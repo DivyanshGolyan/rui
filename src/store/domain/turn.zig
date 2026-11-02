@@ -3,7 +3,8 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const model_admission_domain = @import("model_admission.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
@@ -68,7 +69,8 @@ pub const TurnOutcome = union(enum) {
 };
 
 pub fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
-    const ready = try self.cached(
+    const ready = try store_core.cached(
+        self,
         "SELECT 1 FROM turn WHERE turn_id=?1 AND outcome_code IS NULL " ++
             "AND EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=turn.turn_id) " ++
             "AND NOT EXISTS(SELECT 1 FROM action_operation action " ++
@@ -89,7 +91,8 @@ pub fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
 /// this in its transaction; tool continuation selection reads only the
 /// stored fact. Admitting the Turn's next Operation retires it.
 pub fn recordContinuation(self: *Store, turn_id: u64) !void {
-    const update = try self.cached(
+    const update = try store_core.cached(
+        self,
         "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND outcome_code IS NULL " ++
             "AND continuation_operation_id IS NOT operation_id AND EXISTS(SELECT 1 FROM model_operation current " ++
             "WHERE current.operation_id=turn.operation_id AND " ++ continues_without_input_sql ++ ")",
@@ -100,7 +103,7 @@ pub fn recordContinuation(self: *Store, turn_id: u64) !void {
 }
 
 pub fn turnIsComplete(self: *Store, turn_id: u64) !bool {
-    const statement = try self.cached("SELECT outcome_code FROM turn WHERE turn_id=?1");
+    const statement = try store_core.cached(self, "SELECT outcome_code FROM turn WHERE turn_id=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, turn_id);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -110,7 +113,7 @@ pub fn turnIsComplete(self: *Store, turn_id: u64) !bool {
 /// The Session's next position, or null when it does not exist: what page
 /// cursors and existence checks need, without its 4.6 KB configuration.
 pub fn sessionNextPosition(self: *Store, session_ref: []const u8) !?u64 {
-    const statement = try self.cached("SELECT next_position FROM session WHERE session_ref=?1");
+    const statement = try store_core.cached(self, "SELECT next_position FROM session WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     const step_result = c.sqlite3_step(statement);
@@ -126,18 +129,18 @@ pub fn sessionNextPosition(self: *Store, session_ref: []const u8) !?u64 {
 /// owning write transaction; no separate frontier.
 pub fn claimSessionPositions(self: *Store, session: []const u8, count: u64) !u64 {
     // Every activity row claims here, so every writer of one touches.
-    try self.touch(session);
+    try store_core.touch(self, session);
     if (count > std.math.maxInt(i64)) return error.SessionPositionExhausted;
     // A read then a write: UPDATE RETURNING would buffer its row in a
     // temporary b-tree on every claim.
-    const select = try self.cached("SELECT next_position FROM session WHERE session_ref=?1");
+    const select = try store_core.cached(self, "SELECT next_position FROM session WHERE session_ref=?1");
     defer sqlite.resetCached(select);
     try sqlite.bindText(select, 1, session);
     if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.SessionPositionExhausted;
     const position = try sqlite.readNullablePositiveI64(select, 0) orelse return error.CorruptStore;
     const claimed: i64 = @intCast(count);
     if (position > std.math.maxInt(i64) - claimed) return error.SessionPositionExhausted;
-    const update = try self.cached("UPDATE session SET next_position=?2 WHERE session_ref=?1 AND next_position=?3");
+    const update = try store_core.cached(self, "UPDATE session SET next_position=?2 WHERE session_ref=?1 AND next_position=?3");
     defer sqlite.resetCached(update);
     try sqlite.bindText(update, 1, session);
     try sqlite.bindI64(update, 2, position + claimed);
@@ -156,7 +159,7 @@ pub fn claimSessionPosition(self: *Store, session: []const u8) !u64 {
 /// caller expects the Turn to own. Returns false when the Turn is already
 /// closed or owned by another Operation.
 pub fn closeTurn(self: *Store, turn_id: u64, operation_id: ?u64, outcome: TurnOutcome) !bool {
-    const select = try self.cached("SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NULL AND (?2 IS NULL OR operation_id=?2)");
+    const select = try store_core.cached(self, "SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NULL AND (?2 IS NULL OR operation_id=?2)");
     defer sqlite.resetCached(select);
     try sqlite.bindU64(select, 1, turn_id);
     try sqlite.bindNullableU64(select, 2, operation_id);
@@ -172,7 +175,7 @@ pub fn closeTurn(self: *Store, turn_id: u64, operation_id: ?u64, outcome: TurnOu
     const content_id = outcome.content();
     // A failure code spelling a fixed outcome would read back as that outcome.
     std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
-    const update = try self.cached("UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=unixepoch() WHERE turn_id=?1 AND outcome_code IS NULL");
+    const update = try store_core.cached(self, "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=unixepoch() WHERE turn_id=?1 AND outcome_code IS NULL");
     defer sqlite.resetCached(update);
     try sqlite.bindU64(update, 1, turn_id);
     try sqlite.bindText(update, 2, outcome.code());

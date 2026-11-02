@@ -52,8 +52,8 @@ class LandingTest(unittest.TestCase):
             'tests/integration/host_process.py', 'build.zig.bak', 'docs/install.sh']), [
             'build.zig', 'build.zig.zon', 'install.sh', 'src/execution_turn.zig', 'src/server.zig',
             'src/server_execution.zig', 'src/server_host.zig',
-            'src/store.zig', 'src/store/Store.zig', 'src/store/domain/turn.zig', 'tests/integration/bash_integration.py',
-            'tests/integration/bash_recovery_integration.py'])
+            'src/store.zig', 'src/store/Store.zig', 'src/store/domain/turn.zig', 'src/store/domain/x/y.zig',
+            'tests/integration/bash_integration.py', 'tests/integration/bash_recovery_integration.py'])
 
     def test_auto_land_decisions(self):
         def run(status='completed', conclusion='success', linux='success', covers=True):

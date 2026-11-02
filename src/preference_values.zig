@@ -6,6 +6,8 @@ pub const Values = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     provider: protocol.Bounded(16) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    /// Desktop notifications while the terminal is out of focus.
+    notifications: bool = true,
 };
 
 pub fn directoryPath(home: []const u8, buffer: []u8) ![]const u8 {

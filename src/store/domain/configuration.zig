@@ -6,13 +6,14 @@ const protocol = @import("../../protocol.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_catalog = @import("../../tools.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
-const Faults = Store.Faults;
+const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
 
 /// Whether the Host serves the provider `column` names, through the
@@ -238,7 +239,7 @@ pub fn configureLocked(
     request: *const protocol.ConfigureCommand,
     faults: Faults,
 ) !ConfigureReply {
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
 
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
@@ -275,7 +276,7 @@ pub fn configureLocked(
         .{ .accepted = true, .revision = applied.revision, .created = creating },
     );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
 }
 
@@ -424,7 +425,7 @@ fn saveConfigurationRejection(
         answer,
     );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return .{ .rejected = .{ .replayed = false, .code = code } };
 }
 
@@ -438,7 +439,7 @@ pub fn servesProvider(self: *Store, configuration: ?*const protocol.Configuratio
     const provider = if (configuration != null and configuration.?.provider.state == .value)
         std.meta.stringToEnum(protocol.Provider, configuration.?.provider.value.slice()) orelse return true
     else provider: {
-        const statement = try self.cached("SELECT provider FROM session WHERE session_ref=?1");
+        const statement = try store_core.cached(self, "SELECT provider FROM session WHERE session_ref=?1");
         defer sqlite.resetCached(statement);
         try sqlite.bindText(statement, 1, session_ref);
         switch (c.sqlite3_step(statement)) {
@@ -454,7 +455,7 @@ pub fn servesProvider(self: *Store, configuration: ?*const protocol.Configuratio
 /// field of `current`. A missing one leaves `current` as the caller
 /// declared it: `.{}`, the defaults a creation starts from.
 pub fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfiguration) !bool {
-    const statement = try self.cached("SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at FROM session WHERE session_ref=?1");
+    const statement = try store_core.cached(self, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at FROM session WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     const step_result = c.sqlite3_step(statement);
@@ -481,7 +482,7 @@ pub fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfi
 /// The Session facts turn work binds to, without the workspace or label
 /// a whole configuration carries, and optionally its workspace.
 pub fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*protocol.Bounded(protocol.max_workspace_bytes)) !?SessionFacts {
-    const statement = try self.cached("SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace FROM session WHERE session_ref=?1");
+    const statement = try store_core.cached(self, "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace FROM session WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     const step_result = c.sqlite3_step(statement);
@@ -503,20 +504,20 @@ pub fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*prot
 }
 
 pub fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-    const statement = try self.cached("INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
+    const statement = try store_core.cached(self, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
     defer sqlite.resetCached(statement);
     try bindSettings(statement, session_ref, current);
     try sqlite.bindU64(statement, 9, current.next_position);
     try sqlite.bindText(statement, 15, @tagName(current.provider.codec()));
     try sqlite.expectDone(statement);
     if (c.sqlite3_changes(self.database) != 1) return false;
-    try self.touch(session_ref);
+    try store_core.touch(self, session_ref);
     return true;
 }
 
 fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-    try self.touch(session_ref);
-    const statement = try self.cached("UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
+    try store_core.touch(self, session_ref);
+    const statement = try store_core.cached(self, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try bindSettings(statement, session_ref, current);
     try sqlite.expectDone(statement);
@@ -530,7 +531,7 @@ fn insertRevision(
     current: *const CurrentConfiguration,
     instructions_updated: bool,
 ) !void {
-    const statement = try self.cached("INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)");
+    const statement = try store_core.cached(self, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     try sqlite.bindU64(statement, 2, current.revision);

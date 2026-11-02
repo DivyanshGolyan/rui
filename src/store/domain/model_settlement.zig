@@ -7,7 +7,8 @@ const tool_catalog = @import("../../tools.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
@@ -18,10 +19,10 @@ const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
-const AttemptBinding = Store.AttemptBinding;
-const Faults = Store.Faults;
+const AttemptBinding = store_core.AttemptBinding;
+const Faults = store_core.Faults;
 const ModelOperationKind = historical_domain.ModelOperationKind;
-const Ordinary = Store.Ordinary;
+const Ordinary = store_core.Ordinary;
 const SessionFacts = configuration_domain.SessionFacts;
 const SupersedingControl = action_domain.SupersedingControl;
 const TurnOutcome = turn_domain.TurnOutcome;
@@ -121,13 +122,13 @@ pub const ValidatedOutput = struct {
 };
 
 pub fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     try access.finish(Ordinary.attempt_binding, validateCurrentAttempt(self, binding));
 }
 
 pub fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKind {
-    const statement = try self.cached("SELECT purpose FROM model_operation WHERE operation_id=?1");
+    const statement = try store_core.cached(self, "SELECT purpose FROM model_operation WHERE operation_id=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, operation_id);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -139,7 +140,8 @@ pub fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKi
 }
 
 pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key,session_ref " ++
             "FROM model_operation WHERE operation_id=?1",
     );
@@ -151,7 +153,7 @@ pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
     // Every write that settles this Attempt changes its Session.
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try sqlite.readText(statement, 4, &session);
-    try self.touch(session.slice());
+    try store_core.touch(self, session.slice());
     if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
         c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
         return error.StaleAttemptBinding;
@@ -161,7 +163,7 @@ pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
 }
 
 pub fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-    const statement = try self.cached("SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1");
+    const statement = try store_core.cached(self, "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, binding.operation_id);
     const step = c.sqlite3_step(statement);
@@ -177,9 +179,10 @@ pub fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding)
 }
 
 pub fn claimModelAuthRefreshLocked(self: *Store, binding: AttemptBinding) !bool {
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     try validateCurrentAttempt(self, binding);
-    const update = try self.cached(
+    const update = try store_core.cached(
+        self,
         "UPDATE model_operation SET auth_refresh_claimed=1 " ++
             "WHERE operation_id=?1 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2 " ++
             "AND auth_refresh_claimed=0 AND " ++ retry_allowance_open_sql,
@@ -189,10 +192,10 @@ pub fn claimModelAuthRefreshLocked(self: *Store, binding: AttemptBinding) !bool 
     try sqlite.bindU64(update, 2, binding.attempt_ordinal);
     try sqlite.expectDone(update);
     if (c.sqlite3_changes(self.database) != 1) {
-        try self.rollback();
+        try store_core.rollback(self);
         return false;
     }
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return true;
 }
 
@@ -206,7 +209,7 @@ pub fn settleModelAttemptFailureLocked(
     const code = failure.code();
     var retry_random: u64 = 0;
     if (disposition == .retryable) self.io.random(std.mem.asBytes(&retry_random));
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     try validateCurrentAttempt(self, binding);
     switch (disposition) {
         .ordinary, .context_overflow => {
@@ -216,7 +219,8 @@ pub fn settleModelAttemptFailureLocked(
                 try content_domain.importBytesContent(self, detail, false, faults.content_import)
             else
                 null;
-            const update = try self.cached(
+            const update = try store_core.cached(
+                self,
                 "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?6,request_id=?7," ++
                     "last_failure_code=CASE WHEN ?4=1 THEN ?5 ELSE last_failure_code END," ++ operation_resolved_at_sql ++ " " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
@@ -234,7 +238,7 @@ pub fn settleModelAttemptFailureLocked(
             if (compact) {
                 try turn_domain.recordContinuation(self, binding.turn_id);
                 if (faults.before_commit) return error.InjectedCommitFailure;
-                try self.execute("COMMIT");
+                try store_core.execute(self, "COMMIT");
                 return;
             }
 
@@ -246,22 +250,24 @@ pub fn settleModelAttemptFailureLocked(
             if (!try turn_domain.closeTurn(self, binding.turn_id, binding.operation_id, outcome)) return error.StaleAttemptBinding;
         },
         .refreshed => {
-            const update = try self.cached(
+            const update = try store_core.cached(
+                self,
                 "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=unixepoch(),attempt_at=NULL " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4 " ++
                     "AND auth_refresh_claimed=1 AND " ++ retry_allowance_open_sql,
             );
             defer sqlite.resetCached(update);
             try sqlite.bindU64(update, 1, binding.operation_id);
-            try sqlite.bindI64(update, 2, @max(1, try Store.readUnixMilliseconds(self.io)));
+            try sqlite.bindI64(update, 2, @max(1, try store_core.readUnixMilliseconds(self.io)));
             try sqlite.bindText(update, 3, code);
             try sqlite.bindU64(update, 4, binding.attempt_ordinal);
             try sqlite.expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         },
-        .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try Store.readUnixMilliseconds(self.io), retry_random)) {
+        .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try store_core.readUnixMilliseconds(self.io), retry_random)) {
             .schedule_at_ms => |due_at_ms| {
-                const update = try self.cached(
+                const update = try store_core.cached(
+                    self,
                     "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=unixepoch(),attempt_at=NULL " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4",
                 );
@@ -278,7 +284,8 @@ pub fn settleModelAttemptFailureLocked(
                     try content_domain.importBytesContent(self, detail, false, faults.content_import)
                 else
                     null;
-                const update = try self.cached(
+                const update = try store_core.cached(
+                    self,
                     "UPDATE model_operation SET retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5," ++ operation_resolved_at_sql ++ " " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                 );
@@ -297,7 +304,7 @@ pub fn settleModelAttemptFailureLocked(
         },
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
 }
 
 /// A failure's report as public content, for its Turn's outcome.
@@ -312,7 +319,8 @@ pub fn recoverOneExhaustedModelAttemptLocked(
     active: ActiveOperationFilter,
 ) !bool {
     const scan_limit = try std.math.add(usize, active.maximum_exclusions, 1);
-    const select = try self.cached(
+    const select = try store_core.cached(
+        self,
         "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted " ++
             "WHERE " ++ retry_exhausted_sql ++ " " ++
             "ORDER BY operation_id",
@@ -339,9 +347,10 @@ pub fn recoverOneExhaustedModelAttemptLocked(
     if (c.sqlite3_reset(select) != c.SQLITE_OK) return error.RetryRecoveryFailed;
     const binding = selected orelse return false;
 
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     {
-        const update_operation = try self.cached(
+        const update_operation = try store_core.cached(
+            self,
             "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted'," ++ operation_resolved_at_sql ++ " " ++
                 "WHERE operation_id=?1 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2",
         );
@@ -352,7 +361,7 @@ pub fn recoverOneExhaustedModelAttemptLocked(
         if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
     }
     if (!try turn_domain.closeTurn(self, @intCast(binding.turn_id), @intCast(binding.operation_id), .{ .retry_exhausted = null })) return error.SelectionChanged;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return true;
 }
 
@@ -362,13 +371,14 @@ pub fn settleModelSuccessLocked(
     output: *const ValidatedOutput,
     faults: Faults,
 ) !void {
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     if (faults.settlement_trace) |trace| {
         std.debug.assert(c.sqlite3_txn_state(self.database, "main") == c.SQLITE_TXN_WRITE);
         trace.mark(.transaction_active);
     }
     try validateCurrentAttempt(self, binding);
-    const operation = try self.cached(
+    const operation = try store_core.cached(
+        self,
         "SELECT o.session_ref,r.tools_mask FROM model_operation o JOIN session_revision r " ++
             "ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
             "WHERE o.operation_id=?1 AND o.turn_id=?2",
@@ -427,7 +437,8 @@ pub fn settleModelSuccessLocked(
         if (record.tag != .item) continue;
         defer item_records_start = metadata.offset;
         if (record.ordinal != imported_items) return error.CorruptOutputMetadata;
-        const duplicate_identity = try self.cached(
+        const duplicate_identity = try store_core.cached(
+            self,
             "SELECT 1 FROM model_output_item WHERE operation_id=?1 AND item_id_digest=?2 LIMIT 1",
         );
         defer sqlite.resetCached(duplicate_identity);
@@ -440,7 +451,8 @@ pub fn settleModelSuccessLocked(
         }
         // The item in Rui's own form: its parts and provider bags.
         const neutral = try importNeutralItem(self, binding, output, record, item_records_start, metadata.offset, faults);
-        const insert = try self.cached(
+        const insert = try store_core.cached(
+            self,
             "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,message_content_id) " ++
                 "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         );
@@ -472,7 +484,7 @@ pub fn settleModelSuccessLocked(
             const content = try content_domain.readContentMetadata(self, answer_id.?);
             if (content.length != output.answer_length or !std.mem.eql(u8, &content.digest, &output.answer_digest)) return error.OutputSourceChanged;
         }
-        const entry = try self.cached("INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id,recorded_at) " ++
+        const entry = try store_core.cached(self, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id,recorded_at) " ++
             "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0)+1,session_position,3,?3,?4,?6,?5,unixepoch() " ++
             "FROM model_output_item WHERE operation_id=?4 AND item_ordinal=?6");
         defer sqlite.resetCached(entry);
@@ -518,7 +530,8 @@ pub fn settleModelSuccessLocked(
     const output_fact = turn_policy.outputFact(purpose, output.call_count);
     const resolution_code = @tagName(turn_policy.Resolution.of(output_fact));
     {
-        const update = try self.cached(
+        const update = try store_core.cached(
+            self,
             "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11," ++
                 "usage_uncached_tokens=?12,usage_cache_read_tokens=?13,usage_cache_write_tokens=?14,usage_output_tokens=?15," ++ operation_resolved_at_sql ++ " " ++
                 "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
@@ -545,7 +558,7 @@ pub fn settleModelSuccessLocked(
         if (!try turn_domain.closeTurn(self, binding.turn_id, binding.operation_id, .{ .completed = answer_id.? })) return error.StaleAttemptBinding;
     } else try turn_domain.recordContinuation(self, binding.turn_id);
     if (faults.output_commit) return error.InjectedOutputCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
 }
 
 /// Imports one accepted call: its fields, its classification and, when
@@ -558,7 +571,8 @@ noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *con
     const call_id_content_id = try importDecodedString(self, output, call_id, false, faults);
     const arguments_content_id = try importDecodedString(self, output, record, false, faults);
 
-    const duplicate_call = try self.cached(
+    const duplicate_call = try store_core.cached(
+        self,
         "SELECT 1 FROM model_tool_call WHERE operation_id=?1 AND call_id_content_id=?2 LIMIT 1",
     );
     defer sqlite.resetCached(duplicate_call);
@@ -586,7 +600,8 @@ noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *con
         try turn_domain.claimSessionPosition(self, session_ref_slice)
     else
         null;
-    const insert_call = try self.cached(
+    const insert_call = try store_core.cached(
+        self,
         "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id," ++
             "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
     );
@@ -613,8 +628,9 @@ noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *con
     try sqlite.expectDone(insert_call);
 
     if (rejection_code == null) {
-        const action_id = try self.nextIdentity("action_operation", "action_id");
-        const insert_action = try self.cached(
+        const action_id = try store_core.nextIdentity(self, "action_operation", "action_id");
+        const insert_action = try store_core.cached(
+            self,
             "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at) " ++
                 "VALUES(?1,?2,?3,?4,1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN unixepoch() END)",
         );
@@ -713,7 +729,8 @@ noinline fn importNeutralItem(self: *Store, binding: AttemptBinding, output: *co
                 .part => {
                     const pending = part orelse return error.CorruptOutputMetadata;
                     const bag = try importBag(self, output, record, pending.start, metadata.offset, faults);
-                    const insert = try self.cached(
+                    const insert = try store_core.cached(
+                        self,
                         "INSERT INTO model_output_part(operation_id,item_ordinal,part_ordinal,part_array,part_kind,text_length,text_content_id,extras_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                     );
                     defer sqlite.resetCached(insert);

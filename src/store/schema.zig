@@ -8,15 +8,17 @@ const tool_catalog = @import("../tools.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
 const turn_policy = @import("../turn_policy.zig");
-const facade = @import("../store.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const rsql = @import("rsql.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
-const application_id = facade.application_id;
 const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql;
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
-pub const schema_version = facade.schema_version;
+
+pub const application_id: u32 = 0x4c544631; // LTF1
+pub const schema_version: u32 = 45;
+/// FNV-1a of the SQLite DDL for schema_version; the build fails when they disagree.
+pub const sqlite_schema_digest: u64 = 0x720709f73b39654e;
 
 /// SQL membership of `column` in a set of enum tags or enum literals,
 /// generated at compile time. An OR of equalities, not IN: SQLite builds a
@@ -612,8 +614,8 @@ pub fn digest(comptime dialect: rsql.Dialect) u64 {
 }
 
 comptime {
-    if (digest(.sqlite) != facade.sqlite_schema_digest) @compileError(std.fmt.comptimePrint(
-        "the SQLite schema changed: bump schema_version in src/store.zig and pin sqlite_schema_digest = 0x{x:0>16}",
+    if (digest(.sqlite) != sqlite_schema_digest) @compileError(std.fmt.comptimePrint(
+        "the SQLite schema changed: bump schema_version and pin sqlite_schema_digest = 0x{x:0>16}",
         .{digest(.sqlite)},
     ));
 }

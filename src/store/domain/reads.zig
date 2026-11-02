@@ -4,7 +4,8 @@
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const model_capability = @import("../../model_capability.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
@@ -13,7 +14,7 @@ const store_schema = @import("../schema.zig");
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
-const AttemptBinding = Store.AttemptBinding;
+const AttemptBinding = store_core.AttemptBinding;
 const ContentLocation = content_domain.ContentLocation;
 const ContentMetadata = content_domain.ContentMetadata;
 const ContentReader = content_domain.ContentReader;
@@ -195,7 +196,7 @@ pub fn publicConversationPageLocked(self: *Store, request: *const protocol.Conve
     // Tool outcomes enter public Conversation only when the entire group
     // settles. Position is then its last acceptance; call ordinal is the
     // stable tie breaker. Private model items/instructions never enter it.
-    const statement = try self.cached(public_tool_groups_sql ++
+    const statement = try store_core.cached(self, public_tool_groups_sql ++
         "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
         "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
         "UNION ALL SELECT groups.position,call.call_ordinal+1,4,coalesce(call.rejection_content_id,action.resolution_content_id) " ++
@@ -255,7 +256,7 @@ pub fn openPublicConversationContentLocked(self: *Store, request: *const protoco
 // Compaction messages deliberately have no Conversation certificate.
 pub fn validateAssistantEntries(self: *Store, session: []const u8, lower: u64, upper: u64) !void {
     if (lower > upper) return;
-    const statement = try self.cached("SELECT 1 FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
+    const statement = try store_core.cached(self, "SELECT 1 FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
         "LEFT JOIN conversation_entry e ON e.session_ref=item.session_ref AND e.session_position=item.session_position " ++
         "WHERE item.session_ref=?1 AND item.session_position BETWEEN ?2 AND ?3 AND item.item_kind=2 " ++
         "AND op.purpose=0 AND " ++ store_schema.oneOf("op.resolution_code", &accepted_resolutions) ++
@@ -281,7 +282,8 @@ pub fn publicConversationContentLocked(self: *Store, session: []const u8, positi
     if (ordinal == 0) try validateAssistantEntries(self, session, position, position);
     // One indexed ordinary identity owns provenance for pages, cursors and
     // bytes. LEFT JOIN retains damage instead of hiding dependencies.
-    const statement = if (ordinal == 0) try self.cached(
+    const statement = if (ordinal == 0) try store_core.cached(
+        self,
         "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
             "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
             "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
@@ -294,7 +296,8 @@ pub fn publicConversationContentLocked(self: *Store, session: []const u8, positi
             "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
             "LEFT JOIN content c ON c.content_id=e.content_id " ++
             "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)",
-    ) else try self.cached(
+    ) else try store_core.cached(
+        self,
         "SELECT coalesce(call.rejection_content_id,action.resolution_content_id),NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
             "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
             "LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
@@ -428,7 +431,7 @@ pub const ContentSource = struct {
 };
 
 fn toolPresentationLocked(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
-    const statement = try self.cached("SELECT call.description,coalesce(call.rejection_code,a.resolution_code),a.authorized,item.session_ref,item.session_position FROM model_tool_call call LEFT JOIN action_operation a ON a.parent_operation_id=call.operation_id AND a.call_ordinal=call.call_ordinal LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal WHERE call.operation_id=?1 AND call.call_ordinal=?2");
+    const statement = try store_core.cached(self, "SELECT call.description,coalesce(call.rejection_code,a.resolution_code),a.authorized,item.session_ref,item.session_position FROM model_tool_call call LEFT JOIN action_operation a ON a.parent_operation_id=call.operation_id AND a.call_ordinal=call.call_ordinal LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal WHERE call.operation_id=?1 AND call.call_ordinal=?2");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, operation);
     try sqlite.bindU64(statement, 2, ordinal);
@@ -478,7 +481,7 @@ pub fn activityPageLocked(self: *Store, request: *const protocol.ActivityPage, p
         };
     }
     page.end = end;
-    const statement = try self.cached(activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
+    const statement = try store_core.cached(self, activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
         "(?3=0 OR (?5=0 AND (position>?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal>?4))) OR " ++
         "(?5=1 AND (position<?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal<?4)))) " ++
         "ORDER BY CASE WHEN ?5=0 THEN position END,CASE WHEN ?5=0 THEN ordinal END," ++
@@ -512,7 +515,7 @@ pub fn activityPageLocked(self: *Store, request: *const protocol.ActivityPage, p
     page.queued = try readQueuedLocked(self, request.session.slice(), if (last) |item| item.position else end);
     // Work as of this same read, so the footer, consent and first Action
     // always describe the page they arrive with.
-    const work = (try report_domain.readWorkLocked(self, request.session.slice(), session.created_at, try Store.readUnixMilliseconds(self.io))).work;
+    const work = (try report_domain.readWorkLocked(self, request.session.slice(), session.created_at, try store_core.readUnixMilliseconds(self.io))).work;
     page.work.work = .fromCore(work);
     page.work.revision = session.revision;
 }
@@ -524,7 +527,7 @@ pub fn personMessageLocked(self: *Store, request: *const protocol.ReadPersonMess
     const select = "SELECT admission_position,content_id FROM message_admission INDEXED BY message_admission_person " ++
         "WHERE session_ref=?1 AND sender_session_ref IS NULL AND admission_position>?2 AND admission_position<?3 ORDER BY admission_position";
     const backward = request.direction == .backward;
-    const statement = if (backward) try self.cached(select ++ " DESC LIMIT 1") else try self.cached(select ++ " LIMIT 1");
+    const statement = if (backward) try store_core.cached(self, select ++ " DESC LIMIT 1") else try store_core.cached(self, select ++ " LIMIT 1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, request.session.slice());
     try sqlite.bindU64(statement, 2, if (backward) 0 else request.position);
@@ -544,7 +547,7 @@ pub fn personMessageLocked(self: *Store, request: *const protocol.ReadPersonMess
 // This projection shares the page's canonical capture, not Current's active
 // Turn lifetime. It is staged until the frontend acknowledges that page.
 fn readCallActivityLocked(self: *Store, session: []const u8, position: u64, ordinal: ?u64) !protocol.CallActivity {
-    const statement = try self.cached(public_tool_groups_sql ++
+    const statement = try store_core.cached(self, public_tool_groups_sql ++
         "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM model_operation op " ++
         "LEFT JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
         "LEFT JOIN groups ON groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
@@ -586,7 +589,7 @@ fn readCallActivityLocked(self: *Store, session: []const u8, position: u64, ordi
 /// `position` precedes its tool completions, so a boundary's ordinal
 /// changes nothing.
 pub fn readQueuedLocked(self: *Store, session: []const u8, position: u64) !protocol.Queued {
-    const statement = try self.cached(queued_sql);
+    const statement = try store_core.cached(self, queued_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session);
     try sqlite.bindU64(statement, 2, position);
@@ -609,14 +612,14 @@ pub fn readQueuedLocked(self: *Store, session: []const u8, position: u64) !proto
 }
 
 fn validateActivitySequence(self: *Store, session: []const u8) !void {
-    const guard = try self.cached(activity_sequence_guard_sql);
+    const guard = try store_core.cached(self, activity_sequence_guard_sql);
     defer sqlite.resetCached(guard);
     try sqlite.bindText(guard, 1, session);
     if (c.sqlite3_step(guard) != c.SQLITE_DONE) return error.CorruptStore;
 }
 
 fn activityMessageLocked(self: *Store, session: []const u8, end: u64, admission: u64) !struct { message: protocol.ActivityItem.Message, content_id: i64 } {
-    const statement = try self.cached("SELECT m.command_key,m.turn_id,m.content_id," ++
+    const statement = try store_core.cached(self, "SELECT m.command_key,m.turn_id,m.content_id," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=m.session_ref AND e.source_admission_id=m.admission_id AND e.session_position<=?2)," ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2)," ++
         "c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
@@ -651,7 +654,7 @@ const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 
 
 fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64, ordinal: u64) !ActivityIdentity {
     if (ordinal == 0 and position <= end) try validateAssistantEntries(self, session, position, position);
-    const statement = try self.cached(activity_sql ++ "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2");
+    const statement = try store_core.cached(self, activity_sql ++ "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session);
     try sqlite.bindU64(statement, 2, end);
@@ -686,7 +689,7 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
         4 => {
             const call = (try proposalLocked(self, session, position)).metadata;
             result.item.value = .{ .call = call };
-            const select = try self.cached("SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2");
+            const select = try store_core.cached(self, "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2");
             defer sqlite.resetCached(select);
             try sqlite.bindU64(select, 1, call.operation);
             try sqlite.bindText(select, 2, session);
@@ -695,7 +698,7 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
         },
         8 => {
             const admission = try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-            const select = try self.cached("SELECT m.session_ref,m.content_id,m.admitted_at,c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
+            const select = try store_core.cached(self, "SELECT m.session_ref,m.content_id,m.admitted_at,c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
                 "FROM message_admission m LEFT JOIN core_command c ON c.command_key=m.command_key WHERE m.admission_id=?1 AND m.sender_session_ref=?2 AND m.sender_position=?3");
             defer sqlite.resetCached(select);
             try sqlite.bindI64(select, 1, admission);
@@ -716,7 +719,7 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
             result.content_id = content_id;
         },
         9 => {
-            const select = try self.cached("SELECT s.command_key,c.target,c.code,c.kind=2 AND c.accepted=0,s.rejected_at FROM sent_rejection s " ++
+            const select = try store_core.cached(self, "SELECT s.command_key,c.target,c.code,c.kind=2 AND c.accepted=0,s.rejected_at FROM sent_rejection s " ++
                 "LEFT JOIN core_command c ON c.command_key=s.command_key WHERE s.sender_session_ref=?1 AND s.sender_position=?2");
             defer sqlite.resetCached(select);
             try sqlite.bindText(select, 1, session);
@@ -732,7 +735,7 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
             result.item.at = @intCast(try sqlite.readNullablePositiveI64(select, 4) orelse return error.CorruptStore);
         },
         6 => {
-            const select = try self.cached("SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
+            const select = try store_core.cached(self, "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
                 "AND o.resolution_code IS NOT NULL,o.resolution_content_id,t.outcome_at FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
             defer sqlite.resetCached(select);
             try sqlite.bindText(select, 1, session);
@@ -754,7 +757,7 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
             result.item.at = @intCast(try sqlite.readNullablePositiveI64(select, 6) orelse return error.CorruptStore);
         },
         7 => {
-            const select = try self.cached("SELECT s.command_key,s.selected_turn_id,s.admission_cutoff,t.outcome_position," ++
+            const select = try store_core.cached(self, "SELECT s.command_key,s.selected_turn_id,s.admission_cutoff,t.outcome_position," ++
                 "c.kind=3 AND c.accepted=1 AND c.target=s.session_ref AND (s.selected_turn_id IS NULL OR t.session_ref=s.session_ref),s.stopped_at " ++
                 "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2");
             defer sqlite.resetCached(select);
@@ -775,23 +778,23 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
 }
 
 pub fn openActivityContentLocked(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
-    validateActivitySequence(self, request.session.slice()) catch |err| return self.fence(err);
+    validateActivitySequence(self, request.session.slice()) catch |err| return store_core.fence(self, err);
     // Only Tool Results have nonzero ordinals. Byte readers need their
     // canonical identity, not a second scan of the original arguments.
     const id = if (request.ordinal != 0) id: {
         const content = publicConversationContentLocked(self, request.session.slice(), request.position, request.ordinal) catch |err| switch (err) {
             error.ContentNotFound => return err,
-            else => return self.fence(err),
+            else => return store_core.fence(self, err),
         };
         break :id content.id;
     } else id: {
         const identity = activityItemLocked(self, request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
             error.ContentNotFound => return err,
-            else => return self.fence(err),
+            else => return store_core.fence(self, err),
         };
         break :id identity.content_id orelse return error.ContentNotFound;
     };
-    const content = content_domain.readPublicContentMetadata(self, id) catch |err| return self.fence(err);
+    const content = content_domain.readPublicContentMetadata(self, id) catch |err| return store_core.fence(self, err);
     return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest } };
 }
 
@@ -808,7 +811,7 @@ pub fn proposalPageLocked(self: *Store, request: *const protocol.ProposalPage, p
     page.* = .{ .end = end };
     // The immutable accepted item owns discovery, including rejected calls.
     // Do not filter on live Actions, permissions or Turn state.
-    const statement = try self.cached("SELECT session_position FROM model_output_item " ++
+    const statement = try store_core.cached(self, "SELECT session_position FROM model_output_item " ++
         "WHERE session_ref=?1 AND session_position>?2 AND session_position<=?3 AND item_kind=3 " ++
         "ORDER BY session_position LIMIT 17");
     defer sqlite.resetCached(statement);
@@ -834,7 +837,7 @@ const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_i
 // The page, continuation cursor and byte route share one provenance check.
 // LEFT JOIN keeps missing/contradictory owners visible as corruption.
 pub fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
-    const statement = try self.cached("SELECT item.operation_id,op.turn_id,call.call_ordinal,action.action_id,call.rejection_code," ++
+    const statement = try store_core.cached(self, "SELECT item.operation_id,op.turn_id,call.call_ordinal,action.action_id,call.rejection_code," ++
         "call.name_content_id,call.call_id_content_id,call.arguments_content_id," ++
         "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
         store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND op.attempt_ordinal=item.attempt_ordinal AND " ++
@@ -889,7 +892,7 @@ pub fn proposalLocked(self: *Store, session: []const u8, position: u64) !Proposa
 pub fn openProposalFieldLocked(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
     const identity = proposalLocked(self, request.session.slice(), request.position) catch |err| switch (err) {
         error.ContentNotFound => return err,
-        else => return self.fence(err),
+        else => return store_core.fence(self, err),
     };
     const index = @backingInt(request.field);
     const field = identity.metadata.fields[index];
