@@ -2386,9 +2386,11 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, hei
         screen.draft_anchor = layout.lines[0].start;
         if (!state.starting() and !state.choosingSignIn()) screen.cursor = .{ .row = @intCast(bottom + 1 + layout.shape.caret_line - layout.view.first), .column = @intCast(@min(width - 1, 3 + layout.shape.caret_column)) };
     }
-    // The picker takes the rows right above the input; the list keeps the rest.
-    if (state.picker) |*picker| if (row + 1 < bottom) {
-        bottom -= @intCast(try pickerLines(&painter, state, picker, lines[row + 1 .. bottom]));
+    // The picker takes the rows right above the input; the list keeps the
+    // rest, and at least the selected Session's row, which Ctrl-X stops.
+    const kept: usize = @intFromBool(state.selected != null and state.rows.items.len != 0);
+    if (state.picker) |*picker| if (row + 1 + kept < bottom) {
+        bottom -= @intCast(try pickerLines(&painter, state, picker, lines[row + 1 + kept .. bottom]));
     };
     if (row + 1 < bottom) try list(&painter, state, lines[row + 1 .. bottom]);
     screen.pulses = painter.pulsed;
@@ -6199,21 +6201,26 @@ test "on a short screen the highlighted model always shows, and \"N more\" takes
     try std.testing.expect(counted);
 }
 
-test "the Session row's highlight stays in view while the picker is open" {
+test "the Session row's highlight stays in view while the picker is open, even on a short screen" {
     var state = try pickerState(null);
     defer state.deinit();
+    // ChatGPT's models and the API-key login note fill a short screen.
     try openPicker(&state, &.{chatgpt});
-    var screen = try render(std.testing.allocator, &state, .{}, 60, 24, .{ .unicode = true }, 0);
-    defer screen.deinit();
-    var highlighted: usize = 0;
-    for (screen.lines) |line| {
-        for (line) |span| if (span.style.background == .selection) {
-            highlighted += 1;
-            break;
-        };
+    for (8..25) |height| {
+        var screen = try render(std.testing.allocator, &state, .{}, 60, @intCast(height), .{ .unicode = true }, 0);
+        defer screen.deinit();
+        var highlighted: usize = 0;
+        for (screen.lines) |line| {
+            for (line) |span| if (span.style.background == .selection) {
+                highlighted += 1;
+                break;
+            };
+        }
+        // The selected Session always; the picker's model once a row is
+        // left for it. With one row, the Session keeps it: a stop is the
+        // key that must never act on what the screen does not show.
+        try std.testing.expectEqual(@as(usize, if (height > 8) 2 else 1), highlighted);
     }
-    // The picker's model and the selected Session.
-    try std.testing.expectEqual(@as(usize, 2), highlighted);
 }
 
 test "with no sign-in served, the picker shows each login line instead of models" {
