@@ -389,6 +389,10 @@ def main(report_source):
         assert endpoint.a_reply_received.wait(20), "A never received B's reply"
         a_continuation = next(request for request in endpoint.requests if address_of(request) == session_a and tool_outputs(request))
         assert tool_outputs(a_continuation) == [settled["result"]["text"]], a_continuation
+        # A can read B's reply before B's send has written its receipt: the
+        # receipt is whole once B's Bash call has returned to B's model.
+        wait_for(lambda: any(address_of(request) == session_b and tool_outputs(request) for request in endpoint.requests),
+                 "B's reply Bash call returned", timeout=20)
         reply = json.loads((workspace / "b-reply.json").read_text())
         assert reply["answer"]["status"] == "accepted" and reply["context"]["session"] == session_a, reply
         domain = b"rui/content/v1"
@@ -453,8 +457,11 @@ def main(report_source):
             controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store")],
                 executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home")},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-            observed = os_semantics.processes_executing(installed)
-            assert controls[0].pid not in observed and controls[1].pid in observed, (controls[1].pid, observed)
+            # Darwin's census (lsof) can miss a copy spawned just now; the
+            # census is right once it sees it, and never sees the decoy.
+            observed = wait_for(lambda: os_semantics.processes_executing(installed), "the census sees the renamed copy",
+                                timeout=10, ready=lambda observed: controls[1].pid in observed)
+            assert controls[0].pid not in observed, (controls[0].pid, observed)
         finally:
             dispose_all(*(lambda process=process: stop_process(process) for process in controls))
         # Peers left nothing running beside the Host, and nobody signed in or

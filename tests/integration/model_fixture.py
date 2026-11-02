@@ -41,7 +41,33 @@ def instructions_workspace(instructions):
     return json.loads('"' + quoted + '"')
 
 
-class FailureEndpoint(TestHTTPServer):
+def hold(server, release, what):
+    """Wait for a held reply's release. The case releases it by its own
+    deadlines, so the hold keeps no clock of its own (a 10 s one let the
+    reply fail first and Rui retry, on a slow Mac). Closing the endpoint
+    ends it."""
+    while not release.wait(0.1):
+        if server.closing.is_set():
+            raise RuntimeError(f"{what} was never released")
+
+
+class HeldReplies:
+    """An endpoint whose closing ends every held reply."""
+
+    def __init__(self, *args, **kwargs):
+        self.closing = threading.Event()
+        super().__init__(*args, **kwargs)
+
+    def shutdown(self):
+        self.closing.set()
+        super().shutdown()
+
+    def server_close(self):
+        self.closing.set()
+        super().server_close()
+
+
+class FailureEndpoint(HeldReplies, TestHTTPServer):
     allow_reuse_address = True
     # One stream per h2c connection, so a dropped connection (/disconnect)
     # fails one request only, as it does over HTTP/1.1.
@@ -90,8 +116,7 @@ class FailureHandler(http.server.BaseHTTPRequestHandler):
                     raise
             self.close_connection = True
             return
-        if not self.server.release.wait(10):
-            raise RuntimeError("fixture response was never released")
+        hold(self.server, self.server.release, "fixture response")
         if self.path == "/disconnect":
             self.close_connection = True
             return
@@ -302,7 +327,7 @@ def classification_population(prefix, forbidden_effect, count=32):
     return calls
 
 
-class SuccessEndpoint(TestHTTPServer):
+class SuccessEndpoint(HeldReplies, TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, responses, responses_by_input=None, *, chunk_sizes=None):
@@ -324,7 +349,7 @@ class SuccessEndpoint(TestHTTPServer):
 class ResponseSpec:
     def __init__(
         self, body, headers, status=200, *, retry_date_seconds=None,
-        chunk_delay=0, pacing_end=None, gate_timeout=10,
+        chunk_delay=0, pacing_end=None,
     ):
         self.body = body
         self.headers = headers
@@ -332,7 +357,6 @@ class ResponseSpec:
         self.retry_date_seconds = retry_date_seconds
         self.chunk_delay = chunk_delay
         self.pacing_end = pacing_end
-        self.gate_timeout = gate_timeout
         self.body_finished_at = None
 
 
@@ -359,8 +383,7 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
                 payload = self.server.responses.pop(0)
         if isinstance(payload, tuple):
             payload, release = payload
-            if not release.wait(payload.gate_timeout if isinstance(payload, ResponseSpec) else 10):
-                raise RuntimeError("success fixture response was never released")
+            hold(self.server, release, "success fixture response")
         headers = {"X-Request-Id": f"request-{len(self.server.requests)}", "OpenAI-Model": "model-a-served"}
         status = 200
         spec = payload if isinstance(payload, ResponseSpec) else None
