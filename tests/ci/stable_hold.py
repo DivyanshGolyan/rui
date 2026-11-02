@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Show what holds stable, and warn when a PR touches a held fixture without citing it.
+
+`status` lists open stable-red issues by fixture and the hours since the
+last release (each promotion publishes one), for every status update.
+`pr` runs in the policy job: an open stable-red issue whose fixture or test
+paths the PR changes must be cited `Fixes #N` or `Refs #N` in the PR body or
+a commit, or the fix leaves stable held (#724 fixed #711 and #712 uncited).
+"""
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+import re
+
+from auto_land import CLOSING_KEYWORD, STABLE_RED, git, gh
+from report_issue import signature_state
+from select_tests import changed_paths
+
+REFERENCE = re.compile(r"\brefs?:?\s+#([0-9]+)\b", re.IGNORECASE)
+
+
+def held(repository):
+    """(number, title, paths) of each open stable-red issue."""
+    # REST, not `gh issue list`: GraphQL fails through the cloud sessions' proxy.
+    rows = json.loads(gh("api", f"repos/{repository}/issues?labels={STABLE_RED}&state=open&per_page=100"))
+    return [(row["number"], row["title"], (signature_state(row["body"]) or {}).get("paths", []))
+            for row in rows if "pull_request" not in row]
+
+
+def cited(text):
+    return ({int(number) for target, number in CLOSING_KEYWORD.findall(text) if not target}
+            | {int(number) for number in REFERENCE.findall(text)})
+
+
+def uncited(issues, paths, text):
+    """Issues whose paths the change touches and that the text never cites."""
+    touched, numbers = set(paths), cited(text)
+    return [(number, title, sorted(touched & set(held_paths))) for number, title, held_paths in issues
+            if touched & set(held_paths) and number not in numbers]
+
+
+def status(issues, released_at, now):
+    lines = []
+    if released_at:
+        hours = (now - datetime.fromisoformat(released_at.replace("Z", "+00:00"))).total_seconds() / 3600
+        lines.append(f"Last release {hours:.0f} h ago.")
+    if not issues:
+        return lines + ["Stable is not held: no open stable-red issues."]
+    by_path = {}
+    for number, title, paths in issues:
+        for path in paths or ["(no fixture recorded)"]:
+            by_path.setdefault(path, []).append(f"#{number} {title}")
+    lines.append(f"Stable is held by {len(issues)} open stable-red issue(s):")
+    for path in sorted(by_path):
+        lines.append(f"  {path}")
+        lines.extend(f"    {entry}" for entry in by_path[path])
+    return lines
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", "DivyanshGolyan/rui"))
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    pr = sub.add_parser("pr")
+    pr.add_argument("--base", required=True)
+    pr.add_argument("--head", default="HEAD")
+    args = parser.parse_args()
+    issues = held(args.repository)
+    if args.command == "status":
+        release = json.loads(gh("api", f"repos/{args.repository}/releases/latest"))
+        print("\n".join(status(issues, release.get("published_at"), datetime.now(timezone.utc))))
+        return
+    paths, base = changed_paths(args.base, args.head)
+    text = os.environ.get("PR_BODY", "") + "\n" + git("log", "--format=%B", f"{base}..{args.head}")
+    for number, title, touched in uncited(issues, paths, text):
+        print(f"::warning::This change touches {', '.join(touched)}, held by open stable-red #{number} "
+              f"({title}). If it fixes it, write `Fixes #{number}`; otherwise `Refs #{number}`.")
+
+
+if __name__ == "__main__":
+    main()
