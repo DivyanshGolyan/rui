@@ -4,6 +4,8 @@
 //! every statement the Store caches passes the checks its rules enable.
 
 const std = @import("std");
+const change_ring = @import("../change_ring.zig");
+const schema = @import("schema.zig");
 
 pub const Dialect = enum { sqlite };
 
@@ -23,8 +25,10 @@ pub const reserved_names_checked = true;
 
 pub const schema_rules: Rules = .{ .names = reserved_names_checked, .dialect = true };
 /// The `cached`/`execute` statements, which still use `unixepoch`, `GLOB`,
-/// `||` and `IS` comparisons. PR 4's typed statements set `dialect`.
+/// `||` and `IS` comparisons. Typed statements (`Read`, `Write`) are held
+/// to `typed_rules`.
 pub const statement_rules: Rules = .{ .names = reserved_names_checked, .dialect = false };
+pub const typed_rules: Rules = .{ .names = reserved_names_checked, .dialect = true };
 
 /// Words reserved in at least one engine (SQLite 3.53, Postgres 17, MySQL 8.4).
 const reserved_names = [_][]const u8{
@@ -65,7 +69,16 @@ const keywords = [_]struct { word: []const u8, place: Place }{
 const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
     .{ .word = "GLOB", .fix = "write @charset(column,'set') or @initial(column,'set')" },
     .{ .word = "typeof", .fix = "test IS NULL or IS NOT NULL" },
-    .{ .word = "unixepoch", .fix = "bind the Host's time as a parameter" },
+    .{ .word = "unixepoch", .fix = "write @now, the Host's second" },
+    .{ .word = "INDEXED", .fix = "write @index(name)" },
+    .{ .word = "RETURNING", .fix = "the Host allocates identities; read facts in an earlier round" },
+    .{ .word = "last_insert_rowid", .fix = "take the identity from the Store" },
+    .{ .word = "CONFLICT", .fix = "read in an earlier round, then guard the write" },
+    .{ .word = "MATERIALIZED", .fix = "MySQL cannot update a table its CTE reads; key the writes from Zig" },
+    .{ .word = "DEFERRABLE", .fix = "keys are checked as each row is written; write parents first" },
+    .{ .word = "BEGIN", .fix = "the Access opens the transaction" },
+    .{ .word = "COMMIT", .fix = "call Access.commit" },
+    .{ .word = "ROLLBACK", .fix = "return the error; the entry point rolls back" },
 };
 
 /// Why `text` is not portable Rui SQL under `rules`, or null. String
@@ -102,6 +115,8 @@ pub fn portabilityError(comptime text: []const u8, comptime rules: Rules) ?[]con
                     for (forbidden_words) |forbidden| {
                         if (std.ascii.eqlIgnoreCase(word, forbidden.word)) return "rsql: '" ++ word ++ "' is not portable; " ++ forbidden.fix;
                     }
+                    if (std.ascii.eqlIgnoreCase(previous, "INSERT") and std.ascii.eqlIgnoreCase(word, "OR"))
+                        return "rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write";
                 }
                 if (rules.names) {
                     if (std.ascii.eqlIgnoreCase(word, "rowid")) return "rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column";
@@ -189,6 +204,262 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
         return switch (dialect) {
             .sqlite => renderSqlite(text),
         };
+    }
+}
+
+// Typed statements. Each is a type made by `Read` or `Write`: its Rui SQL
+// rendered at comptime, its `Args` (field order is ?1..?N) and its `Row`
+// (field order is column order), each checked against the text.
+
+/// A stored integer that is never 0 or negative: an id or a position.
+pub const Positive = enum(u64) {
+    _,
+
+    pub fn of(value: u64) Positive {
+        std.debug.assert(value > 0 and value <= std.math.maxInt(i64));
+        return @fromBackingInt(@intCast(value));
+    }
+
+    pub fn get(self: Positive) u64 {
+        return @backingInt(self);
+    }
+};
+
+/// A Session as a round loaded it: its reference, its Workspace's key and
+/// its next position, from the columns `session_ref,workspace_key,
+/// next_position`. As an argument it binds the reference. A write to a
+/// table that carries Sessions binds exactly one, so the Access that queues
+/// it records the touch without a read.
+pub const SessionHead = struct {
+    ref: change_ring.Id,
+    workspace_key: Positive,
+    next_position: Positive,
+};
+
+/// How many rows a read returns. Nothing is unbounded.
+pub const Cardinality = union(enum) {
+    /// Exactly one; none, or a second, is `CorruptStore`.
+    one,
+    /// None or one; a second is `CorruptStore`.
+    optional,
+    /// Up to this many; one more is `CorruptStore`.
+    at_most: u16,
+};
+
+pub fn Rows(comptime Row: type, comptime max: u16) type {
+    return struct {
+        items: [max]Row = undefined,
+        len: u16 = 0,
+
+        pub fn slice(self: *const @This()) []const Row {
+            return self.items[0..self.len];
+        }
+    };
+}
+
+/// The rows a write must change, or its round fails before COMMIT.
+pub const Expect = union(enum) {
+    exact: struct { rows: u32, otherwise: anyerror },
+    /// More is `CorruptStore`.
+    at_most: u32,
+};
+
+pub const ReadSpec = struct { sql: []const u8, Args: type, Row: type, cardinality: Cardinality };
+pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
+
+pub fn Read(comptime spec: ReadSpec) type {
+    comptime {
+        if (statementError(.read, spec.sql, spec.Args, spec.Row)) |message| @compileError(message ++ ": " ++ spec.sql);
+    }
+    return struct {
+        pub const kind: StatementKind = .read;
+        pub const Args = spec.Args;
+        pub const Row = spec.Row;
+        pub const cardinality = spec.cardinality;
+        pub const Result = switch (spec.cardinality) {
+            .one => Row,
+            .optional => ?Row,
+            .at_most => |max| Rows(Row, max),
+        };
+        pub const sql = renderStatement(spec.sql, fieldCount(Args));
+        pub const uses_now = usesNow(spec.sql);
+    };
+}
+
+pub fn Write(comptime spec: WriteSpec) type {
+    comptime {
+        if (statementError(.write, spec.sql, spec.Args, void)) |message| @compileError(message ++ ": " ++ spec.sql);
+    }
+    return struct {
+        pub const kind: StatementKind = .write;
+        pub const Args = spec.Args;
+        pub const expect = spec.expect;
+        pub const sql = renderStatement(spec.sql, fieldCount(Args));
+        pub const uses_now = usesNow(spec.sql);
+        /// The Args field naming the Session this write changes, when its
+        /// table carries Sessions.
+        pub const session_field: ?[]const u8 = sessionField(Args);
+    };
+}
+
+pub const StatementKind = enum { read, write };
+
+/// Why a typed statement's text disagrees with its types, or null.
+pub fn statementError(comptime kind: StatementKind, comptime sql: []const u8, comptime Args: type, comptime Row: type) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(200 * sql.len + 10_000);
+        if (portabilityError(sql, typed_rules)) |message| return message;
+        const first = nextWord(sql, 0);
+        switch (kind) {
+            .read => if (!std.ascii.eqlIgnoreCase(first, "SELECT")) return "rsql: a read starts with SELECT",
+            .write => if (targetTable(sql) == null) return "rsql: a write starts with INSERT INTO, UPDATE or DELETE FROM",
+        }
+        const arguments = fieldCount(Args);
+        var bound: [64]bool = @splat(false);
+        var highest: usize = 0;
+        var index: usize = 0;
+        while (index < sql.len) {
+            if (sql[index] == '\'') {
+                index = literalEnd(sql, index);
+                continue;
+            }
+            if (sql[index] != '?') {
+                index += 1;
+                continue;
+            }
+            const end = wordEnd(sql, index + 1);
+            const number = std.fmt.parseInt(usize, sql[index + 1 .. end], 10) catch return "rsql: write parameters as ?N";
+            if (number == 0 or number > bound.len) return "rsql: a parameter is ?1 to ?64";
+            bound[number - 1] = true;
+            highest = @max(highest, number);
+            index = end;
+        }
+        if (highest != arguments) return std.fmt.comptimePrint("rsql: Args has {d} fields but the text binds up to ?{d}", .{ arguments, highest });
+        for (bound[0..highest], 1..) |used, number| if (!used) return std.fmt.comptimePrint("rsql: ?{d} is never used", .{number});
+
+        switch (kind) {
+            .read => {
+                const columns = selectColumns(sql);
+                var expected: usize = 0;
+                for (@typeInfo(Row).@"struct".field_types) |Field| expected += columnsOf(Field);
+                if (columns != expected) return std.fmt.comptimePrint("rsql: the text selects {d} columns but Row has {d}", .{ columns, expected });
+            },
+            .write => {
+                var heads: usize = 0;
+                for (@typeInfo(Args).@"struct".field_types) |Field| heads += @intFromBool(Field == SessionHead);
+                const table = targetTable(sql).?;
+                if (schema.carriesSessions(table)) {
+                    if (heads != 1) return "rsql: a write to " ++ table ++ ", which carries Sessions, binds exactly one SessionHead";
+                } else if (heads != 0) return "rsql: " ++ table ++ " carries no Sessions; bind no SessionHead";
+            },
+        }
+        return null;
+    }
+}
+
+fn fieldCount(comptime T: type) usize {
+    return @typeInfo(T).@"struct".field_names.len;
+}
+
+fn sessionField(comptime Args: type) ?[]const u8 {
+    const info = @typeInfo(Args).@"struct";
+    for (info.field_names, info.field_types) |name, Field| if (Field == SessionHead) return name;
+    return null;
+}
+
+/// The columns a value of `T` reads: a SessionHead three, any other one.
+fn columnsOf(comptime T: type) usize {
+    return if (T == SessionHead) 3 else 1;
+}
+
+/// The table after INSERT INTO, UPDATE or DELETE FROM, or null.
+fn targetTable(comptime sql: []const u8) ?[]const u8 {
+    const first = nextWord(sql, 0);
+    var after = skipSpace(sql, 0) + first.len;
+    if (std.ascii.eqlIgnoreCase(first, "INSERT") or std.ascii.eqlIgnoreCase(first, "DELETE")) {
+        const second = nextWord(sql, after);
+        const want = if (std.ascii.eqlIgnoreCase(first, "INSERT")) "INTO" else "FROM";
+        if (!std.ascii.eqlIgnoreCase(second, want)) return null;
+        after = skipSpace(sql, after) + second.len;
+    } else if (!std.ascii.eqlIgnoreCase(first, "UPDATE")) return null;
+    const table = nextWord(sql, after);
+    return if (table.len == 0) null else table;
+}
+
+/// The result columns of a SELECT: commas at depth 0 before its FROM.
+fn selectColumns(comptime sql: []const u8) usize {
+    var columns: usize = 1;
+    var depth: usize = 0;
+    var index = skipSpace(sql, 0) + "SELECT".len;
+    while (index < sql.len) {
+        const byte = sql[index];
+        if (byte == '\'') {
+            index = literalEnd(sql, index);
+            continue;
+        }
+        if (isWordStart(byte)) {
+            const end = wordEnd(sql, index);
+            if (depth == 0 and std.ascii.eqlIgnoreCase(sql[index..end], "FROM")) break;
+            index = end;
+            continue;
+        }
+        switch (byte) {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' => if (depth == 0) {
+                columns += 1;
+            },
+            else => {},
+        }
+        index += 1;
+    }
+    return columns;
+}
+
+fn usesNow(comptime sql: []const u8) bool {
+    return std.mem.indexOf(u8, sql, "@now") != null;
+}
+
+/// Typed statement text in SQLite's spelling: `@now` binds the Access's
+/// second as the parameter after Args, `@index(name)` is `INDEXED BY name`
+/// for an index the schema has, and the other markers as `render`.
+fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]const u8 {
+    comptime {
+        @setEvalBranchQuota(200 * sql.len + 10_000);
+        var out: []const u8 = "";
+        var start: usize = 0;
+        var index: usize = 0;
+        while (index < sql.len) {
+            if (sql[index] == '\'') {
+                index = literalEnd(sql, index);
+                continue;
+            }
+            if (sql[index] != '@') {
+                index += 1;
+                continue;
+            }
+            const name_end = wordEnd(sql, index + 1);
+            const name = sql[index + 1 .. name_end];
+            if (std.mem.eql(u8, name, "now")) {
+                out = out ++ sql[start..index] ++ std.fmt.comptimePrint("?{d}", .{arguments + 1});
+            } else if (std.mem.eql(u8, name, "index")) {
+                if (name_end >= sql.len or sql[name_end] != '(') @compileError("rsql: @index needs a name in parentheses: " ++ sql);
+                const close = closingParenthesis(sql, name_end);
+                const index_name = std.mem.trim(u8, sql[name_end + 1 .. close], " ");
+                if (!schema.hasIndex(index_name)) @compileError("rsql: no index named " ++ index_name ++ " in the schema: " ++ sql);
+                out = out ++ sql[start..index] ++ "INDEXED BY " ++ index_name;
+                index = close + 1;
+                start = index;
+                continue;
+            } else {
+                index = name_end;
+                continue;
+            }
+            index = name_end;
+            start = index;
+        }
+        const text = renderSqlite(out ++ sql[start..]) ++ "\x00";
+        return text[0 .. text.len - 1 :0];
     }
 }
 
@@ -343,7 +614,7 @@ test "markers nest, and text outside them is copied" {
 test "non-portable text names its fix" {
     try std.testing.expectEqualStrings("rsql: 'GLOB' is not portable; write @charset(column,'set') or @initial(column,'set')", comptime portabilityError("x NOT GLOB '*[^a]*'", .{ .names = false, .dialect = true }).?);
     try std.testing.expectEqualStrings("rsql: 'typeof' is not portable; test IS NULL or IS NOT NULL", comptime portabilityError("typeof(x)='blob'", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; bind the Host's time as a parameter", comptime portabilityError("at<=unixepoch()", .{ .names = false, .dialect = true }).?);
+    try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; write @now, the Host's second", comptime portabilityError("at<=unixepoch()", .{ .names = false, .dialect = true }).?);
     try std.testing.expectEqualStrings("rsql: '||' is OR on MySQL; compute the text in Zig", comptime portabilityError("a||b='ab'", .{ .names = false, .dialect = true }).?);
     try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS 'x'", .{ .names = false, .dialect = true }).?);
     try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS NOT 1", .{ .names = false, .dialect = true }).?);
@@ -404,4 +675,55 @@ test "a reserved word is a keyword only in its own place, and a name anywhere el
     }) |sql| {
         try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError(sql, statement_rules));
     }
+}
+
+test "a typed statement renders @now after its Args and @index as INDEXED BY" {
+    const S = Read(.{
+        .sql = "SELECT action_id FROM action_operation @index(action_operation_executable) WHERE action_id>?1 AND attempt_at<=@now",
+        .Args = struct { after: u64 },
+        .Row = struct { action_id: Positive },
+        .cardinality = .optional,
+    });
+    try std.testing.expectEqualStrings("SELECT action_id FROM action_operation INDEXED BY action_operation_executable WHERE action_id>?1 AND attempt_at<=?2", S.sql);
+    try std.testing.expect(S.uses_now);
+    const W = Write(.{
+        .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=?2",
+        .Args = struct { turn_id: u64, session: SessionHead },
+        .expect = .{ .at_most = 1 },
+    });
+    try std.testing.expectEqualStrings("session", W.session_field.?);
+}
+
+test "a typed statement's text must agree with its Args and Row" {
+    const One = struct { a: u64 };
+    const Two = struct { a: u64, b: u64 };
+    try std.testing.expectEqualStrings("rsql: Args has 2 fields but the text binds up to ?1", comptime statementError(.read, "SELECT 1 FROM content WHERE content_id=?1", Two, One).?);
+    try std.testing.expectEqualStrings("rsql: ?1 is never used", comptime statementError(.read, "SELECT 1 FROM content WHERE content_id=?2", Two, One).?);
+    try std.testing.expectEqualStrings("rsql: the text selects 2 columns but Row has 1", comptime statementError(.read, "SELECT content_id,(SELECT max(a,b) FROM x) FROM content WHERE content_id=?1", One, One).?);
+    try std.testing.expectEqualStrings("rsql: the text selects 3 columns but Row has 1", comptime statementError(.read, "SELECT session_ref,workspace_key,next_position FROM session WHERE created_seq=?1", One, One).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, "SELECT session_ref,workspace_key,next_position FROM session WHERE created_seq=?1", One, struct { head: SessionHead }));
+    try std.testing.expectEqualStrings("rsql: a read starts with SELECT", comptime statementError(.read, "UPDATE content SET private=0", struct {}, One).?);
+}
+
+test "a write to a table that carries Sessions binds exactly one SessionHead" {
+    const Turn = struct { turn_id: u64 };
+    try std.testing.expectEqualStrings("rsql: a write to turn, which carries Sessions, binds exactly one SessionHead", comptime statementError(.write, "UPDATE turn SET outcome_at=1 WHERE turn_id=?1", Turn, void).?);
+    try std.testing.expectEqualStrings("rsql: content carries no Sessions; bind no SessionHead", comptime statementError(.write, "DELETE FROM content WHERE content_id=?1 AND ?2 IS NOT NULL", struct { id: u64, session: SessionHead }, void).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO content(content_id) VALUES(?1)", Turn, void));
+}
+
+test "typed statements are held to the dialect rules" {
+    const None = struct {};
+    try std.testing.expectEqualStrings("rsql: 'INDEXED' is not portable; write @index(name)", comptime statementError(.read, "SELECT 1 FROM turn INDEXED BY turn_unpositioned", None, struct { a: u64 }).?);
+    try std.testing.expectEqualStrings("rsql: 'RETURNING' is not portable; the Host allocates identities; read facts in an earlier round", comptime statementError(.write, "DELETE FROM content RETURNING content_id", None, void).?);
+    try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; write @now, the Host's second", comptime statementError(.write, "UPDATE content SET private=unixepoch()", None, void).?);
+    try std.testing.expectEqualStrings("rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write", comptime statementError(.write, "INSERT OR IGNORE INTO content(content_id) VALUES(1)", None, void).?);
+    try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime statementError(.write, "UPDATE content SET private=1 WHERE private IS 0", None, void).?);
+}
+
+test "the tables that carry Sessions are the ones the touch oracle watches" {
+    inline for (.{ "session", "session_revision", "message_admission", "sent_rejection", "turn", "session_stop", "model_operation", "action_operation", "conversation_entry", "model_output_item" }) |table| {
+        try std.testing.expect(comptime schema.carriesSessions(table));
+    }
+    inline for (.{ "content", "core_command", "model_tool_call" }) |table| try std.testing.expect(!comptime schema.carriesSessions(table));
 }

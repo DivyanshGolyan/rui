@@ -1124,7 +1124,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     try store_core.rollbackAfterError(&storage, .{});
 
     // A committed content id is never handed out again; a later rolled-back one is.
-    const content = rolled_back[@intFromEnum(store_core.Identity.content_id)];
+    const content = rolled_back[@backingInt(store_core.Identity.content_id)];
     try store_core.begin(&storage);
     try std.testing.expectEqual(@as(i64, @intCast(content)), try content_domain.importBytesContent(&storage, "identity committed", false, false));
     try store_core.commit(&storage);

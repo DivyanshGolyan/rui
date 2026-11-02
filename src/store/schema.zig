@@ -618,6 +618,29 @@ pub const indexes = [_]Index{
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },
 };
 
+/// Whether `table`'s rows belong to Sessions: it has a `session_ref` or a
+/// `sender_session_ref`. A typed write to one binds its Session's head.
+pub fn carriesSessions(comptime table: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |column| {
+                if (std.mem.eql(u8, column.name, "session_ref") or std.mem.eql(u8, column.name, "sender_session_ref")) return true;
+            }
+            return false;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// Whether the schema has an index named `name`.
+pub fn hasIndex(comptime name: []const u8) bool {
+    comptime {
+        for (objects(.sqlite)) |object| if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
+        return false;
+    }
+}
+
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {

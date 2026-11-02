@@ -4,6 +4,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const tool_catalog = @import("../tools.zig");
+const rsql = @import("rsql.zig");
 pub const c = @import("sqlite");
 
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
@@ -376,4 +377,84 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
     const value = c.sqlite3_column_int64(statement, index);
     if (value < 0 or (!allow_zero and value == 0)) return error.CorruptStore;
     return @intCast(value);
+}
+
+/// SQLite copies the bytes: a typed statement is bound when queued and
+/// stepped when its round runs, after the caller's arguments are gone.
+const transient: c.sqlite3_destructor_type = @ptrFromInt(std.math.maxInt(usize));
+
+/// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
+/// the text uses @now.
+pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64) !void {
+    const info = @typeInfo(S.Args).@"struct";
+    inline for (info.field_names, info.field_types, 1..) |name, Field, index| try bindValue(statement, index, Field, @field(args, name));
+    if (S.uses_now) try bindI64(statement, info.field_names.len + 1, now);
+}
+
+fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: T) !void {
+    if (T == rsql.SessionHead) return bindCopied(statement, index, &value.ref);
+    if (T == []const u8) return bindCopied(statement, index, value);
+    if (T == rsql.Positive) return bindU64(statement, index, value.get());
+    switch (@typeInfo(T)) {
+        .optional => |optional| if (value) |present| try bindValue(statement, index, optional.child, present) else {
+            if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
+        },
+        .bool => try bindI64(statement, index, @as(i64, @intFromBool(value))),
+        .int => try bindU64(statement, index, value),
+        // Tag names are static, so SQLite may borrow them.
+        .@"enum" => try bindText(statement, index, @tagName(value)),
+        .array => |array| {
+            comptime std.debug.assert(array.child == u8);
+            if (c.sqlite3_bind_blob64(statement, index, &value, value.len, transient) != c.SQLITE_OK) return error.BindFailed;
+        },
+        else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
+    }
+}
+
+fn bindCopied(statement: *c.sqlite3_stmt, index: c_int, value: []const u8) !void {
+    if (c.sqlite3_bind_text64(statement, index, value.ptr, value.len, transient, c.SQLITE_UTF8) != c.SQLITE_OK) return error.BindFailed;
+}
+
+/// The current row as `Row`. Every value that breaks its type is
+/// `CorruptStore`, here and nowhere else.
+pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt) error{CorruptStore}!Row {
+    var row: Row = undefined;
+    comptime var column: c_int = 0;
+    const info = @typeInfo(Row).@"struct";
+    inline for (info.field_names, info.field_types) |name, Field| {
+        @field(row, name) = decodeValue(Field, statement, column) catch return error.CorruptStore;
+        column += if (Field == rsql.SessionHead) 3 else 1;
+    }
+    return row;
+}
+
+fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int) !T {
+    if (T == rsql.SessionHead) {
+        const ref = try columnText(statement, column);
+        if (ref.len != @sizeOf(@FieldType(rsql.SessionHead, "ref"))) return error.CorruptStore;
+        return .{
+            .ref = ref[0..@sizeOf(@FieldType(rsql.SessionHead, "ref"))].*,
+            .workspace_key = .of(try readPositive(statement, column + 1)),
+            .next_position = .of(try readPositive(statement, column + 2)),
+        };
+    }
+    if (T == rsql.Positive) return .of(try readPositive(statement, column));
+    switch (@typeInfo(T)) {
+        .optional => |optional| {
+            if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
+            return try decodeValue(optional.child, statement, column);
+        },
+        .bool => return switch (try readCount(statement, column)) {
+            0 => false,
+            1 => true,
+            else => error.CorruptStore,
+        },
+        .int => return std.math.cast(T, try readCount(statement, column)) orelse error.CorruptStore,
+        .@"enum" => return std.meta.stringToEnum(T, try columnText(statement, column)) orelse error.CorruptStore,
+        .array => {
+            comptime std.debug.assert(T == [32]u8);
+            return readDigest(statement, column);
+        },
+        else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
+    }
 }
