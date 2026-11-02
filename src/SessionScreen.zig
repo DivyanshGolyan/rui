@@ -955,7 +955,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         says_deny = self.selected.approval == .reason and text.len != 0;
     }
     if (selector) window.hideCursor() else window.showCursor(layout.caret_column, layout.caret_row);
-    if (document.linked or self.live.linked) try self.boundLinks();
+    // Every frame: links can reach the grid from any document.
+    try self.boundLinks();
     // Finish consuming every borrowed cell before output can pump input and
     // change the browsing document. The frame shares the cell memory budget.
     // Any failure is fatal; never drop a frame and continue accepting consent.

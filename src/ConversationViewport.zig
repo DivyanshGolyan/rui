@@ -168,8 +168,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// Where the OSC 8 link being received is: its address or its text.
         link: enum { none, address, text } = .none,
         address_length: usize = 0,
-        /// Some text was ever linked, so frames bound their link copies.
-        linked: bool = false,
         length: usize = 0,
         origin: u64 = 0,
         /// The first row in view; null follows the latest rows.
@@ -209,7 +207,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_end)) {
                         std.debug.assert(self.link == .address);
                         self.link = if (self.address_length == 0) .none else .text;
-                        self.linked = self.linked or self.link == .text;
                         self.control_length = 0;
                     }
                     start = index + 1;
@@ -279,7 +276,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.style = 0;
             self.control_length = 0;
             self.link = .none;
-            self.linked = false;
             self.dirty = true;
         }
 
@@ -1106,7 +1102,6 @@ test "a link's text carries its hidden address to the cells, however its bytes a
         try view.append(input[0..split]);
         try view.append(input[split..]);
         try view.prepare();
-        try std.testing.expect(view.linked);
         // The address takes no cell: the row reads as the text alone.
         var test_screen: TestScreen = undefined;
         _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{});
