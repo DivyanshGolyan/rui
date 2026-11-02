@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 48;
+pub const schema_version: u32 = 49;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes needs a new row, and so a new schema_version.
 /// Review rule: a row, once merged, is never edited.
@@ -25,6 +25,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
     .{ .schema_version = 47, .digest = 0x51267b57c44099bc },
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
+    .{ .schema_version = 49, .digest = 0xeebe0b0c9cfaa50f },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -141,7 +142,7 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
 
 // A label's syntax, not a provider list, so a new provider is no format change.
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
-const tools_mask_column: Column = .{ .name = "tools_mask", .type = .int, .check = std.fmt.comptimePrint("tools_mask BETWEEN 0 AND {d}", .{tool_catalog.toolBit(.bash)}) };
+const tools_mask_column: Column = .{ .name = "tools_mask", .type = .int, .check = std.fmt.comptimePrint("tools_mask BETWEEN 0 AND {d}", .{tool_catalog.all_tools_mask}) };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };

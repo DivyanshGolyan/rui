@@ -1658,7 +1658,7 @@ def command_entry_cases():
         assert fresh["admission"]["context"]["session"] == selected, fresh
         settings = fixture.command("session", "inspect", "--store", store, "--session", selected)["session"]
         assert (settings["workspace"], settings["provider"], settings["model"], settings["tools"],
-            settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash"], "bypass"), settings
+            settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash", "web_search"], "bypass"), settings
         # Fresh Configure selects like a new Session: a saved model pin for the
         # selected provider wins over the recommendation; explicit --model wins
         # over the pin; a saved unsupported provider is refused before capture.
@@ -6607,7 +6607,8 @@ def main(selected="all"):
             assert rejected.returncode != 0 and "UnknownTool" in rejected.stderr, (tools, rejected)
             assert not record.exists(), ("invalid tool selection published a capture", tools)
         for tools, mode in (("none", "bypass"), ("none", "ask"),
-                            ("bash", "bypass"), ("bash", "ask")):
+                            ("bash", "bypass"), ("bash", "ask"),
+                            ("web_search", "ask"), ("bash,web_search", "bypass")):
             warning_ref = create_session(preferences_home, "--store", store,
                   "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
                   "--tools", tools, "--permission-mode", mode)
