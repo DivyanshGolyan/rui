@@ -189,7 +189,7 @@ const notice_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
     "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
     short_result_bytes + 2 * "! ".len,
-    protocol.max_model_bytes + " · API key".len + model_tail.len,
+    protocol.max_model_bytes + " · ".len + unknown_sign_in.len + model_tail.len,
 );
 
 /// Fills the reader's job in place; the caller may add to it before launch.
@@ -540,7 +540,7 @@ fn slashCommand(self: *Self, text: []const u8) void {
             };
         } else self.unknownCommand(text),
         .wait => self.notice = "Work continues while you compose.",
-        .login => self.notice = "Login uses rui auth login codex in your shell.",
+        .login => self.notice = "Login uses " ++ comptime protocol.Provider.codex.login() ++ " in your shell.",
         .efforts => self.notice = self.efforts(),
         .model => self.notice = self.modelFacts(),
         .misused => |name| {
@@ -568,16 +568,16 @@ fn efforts(self: *Self) []const u8 {
     return writer.buffered();
 }
 
-const model_tail = " · another model needs a new Session: /model in the overview";
+const model_tail = " · new Session: /model in overview";
+const unknown_sign_in = "sign-in unknown";
 
-/// The Session's model and sign-in. A Session keeps both for life, so a
-/// different model starts a new Session from the overview's /model.
+/// The Session's model and sign-in, first, so a narrow screen cuts only
+/// the tail. A Session keeps both for life, so a different model starts a
+/// new Session from the overview's /model.
 fn modelFacts(self: *Self) []const u8 {
     if (self.line.read == null) return "The model shows once the Session is read.";
     var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    writer.writeAll(self.line.model.slice()) catch unreachable;
-    if (self.line.provider) |provider| writer.print(" · {s}", .{provider.signIn()}) catch unreachable;
-    writer.writeAll(model_tail) catch unreachable;
+    writer.print("{s} · {s}" ++ model_tail, .{ self.line.model.slice(), if (self.line.provider) |provider| provider.signIn() else unknown_sign_in }) catch unreachable;
     return writer.buffered();
 }
 
@@ -629,20 +629,27 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     }
 }
 
-test "frontend /model shows the Session's model and sign-in and offers no pick" {
+test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init();
-    for ([_]protocol.Provider{ .codex, .openai }) |provider| {
+    for (model_capability.models) |row| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
         self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
-        try self.line.model.set("gpt-6-luna");
+        try self.line.model.set(row.id);
         self.notice = null;
         self.slashCommand("/model");
         const said = self.notice.?;
-        try std.testing.expect(std.mem.startsWith(u8, said, "gpt-6-luna · "));
-        try std.testing.expect(std.mem.indexOf(u8, said, provider.signIn()) != null);
+        // The model, then the sign-in, lead the line.
+        try std.testing.expect(std.mem.startsWith(u8, said, row.id));
+        const rest = said[row.id.len..];
+        if (provider) |known| {
+            try std.testing.expect(std.mem.indexOf(u8, rest, known.signIn()) != null);
+            try std.testing.expect(std.unicode.utf8CountCodepoints(said) catch unreachable <= 60);
+        } else for (std.enums.values(protocol.Provider)) |other| try std.testing.expect(std.mem.indexOf(u8, rest, other.signIn()) == null);
+        // A sign-in is never dropped silently: something stands in its place.
+        try std.testing.expect(!std.mem.startsWith(u8, std.mem.trimStart(u8, rest[" · ".len..], " "), "new Session"));
         try std.testing.expect(self.input.queuedCommand() == null);
-        try std.testing.expectEqualStrings("gpt-6-luna", self.line.model.slice());
-    }
+        try std.testing.expectEqualStrings(row.id, self.line.model.slice());
+    };
 }
 
 test "frontend /effort alone lists the efforts the Session's model supports and marks the one in force" {

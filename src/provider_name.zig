@@ -20,6 +20,13 @@ pub const Provider = enum {
             .openai => "API key",
         };
     }
+
+    /// The shell command that signs this provider in.
+    pub fn login(self: Provider) []const u8 {
+        return switch (self) {
+            inline else => |provider| "rui auth login " ++ @tagName(provider),
+        };
+    }
 };
 
 /// A provider grammar and its version, as a Session pins it. A version's

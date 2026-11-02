@@ -87,6 +87,41 @@ pub fn load(home: []const u8) !Values {
 
 pub const Readinesses = provider_selection.Readinesses;
 
+/// What a failed `update` means for every caller that shows it.
+pub const Failure = struct {
+    /// The file holds the new values, but a crash may yet lose them.
+    saved: bool = false,
+    /// Why, as a clause; null when only the error's name says more.
+    reason: ?[]const u8 = null,
+};
+
+pub fn failure(err: anyerror) Failure {
+    return switch (err) {
+        error.PreferenceDirectorySyncFailed => .{ .saved = true, .reason = "durability unconfirmed; inspect HOME/.config/rui/preferences before another update" },
+        error.UnsupportedPreferenceProvider => .{ .reason = "the provider must be " ++ provider_names },
+        error.PreferenceProviderRequired => .{ .reason = "a model needs a provider: " ++ provider_names },
+        error.UnsupportedPreferenceModel, error.InvalidPreferenceModel => .{ .reason = "a model ID is 1–256 printable non-space ASCII bytes" },
+        error.InvalidPreferenceStore, error.FileNotFound => .{ .reason = "the Store must be an existing private, canonicalizable absolute directory" },
+        else => .{},
+    };
+}
+
+const provider_names = blk: {
+    var text: []const u8 = "";
+    for (std.meta.fieldNames(protocol.Provider), 0..) |name, at| text = text ++ (if (at == 0) "" else " or ") ++ name;
+    break :blk text;
+};
+
+test "a failed save says whether the file holds it, and why, without an error name" {
+    try std.testing.expect(failure(error.PreferenceDirectorySyncFailed).saved);
+    for ([_]anyerror{ error.UnsupportedPreferenceProvider, error.PreferenceProviderRequired, error.InvalidPreferenceModel, error.InvalidPreferenceStore }) |err| {
+        const said = failure(err);
+        try std.testing.expect(!said.saved);
+        try std.testing.expect(std.mem.indexOf(u8, said.reason.?, @errorName(err)) == null);
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), failure(error.AccessDenied).reason);
+}
+
 /// Serializes read/modify/write for competing setup callers. A failed write or
 /// rename leaves the previous complete file; post-rename sync failure is uncertain.
 pub fn update(home: []const u8, edit: Edit, readiness: *const Readinesses) !Values {

@@ -10,7 +10,6 @@ const environment = @import("environment.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
 const descriptor_capacity = @import("descriptor_capacity.zig");
 const product_defaults = @import("product_defaults.zig");
-const model_capability = @import("model_capability.zig");
 const descriptor_limit = @import("os/descriptor_limit.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
@@ -889,10 +888,6 @@ pub fn serve(
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
     var readiness_owned = true;
     defer if (readiness_owned) stderr.release();
-    // Only the lease winner warns, before readiness. Preferences are advice
-    // for future Sessions: unreadable/missing defaults must not stop this Host
-    // from serving existing work, and an unsupported saved pin stays intact.
-    if (home) |absolute_home| try warnUnsupportedSavedModel(absolute_home);
     var diagnostic_open_error: ?anyerror = null;
     var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
         diagnostic_open_error = err;
@@ -1046,23 +1041,6 @@ pub fn serve(
 
 // serve's frame stays resident for the Host's life, so each startup-only
 // buffer lives in a noinline function of its own.
-
-/// Warns, before readiness, about a saved default model this release cannot
-/// serve. Preferences are advice for future Sessions: unreadable or missing
-/// defaults never stop the Host, and the saved pin stays intact.
-noinline fn warnUnsupportedSavedModel(home: []const u8) !void {
-    const values = @import("preferences.zig").load(home) catch return;
-    if (values.model.len == 0 or model_capability.supportsModel(values.model.slice())) return;
-    var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 384]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    try out.writeAll("rui: saved new-Session default model \"");
-    var text: TerminalText = .{ .mode = .line };
-    try text.feed(&out, values.model.slice());
-    try text.finish(&out);
-    try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ model_capability.model_help ++
-        "Choose rui defaults configure --model ID, or remove the saved pin with rui defaults configure --clear-model. Existing Sessions are unchanged.\n");
-    _ = stderr.writeHeld(out.buffered());
-}
 
 noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version: u32) !void {
     var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;

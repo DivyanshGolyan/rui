@@ -74,17 +74,13 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 ## Models
 
-To list this release's supported model IDs, run `rui session configure --help`. The list is compiled into Rui and needs no Host or credentials. It does not mean that your account can use every listed model.
+To list the model IDs this release knows, run `rui session configure --help`. The list is compiled into Rui and needs no Host or credentials. It does not mean that your account can use every listed model.
 
-Without `--model`, a new Session uses your saved default. With no saved default, it uses `gpt-6.1-sol`.
+Rui also takes a model it does not list, such as one your provider's model list offers. It says `Rui does not list ID; it uses default limits`, and runs that model with a 128,000-token context. If the provider does not know the ID, the Session's first request fails and says to pick another with `/model` in the overview.
 
-If Host startup warns that a saved model default is unsupported, pick a listed ID:
+Without `--model`, a new Session uses your saved default. With no saved default, it uses `gpt-6.1-sol`. To pick the default from a list, type `/model` in the overview.
 
-```sh
-rui defaults configure --model ID
-```
-
-To remove the saved default instead, run `rui defaults configure --clear-model`. Rui keeps the old default until you change it.
+To change the saved default from the shell, run `rui defaults configure --model ID`. To remove it, run `rui defaults configure --clear-model`.
 
 ## Notifications
 

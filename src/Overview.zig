@@ -16,6 +16,7 @@ const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const model_list = @import("model_list.zig");
+const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
@@ -78,8 +79,8 @@ pub const Operations = struct {
     /// ends the overview after a canonical Store failure.
     start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
-    /// The Host's model lists, parsed into the arena.
-    models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror!protocol_reply.ModelList,
+    /// The Host's `model_list` reply, owned by the allocator.
+    models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
     /// Saves the person's default for new Sessions.
     save_default: *const fn (*Self, view.Default) anyerror!void,
     /// Lends the terminal to the Session's conversation. Null once the
@@ -264,9 +265,8 @@ host: ?view.Host = null,
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
 reply: Reply = .{},
-/// The latest model lists, in `model_arena` until the core has read them.
-models: protocol_reply.ModelList = .{ .providers = &.{} },
-model_arena: std.heap.ArenaAllocator = undefined,
+/// The menu a model-list read built, until the core takes it.
+menu: model_picker.Menu = .{},
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 
@@ -385,8 +385,6 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = .{ .buffer = &self.draft };
-    self.model_arena = .init(init.gpa);
-    errdefer self.model_arena.deinit();
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     errdefer self.closePipes();
@@ -422,7 +420,7 @@ fn destroy(self: *Self) void {
     self.forget();
     self.frame.deinit(self.init.gpa);
     self.state.deinit();
-    self.model_arena.deinit();
+    self.menu.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
 }
 
@@ -615,7 +613,12 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
         },
         .start => |*start| try self.ops.start(self, requests, self.startInput(start), &self.reply),
         .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
-        .models => self.models = try self.ops.models(self, requests, self.model_arena.allocator()),
+        .models => {
+            const gpa = self.init.gpa;
+            const body = try self.ops.models(self, requests, gpa);
+            defer gpa.free(body);
+            self.menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body));
+        },
         .save => |binding| try self.ops.save_default(self, binding),
     }
 }
@@ -653,17 +656,19 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
         .models => {
-            defer {
-                self.models = .{ .providers = &.{} };
-                _ = self.model_arena.reset(.retain_capacity);
-            }
-            outcome catch return self.event(.{ .models = null });
-            return self.event(.{ .models = self.models.providers });
+            outcome catch |err| return self.event(.{
+                .models = switch (err) {
+                    error.InvalidModelList, error.InvalidResponse, error.ResponseTooLarge => .invalid,
+                    // Any other failure leaves the person nothing to do but
+                    // try /model again, as when the Host is gone.
+                    else => .unanswered,
+                },
+            });
+            const menu = self.menu;
+            self.menu = .{};
+            return self.event(.{ .models = .{ .menu = menu } });
         },
-        .save => {
-            outcome catch |err| return self.event(.{ .saved = @errorName(err) });
-            return self.event(.{ .saved = null });
-        },
+        .save => return self.event(.{ .saved = savedAs(outcome) }),
     }
     return null;
 }
@@ -701,8 +706,17 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) client.MessageIn
     } };
 }
 
-fn listModels(self: *Self, requests: client.Requests, arena: std.mem.Allocator) !protocol_reply.ModelList {
-    return requests.modelList(self.options.store, arena);
+fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![]u8 {
+    return requests.modelList(self.options.store, gpa);
+}
+
+/// How a save ended, in the words `/setup` uses for the same failure.
+fn savedAs(outcome: anyerror!void) view.Saved {
+    outcome catch |err| {
+        const said = preferences.failure(err);
+        return if (said.saved) .unconfirmed else .{ .failed = said.reason };
+    };
+    return .done;
 }
 
 /// Saves the pick as `rui defaults configure --provider --model` would.
@@ -983,16 +997,17 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
-/// `complete` as the loop does, then writes the ledger's guidance before
-/// anything that can return. The departure is whole before the restore
+/// `complete` as the loop does, runs a queued save, then writes the
+/// ledger's guidance before anything that can return. The departure is whole before the restore
 /// result is read. A conversation's own guidance and the Detached notice
 /// follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
     const answered: anyerror!?Next = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
+    self.settleSave();
     // A ledger entry prints well under 512 bytes.
-    var bytes: [view.max_requests * 512]u8 = undefined;
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes]u8 = undefined;
     var guidance = std.Io.Writer.fixed(&bytes);
     view.writeDeparture(&self.state, &guidance) catch unreachable;
     _ = stderr.write(guidance.buffered());
@@ -1008,6 +1023,14 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             return self.leave(left.*, restored);
         },
     }
+}
+
+/// Runs a save still queued as the overview ends: it is a local file write,
+/// so it ends before the departure says how.
+fn settleSave(self: *Self) void {
+    for (self.jobs[0..self.job_count]) |job| if (job == .save) {
+        _ = self.event(.{ .saved = savedAs(self.ops.save_default(self, job.save)) }) catch {};
+    };
 }
 
 /// Lets the conversation the person left join its borrowers and write its
@@ -1227,15 +1250,17 @@ const fake_operations: Operations = .{
         }
     }.stop,
     .models = struct {
-        fn models(_: *Self, _: client.Requests, arena: std.mem.Allocator) !protocol_reply.ModelList {
+        fn models(_: *Self, _: client.Requests, gpa: std.mem.Allocator) ![]u8 {
             Seen.now.model_lists += 1;
-            const ids = [_][]const u8{ "gpt-5.5", "gpt-6-luna", "whisper-1" };
-            const offered = try arena.alloc(model_list.Offered, ids.len);
-            for (offered, ids) |*model, id| model.* = .{ .id = try arena.dupe(u8, id), .known = !std.mem.eql(u8, id, "whisper-1") };
-            const providers = try arena.alloc(model_list.Provided, 2);
-            providers[0] = .{ .provider = .codex, .source = .table, .models = offered[0..2] };
-            providers[1] = .{ .provider = .openai, .source = .live, .models = offered };
-            return .{ .providers = providers };
+            var reply: std.Io.Writer.Allocating = .init(gpa);
+            errdefer reply.deinit();
+            try reply.writer.writeAll(protocol.model_list_reply.head);
+            try model_list.writeProviders(&reply.writer, &.{
+                .{ .provider = .codex, .list = .table },
+                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
+            });
+            try reply.writer.writeAll(protocol.model_list_reply.tail);
+            return reply.toOwnedSlice();
         }
     }.models,
     .save_default = struct {
@@ -1418,6 +1443,34 @@ test "/model reads the lists on the worker, the sign-in choice takes the arrows,
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("openai", Seen.now.start.provider.?.slice());
     try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
+}
+
+test "a save still queued as the overview ends runs, and the way out names it" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // gpt-5.5 both sign-ins offer: Enter opens the choice, Enter picks.
+    try std.testing.expect(try rig.press("\n\n") == null);
+    try std.testing.expectEqual(Job.save, std.meta.activeTag(rig.overview.jobs[rig.overview.job_count - 1]));
+    var buffer: [1024]u8 = undefined;
+    const guidance = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqualStrings("gpt-5.5", Seen.now.saved.?.model.slice());
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-5.5") != null);
+}
+
+test "a model list the Host cannot answer and one Rui cannot read reach the core apart" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/model\n") == null);
+    overview.job = .models;
+    try std.testing.expect(try overview.deliver(error.ConnectionRefused) == null);
+    try std.testing.expect(overview.state.menu_read == .unanswered);
+    try std.testing.expect(try overview.deliver(error.InvalidModelList) == null);
+    try std.testing.expect(overview.state.menu_read == .invalid);
 }
 
 test "a start with no saved binding names no model, so the Host refuses it" {

@@ -1365,9 +1365,9 @@ fn ending(code: []const u8) Ending {
         .quota => .{ .reason = "the OpenAI account is out of quota", .next = "Add credit or wait for the limit to reset, then send a message to continue." },
         .plan => .{ .reason = "the OpenAI plan does not include this Session's model", .next = "Use /model in the overview to start a new Session." },
         .model => .{ .reason = "OpenAI cannot serve this Session's model", .next = "Use /model in the overview to start a new Session." },
-        .sign_in => .{ .reason = "sign-in expired", .next = "Run rui auth login codex, then send a message to continue." },
+        .sign_in => .{ .reason = "sign-in expired", .next = "Run " ++ comptime protocol.Provider.codex.login() ++ ", then send a message to continue." },
         // A running Host keeps the key it started with.
-        .api_key => .{ .reason = "the OpenAI API key was rejected", .next = "Save a new one with rui auth login openai, restart the Host with rui host stop, then send a message to continue." },
+        .api_key => .{ .reason = "the OpenAI API key was rejected", .next = "Save a new one with " ++ comptime protocol.Provider.openai.login() ++ ", restart the Host with rui host stop, then send a message to continue." },
         .overflow => .{ .reason = "the conversation no longer fits the model's context", .next = "Start a new Session; more here will not fit either." },
         .refused => .{ .reason = null, .next = "Sending this again will likely fail the same way; change what the error names, or start a new Session." },
         .unreachable_provider => .{ .reason = "OpenAI could not be reached", .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
