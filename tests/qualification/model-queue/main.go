@@ -225,10 +225,11 @@ INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id
  SELECT 'h-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='template-configure'),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0) FROM core_command)+i FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
- SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),'h-msg-'||i,(SELECT v FROM q),100+i,unixepoch() FROM n;
+ SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),'h-msg-'||i,(SELECT v FROM q),NULL,unixepoch() FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_at)
  SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),100+i,100+i,100+i,'provider_http_422',NULL,unixepoch() FROM n;
+UPDATE message_admission SET turn_id=admission_id WHERE admission_id BETWEEN 101 AND 100+%[1]d;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,retry_due_at_ms,resolution_code,output_reservation,resolved_at)
  SELECT 100+i,100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),1,100+i,2*i,1,NULL,'provider_http_422',0,unixepoch() FROM n;

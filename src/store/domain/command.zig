@@ -181,10 +181,15 @@ pub fn submitMessageLocked(
         .model_capability_unavailable
     else
         null;
+    // A created Session's revision, recorded after the command row.
+    var revision: ?bool = null;
     if (code == null) if (command.configuration) |*configuration| {
-        switch (try configuration_domain.applyConfiguration(self, command.key.slice(), "", configuration, faults)) {
+        switch (try configuration_domain.applyConfiguration(self, "", configuration, faults)) {
             .rejected => |rejection| code = std.meta.stringToEnum(protocol.MessageRejection, @tagName(rejection)).?,
-            .accepted => |value| session = value.session,
+            .accepted => |value| {
+                session = value.session;
+                revision = value.instructions_updated;
+            },
         }
     };
     if (code) |rejection| {
@@ -224,6 +229,7 @@ pub fn submitMessageLocked(
         null,
         .{ .accepted = true },
     );
+    if (revision) |updated| try configuration_domain.insertRevision(self, session.slice(), command.key.slice(), updated);
     const admission_id = try insertMessageAdmission(
         self,
         session.slice(),

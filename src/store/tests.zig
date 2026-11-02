@@ -7503,6 +7503,33 @@ test "a Workspace is matched by its digest and then its text" {
     try listed.expectReferences(&.{other.slice()[0..protocol.session_id_bytes].*});
 }
 
+test "a reference is checked when its row is written, not at commit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "immediate-config");
+    try sqlite.exec(storage.database, "BEGIN");
+    defer sqlite.exec(storage.database, "ROLLBACK") catch unreachable;
+    const Admission = struct {
+        fn insert(database: *c.sqlite3, session_ref: []const u8, command_key: []const u8) !void {
+            var sql: [320]u8 = undefined;
+            try sqlite.exec(database, try std.fmt.bufPrintSentinel(
+                &sql,
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) " ++
+                    "SELECT 1000,session_ref,'{s}',instructions_content_id,1 FROM session WHERE session_ref='{s}'",
+                .{ command_key, session_ref },
+                0,
+            ));
+        }
+    };
+    try std.testing.expectError(error.SqliteExecFailed, Admission.insert(storage.database, session.slice(), "later-command"));
+    try sqlite.exec(storage.database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
+        "VALUES('later-command',2,'',zeroblob(32),1,'',0,0,(SELECT max(command_seq)+1 FROM core_command))");
+    try Admission.insert(storage.database, session.slice(), "later-command");
+}
+
 test "existing Store rejects noncanonical durable authority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

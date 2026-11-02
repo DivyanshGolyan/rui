@@ -22,7 +22,7 @@ pub const schema_version: u32 = 46;
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
-    .{ .schema_version = 46, .digest = 0x6731f43d33a0b95c },
+    .{ .schema_version = 46, .digest = 0xa90c6603196840b4 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -97,11 +97,12 @@ pub const Column = struct {
     check: ?[]const u8 = null,
 };
 
+/// Checked when its row is written, on every engine: writers insert a
+/// parent before its children.
 pub const ForeignKey = struct {
     columns: []const []const u8,
     references: []const u8,
     referenced: []const []const u8,
-    deferred: bool = false,
 };
 
 /// A key or reference of one column is written on that column; one of
@@ -134,10 +135,6 @@ const command_reference: []const []const u8 = &.{"command_key"};
 
 fn references(comptime column: []const u8, comptime table: []const u8, comptime referenced: []const []const u8) ForeignKey {
     return .{ .columns = &.{column}, .references = table, .referenced = referenced };
-}
-
-fn deferredReferences(comptime column: []const u8, comptime table: []const u8, comptime referenced: []const []const u8) ForeignKey {
-    return .{ .columns = &.{column}, .references = table, .referenced = referenced, .deferred = true };
 }
 
 // A label's syntax, not a provider list, so a new provider is no format change.
@@ -255,7 +252,7 @@ pub const tables = [_]Table{
         .uniques = &.{&.{"command_key"}},
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
-            deferredReferences("command_key", "core_command", command_reference),
+            references("command_key", "core_command", command_reference),
             references("instructions_content_id", "content", content_reference),
             references("output_schema_content_id", "content", content_reference),
         },
@@ -278,9 +275,11 @@ pub const tables = [_]Table{
         .uniques = &.{&.{"command_key"}},
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
-            deferredReferences("command_key", "core_command", command_reference),
+            references("command_key", "core_command", command_reference),
             references("content_id", "content", content_reference),
-            deferredReferences("turn_id", "turn", &.{"turn_id"}),
+            // The one reference cycle, with turn.first_admission_id: an
+            // Admission is written with turn_id NULL, and set once its Turn exists.
+            references("turn_id", "turn", &.{"turn_id"}),
             references("sender_session_ref", "session", session_reference),
         },
         .checks = &.{"(sender_session_ref IS NULL)=(sender_position IS NULL)"},
@@ -296,7 +295,7 @@ pub const tables = [_]Table{
         .primary_key = &.{"command_key"},
         .uniques = &.{&.{ "sender_session_ref", "sender_position" }},
         .foreign_keys = &.{
-            deferredReferences("command_key", "core_command", command_reference),
+            references("command_key", "core_command", command_reference),
             references("sender_session_ref", "session", session_reference),
         },
         .without_rowid = true,
@@ -318,7 +317,7 @@ pub const tables = [_]Table{
         .primary_key = &.{"turn_id"},
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
-            deferredReferences("first_admission_id", "message_admission", &.{"admission_id"}),
+            references("first_admission_id", "message_admission", &.{"admission_id"}),
             references("outcome_content_id", "content", content_reference),
         },
         .checks = &.{"(outcome_code IS NULL)=(outcome_at IS NULL)"},
@@ -389,7 +388,7 @@ pub const tables = [_]Table{
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
         .foreign_keys = &.{
-            deferredReferences("turn_id", "turn", &.{"turn_id"}),
+            references("turn_id", "turn", &.{"turn_id"}),
             references("resolution_content_id", "content", content_reference),
             references("usage_content_id", "content", content_reference),
             references("interrupted_by_command_key", "core_command", command_reference),
@@ -726,7 +725,7 @@ fn lengthBound(comptime length: []const u8, comptime bounds: Octets) []const u8 
 }
 
 fn referenceClause(comptime key: ForeignKey) []const u8 {
-    return "REFERENCES " ++ key.references ++ "(" ++ list(key.referenced) ++ ")" ++ (if (key.deferred) " DEFERRABLE INITIALLY DEFERRED" else "");
+    return "REFERENCES " ++ key.references ++ "(" ++ list(key.referenced) ++ ")";
 }
 
 fn createIndex(comptime dialect: rsql.Dialect, comptime index: Index) []const u8 {

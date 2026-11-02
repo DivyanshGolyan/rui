@@ -261,7 +261,7 @@ pub fn configureLocked(
     if (command.require_model and !try servesProvider(self, &command.configuration, command.session.slice())) {
         return try saveConfigurationRejection(self, command, &digest, .model_capability_unavailable, faults);
     }
-    const applied = switch (try applyConfiguration(self, command.key.slice(), command.session.slice(), &command.configuration, faults)) {
+    const applied = switch (try applyConfiguration(self, command.session.slice(), &command.configuration, faults)) {
         .rejected => |code| return saveConfigurationRejection(self, command, &digest, code, faults),
         .accepted => |value| value,
     };
@@ -275,6 +275,7 @@ pub fn configureLocked(
         applied.output_schema_id,
         .{ .accepted = true, .revision = applied.revision, .created = creating },
     );
+    try insertRevision(self, applied.session.slice(), command.key.slice(), applied.instructions_updated);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try store_core.execute(self, "COMMIT");
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
@@ -283,9 +284,10 @@ pub fn configureLocked(
 /// Applies settings within the caller's transaction. Creation and its
 /// first Message can share this owner without an intermediate commit.
 /// An empty `session` creates one; the answer names the Session either way.
+/// The caller inserts its command row, then `insertRevision`: the
+/// revision references the command, and references are checked at once.
 pub fn applyConfiguration(
     self: *Store,
-    key: []const u8,
     session: []const u8,
     configuration: *const protocol.Configuration,
     faults: Faults,
@@ -295,6 +297,8 @@ pub fn applyConfiguration(
         revision: u64,
         instructions_id: ?i64,
         output_schema_id: ?i64,
+        /// The revision row to record once the command row exists.
+        instructions_updated: bool,
     },
     rejected: protocol.ConfigurationRejection,
 } {
@@ -390,18 +394,12 @@ pub fn applyConfiguration(
         try target.set(session);
         try updateSession(self, target.slice(), &next);
     }
-    try insertRevision(
-        self,
-        target.slice(),
-        key,
-        &next,
-        created or configuration.instructions.state == .value,
-    );
     return .{ .accepted = .{
         .session = target,
         .revision = next.revision,
         .instructions_id = command_instructions_id,
         .output_schema_id = command_output_schema_id,
+        .instructions_updated = created or configuration.instructions.state == .value,
     } };
 }
 
@@ -530,31 +528,17 @@ fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentC
     if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
 }
 
-fn insertRevision(
-    self: *Store,
-    session_ref: []const u8,
-    command_key: []const u8,
-    current: *const CurrentConfiguration,
-    instructions_updated: bool,
-) !void {
-    const statement = try store_core.cached(self, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)");
+/// Records the Session's settings as written under `command_key`, which
+/// must already exist: the revision row copies the Session row.
+pub fn insertRevision(self: *Store, session_ref: []const u8, command_key: []const u8, instructions_updated: bool) !void {
+    const statement = try store_core.cached(self, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label FROM session WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindU64(statement, 2, current.revision);
-    try sqlite.bindText(statement, 3, command_key);
-    try sqlite.bindText(statement, 4, current.workspace.slice());
-    try sqlite.bindText(statement, 5, current.model.slice());
-    try sqlite.bindNullableI64(statement, 6, current.instructions_id);
-    try sqlite.bindI64(statement, 7, @as(i64, if (instructions_updated) 1 else 0));
-    try sqlite.bindI64(statement, 8, current.tools_mask);
-    try sqlite.bindI64(statement, 9, current.permission_mode);
-    try sqlite.bindNullableI64(statement, 10, current.output_schema_id);
-    try sqlite.bindText(statement, 11, @tagName(current.provider));
-    try sqlite.bindNullableU64(statement, 12, current.compaction_trigger);
-    try sqlite.bindNullableU64(statement, 13, current.output_reservation);
-    try sqlite.bindNullableEffort(statement, 14, current.reasoning_effort);
-    try sqlite.bindOptionalLabel(statement, 15, &current.label);
+    try sqlite.bindText(statement, 2, command_key);
+    try sqlite.bindI64(statement, 3, @as(i64, if (instructions_updated) 1 else 0));
     try sqlite.expectDone(statement);
+    if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
 }
 
 /// Whether `supplied` canonicalizes to `existing`. Its canonical path
