@@ -22,6 +22,7 @@ const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
+const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
@@ -30,6 +31,7 @@ const TerminalInput = @import("TerminalInput.zig");
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
+const new_session_selection = @import("new_session_selection.zig");
 const preferences = @import("preferences.zig");
 
 comptime {
@@ -51,14 +53,17 @@ pub const Options = struct {
     model: ?[]const u8 = null,
     /// This terminal's own successful login, Unix seconds.
     login_at: ?u64 = null,
-    /// The launch named the Store, provider and model, so, as there, a
-    /// start reads no saved defaults, the saved effort included.
-    explicit: bool = false,
+    /// The launch's own `--store`, `--provider` and `--model`, as given.
+    /// When it named all three, a start reads no saved defaults, the saved
+    /// effort included. Otherwise a `/setup` that ran re-resolves the
+    /// default from them and the saved defaults, as a fresh launch would.
+    selectors: new_session_selection.Intent = .{},
     /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
 };
 
-/// What the CLI lends a conversation: its scratch files and slash commands.
+/// What the CLI lends the overview and its conversations: scratch files and
+/// the slash commands both run.
 pub const Hooks = struct {
     scratch: *const fn (std.process.Init) anyerror!std.Io.File,
     command: SessionFrontend.Command,
@@ -92,6 +97,9 @@ pub const Operations = struct {
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
     /// Saves the person's default for new Sessions.
     save_default: *const fn (*Self, view.Default) anyerror!void,
+    /// Runs a command line for a Session, or for none when it is empty,
+    /// keeping what it printed in `output`.
+    command: *const fn (*Self, client.Requests, []const u8, []u8) anyerror!void,
     /// Records how far the person saw a Session, giving up at the awake
     /// clock's `until`.
     mark_read: *const fn (*Self, client.Requests, []const u8, u64, i128) anyerror!void,
@@ -100,7 +108,7 @@ pub const Operations = struct {
     converse: *const fn (*Self, view.Reference) ?Left,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .models = listModels, .save_default = saveDefault, .mark_read = markRead, .converse = converse };
+pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .models = listModels, .save_default = saveDefault, .command = runCommand, .mark_read = markRead, .converse = converse };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -207,20 +215,26 @@ const Job = union(enum) {
     stop: view.Reference,
     models,
     save: view.Default,
+    /// Owns its line, as a start owns its text.
+    command: struct { name: view.commands.Name, session: ?view.Reference, line: []u8 },
     /// Sends a position the Host lacks.
     mark_read: Reads.Mark,
 
     /// A job owns its inputs until it is replaced or the overview ends,
     /// whether or not it ran.
     fn deinit(self: Job, gpa: std.mem.Allocator) void {
-        if (self == .start) self.start.deinit(gpa);
+        switch (self) {
+            .start => |start| start.deinit(gpa),
+            .command => |command| gpa.free(command.line),
+            else => {},
+        }
     }
 };
 
 /// One host read and list page, at most one first-line batch, one
-/// model-list read, one save and the requests the core's ledger allows can
-/// wait at once.
-const max_jobs = 5 + view.max_requests;
+/// model-list read, one save, one command and the requests the core's
+/// ledger allows can wait at once.
+const max_jobs = 6 + view.max_requests;
 
 /// How far the person has read each Session, as far as this overview
 /// knows, and how far of that the Host was sent. A position only rises, and
@@ -279,6 +293,15 @@ pub const Reads = struct {
 const background_wait_ms = 200;
 
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
+
+/// A command's output: one byte past what the core takes tells it was cut.
+const Output = struct {
+    bytes: [view.max_output_bytes + 1]u8 = undefined,
+    len: usize = 0,
+    /// Its stdout and stderr went to the page, so a failure is a failure
+    /// while it ran.
+    kept: bool = false,
+};
 
 /// Wakes the loop from a signal handler: SIGINT and SIGTERM stop it, and
 /// SIGWINCH redraws.
@@ -340,6 +363,10 @@ menu: model_picker.Menu = .{},
 reads: Reads = .{},
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
+/// Unlinked scratch a command's output goes to, made for the first command.
+command_page: ?std.Io.File = null,
+/// What the last command printed, as far as the core takes it.
+output: Output = .{},
 
 /// The screen the terminal shows, so a frame writes only what changed;
 /// null when the terminal's contents are unknown.
@@ -487,6 +514,7 @@ fn destroy(self: *Self) void {
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
     if (self.scratch) |file| file.close(self.init.io);
+    if (self.command_page) |file| file.close(self.init.io);
     self.closePipes();
     self.forget();
     self.frame.deinit(self.init.gpa);
@@ -582,6 +610,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .stop => |reference| self.queue(.{ .stop = reference }),
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
+        .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
         // A refused addition says so as a refused key does.
@@ -718,6 +747,10 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             self.menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body));
         },
         .save => |binding| try self.ops.save_default(self, binding),
+        .command => |*command| {
+            self.output = .{};
+            try self.ops.command(self, requests, if (command.session) |*session| session else "", command.line);
+        },
         .mark_read => |*mark| try self.sendMark(requests, mark, requests.markReadDeadline()),
     }
 }
@@ -805,10 +838,41 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .models = .{ .menu = menu } });
         },
         .save => |binding| return self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(outcome) } }),
+        .command => |command| {
+            const output = &self.output;
+            const ran: view.Ran = .{
+                .output = output.bytes[0..@min(output.len, view.max_output_bytes)],
+                .cut = output.len > view.max_output_bytes,
+                // As a conversation drops an inspection that could not
+                // start, the overview says only that it did not run.
+                .outcome = if (outcome) |_| .done else |_| if (output.kept) .failed else .not_run,
+                .default = if (outcome) |_| if (command.name == .setup) self.savedDefault() else null else |_| null,
+            };
+            const next = self.event(.{ .ran = ran });
+            // As in a conversation, a command that failed while it ran ends
+            // the overview, and its failure is the one reported, not one
+            // from taking the answer; the core keeps its output for the way
+            // out.
+            if (ran.outcome == .failed) try outcome;
+            return next;
+        },
         // A send the overview cancelled may not have gone out.
         .mark_read => |mark| if (!self.worker.cancellation.stopped.load(.acquire)) self.reads.sent(mark),
     }
     return null;
+}
+
+/// The default a fresh launch with this overview's selectors would take
+/// from the saved defaults now; null when they decide none, so the one in
+/// force stays. Readiness is the Host's to answer at the start, as for any
+/// caller that cannot ask, so every provider counts as ready here, and only
+/// a launch that named no provider and saved none needs the chooser.
+fn savedDefault(self: *const Self) ?view.Default {
+    const selectors = self.options.selectors;
+    if (!selectors.needsPreferences() or self.options.home.len == 0) return null;
+    const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = preferences.load(self.options.home) catch return null };
+    const binding = (snapshot.resolve(&.initFill(.configured)) catch return null) orelse return null;
+    return .of(binding.provider.slice(), binding.model.slice());
 }
 
 /// One captured `session start`: the composer's text and start settings
@@ -831,7 +895,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const effort = held.policy(held.at(start, "reasoning-effort"));
-    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or self.options.explicit or self.options.home.len == 0) null else if (start.binding().model) |model|
+    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or !self.options.selectors.needsPreferences() or self.options.home.len == 0) null else if (start.binding().model) |model|
         (try preferences.load(self.options.home)).startEffort(model)
     else
         null;
@@ -862,6 +926,28 @@ fn savedAs(outcome: anyerror!void) view.Saved {
         return if (said.saved) .unconfirmed else .{ .failed = said.reason };
     };
     return .done;
+}
+
+/// Runs a command line through the CLI's hook, as a conversation runs it,
+/// and keeps what it printed.
+fn runCommand(self: *Self, requests: client.Requests, session: []const u8, line: []u8) !void {
+    const page = self.command_page orelse page: {
+        const file = try self.hooks.scratch(self.init);
+        self.command_page = file;
+        break :page file;
+    };
+    const command: session_reads.CommandRun = .{ .command = self.hooks.command, .init = self.init, .requests = requests, .store = self.options.store, .session = session, .line = line };
+    const ended = command.into(page);
+    self.output.kept = ended.rendering;
+    // Failed restoration may leave fd 2 on the page, so, as a conversation
+    // does, keep nothing for the way out to write there.
+    if (!ended.rendering or !ended.stderr_restored) return ended.outcome;
+    // What it printed shows whether it ran to the end or not.
+    self.output.len = page.readPositionalAll(self.init.io, &self.output.bytes, 0) catch |err| {
+        try ended.outcome;
+        return err;
+    };
+    return ended.outcome;
 }
 
 /// Saves the pick as `rui defaults configure --provider --model` would.
@@ -1182,11 +1268,7 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
-    // A ledger entry prints well under 512 bytes.
-    var bytes: [view.max_requests * 512 + view.max_late_save_bytes]u8 = undefined;
-    var guidance = std.Io.Writer.fixed(&bytes);
-    view.writeDeparture(&self.state, &guidance) catch unreachable;
-    _ = stderr.write(guidance.buffered());
+    self.writeDeparture();
     var ending = try ended;
     switch (ending) {
         .overview => {
@@ -1205,6 +1287,16 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             return self.leave(left.*, restored);
         },
     }
+}
+
+/// Writes the core's departure to stderr in one write. Never inlined: its
+/// buffer stays off `finish`'s frame.
+noinline fn writeDeparture(self: *const Self) void {
+    // A ledger entry prints well under 512 bytes.
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var guidance = std.Io.Writer.fixed(&bytes);
+    view.writeDeparture(&self.state, &guidance) catch unreachable;
+    _ = stderr.write(guidance.buffered());
 }
 
 /// Lets the conversation the person left join its borrowers and write its
@@ -1461,6 +1553,8 @@ const fake_operations: Operations = .{
             Seen.now.saves += 1;
         }
     }.save,
+    // Through the hooks `Printing` gives.
+    .command = runCommand,
     .mark_read = struct {
         fn markRead(_: *Self, requests: client.Requests, session: []const u8, position: u64, _: i128) !void {
             if (Seen.now.mark_failure) |err| return err;
@@ -1714,6 +1808,9 @@ fn pin(home: []const u8, provider: []const u8, model: []const u8) !void {
     _ = try preferences.update(home, .{ .provider = .{ .set = provider }, .model = .{ .set = model } }, &readiness);
 }
 
+/// Selectors a launch that named the Store, provider and model gives.
+const explicit_selectors: new_session_selection.Intent = .{ .store = "/store", .provider = "codex", .model = "gpt-6-luna" };
+
 test "an overview left without a pick writes no default, pinned or not" {
     for ([_]bool{ false, true }) |pinned| {
         var tmp = std.testing.tmpDir(.{});
@@ -1848,7 +1945,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
     _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" }, .reasoning_effort = .{ .set = .high } }, &.initFill(.configured));
     inline for (.{ false, true }) |explicit| {
         var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = explicit }, fake_operations, &cancellation);
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = if (explicit) explicit_selectors else .{} }, fake_operations, &cancellation);
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
@@ -1861,7 +1958,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
     try bad.writeStreamingAll(std.testing.io, "version=1\n");
     bad.close(std.testing.io);
     var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = true }, fake_operations, &cancellation);
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = explicit_selectors }, fake_operations, &cancellation);
     defer rig.close();
     const starts = Seen.now.starts;
     try std.testing.expect(try rig.press("hello\n") == null);
@@ -3330,4 +3427,172 @@ test "the terminal's width report sets how the core measures text" {
     try std.testing.expect(try rig.press("\x1b[?2027;3$y") == null);
     try std.testing.expectEqual(vaxis.gwidth.Method.unicode, rig.overview.caps.width);
     try std.testing.expectEqual(vaxis.gwidth.Method.unicode, rig.screen.vx.caps.unicode);
+}
+
+/// The CLI's command hook as a test gives it: it records what it ran and
+/// prints what the test says to stdout and stderr, as `sessionCommand` does.
+const Printing = struct {
+    var stdout: []const u8 = "";
+    var stderr_text: []const u8 = "";
+    var failure: ?anyerror = null;
+    var line: protocol.Bounded(64) = .{};
+    var session: protocol.Bounded(64) = .{};
+    var store: protocol.Bounded(64) = .{};
+    var runs: usize = 0;
+    var dir: std.Io.Dir = undefined;
+
+    /// Lends `rig` these hooks, with pages in `pages`.
+    fn use(rig: *Rig, pages: std.Io.Dir) void {
+        stdout = "";
+        stderr_text = "";
+        failure = null;
+        runs = 0;
+        dir = pages;
+        rig.overview.hooks.command = command;
+        rig.overview.hooks.scratch = scratch;
+    }
+
+    fn command(_: std.process.Init, _: client.Requests, to: []const u8, reference: []const u8, text: []u8) anyerror!void {
+        runs += 1;
+        line = Seen.bounded(text);
+        session = Seen.bounded(reference);
+        store = Seen.bounded(to);
+        for ([_]c_int{ 1, 2 }, [_][]const u8{ stdout, stderr_text }) |fd, bytes| {
+            if (std.c.write(fd, bytes.ptr, bytes.len) != @as(isize, @intCast(bytes.len))) return error.TestUnexpectedResult;
+        }
+        if (failure) |err| return err;
+    }
+
+    fn scratch(_: std.process.Init) !std.Io.File {
+        return dir.createFile(std.testing.io, "page", .{ .read = true });
+    }
+};
+
+/// An overview whose first listing selected k7m2qx, running commands
+/// through `Printing`.
+fn commandRig(pages: std.Io.Dir, cancellation: *client.Cancellation) !*Rig {
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, cancellation);
+    errdefer rig.close();
+    Printing.use(rig, pages);
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    return rig;
+}
+
+test "/rename and /setup run through the conversation's command hook on the worker, and what they print reaches the overview" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cancellation: client.Cancellation = .{};
+    const rig = try commandRig(tmp.dir, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    const lists = Seen.now.lists;
+    Printing.stdout = "Rui: Configured.\n";
+    try std.testing.expect(try rig.press("/rename lane four\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("/rename lane four", Printing.line.slice());
+    try std.testing.expectEqualStrings("k7m2qx", Printing.session.slice());
+    try std.testing.expectEqualStrings("/store", Printing.store.slice());
+    try std.testing.expectEqualStrings("Configured.", overview.state.notice.?.text());
+    // The next listing, which shows the new label, goes at once.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(lists + 1, Seen.now.lists);
+
+    // /setup names no Session; both its streams reach the overview, in
+    // the order it wrote them.
+    Printing.stdout = "Defaults (read only):\nNotifications: on\n";
+    Printing.stderr_text = "rui: Host unavailable\n";
+    try std.testing.expect(try rig.press("/setup\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("/setup", Printing.line.slice());
+    try std.testing.expectEqualStrings("", Printing.session.slice());
+    try std.testing.expectEqualStrings("Defaults (read only):\nNotifications: on\nrui: Host unavailable", overview.state.panel.?.output.text);
+    try std.testing.expectEqual(@as(usize, 2), Printing.runs);
+}
+
+test "a /setup that saves another model starts the next Session on it, unless the launch named it or /configure holds one" {
+    const Case = struct { selectors: new_session_selection.Intent = .{}, setup: []const u8 = "/setup --model gpt-5.5\n", edit: preferences.Edit, configure: ?[]const u8 = null, model: []const u8 };
+    for ([_]Case{
+        .{ .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-5.5" },
+        .{ .setup = "/setup --clear-model\n", .edit = .{ .model = .clear }, .model = product_defaults.recommended_model },
+        .{ .selectors = .{ .model = "gpt-6-luna" }, .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-6-luna" },
+        .{ .selectors = explicit_selectors, .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-6-luna" },
+        .{ .edit = .{ .model = .{ .set = "gpt-5.5" } }, .configure = "/configure --model gpt-6-sol\n", .model = "gpt-6-sol" },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        try pin(home, "codex", "gpt-6-luna");
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = case.selectors }, fake_operations, &cancellation);
+        defer rig.close();
+        Printing.use(rig, tmp.dir);
+        // The CLI's /setup saves as `rui defaults configure` does.
+        const Setup = struct {
+            var at: []const u8 = "";
+            var edit: preferences.Edit = .{};
+            fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+                _ = try preferences.update(at, edit, &.initFill(.configured));
+                const said = "Rui: Saved.\n";
+                if (std.c.write(1, said.ptr, said.len) != said.len) return error.TestUnexpectedResult;
+            }
+        };
+        Setup.at = home;
+        Setup.edit = case.edit;
+        rig.overview.hooks.command = Setup.command;
+        if (case.configure) |line| try std.testing.expect(try rig.press(line) == null);
+        try std.testing.expect(try rig.press(case.setup) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(try rig.press("hello\n") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("codex", Seen.now.start.provider.?.slice());
+        try std.testing.expectEqualStrings(case.model, Seen.now.start.model.?.slice());
+    }
+}
+
+test "a command that cannot start says why, and one that fails while it runs ends the overview, whose way out prints its output" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cancellation: client.Cancellation = .{};
+    const rig = try commandRig(tmp.dir, &cancellation);
+    defer rig.close();
+    rig.overview.hooks.scratch = struct {
+        fn scratch(_: std.process.Init) !std.Io.File {
+            return error.FileNotFound;
+        }
+    }.scratch;
+    try std.testing.expect(try rig.press("/setup\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Printing.runs);
+    try std.testing.expectEqualStrings("! /setup unavailable.", rig.overview.state.notice.?.text());
+
+    rig.overview.hooks.scratch = Printing.scratch;
+    const said = "rui: configure: CanonicalStoreFailure; check saved requests before retrying\n";
+    Printing.stderr_text = said;
+    Printing.failure = error.CanonicalStoreFailure;
+    try std.testing.expect(try rig.press("/rename x\n") == null);
+    try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
+    var buffer: [1024]u8 = undefined;
+    const written = try finishedGuidance(rig, &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, written, "rui: /rename output:\n" ++ said) != null);
+}
+
+test "a command that fails while it runs is the failure reported, even when taking its answer runs out of memory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cancellation: client.Cancellation = .{};
+    const rig = try commandRig(tmp.dir, &cancellation);
+    defer rig.close();
+    Printing.stderr_text = "rui: configure: CanonicalStoreFailure\n";
+    Printing.failure = error.CanonicalStoreFailure;
+    try std.testing.expect(try rig.press("/rename x\n") == null);
+    // The core keeps the output for the way out with memory it cannot get.
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    const gpa = rig.overview.state.gpa;
+    rig.overview.state.gpa = failing.allocator();
+    defer rig.overview.state.gpa = gpa;
+    try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
+    try std.testing.expect(failing.has_induced_failure);
 }

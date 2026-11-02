@@ -4,6 +4,7 @@ const TerminalText = @import("TerminalText.zig");
 const stderr = @import("stderr.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Overview = @import("Overview.zig");
+const session_reads = @import("session_reads.zig");
 const overview_view = @import("overview_view.zig");
 const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
@@ -200,7 +201,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
-        .defaults_inspect, .defaults_configure => try setup(init, parsed, false),
+        .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
         .auth_login => try login(init, &.{parsed.positional.?}, false, codex_auth.login),
     }
 }
@@ -249,7 +250,11 @@ fn createConfigDirectory(io: std.Io, home: []const u8) !void {
     opened.close(io);
 }
 
-fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bool) !void {
+/// Who reads what `setup` prints: a command line, which gets JSON, or a
+/// screen's /setup, a conversation's naming the Session it leaves alone.
+const SetupReader = enum { command_line, conversation, overview };
+
+fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupReader) !void {
     if (parsed.get("model")) |model| try admitModel(model);
     const home = init.environ_map.get("HOME") orelse {
         stderr.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
@@ -275,7 +280,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
     // Preferences live in HOME, so a saved Store redirects every Workspace.
-    if (!interactive and edit.store != .keep) notice: {
+    if (reader == .command_line and edit.store != .keep) notice: {
         var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
         notice.writeAll("rui: saved ") catch break :notice;
@@ -283,7 +288,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
     }
-    if (!interactive) return writeDefaultsJson(init.io, .{
+    if (reader == .command_line) return writeDefaultsJson(init.io, .{
         .changed = changed,
         .store = prospective_store,
         .saved_store = values.store.len != 0,
@@ -295,7 +300,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         .readiness = &readiness,
     });
     // Preferences are local hints, not Session settings or Host facts.
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (changed) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Defaults (read only):\n");
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (!changed) "Defaults (read only):\n" else if (reader == .conversation) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Saved defaults for future Sessions.\n");
     try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
     try writeSafeText(init.io, prospective_store orelse "unavailable");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
@@ -1189,7 +1194,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         .provider = entry.binding.provider.slice(),
         .model = entry.binding.model.slice(),
         .login_at = entry.login_at,
-        .explicit = !(new_session_selection.Intent{ .store = options.store, .provider = options.provider, .model = options.model }).needsPreferences(),
+        .selectors = .{ .store = options.store, .provider = options.provider, .model = options.model },
     });
 }
 
@@ -1985,13 +1990,17 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
+            // The overview runs /setup for no Session, so no Session is
+            // there to leave alone.
+            const reader: SetupReader = if (reference.len == 0) .overview else .conversation;
+            const unchanged = if (reader == .conversation) "; active Session unchanged" else "";
             const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
-                stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+                stderr.diagnostic("rui: /setup: {s}{s}\n", .{ @errorName(err), unchanged });
                 return;
             };
             if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-            setup(init, &parsed, true) catch |err| {
-                if (err != error.InvalidModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            setup(init, &parsed, reader) catch |err| {
+                if (err != error.InvalidModel) stderr.diagnostic("rui: /setup: {s}{s}\n", .{ @errorName(err), unchanged });
             };
         },
         .result => {
@@ -2078,6 +2087,33 @@ test "/effort and /rename give what their /configure spelling gives" {
         var arguments: [live_capacity][]const u8 = undefined;
         try std.testing.expectError(error.InvalidInteractiveArguments, liveArguments(command.name, line[text.len - command.argument.len .. text.len], &arguments));
         try std.testing.expect(std.mem.indexOf(u8, liveUsage(command.name), text[0..7]) != null);
+    }
+}
+
+test "a conversation's /setup says it left the active Session alone, and the overview's, which has none, does not" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    const page = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer page.close(io);
+    var token: client.Cancellation = .{};
+    for ([_][]const u8{ "k7m2qx", "" }, [_][]const u8{ "Saved defaults for future Sessions. Active Session unchanged.\n", "Saved defaults for future Sessions.\n" }) |session, said| {
+        var line = "/setup --notifications off".*;
+        const command: session_reads.CommandRun = .{ .command = sessionCommand, .init = init, .requests = .{ .io = io, .cancellation = &token }, .store = home, .session = session, .line = &line };
+        try command.into(page).outcome;
+        var bytes: [4096]u8 = undefined;
+        const printed = bytes[0..try page.readPositionalAll(io, &bytes, 0)];
+        errdefer std.debug.print("session={s} printed={s}\n", .{ session, printed });
+        try std.testing.expect(std.mem.startsWith(u8, printed, said));
     }
 }
 

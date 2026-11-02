@@ -191,8 +191,6 @@ line: reads.Line = .{},
 hint: reads.Hint = .unread,
 shown: session_line.Shown = .{},
 
-/// A short command result shows as a notice up to this size.
-const short_result_bytes = 256;
 const rejection_suffix = " · /discard clears it";
 /// This process's environment cannot change, so the original goes from a
 /// shell with a smaller one.
@@ -203,7 +201,7 @@ const too_large_advice = " Unset or shorten them in another shell, then run rui 
 const notice_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
     "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
-    short_result_bytes + 2 * "! ".len,
+    slash_commands_shared.result_notice_bytes,
     protocol.max_model_bytes + " · ".len + unknown_sign_in.len + model_tail.len,
 );
 
@@ -578,13 +576,7 @@ fn modelFacts(self: *Self) []const u8 {
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
-    // Name the command only when it is short printable ASCII.
-    const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
-    var shown = name.len <= 32;
-    for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
-    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    writer.print("! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
-    self.notice = writer.buffered();
+    self.notice = slash_commands_shared.unknown(self.notice_buffer[0..slash_commands_shared.unknown_bytes], text);
 }
 
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
@@ -2050,26 +2042,18 @@ test "the queued row shows what waits until it is taken, whatever the work is do
 fn showInspection(self: *Self) !void {
     self.inspection.status_page = false;
     const size = (try self.files.inspection.stat(self.init.io)).size;
-    if (size == 0) {
-        self.notice = "Command finished with no output.";
-        return;
-    }
-    // A short command result is a notice, not a page. Inside the Session the
-    // speaker is known: CLI "Rui: " text loses its prefix and "rui: "
-    // diagnostics become failure notices.
-    if (self.reading.phase == .inspection and self.inspection.kind == .command and size <= short_result_bytes) {
-        var bytes: [short_result_bytes]u8 = undefined;
-        const text = std.mem.trimEnd(u8, bytes[0..try self.files.inspection.readPositionalAll(self.init.io, bytes[0..@intCast(size)], 0)], "\n");
-        if (std.mem.count(u8, text, "\n") < 2) {
-            var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            var lines = std.mem.splitScalar(u8, text, '\n');
-            while (lines.next()) |line| {
-                if (writer.buffered().len != 0) try writer.writeAll("\n");
-                if (std.mem.startsWith(u8, line, "Rui: ")) try writer.writeAll(line[5..]) else if (std.mem.startsWith(u8, line, "rui: ")) try writer.print("! {s}", .{line[5..]}) else try writer.writeAll(line);
-            }
-            self.notice = writer.buffered();
+    // A short command result is a notice, not a page, worded as the
+    // overview words it.
+    if (self.reading.phase == .inspection and self.inspection.kind == .command) {
+        var bytes: [slash_commands_shared.short_result_bytes + 1]u8 = undefined;
+        const read = try self.files.inspection.readPositionalAll(self.init.io, bytes[0..@intCast(@min(size, bytes.len))], 0);
+        if (slash_commands_shared.resultNotice(self.notice_buffer[0..slash_commands_shared.result_notice_bytes], bytes[0..read])) |said| {
+            self.notice = said;
             return;
         }
+    } else if (size == 0) {
+        self.notice = slash_commands_shared.no_output;
+        return;
     }
     try self.terminal.screen.showFile(self.init.io, self.files.inspection, false);
     // The page heading already says how to return.
