@@ -20,7 +20,6 @@ const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
-const attention = @import("attention.zig");
 const Self = @This();
 
 const reads = @import("session_reads.zig");
@@ -219,6 +218,11 @@ pub const Lender = struct {
     service: *const fn (context: *anyopaque) anyerror!bool,
     /// What the overview says under the input, until its next step.
     line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
+    /// Hands the overview each read of the Session's work, which it records
+    /// against what its listing read of the Session and notifies of as
+    /// news, named `name`, unless it is the read the conversation opens on.
+    /// Its failure is the overview's and ends the conversation.
+    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, name: []const u8, opening: bool) anyerror!void,
 
     pub const Said = struct {
         /// The stop prompt, or the overview's notice; null for neither.
@@ -1652,7 +1656,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         return;
     }
     if (end != .complete) return;
-    var news: ?attention.Kind = null;
+    var observed: ?struct { work: protocol.session_work.Work, opening: bool } = null;
     if (self.reading.output_started)
         self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
     if (self.reading.phase == .history or self.reading.phase == .message) {
@@ -1665,8 +1669,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
-        // The state the conversation opened on is not news.
-        if (!self.reading.opening) news = attention.news(self.live.work.core(), result.work.work.core());
+        observed = .{ .work = result.work.work.core(), .opening = self.reading.opening };
         self.live.work = result.work.work;
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
@@ -1689,8 +1692,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     }
     // A /status asked for during this read is the next read's, at once.
     self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
-    // The next frame writes it first, once the read is applied.
-    if (news) |kind| self.terminal.notify(if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, kind, 0);
+    // News goes out first in the next frame, once the read is applied.
+    if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
     self.dirty = true;
 }
 
@@ -2833,7 +2836,9 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
     fn line(_: *anyopaque, _: protocol.session_work.Kind) Lender.Said {
         return .{};
     }
-}.line };
+}.line, .observed = struct {
+    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: []const u8, _: bool) !void {}
+}.observed };
 
 /// An overview that lent the terminal, reduced to one Session's stop
 /// prompt, stop and notice.
@@ -2867,7 +2872,7 @@ const FakeOverview = struct {
     }
 
     fn lender(fake: *FakeOverview) Lender {
-        return .{ .context = fake, .step = FakeOverview.step, .service = FakeOverview.service, .line = FakeOverview.line };
+        return .{ .context = fake, .step = FakeOverview.step, .service = FakeOverview.service, .line = FakeOverview.line, .observed = quiet_overview.observed };
     }
 };
 

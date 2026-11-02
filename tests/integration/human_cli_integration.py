@@ -1479,7 +1479,7 @@ def notification_cases():
         shown_choice = read_terminal(master, CHOICE)
         assert "? Do nothing" in shown_choice, shown_choice
         # Another Session's finish, while the conversation is open and away,
-        # notifies exactly once; the open Session's news stays its own.
+        # notifies exactly once.
         admit(home, "session", "send", "--to", lanes["focused lane"], input="Other lane finish", cwd=workspace)
         raw = raw_output(master, b"\x1b]9;Rui: focused lane finished\x07", timeout=20)
         raw += quiet_output(master, 3)

@@ -1,7 +1,7 @@
 //! What a Session's work asks of its person, and the desktop notification
 //! that tells them while the terminal is out of focus. The overview and the
-//! conversation decide with `news` and write with `write`, so both notify
-//! alike.
+//! conversation decide with `observe`, against one record per Session, and
+//! write with `write`, so both notify alike and never twice.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
@@ -11,41 +11,39 @@ const TerminalText = @import("TerminalText.zig");
 /// Most urgent first: a listing that brings several names the first.
 pub const Kind = enum { approval, failed, finished };
 
-/// A state that wants the person, and the Turn whose state it is: a later
-/// Turn's finish is news again, even within the same second, and a reread of
-/// the same one is not.
-pub const Attention = struct {
-    kind: Kind,
-    turn: ?u64,
+/// A state that wants the person, by what it is about: a finish or failure
+/// by its Turn, so a later Turn's is news again even within the same second;
+/// a wait by its earliest Action awaiting a decision, so one Action's wait is
+/// one wait as its Bash ends and the approval state begins.
+pub const Attention = union(Kind) {
+    approval: ?u64,
+    failed: ?u64,
+    finished: ?u64,
 
     /// An Action waits for a decision in the approval state, and beside
     /// running Bash while `approvals` counts one. A stop is the person's own
     /// doing.
     pub fn of(work: session_work.Work) ?Attention {
-        const kind: Kind = switch (work.state) {
-            .approval => .approval,
-            .bash => |bash| if (bash.approvals != 0) .approval else return null,
-            .failed => .failed,
-            .finished => .finished,
-            else => return null,
+        return switch (work.state) {
+            .approval => .{ .approval = work.first_action },
+            .bash => |bash| if (bash.approvals != 0) .{ .approval = work.first_action } else null,
+            .failed => .{ .failed = work.turn },
+            .finished => .{ .finished = work.turn },
+            else => null,
         };
-        return .{ .kind = kind, .turn = work.turn };
     }
 };
 
-/// What to notify when a Session's work moved from `before`, null when the
-/// screen had not seen it, to `after`: each state that wants the person is
-/// news once, however many reads show it. A wait for the same Action is one
-/// wait while it lasts, as its Bash ends and the approval state begins; the
-/// next Action to wait is news again.
-pub fn news(before: ?session_work.Work, after: session_work.Work) ?Kind {
-    const now = Attention.of(after) orelse return null;
-    if (before) |read| if (Attention.of(read)) |seen| {
-        if (seen.kind == .approval and now.kind == .approval) {
-            if (read.first_action == after.first_action) return null;
-        } else if (std.meta.eql(seen, now)) return null;
-    };
-    return now.kind;
+/// Records a read of a Session's work in `seen`, the last state that wanted
+/// the person any read showed, and returns the news: each state that wants
+/// the person is news once, however many reads, by however many screens,
+/// show it. Work under way, a stop, or a stale read between leaves `seen`,
+/// so a finish read again after them is not news again.
+pub fn observe(seen: *?Attention, work: session_work.Work) ?Kind {
+    const now = Attention.of(work) orelse return null;
+    if (seen.*) |held| if (std.meta.eql(held, now)) return null;
+    seen.* = now;
+    return now;
 }
 
 /// How a terminal shows a notification. OSC 9 (iTerm2, kitty, WezTerm,
@@ -114,6 +112,14 @@ pub fn write(out: *std.Io.Writer, how: Signal, name: []const u8, kind: Kind, mor
 
 const Work = session_work.Work;
 
+/// The news of `after` once a screen read `before`, null when no read had
+/// shown the Session.
+fn news(before: ?Work, after: Work) ?Kind {
+    var seen: ?Attention = null;
+    if (before) |read| _ = observe(&seen, read);
+    return observe(&seen, after);
+}
+
 test "each finish, failure and approval is news once, and stopping or working is none" {
     const finished: Work = .{ .state = .{ .finished = .{ .since = 10 } }, .turn = 1 };
     try std.testing.expectEqual(Kind.finished, news(.{ .state = .{ .working = .{ .since = 5 } } }, finished).?);
@@ -138,6 +144,12 @@ test "each finish, failure and approval is news once, and stopping or working is
     // when no read saw the Session between them.
     try std.testing.expectEqual(Kind.approval, news(.{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 7 }, .{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 8 }).?);
     try std.testing.expectEqual(Kind.approval, news(beside, .{ .state = .{ .approval = .{ .since = 9 } }, .first_action = 8 }).?);
+    // A stale read between two reads of one finish, as a slower screen's,
+    // leaves it seen.
+    var seen: ?Attention = null;
+    try std.testing.expectEqual(Kind.finished, observe(&seen, finished).?);
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, .{ .state = .{ .working = .{ .since = 5 } }, .turn = 1 }));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, finished));
 }
 
 test "of every work state, only a finish, a failure and an Action awaiting approval want the person" {

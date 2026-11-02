@@ -760,11 +760,6 @@ fn pump(raw: *anyopaque) !void {
 /// leaves it.
 fn converse(self: *Self, session: view.Reference) ?Left {
     var left: Left = .{ .session = session, .frontend = null, .files = null, .ended = error.OutOfMemory };
-    // The conversation notifies of its own Session; the listing, of others.
-    _ = self.event(.{ .conversing = session }) catch |err| {
-        left.ended = err;
-        return left;
-    };
     const io = self.init.io;
     const screen = self.terminal.screen;
     if (!self.screen_fresh) {
@@ -792,12 +787,8 @@ fn converse(self: *Self, session: view.Reference) ?Left {
         left.ended = err;
         return left;
     };
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed };
     var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, lender);
-    if (self.event(.{ .conversing = null })) |_| {} else |err| {
-        self.lent_failed = true;
-        if (ended) |_| ended = err else |_| {}
-    }
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
@@ -818,6 +809,15 @@ fn conversed(raw: *anyopaque, kind: view.Kind, ctrl_x: bool) !void {
     const next = try self.event(.{ .conversed = .{ .reference = self.opened, .work = kind, .stop = ctrl_x } });
     std.debug.assert(next == null);
     try self.dispatch(.lent);
+}
+
+/// A read the opened Session's conversation applied, recorded as the
+/// listing's are, so its news is notified once whichever reads it first.
+fn observed(raw: *anyopaque, read: protocol.session_work.Work, name: []const u8, opening: bool) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    errdefer self.lent_failed = true;
+    const next = try self.event(.{ .observed = .{ .reference = self.opened, .work = read, .name = name, .opening = opening } });
+    std.debug.assert(next == null);
 }
 
 /// While a conversation holds the terminal the overview goes on without
@@ -1588,6 +1588,46 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     var buffer: [1024]u8 = undefined;
     const left: Left = .{ .session = "k7m2qx".*, .frontend = null, .files = null, .ended = error.CanonicalStoreFailure };
     try std.testing.expectEqualStrings("", try finishedWith(failing, .{ .conversation = left }, error.TerminalRestoreFailed, error.CanonicalStoreFailure, &buffer));
+}
+
+test "a finish the conversation notified is no news to the listing that reads it after Esc, out of focus" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    const Listing = struct {
+        var finished = false;
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, page);
+            if (finished) page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 };
+            return null;
+        }
+    };
+    Listing.finished = false;
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    rig.terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    try std.testing.expect(try rig.press("\x1b[O") == null);
+    // The overview opens on k7m2qx working.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("", rig.terminal.takeNotification());
+    // Its conversation reads the finish before any listing does.
+    overview.opened = "k7m2qx".*;
+    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, "Fix the flaky test", false);
+    try std.testing.expectEqualStrings("\x1b]9;Rui: Fix the flaky test finished\x07", rig.terminal.takeNotification());
+    // Esc, back in focus, then away again before the listing catches up.
+    try std.testing.expect(try rig.press("\x1b[I") == null);
+    try std.testing.expect(try rig.press("\x1b[O") == null);
+    Listing.finished = true;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(overview.state.find("k7m2qx".*).?.state == .finished);
+    try std.testing.expectEqualStrings("", rig.terminal.takeNotification());
 }
 
 test "a stop answered under a conversation says so there, and goes before a listing" {

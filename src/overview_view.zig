@@ -314,11 +314,15 @@ pub const Event = union(enum) {
     host: ?Host,
     /// The person pressed a key, at this Unix millisecond.
     looked: u64,
-    /// A conversation opened on this Session, or null as it closes. The
-    /// conversation notifies of its own Session's news.
-    conversing: ?Reference,
     conversed: Conversed,
+    /// A read the open conversation applied.
+    observed: Observed,
 };
+
+/// A read the open conversation of `reference` applied, which showed its
+/// work as `work`. Its news is named `name`, as the conversation names the
+/// Session; the read the conversation opens on is not news.
+pub const Observed = struct { reference: Reference, work: session_work.Work, name: []const u8, opening: bool };
 
 /// An input in the open conversation of `reference`, whose work it shows as
 /// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
@@ -350,9 +354,9 @@ pub const Effect = union(enum) {
     exit,
 };
 
-/// A listing's news: the most urgent Session that newly wants the person, by
-/// the name its row shows, which borrows the state until the next `step`,
-/// and how many others brought news with it.
+/// News: the most urgent Session that newly wants the person, by the name
+/// its row or the conversation shows, which borrows the state or the event
+/// until the next `step`, and how many others brought news with it.
 pub const Alert = struct { name: []const u8, kind: attention.Kind, more: usize };
 
 /// Each event brings at most two effects today; the shell runs them in order.
@@ -535,7 +539,7 @@ pub const Row = struct {
     from_person_at: ?u64,
     line: Line = .unread,
 
-    /// What the listing said of the row's work, as `attention.news` reads it.
+    /// What the listing said of the row's work, as `attention.observe` reads it.
     fn work(self: *const Row) session_work.Work {
         return .{ .state = self.state, .turn = self.turn, .first_action = self.first_action };
     }
@@ -601,8 +605,10 @@ pub const State = struct {
 
     /// The token of the last completed listing.
     token: ?Token = null,
-    /// The Session an open conversation shows, whose news is its own.
-    conversing: ?Reference = null,
+    /// What wanted the person when a read, by the listing or the open
+    /// conversation, last showed it, by Session reference key: one record
+    /// both read against, so neither gives news the other gave.
+    seen: Vec(Seen) = .{},
     /// A list request is in flight.
     listing: bool = false,
     /// Rows the listing in progress has read.
@@ -629,7 +635,7 @@ pub const State = struct {
 
     pub fn deinit(self: *State) void {
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
-        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys }) |vec| vec.deinit(self.gpa);
+        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.seen }) |vec| vec.deinit(self.gpa);
     }
 
     /// The row of `reference`, if listed.
@@ -715,6 +721,24 @@ pub const State = struct {
         held.text.set(text) catch unreachable;
     }
 
+    /// Records a read of `ref`'s work in `seen` and returns its news.
+    fn observe(self: *State, ref: Reference, work: session_work.Work) error{OutOfMemory}!?attention.Kind {
+        const key = referenceKey(ref);
+        const seen = self.seen.items;
+        var low: usize = 0;
+        var high = seen.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (seen[middle].key < key) low = middle + 1 else high = middle;
+        }
+        if (low < seen.len and seen[low].key == key) return attention.observe(&seen[low].attention, work);
+        var first: ?attention.Attention = null;
+        const kind = attention.observe(&first, work) orelse return null;
+        try self.seen.ensure(self.gpa, seen.len + 1);
+        self.seen.insertAssumeCapacity(low, .{ .key = key, .attention = first });
+        return kind;
+    }
+
     /// Interns a Workspace: Sessions share few, and a row keeps an index.
     fn intern(self: *State, bytes: []const u8) error{OutOfMemory}!u32 {
         const key = workspaceKey(bytes);
@@ -773,6 +797,7 @@ pub const Summary = struct {
 
 const Run = struct { start: usize = 0, len: usize = 0 };
 const Keyed = struct { key: u64, index: u32 };
+const Seen = struct { key: u64, attention: ?attention.Attention };
 const SortKey = struct { key: u128, index: u32 };
 
 /// A growable array of the state's allocator. Cores name no `std` list.
@@ -904,7 +929,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
         },
         .leave => state.left = true,
-        .conversing => |reference| state.conversing = reference,
+        .observed => |read| if (try state.observe(read.reference, read.work)) |kind| if (!read.opening) effects.add(.{ .notify = .{ .name = read.name, .kind = kind, .more = 0 } }),
         .open => |ref| {
             state.selected = ref;
             effects.add(.{ .open = ref });
@@ -989,8 +1014,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         });
     }
     const answer = page.answer orelse return;
-    // The first listing is what the overview opened on, not news.
-    const alert = if (state.token != null) newsworthy(state) else null;
+    const alert = try newsworthy(state);
     try commit(state, answer);
     if (alert) |found| {
         const row = state.find(found.reference).?;
@@ -1002,15 +1026,15 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
 
 const Newsworthy = struct { reference: Reference, kind: attention.Kind, more: usize };
 
-/// Each Session the pending listing shows newly wanting the person, against
-/// the row the overview has for it, if any; the most urgent first, the
-/// first listed among equals. An open conversation's Session is its own.
-fn newsworthy(state: *const State) ?Newsworthy {
+/// Records each Session the pending listing shows and returns those newly
+/// wanting the person; the most urgent first, the first listed among equals.
+/// The first listing is what the overview opened on, not news.
+fn newsworthy(state: *State) error{OutOfMemory}!?Newsworthy {
+    const opening = state.token == null;
     var found: ?Newsworthy = null;
     for (state.pending.items) |*incoming| {
-        if (state.conversing) |open| if (std.mem.eql(u8, &open, &incoming.reference)) continue;
-        const before = if (lookup(state.by_reference.items, incoming.reference)) |at| state.rows.items[at].work() else null;
-        const kind = attention.news(before, incoming.work()) orelse continue;
+        const kind = try state.observe(incoming.reference, incoming.work()) orelse continue;
+        if (opening) continue;
         if (found) |*held| {
             held.more += 1;
             if (@backingInt(kind) < @backingInt(held.kind)) {
@@ -3538,8 +3562,11 @@ test "a first line arriving titles its unlabelled row" {
     // full, name its unchanged first Message.
     const f6g7h8 = session("f6g7h8", .{ .idle = ago(0) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".* } });
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(3), &.{f6g7h8}));
-    // The full listing finds h8q2mz finished again after the working above.
-    try expectEffects(&.{.{ .notify = .{ .name = "summarize yesterday's CI failures", .kind = .finished, .more = 0 } }}, try refresh(&state, .full, testToken(4), &mixed));
+    // The full listing finds h8q2mz's next Turn finished after the working
+    // above.
+    var next_turn = mixed;
+    next_turn[1].turn = 2;
+    try expectEffects(&.{.{ .notify = .{ .name = "summarize yesterday's CI failures", .kind = .finished, .more = 0 } }}, try refresh(&state, .full, testToken(4), &next_turn));
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     // Results nobody asked for are ignored: a second answer for a read line,
@@ -3662,20 +3689,36 @@ test "a listing notifies once of each Session that newly finished, failed or nee
     try expectEffects(&.{.{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 0 } }}, try refresh(&state, .changed, testToken(9), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 2 })}));
 }
 
-test "under an open conversation a listing notifies of other Sessions only, and its own news never comes twice" {
+test "the listing and the open conversation read one record, so each news comes once, whichever reads it first" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{}, try step(&state, .{ .conversing = "k7m2qx".* }));
-    try expectEffects(&.{.{ .notify = .{ .name = "Profile the curl send queue", .kind = .finished, .more = 0 } }}, try refresh(&state, .changed, testToken(2), &.{
-        session("k7m2qx", .{ .finished = ago(0) }, .{ .label = "Fix the flaky resize test", .yours = true }),
+    const fixing = session("k7m2qx", .{ .finished = ago(0) }, .{ .label = "Fix the flaky resize test", .yours = true, .turn = 1 });
+    const read: Observed = .{ .reference = "k7m2qx".*, .work = .{ .state = .{ .finished = ago(0) }, .turn = 1 }, .name = "Fix the flaky resize test", .opening = false };
+    const finished: Alert = .{ .name = "Fix the flaky resize test", .kind = .finished, .more = 0 };
+    // The conversation reads the finish first and notifies. Back on the
+    // overview before a listing caught up, the listing that does is no news.
+    try expectEffects(&.{.{ .notify = finished }}, try step(&state, .{ .observed = read }));
+    try expectEffects(&.{}, try step(&state, .{ .observed = read }));
+    try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{fixing}));
+    // Under the conversation the listing reads the next Turn's finish first,
+    // with another Session's; the conversation's read of it is no news.
+    var next_turn = fixing;
+    next_turn.turn = 2;
+    try expectEffects(&.{.{ .notify = .{ .name = "Fix the flaky resize test", .kind = .finished, .more = 1 } }}, try refresh(&state, .changed, testToken(3), &.{
+        next_turn,
         session("b2c3d4", .{ .finished = ago(0) }, .{ .label = "Profile the curl send queue" }),
     }));
-    // Back on the overview, the catch-up listing finds nothing new.
-    try expectEffects(&.{}, try step(&state, .{ .conversing = null }));
-    try expectEffects(&.{}, try refresh(&state, .changed, testToken(3), &.{
-        session("k7m2qx", .{ .finished = ago(0) }, .{ .label = "Fix the flaky resize test", .yours = true }),
-        session("b2c3d4", .{ .finished = ago(0) }, .{ .label = "Profile the curl send queue" }),
-    }));
+    var read_next = read;
+    read_next.work.turn = 2;
+    try expectEffects(&.{}, try step(&state, .{ .observed = read_next }));
+    // A Session no listing has shown yet: the read its conversation opens on
+    // is no news, nor is the listing that first shows it; its finish, once
+    // the conversation notified it, is no news to the listing either.
+    const started = session("n3w5es", .{ .approval = ago(0) }, .{ .label = "Start the notes", .first = null, .first_action = 3 });
+    try expectEffects(&.{}, try step(&state, .{ .observed = .{ .reference = "n3w5es".*, .work = .{ .state = .{ .approval = ago(0) }, .first_action = 3 }, .name = "Start the notes", .opening = true } }));
+    try expectEffects(&.{}, try refresh(&state, .changed, testToken(4), &.{started}));
+    try expectEffects(&.{.{ .notify = .{ .name = "Start the notes", .kind = .finished, .more = 0 } }}, try step(&state, .{ .observed = .{ .reference = "n3w5es".*, .work = .{ .state = .{ .finished = ago(0) }, .turn = 1 }, .name = "Start the notes", .opening = false } }));
+    try expectEffects(&.{}, try refresh(&state, .changed, testToken(5), &.{session("n3w5es", .{ .finished = ago(0) }, .{ .label = "Start the notes", .first = null, .turn = 1 })}));
 }
 
 test "moving into a folded group's hidden rows opens it" {
