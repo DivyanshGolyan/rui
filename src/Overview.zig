@@ -898,7 +898,15 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     return outcome catch |err| {
         if (self.lent_failed) return err;
         if (!client.hostUnreachable(err) or !self.ops.stopped(self)) return self.failed(err, left.session);
-        stderr.diagnostic("rui: The Host stopped. Run rui host start, then resume this Session.\n", .{});
+        // Name this Store: a bare host start may pick another one.
+        var bytes: [4 * protocol.max_store_bytes + 96]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        write: {
+            notice.writeAll("\nrui: The Host stopped. Run rui host start --store ") catch break :write;
+            TerminalText.writeShellWord(&notice, self.options.store) catch break :write;
+            notice.writeAll(", then resume this Session.\n") catch break :write;
+        }
+        _ = stderr.write(notice.buffered());
         return self.failed(error.HostStopped, left.session);
     };
 }
@@ -1631,7 +1639,7 @@ test "a conversation ended by its Host stopping says how to start it again" {
         const resume_line = "\nResume: rui session resume --store $'/store' k7m2qx\n";
         if (stopped) {
             const written = try finishedWith(rig, ending, error.HostStopped, &buffer);
-            try std.testing.expectEqualStrings("\nrui: The Host stopped. Run rui host start, then resume this Session.\n" ++ resume_line, written);
+            try std.testing.expectEqualStrings("\nrui: The Host stopped. Run rui host start --store $'/store', then resume this Session.\n" ++ resume_line, written);
         } else {
             const written = try finishedWith(rig, ending, error.FileNotFound, &buffer);
             try std.testing.expectEqualStrings(resume_line, written);

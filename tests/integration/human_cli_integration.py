@@ -7242,7 +7242,8 @@ def main(selected="all"):
             observation_continue.set()
             lost, errors = terminal_exit(entered, master)
             assert entered.returncode != 0, errors
-            assert b"rui: The Host stopped. Run rui host start, then resume this Session.\n" in errors, errors
+            stopped = b"rui: The Host stopped. Run rui host start --store $'" + bytes(store) + b"', then resume this Session.\n"
+            assert stopped in errors, errors
             assert b"TruncatedResponse" not in errors and b"syntax and recovery" not in errors, errors
             assert b"Message accepted; do not resubmit it" in errors, errors
             assert f"rui request read-result {saved_key}".encode() in errors, errors
