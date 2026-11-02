@@ -17,15 +17,16 @@ pub const Violation = struct {
 /// `std` members a core may name, with everything beneath them. The rest of
 /// `std` is an effect or reaches one.
 const allowed_std = [_][]const u8{
-    "std.ascii",               "std.base64",                     "std.enums",
-    "std.fmt",                 "std.json",                       "std.math",
-    "std.mem",                 "std.meta",                       "std.Target",
-    "std.crypto.secureZero",   "std.debug.assert",               "std.heap.FixedBufferAllocator",
-    "std.heap.ArenaAllocator", "std.Io.Writer",                  "std.Io.Timestamp",
-    "std.Io.Clock.Timestamp",  "std.testing.allocator",          "std.testing.expect",
-    "std.testing.expectEqual", "std.testing.expectEqualStrings", "std.testing.expectEqualSlices",
-    "std.testing.expectError", "std.unicode.utf8ValidateSlice",  "std.unicode.utf8ByteSequenceLength",
-    "std.unicode.utf8Decode",  "std.unicode.utf8Encode",         "std.bit_set",
+    "std.ascii",                   "std.base64",                     "std.enums",
+    "std.fmt",                     "std.json",                       "std.math",
+    "std.mem",                     "std.meta",                       "std.Target",
+    "std.crypto.secureZero",       "std.debug.assert",               "std.heap.FixedBufferAllocator",
+    "std.heap.ArenaAllocator",     "std.Io.Writer",                  "std.Io.Timestamp",
+    "std.Io.Clock.Timestamp",      "std.testing.allocator",          "std.testing.expect",
+    "std.testing.expectEqual",     "std.testing.expectEqualStrings", "std.testing.expectEqualSlices",
+    "std.testing.expectError",     "std.unicode.utf8ValidateSlice",  "std.unicode.utf8ByteSequenceLength",
+    "std.unicode.utf8Decode",      "std.unicode.utf8Encode",         "std.bit_set",
+    "std.crypto.hash.sha2.Sha256",
 };
 
 /// vaxis's Unicode tables, which `configureTerminalEditor` in build.zig
