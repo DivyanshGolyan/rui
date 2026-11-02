@@ -163,6 +163,13 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     _ = try line.finish(1_800_000_000);
     try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged Review the WAL · hi" ++ N ++ "08:00" ++ R ++ "\n" ++
         S ++ "← Received message from Review the WAL · ok" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
+    // A name ending in `…` over a blank Message ends the line in `…`, which
+    // the viewport counts as a collapsed block, so the row opens as one.
+    try named.label.set("Plan…");
+    var dotted: Sink = .{};
+    try line.init(&dotted, .inbound, named, 2, &compact);
+    try line.feed(" \n");
+    try std.testing.expect(try line.finish(1_800_000_000));
 }
 
 /// A line's end before trailing blanks.
@@ -190,6 +197,9 @@ pub fn PeerLine(comptime Sink: type) type {
         // later non-blank byte. A caller that reads no bytes sets `more`.
         phase: enum { leading, first, after, more } = .leading,
         longer: bool = false,
+        // A name ending in `…` ends a line with no text after it, which
+        // then reads as continued and opens as one.
+        named_ellipsis: bool = false,
 
         /// `compact` is the tool rows' grouping: a row after another one
         /// joins it without a blank line.
@@ -200,6 +210,7 @@ pub fn PeerLine(comptime Sink: type) type {
             try sink.feed(Mark.summary);
             try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
             try peerName(sink, peer);
+            self.named_ellipsis = std.mem.endsWith(u8, peer.name(), "…");
         }
 
         pub fn feed(self: *Self, bytes: []const u8) anyerror!void {
@@ -248,7 +259,7 @@ pub fn PeerLine(comptime Sink: type) type {
                 try self.sink.feed(time);
             }
             try self.sink.feed(Mark.reset ++ "\n");
-            return continues or std.mem.endsWith(u8, kept, "…");
+            return continues or std.mem.endsWith(u8, kept, "…") or (kept.len == 0 and self.named_ellipsis);
         }
     };
 }

@@ -809,7 +809,7 @@ pub fn peerNamed(self: *Store, session: protocol.Bounded(protocol.max_session_by
         c.SQLITE_ROW => if (try sqlite.readNullableLabel(statement, 0)) |label| {
             peer.label = label;
         },
-        else => return error.CorruptStore,
+        else => return error.SessionReadFailed,
     }
     return peer;
 }
