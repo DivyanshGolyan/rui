@@ -1017,6 +1017,14 @@ def main():
             [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}", "timeout_ms": None, "description": "Append unattempted marker"}))],
         )
     )
+    stop_all_marker = state / "stop-all-marker"
+    for name in ("stop-all-a", "stop-all-b"):
+        responses.append(
+            fixture.sse_tool_calls(
+                f"{name}-calls",
+                [("bash", f"{name}-call", json.dumps({"cmd": f"printf x >> {stop_all_marker}", "timeout_ms": None, "description": "Append stop-all marker"}))],
+            )
+        )
     prelaunch_stop_marker = state / "prelaunch-stop-marker"
     responses.append(
         fixture.sse_tool_calls(
@@ -1452,6 +1460,30 @@ def main():
         assert stopped["answer"]["status"] == "accepted", stopped
         assert resolution(store, session) == "cancelled"
         assert not unattempted_marker.exists()
+
+        # stop --all stops each Session whose work is under way, each under
+        # its own generated request, and leaves idle and settled ones alone.
+        waiting = []
+        for name in ("stop-all-a", "stop-all-b"):
+            waiter = configure(state, store, f"{name}-config")
+            fixture.message(state, store, f"{name}-message", waiter, "execute")
+            fixture.wait_for(lambda: action_for(store, waiter), f"{name} stoppable Action")
+            waiting.append(waiter)
+        idle = configure(state, store, "stop-all-idle-config")
+        stopped_all = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
+                                     text=True, capture_output=True, timeout=15)
+        assert stopped_all.returncode == 0, stopped_all
+        replies = [json.loads(line) for line in stopped_all.stdout.splitlines()]
+        assert sorted(reply["context"]["session"] for reply in replies) == sorted(waiting), replies
+        assert all(reply["answer"]["status"] == "accepted" and reply["context"]["kind"] == "session_stop" for reply in replies), replies
+        for waiter in waiting:
+            assert resolution(store, waiter) == "cancelled"
+        assert not stop_all_marker.exists()
+        assert idle not in stopped_all.stdout
+        nothing = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
+                                 text=True, capture_output=True, timeout=15)
+        assert (nothing.returncode, nothing.stdout) == (0, ""), nothing
+        assert nothing.stderr == "rui: no Session in this Store has work under way.\n", nothing
 
         session = configure(state, store, "prelaunch-stop-config")
         fixture.message(state, store, "prelaunch-stop-message", session, "execute")

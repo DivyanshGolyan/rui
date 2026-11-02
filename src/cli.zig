@@ -2183,6 +2183,7 @@ test "local recovery enumeration observes cancellation before skipping invalid r
 }
 
 fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    if (parsed.has("all")) return stopAllSessions(init, parsed);
     const io = init.io;
     var input = client.SessionStopInput{ .store = "", .session = parsed.get("session").? };
     if (input.session.len == 0) return usage();
@@ -2192,6 +2193,43 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
     try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
+}
+
+/// Stops every Session in the Store whose work is under way, a listing page at
+/// a time. Each stop is its own generated capture, recoverable like a single
+/// `session stop`; one that fails does not keep the rest from stopping, and
+/// the command fails after trying them all.
+fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try requestDirectory(init, &directory_buffer);
+    var traversal = protocol_reply.SessionTraversal.init(null);
+    var asked: usize = 0;
+    var failure: ?anyerror = null;
+    while (true) {
+        const page = try readSessionPage(init, store, null, traversal.cursor);
+        for (page.rows[0..page.count]) |*row| {
+            if (!underWay(row.work.state)) continue;
+            asked += 1;
+            stopListedSession(init, parsed, store, row.reference.slice(), directory) catch |err| {
+                failure = failure orelse err;
+            };
+        }
+        if (!traversal.advance(&page)) break;
+    }
+    if (asked == 0) stderr.diagnostic("rui: no Session in this Store has work under way.\n", .{});
+    if (failure) |err| return err;
+}
+
+/// Work a stop would end: anything under way except a stop already settling.
+fn underWay(state: protocol.WorkState) bool {
+    return state != .stopping and state.progress() != null;
+}
+
+fn stopListedSession(init: std.process.Init, parsed: *const cli_args.Parsed, store: []const u8, session: []const u8, directory: []const u8) !void {
+    var captured = try client.captureSessionStop(init.io, .{ .store = store, .session = session }, .{ .generated = directory });
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2768,13 +2806,24 @@ fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !Requ
 /// that restarts the traversal replaces the rows there. Returns whether
 /// another page follows.
 fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, traversal: *protocol_reply.SessionTraversal, rows: *std.Io.File.Writer) !bool {
+    const page = &try readSessionPage(init, store, workspace, traversal.cursor);
+    if (traversal.restarts(page)) {
+        try rows.seekTo(0);
+        try rows.end();
+    }
+    if (page.count != 0 and rows.logicalPos() != 0) rows.interface.writeByte(',') catch return rows.err.?;
+    page.writeRowsJson(&rows.interface) catch return rows.err.?;
+    return traversal.advance(page);
+}
+
+/// One listing page; a failure reply is reported on stderr and returned as its error.
+fn readSessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor) !protocol_reply.SessionListPage {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
-    const reply = try client.listSessions(init.io, store, workspace, traversal.cursor, file, &buffer);
-    const decoded = try protocol_reply.SessionListReply.decode(init.io, file, workspace, traversal.cursor, reply);
-    const page = switch (decoded) {
-        .page => |*page| page,
+    const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
+    return switch (try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply)) {
+        .page => |page| page,
         .failure => |failure| {
             var bytes: [256]u8 = undefined;
             var diagnostic = std.Io.File.stderr().writerStreaming(init.io, &bytes);
@@ -2784,13 +2833,6 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
             return failure.err();
         },
     };
-    if (traversal.restarts(page)) {
-        try rows.seekTo(0);
-        try rows.end();
-    }
-    if (page.count != 0 and rows.logicalPos() != 0) rows.interface.writeByte(',') catch return rows.err.?;
-    page.writeRowsJson(&rows.interface) catch return rows.err.?;
-    return traversal.advance(page);
 }
 
 /// A token from an earlier listing's `since`.
