@@ -21,6 +21,12 @@ pub const Mode = enum {
     /// Opens the transaction before its first statement and ends it with
     /// `commit`, or with `abandon` when it finds no work or fails.
     write,
+    /// One write statement, which commits itself: no BEGIN or COMMIT.
+    /// Its reads run outside any transaction, under the Entry's lock,
+    /// which excludes every other writer, so what they read still holds
+    /// when the write runs. It takes no identities and claims no
+    /// positions, and `commit` runs exactly one queued write.
+    single,
     /// Writes inside a transaction its caller opened, and ends with `apply`:
     /// how unconverted code runs a rule that has an Access form.
     nested,
@@ -121,7 +127,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
         /// None in a read Access, which claims no positions.
-        claims: [if (mode == .read) 0 else max_claims]Positions = undefined,
+        claims: [if (mode == .read or mode == .single) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
         /// The last `content_id` this Access took: the one row
         /// `contentSink` opens.
@@ -158,10 +164,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// How unconverted code, under an Entry it already holds, runs a
         /// rule that has an Access form. A `.nested` Access writes inside
-        /// the transaction its caller opened, which is asserted; a `.read`
-        /// one checks nothing.
+        /// the transaction its caller opened, which is asserted. A `.read`
+        /// one checks nothing: it is how unconverted code that holds the
+        /// Store, not the Entry `open` takes, reads through a converted
+        /// read (`readSaved`, `lookupCommand`, `readWindow`). Both go once
+        /// that code is converted (PR 5e).
         pub fn within(store: *Store) Self {
-            comptime std.debug.assert(mode != .write);
+            comptime std.debug.assert(mode == .nested or mode == .read);
             if (mode == .nested) std.debug.assert(c.sqlite3_get_autocommit(store.database) == 0);
             return .{ .store = store };
         }
@@ -210,7 +219,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Records that this Access changes `head`'s Session, and returns
         /// its position claimer.
         pub fn positions(a: *Self, head: rsql.SessionHead) error{TooManyPositionClaims}!*Positions {
-            comptime std.debug.assert(mode != .read);
+            comptime std.debug.assert(mode != .read and mode != .single);
             a.touch(head);
             for (a.claims[0..a.claimed]) |*claim| if (std.mem.eql(u8, &claim.head.ref, &head.ref)) return claim;
             if (a.claimed == a.claims.len) return error.TooManyPositionClaims;
@@ -230,7 +239,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// The next value of `column`, inside this transaction.
         pub fn identity(a: *Self, comptime column: store_core.Identity) !u64 {
-            comptime std.debug.assert(mode != .read);
+            comptime std.debug.assert(mode != .read and mode != .single);
             a.ensureOpen();
             if (a.failure) |err| return err;
             const id = try store_core.takeIdentity(a.store, column);
@@ -242,7 +251,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `content_id`, inserted by an earlier queued write. `bytes` must
         /// outlive the round.
         pub fn writeContent(a: *Self, content_id: u64, bytes: []const u8) void {
-            comptime std.debug.assert(mode != .read);
+            comptime std.debug.assert(mode != .read and mode != .single);
             if (a.reserve()) |slot| {
                 slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
                 a.queued += 1;
@@ -280,7 +289,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `ContentNotInserted`. It writes into the open transaction, so
         /// the bytes commit with the row.
         pub fn contentSink(a: *Self, content_id: u64) Error!ContentSink {
-            comptime std.debug.assert(mode != .read);
+            comptime std.debug.assert(mode != .read and mode != .single);
             if (a.failure) |err| return err;
             if (content_id == 0 or content_id != a.content_id or a.queued != 0) return error.ContentNotInserted;
             var blob: ?*c.sqlite3_blob = null;
@@ -290,9 +299,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// Runs the queued writes and one compare-and-set per Session that
         /// claimed positions, then COMMIT. A failed guard stops before
-        /// COMMIT.
+        /// COMMIT. A `.single` Access runs its one write, which commits
+        /// itself.
         pub fn commit(a: *Self) Error!void {
-            comptime std.debug.assert(mode == .write);
+            comptime std.debug.assert(mode == .write or mode == .single);
+            if (mode == .single) {
+                // A second statement would not commit with the first.
+                if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");
+                try a.run();
+                a.ended = true;
+                return;
+            }
             try a.finishWrites();
             store_core.commit(a.store) catch |err| {
                 a.failure = err;
@@ -312,11 +329,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `faults` included. A transition that finds no work calls it,
         /// and `end` calls it on every error.
         pub fn abandon(a: *Self, faults: store_core.Faults) Error!void {
-            comptime std.debug.assert(mode == .write);
+            comptime std.debug.assert(mode == .write or mode == .single);
             a.resetQueued();
             a.claimed = 0;
             a.ended = true;
-            if (a.opened) try store_core.rollbackAfterError(a.store, faults);
+            if (mode == .write and a.opened) try store_core.rollbackAfterError(a.store, faults);
         }
 
         /// The transition's `result`, after abandoning the Access when it
@@ -324,7 +341,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// no exit leaves the transaction open; a failed rollback takes the
         /// error's place, and the Entry fences on it.
         pub fn end(a: *Self, faults: store_core.Faults, result: anytype) @TypeOf(result) {
-            comptime std.debug.assert(mode == .write);
+            comptime std.debug.assert(mode == .write or mode == .single);
             _ = result catch |err| {
                 a.abandon(faults) catch |failed| return failed;
                 return err;

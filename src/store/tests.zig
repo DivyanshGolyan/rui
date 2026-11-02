@@ -7169,6 +7169,42 @@ test "message rejections replay before current Session checks without retained i
     try std.testing.expect(observed.message == null);
 }
 
+/// Gives `session` Bash, has its model propose two calls, and attempts
+/// the first; the second stays unattempted.
+fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !ActionAttemptBinding {
+    var tools: protocol.ConfigureCommand = .{};
+    try tools.key.set("bash-tools");
+    try tools.session.set(session);
+    tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
+    tools.configuration.permission_mode.state = .value;
+    try tools.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+    try submitTestMessage(storage, tmp, "bash-seed", "bash-seed", session, "run two");
+    try settleTwoActionsForTesting(storage, tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "bash-calls");
+    return (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+}
+
+/// Counts the statements the Store starts from `begin` to `end`: not a
+/// trigger's program, nor the test-only touch oracle's read.
+const TestingStatements = struct {
+    count: u64 = 0,
+
+    fn begin(self: *TestingStatements, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, c.SQLITE_TRACE_STMT, traced, self);
+    }
+
+    fn end(_: *const TestingStatements, database: *c.sqlite3) void {
+        _ = c.sqlite3_trace_v2(database, 0, null, null);
+    }
+
+    fn traced(_: c_uint, context: ?*anyopaque, _: ?*anyopaque, text: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatements = @ptrCast(@alignCast(context.?));
+        const sql = std.mem.span(@as([*:0]const u8, @ptrCast(text.?)));
+        if (!std.mem.startsWith(u8, sql, "--") and std.mem.indexOf(u8, sql, "touched_oracle") == null) self.count += 1;
+        return 0;
+    }
+};
+
 test "a Bash binding that is unknown, unattempted or without its revision is stale, and fences nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7176,16 +7212,7 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "stale-bash-config");
-    var tools: protocol.ConfigureCommand = .{};
-    try tools.key.set("stale-bash-tools");
-    try tools.session.set(session.slice());
-    tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
-    tools.configuration.permission_mode.state = .value;
-    try tools.configuration.permission_mode.value.set("bypass");
-    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
-    try submitTestMessage(&storage, &tmp, "stale-bash-seed", "stale-bash-seed", session.slice(), "run two");
-    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stale-bash-calls");
-    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const action = try attemptBashForTesting(&storage, &tmp, session.slice());
     var input: BashExecutionInput = undefined;
     try storage.readBashExecutionInput(action, &input);
     try std.testing.expectEqualStrings(session.slice(), input.session.slice());
@@ -7205,6 +7232,37 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try execSessionSql(storage.database, "UPDATE action_operation SET permission_revision=999 WHERE session_ref=?1 AND attempt_ordinal=1", session.slice());
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(action, &input));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "revoking a sender runs main's statements, with no transaction, and a missing Attempt changes nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "revoke-config");
+    const action = try attemptBashForTesting(&storage, &tmp, session.slice());
+    const held = "SELECT count(*) FROM action_operation WHERE session_ref=?1 AND sender_handle IS NOT NULL";
+    try std.testing.expectEqual(@as(u64, 1), try querySessionU64(storage.database, held, session.slice()));
+
+    // Main: its UPDATE, then its touch's Workspace read. Now: the read, then the UPDATE.
+    var statements: TestingStatements = .{};
+    statements.begin(storage.database);
+    try storage.revokeActionSender(action);
+    statements.end(storage.database);
+    try std.testing.expectEqual(@as(u64, 2), statements.count);
+    try std.testing.expectEqual(@as(u64, 0), try querySessionU64(storage.database, held, session.slice()));
+
+    var unknown = action;
+    unknown.action_id += 1000;
+    const generation = storage.commit_generation.load(.acquire);
+    statements = .{};
+    statements.begin(storage.database);
+    try storage.revokeActionSender(unknown);
+    statements.end(storage.database);
+    try std.testing.expectEqual(@as(u64, 1), statements.count);
+    try std.testing.expectEqual(generation, storage.commit_generation.load(.acquire));
     try std.testing.expect(!storage.isFenced());
 }
 
