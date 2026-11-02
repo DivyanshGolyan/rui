@@ -264,7 +264,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     const digest = request.semanticDigest();
     var saved: command_domain.saved_command.Result = undefined;
     command_domain.lookupCommand(a, command.key.slice(), &saved);
-    const reads = a.store.configuration_reads;
+    const reads = a.store.configurationReads();
     reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
     prepareConfiguration(a, command.session.slice(), &command.configuration, reads);
     try a.run();
@@ -664,7 +664,7 @@ pub fn applyConfigurationLocked(
 ) !Application {
     var a = Access(.nested, error{SessionUpdateFailed}).within(self);
     defer a.deinit();
-    const reads = self.configuration_reads;
+    const reads = self.configurationReads();
     reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
     prepareConfiguration(&a, session, configuration, reads);
     try a.run();

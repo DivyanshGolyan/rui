@@ -79,11 +79,6 @@ pub const Store = struct {
     /// names generations this one never counted.
     instance: [16]u8 = undefined,
     statements: StatementCache = .{},
-    /// What a configure reads, over 4.6 KB: one address the Store owns, so no
-    /// Host stack frame holds it. A configure or a creating Message uses
-    /// it under the mutex, and no entry point runs both. Owned:
-    /// `openWithOptions` allocates it and `close` frees it.
-    configuration_reads: *configuration_domain.ConfigurationReads,
     /// The Host hands out every id and sequence value, and each
     /// transaction's second; see `HostValues`.
     ids: HostValues,
@@ -251,9 +246,7 @@ pub const Store = struct {
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
-        const configuration_reads = try std.heap.page_allocator.create(configuration_domain.ConfigurationReads);
-        errdefer std.heap.page_allocator.destroy(configuration_reads);
-        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .configuration_reads = configuration_reads, .ids = .{ .next = undefined } };
+        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = .{ .next = undefined } };
         self.served = options.served;
         // The Store is in final storage, so the function may keep its address.
         if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
@@ -324,10 +317,18 @@ pub const Store = struct {
         self.mutex.unlock(self.io);
         // Freed even when SQLite keeps the handle: nothing retries a close.
         destroyRing(self.changes);
-        std.heap.page_allocator.destroy(self.configuration_reads);
         if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
         _ = c.sqlite3_hard_heap_limit64(0);
         self.* = undefined;
+    }
+
+    /// What a configure reads, over 4.6 KB, at one address the Store owns
+    /// beside its change ring, so no Host stack frame holds it. A
+    /// configure or a creating Message uses it under the mutex, and no
+    /// entry point runs both.
+    pub fn configurationReads(self: *Store) *configuration_domain.ConfigurationReads {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        return &owned.configuration_reads;
     }
 
     pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
@@ -835,12 +836,19 @@ comptime {
     if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
 
-/// The change ring in pages of its own, which the kernel faults in only as
-/// entries are recorded: an idle Host keeps none of its 88 KiB resident. Not
-/// `Allocator.create`, whose ReleaseSafe 0xAA fill would write every page now.
+/// The Store's state too large for the frame that holds it.
+const OutOfLine = struct {
+    ring: change_ring.Ring,
+    configuration_reads: configuration_domain.ConfigurationReads,
+};
+
+/// The change ring, and `Store.configurationReads` beside it, in pages of
+/// their own, which the kernel faults in only as they are written: an idle
+/// Host keeps none of the ring's 88 KiB resident. Not `Allocator.create`,
+/// whose ReleaseSafe 0xAA fill would write every page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
-    const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(change_ring.Ring), .of(change_ring.Ring), @returnAddress()) orelse return error.OutOfMemory;
-    const ring: *change_ring.Ring = @ptrCast(@alignCast(bytes));
+    const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(OutOfLine), .of(OutOfLine), @returnAddress()) orelse return error.OutOfMemory;
+    const ring: *change_ring.Ring = &@as(*OutOfLine, @ptrCast(@alignCast(bytes))).ring;
     // Every scalar takes Ring's own default; the columns stay unwritten, since
     // only entries below `len` are read.
     const info = @typeInfo(change_ring.Ring).@"struct";
@@ -852,7 +860,8 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
 }
 
 fn destroyRing(ring: *change_ring.Ring) void {
-    std.heap.page_allocator.rawFree(@as([*]u8, @ptrCast(ring))[0..@sizeOf(change_ring.Ring)], .of(change_ring.Ring), @returnAddress());
+    const owned: *OutOfLine = @fieldParentPtr("ring", ring);
+    std.heap.page_allocator.rawFree(@as([*]u8, @ptrCast(owned))[0..@sizeOf(OutOfLine)], .of(OutOfLine), @returnAddress());
 }
 
 /// Expected outcomes of locked entry points. A canonical read or save
