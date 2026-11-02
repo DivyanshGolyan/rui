@@ -14,7 +14,7 @@ Then edit the owning section and affected verification cases; keep rationale bes
 Identify conflicts with accepted behavior explicitly.
 Replace superseded text rather than creating parallel ADRs, proposals, glossaries, summaries or amendment ledgers.
 Keep [Research](research/README.md) a compact index of reproducible evidence.
-Write these documents one sentence per line, so PRs that edit different sentences of one paragraph merge without a conflict; `python3 tests/ci/sentence_lines.py` rewrites them and the policy job checks them.
+Write the top-level documents and docs/ one sentence per line, so PRs that edit different sentences of one paragraph merge without a conflict; `python3 tests/ci/sentence_lines.py` rewrites them and the policy job checks them.
 
 ## Engineering
 
@@ -114,18 +114,14 @@ Review signoff does not gate landing a coherent green change; [Landing](AGENTS.m
 
 Review parity and failure paths as well as the diff:
 
-- **Parity.**
-  List what the change re-implements, replaces or drops: each sibling component, previous version and contract line it touches.
+- **Parity.** List what the change re-implements, replaces or drops: each sibling component, previous version and contract line it touches.
   Confirm each keeps its behavior.
   A second implementation of a behavior an existing component owns is a finding.
-- **Discarded failures.**
-  List every error a secondary path (after commit, on cancel or return, in a worker, during setup or teardown, a catch-all switch arm) discards, turns into `null` or treats as unreachable.
+- **Discarded failures.** List every error a secondary path (after commit, on cancel or return, in a worker, during setup or teardown, a catch-all switch arm) discards, turns into `null` or treats as unreachable.
   Route each to the main path's failure boundary, or justify it beside the code.
-- **In-flight effects.**
-  Each effect the change emits has one record from emission to a definite answer.
+- **In-flight effects.** Each effect the change emits has one record from emission to a definite answer.
   On every exit (return, error, cancel), the owner reports each still-open record to the caller's failure boundary.
-- **Design.**
-  Check the change against the approved design, not only the issue derived from it.
+- **Design.** Check the change against the approved design, not only the issue derived from it.
   An edit to a contract document that makes it match the change's own code is a finding, and so is a "by design" that cites text the same change added.
 
 Trace beyond changed lines to owning state/control flow and existing causes of workarounds.
@@ -133,8 +129,7 @@ Identify duplicated authority, scattered policy and dependencies on private repr
 Justify affected state, layers, caches, queues and per-slot allocations by required behavior or demonstrated cost.
 
 Validate findings against the contract and owner.
-For each actionable finding, give code/location, scenario, consequence, correction, removable machinery, preserved guarantees and behavior/memory verification.
-**Simplify first:** lead the correction with the simpler design that removes the finding's whole class ([Ownership and transitions](#ownership-and-transitions)), such as deleting a copy, deriving a fact instead of syncing it, or giving a rule one owner; offer the smallest complete patch only when no such design exists, and say why.
+For each actionable finding, give code/location, scenario, consequence, correction, removable machinery, preserved guarantees and behavior/memory verification. **Simplify first:** lead the correction with the simpler design that removes the finding's whole class ([Ownership and transitions](#ownership-and-transitions)), such as deleting a copy, deriving a fact instead of syncing it, or giving a rule one owner; offer the smallest complete patch only when no such design exists, and say why.
 Simple means unbraided, as in Rich Hickey's "Simple Made Easy": independent concerns kept independent, whatever the line count.
 Quantify relevant memory multipliers; distinguish estimates from measurements.
 Prefer simplicity, explainability and memory efficiency over implementation speed.

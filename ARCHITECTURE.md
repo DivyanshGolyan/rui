@@ -95,8 +95,7 @@ flowchart TD
 ```
 
 The **Host Store** contains canonical facts and content: the committed records that determine saved outcomes and recovery.
-The **Storage Owner** exclusively accesses core tables.
-**Content References** identify complete immutable bytes with length/digest and bounded reads.
+The **Storage Owner** exclusively accesses core tables. **Content References** identify complete immutable bytes with length/digest and bounded reads.
 Credentials and diagnostics cannot determine semantic recovery.
 
 | Term | Meaning |
@@ -1365,8 +1364,7 @@ A Resolution ends the Operation; the Turn may still need other Operations or com
 Only the invocation committing fresh Attempt admission receives a **Dispatch Permit**: volatile permission to launch that Attempt once.
 Recovery cannot recreate that permit because the previous process may already have launched the effect.
 
-Every live resource has exactly one cleanup owner until its last possible use ends.
-**Physical Custody** is the content-free record of that responsibility: keep execution resources alive through safe cleanup.
+Every live resource has exactly one cleanup owner until its last possible use ends. **Physical Custody** is the content-free record of that responsibility: keep execution resources alive through safe cleanup.
 A saved outcome, cancellation or rejection does not shorten their lifetime.
 Custody confers no permission to launch or decide an Operation's result.
 
@@ -2789,8 +2787,7 @@ Output of up to two lines becomes a notice under the input without the CLI's `Ru
 The Session screen stays in place and no command reads terminal input.
 `/discard`, `/recover KEY`, `/wait` and `/login` answer with a notice; an unknown command shows `! Unknown command /NAME · /help`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
 
-A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure.
-(Divyansh approved this on 2026-10-31, front-end plan row 6.)
+A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
 One table, `slash_commands.zig`, holds each command's name, argument shape and one-line description; the draft's parser, the command runner, the list and `/help`'s command lines read it, and `/wait` and `/login` stay out of the list and `/help`.
 The list shows while the draft is one line that starts with one `/` and holds no space yet: a row for each command the word starts, in the rows right above the input that a growing draft would take, under the rule, so the input never moves; at most a third of the screen, less the input's own row.
@@ -3048,8 +3045,7 @@ To reuse current state, inspect W1 and pass a selected key unchanged to W2; no o
 
 ### Capturing and delivering reports
 
-Reports have exactly two closed profiles.
-**Current**, the default, contains effective settings including the Label, `created_at`, `context_estimate`, the Session work, `first_message` and `from_person_at` that Session listing reports, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, accepted call outcomes still participating in the active Turn, the selected work's original Message key (active Turn's first admission or oldest unexcluded queued admission), and up to ten most recent applied Messages from terminal Turns with their keys and outcomes.
+Reports have exactly two closed profiles. **Current**, the default, contains effective settings including the Label, `created_at`, `context_estimate`, the Session work, `first_message` and `from_person_at` that Session listing reports, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, accepted call outcomes still participating in the active Turn, the selected work's original Message key (active Turn's first admission or oldest unexcluded queued admission), and up to ten most recent applied Messages from terminal Turns with their keys and outcomes.
 Selection and recent identities are committed Host facts, not local caller records; growing terminal history is excluded.
 Explicit **Full** contains Current plus the following closed inventory:
 
@@ -3544,8 +3540,7 @@ Host information is a read-only, bounded `/v1/host-info` exchange for the canoni
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
-A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device` or `key_file`).
-**Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
+A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device` or `key_file`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.
