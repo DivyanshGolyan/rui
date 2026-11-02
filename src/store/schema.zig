@@ -1,6 +1,6 @@
 //! The Store schema as one value: its tables and indexes, from which each
-//! engine's DDL and the open-time allow-list derive. A new database gets the
-//! DDL; an existing one is checked against the allow-list when it opens.
+//! engine's DDL derives. A new database gets the DDL; an existing one's
+//! stored DDL is compared with it when it opens.
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
@@ -16,13 +16,14 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 46;
+pub const schema_version: u32 = 47;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes needs a new row, and so a new schema_version.
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
+    .{ .schema_version = 47, .digest = 0x51267b57c44099bc },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -97,11 +98,12 @@ pub const Column = struct {
     check: ?[]const u8 = null,
 };
 
+/// Checked when its row is written, on every engine: writers insert a
+/// parent before its children.
 pub const ForeignKey = struct {
     columns: []const []const u8,
     references: []const u8,
     referenced: []const []const u8,
-    deferred: bool = false,
 };
 
 /// A key or reference of one column is written on that column; one of
@@ -136,10 +138,6 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
     return .{ .columns = &.{column}, .references = table, .referenced = referenced };
 }
 
-fn deferredReferences(comptime column: []const u8, comptime table: []const u8, comptime referenced: []const []const u8) ForeignKey {
-    return .{ .columns = &.{column}, .references = table, .referenced = referenced, .deferred = true };
-}
-
 // A label's syntax, not a provider list, so a new provider is no format change.
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
 const tools_mask_column: Column = .{ .name = "tools_mask", .type = .int, .check = std.fmt.comptimePrint("tools_mask BETWEEN 0 AND {d}", .{tool_catalog.toolBit(.bash)}) };
@@ -152,10 +150,10 @@ pub const tables = [_]Table{
     .{
         .name = "store_meta",
         .columns = &.{
-            .{ .name = "key", .type = .{ .text = null } },
-            .{ .name = "value", .type = .{ .text = null } },
+            .{ .name = "meta_key", .type = .{ .text = null } },
+            .{ .name = "meta_value", .type = .{ .text = null } },
         },
-        .primary_key = &.{"key"},
+        .primary_key = &.{"meta_key"},
     },
     .{
         .name = "content",
@@ -172,7 +170,7 @@ pub const tables = [_]Table{
     .{
         .name = "session",
         .columns = &.{
-            .{ .name = "session_ref", .type = .{ .text = null }, .check = "length(session_ref)=6 AND @octets(session_ref)=6 AND @charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
+            .{ .name = "session_ref", .type = .{ .text = null }, .check = "@octets(session_ref)=6 AND @charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
             // The Session's immutable binding: grammar version and its options.
@@ -195,8 +193,18 @@ pub const tables = [_]Table{
             // The position a person has seen the conversation through; null
             // until one has.
             .{ .name = "read_through", .type = .int, .nullable = true, .check = "read_through IS NULL OR (read_through>0 AND read_through<next_position)" },
+            // Creation order: list cursors and the Workspace key, allocated
+            // max+1 in the creating transaction.
+            .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
+            // SHA-256 of `workspace`. Workspace equality compares it, then the
+            // text, so a collision never merges two Workspaces.
+            .{ .name = "workspace_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
+            // The change ring's key: created_seq of the Workspace's first Session.
+            .{ .name = "workspace_key", .type = .int },
         },
         .primary_key = &.{"session_ref"},
+        .uniques = &.{&.{"created_seq"}},
+        .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
             references("output_schema_content_id", "content", content_reference),
@@ -215,8 +223,11 @@ pub const tables = [_]Table{
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
+            // Command order, allocated max+1 in the recording transaction.
+            .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
         },
         .primary_key = &.{"command_key"},
+        .uniques = &.{&.{"command_seq"}},
         .foreign_keys = &.{
             references("primary_content_id", "content", content_reference),
             references("secondary_content_id", "content", content_reference),
@@ -245,7 +256,7 @@ pub const tables = [_]Table{
         .uniques = &.{&.{"command_key"}},
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
-            deferredReferences("command_key", "core_command", command_reference),
+            references("command_key", "core_command", command_reference),
             references("instructions_content_id", "content", content_reference),
             references("output_schema_content_id", "content", content_reference),
         },
@@ -268,9 +279,11 @@ pub const tables = [_]Table{
         .uniques = &.{&.{"command_key"}},
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
-            deferredReferences("command_key", "core_command", command_reference),
+            references("command_key", "core_command", command_reference),
             references("content_id", "content", content_reference),
-            deferredReferences("turn_id", "turn", &.{"turn_id"}),
+            // The one reference cycle, with turn.first_admission_id: an
+            // Admission is written with turn_id NULL, and set once its Turn exists.
+            references("turn_id", "turn", &.{"turn_id"}),
             references("sender_session_ref", "session", session_reference),
         },
         .checks = &.{"(sender_session_ref IS NULL)=(sender_position IS NULL)"},
@@ -286,7 +299,7 @@ pub const tables = [_]Table{
         .primary_key = &.{"command_key"},
         .uniques = &.{&.{ "sender_session_ref", "sender_position" }},
         .foreign_keys = &.{
-            deferredReferences("command_key", "core_command", command_reference),
+            references("command_key", "core_command", command_reference),
             references("sender_session_ref", "session", session_reference),
         },
         .without_rowid = true,
@@ -308,7 +321,7 @@ pub const tables = [_]Table{
         .primary_key = &.{"turn_id"},
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
-            deferredReferences("first_admission_id", "message_admission", &.{"admission_id"}),
+            references("first_admission_id", "message_admission", &.{"admission_id"}),
             references("outcome_content_id", "content", content_reference),
         },
         .checks = &.{"(outcome_code IS NULL)=(outcome_at IS NULL)"},
@@ -336,8 +349,9 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "session_ref", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "turn_id", .type = .{ .text = null }, .check = "length(turn_id) BETWEEN 1 AND 20" },
-            .{ .name = "operation_id", .type = .{ .text = null }, .check = "length(operation_id) BETWEEN 1 AND 20" },
+            // A u64 in decimal: ASCII digits, so bytes and characters agree.
+            .{ .name = "turn_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(turn_id,'0-9')" },
+            .{ .name = "operation_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(operation_id,'0-9')" },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
@@ -379,7 +393,7 @@ pub const tables = [_]Table{
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
         .foreign_keys = &.{
-            deferredReferences("turn_id", "turn", &.{"turn_id"}),
+            references("turn_id", "turn", &.{"turn_id"}),
             references("resolution_content_id", "content", content_reference),
             references("usage_content_id", "content", content_reference),
             references("interrupted_by_command_key", "core_command", command_reference),
@@ -533,7 +547,7 @@ pub const tables = [_]Table{
             .{ .name = "attempt_ordinal", .type = .int, .default = "0", .check = "attempt_ordinal IN (0,1)" },
             .{ .name = "bash_timeout_override_ms", .type = .int, .nullable = true, .check = "bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0" },
             .{ .name = "bash_timeout_ms", .type = .int, .nullable = true, .check = "bash_timeout_ms IS NULL OR bash_timeout_ms>0" },
-            .{ .name = "sender_handle", .type = .{ .text = null }, .nullable = true, .check = "sender_handle IS NULL OR (length(sender_handle)=32 AND @charset(sender_handle,'0-9a-f'))" },
+            .{ .name = "sender_handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .nullable = true, .check = "@charset(sender_handle,'0-9a-f')" },
             .{
                 .name = "resolution_code",
                 .type = .{ .tag = &.{ "denied", "cancelled", "succeeded", "failed", "timed_out", "indeterminate", "storage_failed", "spawn_failed", "infrastructure_shutdown" } },
@@ -569,7 +583,7 @@ pub const tables = [_]Table{
         .name = "permission_decision_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "action_id", .type = .{ .text = null }, .check = "length(action_id) BETWEEN 1 AND 20" },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
             .{ .name = "decision", .type = .{ .tag = &.{ "allow_once", "deny" } } },
         },
         .primary_key = &.{"command_key"},
@@ -579,7 +593,7 @@ pub const tables = [_]Table{
 };
 
 pub const indexes = [_]Index{
-    .{ .name = "session_workspace_list", .table = "session", .columns = &.{"workspace"} },
+    .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
     .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
@@ -618,25 +632,25 @@ pub const indexes = [_]Index{
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
-        // Format 45's 46 tables and indexes took about 68,000 branches (measured).
         @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
         var text: []const u8 = "";
-        for (tables) |table| text = text ++ createTable(dialect, table) ++ ";\n";
-        for (indexes) |index| text = text ++ createIndex(dialect, index) ++ ";\n";
+        for (objects(dialect)) |object| text = text ++ object.sql ++ ";\n";
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
 }
 
-pub const ObjectName = struct { kind: enum { table, index }, name: []const u8 };
+pub const Object = struct { kind: enum { table, index }, name: []const u8, sql: []const u8 };
 
-/// Every table and named index an existing Store may hold.
-pub fn objectNames() []const ObjectName {
+/// Every table and named index, each with the statement that creates it.
+pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
-        var names: []const ObjectName = &.{};
-        for (tables) |table| names = names ++ .{ObjectName{ .kind = .table, .name = table.name }};
-        for (indexes) |index| names = names ++ .{ObjectName{ .kind = .index, .name = index.name }};
-        break :blk names;
+        // Format 47's 51 tables and indexes take about 129,000 branches (measured).
+        @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
+        var result: []const Object = &.{};
+        for (tables) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(dialect, table) }};
+        for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(dialect, index) }};
+        break :blk result;
     };
 }
 
@@ -655,9 +669,11 @@ pub fn digest() u64 {
 
 const identity_sql = std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id});
 const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version});
+/// `schema_version` as store_meta's `format` row holds it.
+const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
 /// a wire bump is no schema change.
-const store_meta_sql = "INSERT INTO store_meta(key,value) VALUES('wire_version',?1),('store_selector',?2)";
+const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++ format_text ++ "')";
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
 fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8 {
@@ -688,7 +704,8 @@ fn columnDefinition(comptime dialect: rsql.Dialect, comptime table: Table, compt
         .bytes => "BLOB",
     };
     if (primary) text = text ++ " PRIMARY KEY";
-    if (!primary and !column.nullable) text = text ++ " NOT NULL";
+    // Also on a key: SQLite lets a rowid table's non-integer key be NULL.
+    if (!column.nullable) text = text ++ " NOT NULL";
     if (column.default) |value| text = text ++ " DEFAULT " ++ value;
     for (table.uniques) |unique| {
         if (eqlList(unique, only)) text = text ++ " UNIQUE";
@@ -723,7 +740,7 @@ fn lengthBound(comptime length: []const u8, comptime bounds: Octets) []const u8 
 }
 
 fn referenceClause(comptime key: ForeignKey) []const u8 {
-    return "REFERENCES " ++ key.references ++ "(" ++ list(key.referenced) ++ ")" ++ (if (key.deferred) " DEFERRABLE INITIALLY DEFERRED" else "");
+    return "REFERENCES " ++ key.references ++ "(" ++ list(key.referenced) ++ ")";
 }
 
 fn createIndex(comptime dialect: rsql.Dialect, comptime index: Index) []const u8 {
@@ -764,34 +781,49 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "COMMIT");
 }
 
-/// Counts every object that is not one of the schema's tables, their
-/// automatic indexes, or its named indexes.
-const unexpected_objects_sql = blk: {
-    var table_names: []const u8 = "";
-    var index_names: []const u8 = "";
-    for (objectNames()) |object| switch (object.kind) {
-        .table => table_names = table_names ++ (if (table_names.len == 0) "'" else ",'") ++ object.name ++ "'",
-        .index => index_names = index_names ++ (if (index_names.len == 0) "'" else ",'") ++ object.name ++ "'",
-    };
-    break :blk "SELECT count(*) FROM sqlite_schema WHERE " ++
-        "(type='table' AND name NOT IN (" ++ table_names ++ ")) OR " ++
-        "(type='index' AND ((sql IS NULL AND tbl_name NOT IN (" ++ table_names ++ ")) OR " ++
-        "(sql IS NOT NULL AND name NOT IN (" ++ index_names ++ ")))) OR " ++
-        "type NOT IN ('table','index')";
-};
-
+/// Refuses a Store unless its tables and indexes are exactly the ones
+/// bootstrap creates, each with the same CREATE text. SQLite keeps that text
+/// as run and bootstrap is its only writer, so a dropped CHECK, a changed
+/// column or a missing or extra index or trigger is a WrongStoreSchema. A
+/// network engine keeps no such text: PR 8/9 compare its catalog's tables,
+/// columns and indexes by name and type instead, which cannot see a CHECK.
 pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     if (try sqlite.pragmaInt(database, "PRAGMA user_version") != schema_version) return error.WrongStoreVersion;
     {
-        const statement = try sqlite.prepare(database, unexpected_objects_sql);
+        const expected = comptime objects(.sqlite);
+        const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");
         defer _ = c.sqlite3_finalize(statement);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW or c.sqlite3_column_int64(statement, 0) != 0) {
+        var matched: usize = 0;
+        rows: while (true) {
+            switch (c.sqlite3_step(statement)) {
+                c.SQLITE_DONE => break,
+                c.SQLITE_ROW => {},
+                else => return error.StatementFailed,
+            }
+            const kind = try columnText(statement, 0);
+            if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) {
+                // An automatic index of a key: its table's text covers it.
+                if (!std.mem.eql(u8, kind, "index")) return error.WrongStoreSchema;
+                for (expected) |object| {
+                    if (object.kind == .table and std.mem.eql(u8, object.name, try columnText(statement, 2))) continue :rows;
+                }
+                return error.WrongStoreSchema;
+            }
+            const name = try columnText(statement, 1);
+            for (expected) |object| {
+                if (!std.mem.eql(u8, object.name, name)) continue;
+                if (!std.mem.eql(u8, @tagName(object.kind), kind) or !std.mem.eql(u8, object.sql, try columnText(statement, 3))) return error.WrongStoreSchema;
+                matched += 1;
+                continue :rows;
+            }
             return error.WrongStoreSchema;
         }
+        if (matched != expected.len) return error.WrongStoreSchema;
     }
+    if (!try metaEquals(database, "format", format_text)) return error.WrongStoreVersion;
     {
-        const statement = try sqlite.prepare(database, "SELECT value FROM store_meta WHERE key='wire_version'");
+        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
         var version: protocol.Bounded(16) = .{};
@@ -799,11 +831,27 @@ pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
     }
     {
-        const statement = try sqlite.prepare(database, "SELECT value FROM store_meta WHERE key='store_selector'");
+        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) return error.WrongStoreIdentity;
     }
+}
+
+/// Column `column` of the current row, which is not NULL, as text.
+fn columnText(statement: *c.sqlite3_stmt, column: c_int) ![]const u8 {
+    const text = c.sqlite3_column_text(statement, column) orelse return error.OutOfMemory;
+    return text[0..@intCast(c.sqlite3_column_bytes(statement, column))];
+}
+
+/// Whether store_meta holds exactly `expected` under `key`.
+fn metaEquals(database: *c.sqlite3, comptime key: []const u8, expected: []const u8) !bool {
+    const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='" ++ key ++ "'");
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+    if (c.sqlite3_column_type(statement, 0) != c.SQLITE_TEXT) return false;
+    const text = c.sqlite3_column_text(statement, 0) orelse return error.OutOfMemory;
+    return std.mem.eql(u8, text[0..@intCast(c.sqlite3_column_bytes(statement, 0))], expected);
 }

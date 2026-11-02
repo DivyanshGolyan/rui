@@ -17,6 +17,7 @@ const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
+const rsql = @import("rsql.zig");
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
@@ -54,7 +55,6 @@ const StatementCache = sqlite.StatementCache;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
-const workspace_key_sql = sqlite.workspace_key_sql;
 
 pub const Store = struct {
     io: std.Io,
@@ -995,13 +995,29 @@ pub fn rollback(self: *Store) !void {
     try execute(self, "ROLLBACK");
 }
 
-/// The change ring's key for a Workspace: the rowid of its first
-/// Session, or 0 while it has none. Workspaces are immutable and
-/// Sessions are never deleted, so a Session's key never changes.
+/// A Workspace's identity in the Store: SHA-256 of its canonical text.
+/// Reads compare it, then the text, so a collision never merges two.
+pub fn workspaceDigest(workspace: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(workspace, &digest, .{});
+    return digest;
+}
+
+/// Binds a Workspace as its digest at `digest_index` and its text at
+/// `text_index`. SQLite reads `digest` in place, so it outlives the step.
+pub fn bindWorkspace(statement: *c.sqlite3_stmt, digest_index: c_int, text_index: c_int, workspace: []const u8, digest: *[32]u8) !void {
+    digest.* = workspaceDigest(workspace);
+    try sqlite.bindBlob(statement, digest_index, digest);
+    try sqlite.bindText(statement, text_index, workspace);
+}
+
+/// The change ring's key for a Workspace: the stored key of its
+/// Sessions (the created_seq of its first), or 0 while it has none.
 pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
-    const statement = try cached(self, workspace_key_sql);
+    const statement = try cached(self, "SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1");
     defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, workspace);
+    var digest: [32]u8 = undefined;
+    try bindWorkspace(statement, 1, 2, workspace, &digest);
     return switch (c.sqlite3_step(statement)) {
         c.SQLITE_DONE => 0,
         c.SQLITE_ROW => @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
@@ -1009,19 +1025,19 @@ pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
     };
 }
 
+pub const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";
+
 /// The key of `session_ref`'s Workspace, or null when no such Session
 /// exists.
 fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
-    const statement = try cached(self, "SELECT workspace FROM session WHERE session_ref=?1");
-    // Reset only after the key lookup: it binds this row's text in place.
+    const statement = try cached(self, session_workspace_key_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
-    switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => return null,
-        c.SQLITE_ROW => {},
-        else => return error.SessionReadFailed,
-    }
-    return try readWorkspaceKey(self, try sqlite.boundedColumnText(statement, 0, protocol.max_workspace_bytes));
+    return switch (c.sqlite3_step(statement)) {
+        c.SQLITE_DONE => null,
+        c.SQLITE_ROW => @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
+        else => error.SessionReadFailed,
+    };
 }
 
 /// Runs a write whose `RETURNING session_ref` names each changed row's
@@ -1102,6 +1118,7 @@ pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !Pro
 /// with `resetCached` before releasing the Store mutex. Comptime only
 /// pins the SQL to static storage, so one body serves every statement.
 pub inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
+    comptime rsql.checkStatement(sql);
     return cachedStatic(self, sql);
 }
 
@@ -1125,6 +1142,7 @@ fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
 
 /// Runs a cached statement that returns no rows.
 pub inline fn execute(self: *Store, comptime sql: [:0]const u8) !void {
+    comptime rsql.checkStatement(sql);
     return executeStatic(self, sql);
 }
 
