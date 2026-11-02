@@ -1852,6 +1852,10 @@ fn pick(state: *State, effects: *Effects) void {
     var binding: Default = .{ .provider = provider, .model = .{ .len = 0 } };
     binding.model.set(entry.id) catch unreachable;
     state.default = binding;
+    // A pick asks again for a save that failed; only a failure never retries.
+    if (state.saved) |last| if (last.outcome == .failed and last.binding.eql(&binding)) {
+        state.saved = null;
+    };
     state.closePicker();
     askSave(state, effects);
 }
@@ -6100,6 +6104,21 @@ test "picks made during one save are saved after it, only the newest" {
     try openPicker(&state, &.{chatgpt});
     try expectEffects(&.{}, try submit(&state, draft));
     try std.testing.expectEqualStrings("gpt-6.1-sol", state.default.?.model.slice());
+}
+
+test "a failed save is not retried, but picking the same model again saves it" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    const draft = try typeText(&state, "");
+    try openPicker(&state, &.{chatgpt});
+    try expectEffects(&.{}, try press(&state, draft, .last));
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try submit(&state, draft));
+    try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-5.5", .{ .failed = null })));
+    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "not saved") != null);
+    try openPicker(&state, &.{chatgpt});
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try submit(&state, draft));
+    try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-5.5", .done)));
+    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "New Sessions use gpt-5.5") != null);
 }
 
 test "a loading list is read again with the next listing, and a failed read keeps the list under a note" {
