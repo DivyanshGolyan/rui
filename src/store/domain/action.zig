@@ -239,7 +239,7 @@ pub fn validateActionDispatchLocked(self: *Store, binding: ActionAttemptBinding)
 /// Turn, and whether a Session stop selected that Turn.
 const settle_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id," ++
-        "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+        "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
@@ -250,7 +250,7 @@ const settle_facts = rsql.Read(.{
 
 const resolve_action = rsql.Write(.{
     .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL,resolved_at=@now " ++
-        "WHERE action_id=?1 AND parent_operation_id=?5 AND session_ref=?6 AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
+        "WHERE action_id=?1 AND parent_operation_id=?5 AND session_ref=@session(?6) AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
     .Args = struct { action_id: u64, code: ActionResolutionCode, content_id: u64, position: u64, parent_operation_id: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleActionAttemptBinding } },
 });

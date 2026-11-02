@@ -120,7 +120,7 @@ pub const ContentBlob = struct {
 const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
     .Args = struct { digest: [32]u8, length: u64, private: bool },
-    .Row = struct { id: rsql.Positive },
+    .Row = struct { content_id: rsql.Positive },
     .cardinality = .optional,
 });
 
@@ -155,7 +155,7 @@ const ContentSlot = struct { id: i64, existing: bool };
 /// After `lookup`'s round: the found row, or a new row queued with a Host
 /// identity and a zeroed payload of the right length.
 pub fn importSlot(a: anytype, value: *const Import) !ContentSlot {
-    if (value.found) |row| return .{ .id = @intCast(row.id.get()), .existing = true };
+    if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try a.identity(.content_id);
     a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
     return .{ .id = @intCast(id), .existing = false };

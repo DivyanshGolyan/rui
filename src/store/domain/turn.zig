@@ -96,14 +96,14 @@ pub const stopped_turn = rsql.Read(.{
 
 const close_turn = rsql.Write(.{
     .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now " ++
-        "WHERE turn_id=?1 AND session_ref=?5 AND outcome_code IS NULL",
+        "WHERE turn_id=?1 AND session_ref=@session(?5) AND outcome_code IS NULL",
     .Args = struct { turn_id: u64, code: []const u8, content_id: ?u64, position: u64, session: rsql.SessionHead },
     // Its round read the Turn open, under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
 const record_continuation = rsql.Write(.{
-    .sql = "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND session_ref=?2 AND outcome_code IS NULL " ++
+    .sql = "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND session_ref=@session(?2) AND outcome_code IS NULL " ++
         "AND @distinct(continuation_operation_id,operation_id) AND EXISTS(SELECT 1 FROM model_operation current " ++
         "WHERE current.operation_id=turn.operation_id AND " ++ continues_without_input_sql ++ ")",
     .Args = struct { turn_id: u64, session: rsql.SessionHead },

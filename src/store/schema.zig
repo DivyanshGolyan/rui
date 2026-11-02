@@ -630,15 +630,49 @@ pub const indexes = [_]Index{
 };
 
 /// Whether `table`'s rows belong to Sessions: it has a `session_ref` or a
-/// `sender_session_ref`. A typed write to one binds its Session's head.
+/// `sender_session_ref`. The tests' touch oracle watches exactly these.
 pub fn carriesSessions(comptime table: []const u8) bool {
+    return hasColumn(table, "session_ref") or hasColumn(table, "sender_session_ref");
+}
+
+/// The names of `table`'s columns.
+pub fn columnsOf(comptime table: []const u8) []const []const u8 {
     comptime {
         for (tables) |candidate| {
             if (!std.mem.eql(u8, candidate.name, table)) continue;
-            for (candidate.columns) |column| {
-                if (std.mem.eql(u8, column.name, "session_ref") or std.mem.eql(u8, column.name, "sender_session_ref")) return true;
-            }
+            var names: []const []const u8 = &.{};
+            for (candidate.columns) |column| names = names ++ .{column.name};
+            return names;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// Whether `table` has a column named `column`.
+pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return true;
             return false;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// The column sets that identify one row of `table`: its primary key, its
+/// unique constraints, and its unique indexes without a WHERE (a partial
+/// index identifies rows only under its predicate).
+pub fn keys(comptime table: []const u8) []const []const []const u8 {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            var found: []const []const []const u8 = &.{candidate.primary_key};
+            found = found ++ candidate.uniques;
+            for (indexes) |index| {
+                if (index.unique and index.where == null and std.mem.eql(u8, index.table, table)) found = found ++ .{index.columns};
+            }
+            return found;
         }
         @compileError("schema: no table named " ++ table);
     }

@@ -1151,7 +1151,7 @@ const TestingRound = struct {
         .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
     });
     const date_session = rsql.Write(.{
-        .sql = "UPDATE session SET created_at=@now WHERE session_ref=?1 AND revision=?2",
+        .sql = "UPDATE session SET created_at=@now WHERE session_ref=@session(?1) AND revision=?2",
         .Args = struct { session: rsql.SessionHead, revision: u64 },
         .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
     });

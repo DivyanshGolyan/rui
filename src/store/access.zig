@@ -64,7 +64,7 @@ pub const Positions = struct {
 
 /// The one compare-and-set on `next_position` for converted code.
 const advance = rsql.Write(.{
-    .sql = "UPDATE session SET next_position=?3 WHERE session_ref=?1 AND next_position=?2",
+    .sql = "UPDATE session SET next_position=?3 WHERE session_ref=@session(?1) AND next_position=?2",
     .Args = struct { session: rsql.SessionHead, expected: u64, next: u64 },
     // The head was read in this transaction under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -278,14 +278,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 fn run(_: *Self, entry: *const Queued) Error!void {
                     const statement = entry.statement.?;
                     const destination: *S.Result = @ptrCast(@alignCast(entry.destination.?));
+                    // A read whose keys allow one row takes no step to look for a second.
                     switch (S.cardinality) {
                         .one => {
                             destination.* = try nextRow(S.Row, statement) orelse return error.CorruptStore;
-                            if (try nextRow(S.Row, statement) != null) return error.CorruptStore;
+                            if (!S.keyed and try nextRow(S.Row, statement) != null) return error.CorruptStore;
                         },
                         .optional => {
                             destination.* = try nextRow(S.Row, statement);
-                            if (destination.* != null and try nextRow(S.Row, statement) != null) return error.CorruptStore;
+                            if (!S.keyed and destination.* != null and try nextRow(S.Row, statement) != null) return error.CorruptStore;
                         },
                         .at_most => |max| {
                             destination.* = .{};
