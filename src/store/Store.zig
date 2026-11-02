@@ -79,8 +79,9 @@ pub const Store = struct {
     /// names generations this one never counted.
     instance: [16]u8 = undefined,
     statements: StatementCache = .{},
-    /// The Host hands out every id and sequence value; see `Identities`.
-    ids: Identities,
+    /// The Host hands out every id and sequence value, and each
+    /// transaction's second; see `HostValues`.
+    ids: HostValues,
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
@@ -606,7 +607,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttempt(&access, binding, code, result, faults));
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
@@ -997,7 +998,7 @@ pub fn touch(self: *Store, session_ref: []const u8) !void {
 /// Opens the entry point's write transaction: the only BEGIN of a Store
 /// transaction.
 pub fn begin(self: *Store) !void {
-    std.debug.assert(self.ids.taken.count() == 0);
+    std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
     try execute(self, "BEGIN IMMEDIATE");
 }
 
@@ -1005,14 +1006,28 @@ pub fn begin(self: *Store) !void {
 pub fn commit(self: *Store) !void {
     try execute(self, "COMMIT");
     self.ids.taken = .empty;
+    self.ids.second = 0;
 }
 
 /// Rolls back the open transaction. A Session it created no longer
 /// exists, so the entry point has touched everything.
 pub fn rollback(self: *Store) !void {
     self.touched.everything = true;
+    self.ids.second = 0;
     try execute(self, "ROLLBACK");
     try loadIdentities(self, self.ids.taken);
+}
+
+/// The open transaction's second, bound to every `@now` in it: read from
+/// the clock at its first use, and held until commit or rollback, so a
+/// nested Access dates its rows with its caller's second. Outside a
+/// transaction (a read Access), each use reads the clock.
+pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
+    if (self.ids.second != 0) return self.ids.second;
+    const second = std.math.cast(u32, @divFloor(try readUnixMilliseconds(self.io), 1000)) orelse return error.ClockReadFailed;
+    if (second == 0) return error.ClockReadFailed;
+    if (c.sqlite3_get_autocommit(self.database) == 0) self.ids.second = second;
+    return second;
 }
 
 /// A Workspace's identity in the Store: SHA-256 of its canonical text.
@@ -1183,20 +1198,26 @@ fn executeStatic(self: *Store, sql: [:0]const u8) !void {
 /// a Store-wide order.
 pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id };
 
-/// The next value of each `Identity`: the Store's maximum plus one, read at
-/// open and again for each column a rolled-back transaction took from.
-/// Correct because one Host owns the Store; the primary or unique key still
-/// refuses a duplicate, and a refused write fences.
-const Identities = struct {
+/// What the Host hands to transactions. The next value of each `Identity`
+/// is the Store's maximum plus one, read at open and again for each column
+/// a rolled-back transaction took from. Correct because one Host owns the
+/// Store; the primary or unique key still refuses a duplicate, and a
+/// refused write fences.
+const HostValues = struct {
     next: std.EnumArray(Identity, u64),
     /// The columns that handed out a value since `begin`.
     taken: std.EnumSet(Identity) = .empty,
+    /// The open transaction's Unix second for `@now`, or 0 before its first
+    /// use. A u32 holds seconds until 2106 and fits the padding after
+    /// `taken`, so the Store does not grow.
+    second: u32 = 0,
 };
 
 /// The next value of `column`, inside the open transaction. The one place
 /// an identity is allocated, so a per-Host range can replace the counter.
-pub fn takeIdentity(self: *Store, comptime column: Identity) error{IdentityExhausted}!u64 {
-    std.debug.assert(c.sqlite3_get_autocommit(self.database) == 0);
+pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExhausted, IdentityOutsideTransaction }!u64 {
+    // Rollback is what gives an id back; outside a transaction nothing would.
+    if (c.sqlite3_get_autocommit(self.database) != 0) return error.IdentityOutsideTransaction;
     const value = self.ids.next.get(column);
     if (value > std.math.maxInt(i64)) return error.IdentityExhausted;
     self.ids.next.set(column, value + 1);
@@ -1240,6 +1261,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
         execute(self, "ROLLBACK") catch return error.CanonicalRollbackFailed;
         if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
     }
+    self.ids.second = 0;
     loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
 }
 

@@ -119,14 +119,14 @@ pub const ContentBlob = struct {
 
 const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
-    .Args = struct { digest: [32]u8, length: u64, private: bool },
+    .Args = struct { digest: *const [32]u8, length: u64, private: bool },
     .Row = struct { content_id: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_content = rsql.Write(.{
     .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
-    .Args = struct { content_id: u64, digest: [32]u8, length: u64, private: bool },
+    .Args = struct { content_id: u64, digest: *const [32]u8, length: u64, private: bool },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -146,18 +146,20 @@ pub const Import = struct {
 };
 
 /// Queues the read that finds `value`'s row; `importSlot` follows its round.
+/// `value` must outlive the round, which reads its digest in place.
 pub fn lookup(a: anytype, value: *Import) void {
-    a.read(lookup_content, .{ .digest = value.digest, .length = value.length, .private = value.private }, &value.found);
+    a.read(lookup_content, .{ .digest = &value.digest, .length = value.length, .private = value.private }, &value.found);
 }
 
 const ContentSlot = struct { id: i64, existing: bool };
 
 /// After `lookup`'s round: the found row, or a new row queued with a Host
-/// identity and a zeroed payload of the right length.
+/// identity and a zeroed payload of the right length. `value` must outlive
+/// the round that writes it.
 pub fn importSlot(a: anytype, value: *const Import) !ContentSlot {
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try a.identity(.content_id);
-    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
+    a.write(insert_content, .{ .content_id = id, .digest = &value.digest, .length = value.length, .private = value.private });
     return .{ .id = @intCast(id), .existing = false };
 }
 

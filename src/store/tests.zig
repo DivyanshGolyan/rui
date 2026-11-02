@@ -1147,7 +1147,7 @@ const TestingRound = struct {
     });
     const insert_content = rsql.Write(.{
         .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),0)",
-        .Args = struct { content_id: u64, digest: [32]u8, length: u64 },
+        .Args = struct { content_id: u64, digest: *const [32]u8, length: u64 },
         .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
     });
     const date_session = rsql.Write(.{
@@ -1163,23 +1163,98 @@ const TestingRound = struct {
         defer entry.release();
         var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
         defer a.deinit();
-        return entry.finishTransaction(error{TestingGuard}, .{}, body(&a, session, text, revision));
+        return entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, body(&a, session, text, revision)));
     }
 
     fn body(a: anytype, session: []const u8, text: []const u8, revision: u64) !u64 {
         var loaded: head.Result = undefined;
         a.read(head, .{ .session_ref = session }, &loaded);
         try a.run();
-        const positions = try a.touch(loaded.head);
+        const positions = try a.positions(loaded.head);
         const first = try positions.take(2);
         const content_id = try a.identity(.content_id);
-        a.write(insert_content, .{ .content_id = content_id, .digest = protocol.contentDigest(text), .length = text.len });
+        const digest = protocol.contentDigest(text);
+        a.write(insert_content, .{ .content_id = content_id, .digest = &digest, .length = text.len });
         a.writeContent(content_id, text);
         a.write(date_session, .{ .session = loaded.head, .revision = revision });
         try a.commit();
         return first;
     }
 };
+
+test "an Access that touches a fifth Session records everything and still commits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var sessions: [5]protocol.Bounded(protocol.max_session_bytes) = undefined;
+    inline for (&sessions, .{ "five-a", "five-b", "five-c", "five-d", "five-e" }) |*session, key| session.* = try configureTestSession(&storage, key);
+
+    const Five = struct {
+        fn body(a: anytype, all: []const protocol.Bounded(protocol.max_session_bytes)) !void {
+            for (all) |session| {
+                var loaded: TestingRound.head.Result = undefined;
+                a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
+                try a.run();
+                a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
+                try a.run();
+            }
+            try a.commit();
+        }
+    };
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+        defer a.deinit();
+        try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, Five.body(&a, &sessions)));
+    }
+    try std.testing.expect(storage.touched.everything);
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(DISTINCT created_at) FROM session"));
+}
+
+test "every Access in one transaction dates its rows with the transaction's second" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const first = try configureTestSession(&storage, "second-first");
+    const second = try configureTestSession(&storage, "second-second");
+
+    const Nested = struct {
+        fn date(store: *Store, session: []const u8) !void {
+            var a = store_access.Access(.nested, error{TestingGuard}).within(store);
+            defer a.deinit();
+            var loaded: TestingRound.head.Result = undefined;
+            a.read(TestingRound.head, .{ .session_ref = session }, &loaded);
+            try a.run();
+            a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
+            try a.apply();
+        }
+
+        fn clockSecond() !i64 {
+            return @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
+        }
+    };
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    try store_core.begin(&storage);
+    try Nested.date(&storage, first.slice());
+    const dated = try store_core.transactionSecond(&storage);
+    // The clock moves on to a later second before the second Access dates.
+    while (try Nested.clockSecond() == dated) try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
+    try Nested.date(&storage, second.slice());
+    try store_core.commit(&storage);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(DISTINCT created_at) FROM session"));
+    try std.testing.expectEqual(@as(u64, @intCast(dated)), try queryU64(storage.database, "SELECT max(created_at) FROM session"));
+    // Commit cleared it: the next transaction reads the clock again.
+    try store_core.begin(&storage);
+    try std.testing.expect(try store_core.transactionSecond(&storage) > dated);
+    try store_core.rollbackAfterError(&storage, .{});
+}
 
 test "an Access commits its writes, positions and identities together, or none of them" {
     var tmp = std.testing.tmpDir(.{});

@@ -5,6 +5,7 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const tool_catalog = @import("../tools.zig");
 const rsql = @import("rsql.zig");
+const change_ring = @import("../change_ring.zig");
 pub const c = @import("sqlite");
 
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
@@ -393,16 +394,22 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
 }
 
 /// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
-/// the text uses @now.
-pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64) !void {
+/// the text uses @now. Integers are copied into the statement. Text and
+/// blobs are read in place when the round steps the statement, so nothing
+/// is allocated: a `[]const u8` or `*const [n]u8` argument is the caller's
+/// memory, which outlives the round, and a SessionHead binds `session_ref`,
+/// the reference the Access keeps until commit.
+pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64, session_ref: ?*const change_ring.Id) !void {
     const info = @typeInfo(S.Args).@"struct";
-    inline for (info.field_names, info.field_types, 1..) |name, Field, index| try bindValue(statement, index, Field, @field(args, name));
+    inline for (info.field_names, info.field_types, 1..) |name, Field, index| {
+        if (Field == rsql.SessionHead) try bindText(statement, index, session_ref.?) else try bindValue(statement, index, Field, @field(args, name));
+    }
     if (S.uses_now) try bindI64(statement, info.field_names.len + 1, now);
 }
 
 fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: T) !void {
-    if (T == rsql.SessionHead) return bindCopied(statement, index, &value.ref);
-    if (T == []const u8) return bindCopied(statement, index, value);
+    // An empty slice may carry any address; "" is a real one, so it binds '' and not NULL.
+    if (T == []const u8) return bindText(statement, index, if (value.len == 0) "" else value);
     if (T == rsql.Positive) return bindU64(statement, index, value.get());
     switch (@typeInfo(T)) {
         .optional => |optional| if (value) |present| try bindValue(statement, index, optional.child, present) else {
@@ -410,33 +417,15 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
         },
         .bool => try bindI64(statement, index, @as(i64, @intFromBool(value))),
         .int => try bindU64(statement, index, value),
-        // Tag names are static, so SQLite may borrow them.
+        // Tag names are static.
         .@"enum" => try bindText(statement, index, @tagName(value)),
-        .array => |array| {
-            comptime std.debug.assert(array.child == u8);
-            const copy = try sqliteCopy(&value);
-            if (c.sqlite3_bind_blob64(statement, index, copy, value.len, c.sqlite3_free) != c.SQLITE_OK) return error.BindFailed;
+        .pointer => |pointer| {
+            comptime std.debug.assert(pointer.size == .one and @typeInfo(pointer.child).array.child == u8);
+            try bindBlob(statement, index, value);
         },
+        .array => @compileError("rsql: an Args array would die with the call that queued it; bind a *const " ++ @typeName(T)),
         else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
     }
-}
-
-/// A typed statement is bound when queued and stepped when its round runs,
-/// after the caller's arguments are gone, so SQLite owns a copy and frees it.
-/// Not SQLITE_TRANSIENT: Zig refuses its address, -1, as a function pointer
-/// on aarch64.
-fn bindCopied(statement: *c.sqlite3_stmt, index: c_int, value: []const u8) !void {
-    // Empty text has no bytes to outlive.
-    if (value.len == 0) return bindText(statement, index, "");
-    const copy = try sqliteCopy(value);
-    if (c.sqlite3_bind_text64(statement, index, copy, value.len, c.sqlite3_free, c.SQLITE_UTF8) != c.SQLITE_OK) return error.BindFailed;
-}
-
-/// `bytes` in memory SQLite frees; a bind frees it even when it fails.
-fn sqliteCopy(bytes: []const u8) error{OutOfMemory}![*]u8 {
-    const copy: [*]u8 = @ptrCast(c.sqlite3_malloc64(bytes.len) orelse return error.OutOfMemory);
-    @memcpy(copy[0..bytes.len], bytes);
-    return copy;
 }
 
 /// The current row as `Row`. Every value that breaks its type is

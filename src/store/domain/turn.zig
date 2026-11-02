@@ -128,7 +128,7 @@ pub fn queueClose(a: anytype, positions: *store_access.Positions, turn_id: u64, 
 /// After a `stopped_turn` round: cancels the Turn it found ready.
 pub fn queueStopCompletion(a: anytype, ready: stopped_turn.Result, turn_id: u64) !void {
     const row = ready orelse return;
-    try queueClose(a, try a.touch(row.session), turn_id, .cancelled);
+    try queueClose(a, try a.positions(row.session), turn_id, .cancelled);
 }
 
 /// Every writer that can let an active Turn continue without input queues
@@ -225,7 +225,7 @@ pub fn closeTurn(self: *Store, turn_id: u64, operation_id: ?u64, outcome: TurnOu
     a.read(open_turn, .{ .turn_id = turn_id, .operation_id = operation_id }, &open);
     try a.run();
     const row = open orelse return false;
-    try queueClose(&a, try a.touch(row.session), turn_id, outcome);
+    try queueClose(&a, try a.positions(row.session), turn_id, outcome);
     try a.apply();
     return true;
 }

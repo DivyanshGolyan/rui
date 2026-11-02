@@ -19,7 +19,7 @@ pub const Mode = enum {
     /// Reads only, outside any transaction.
     read,
     /// Opens the transaction before its first statement and ends it with
-    /// `commit`, or with `abandon` when it finds no work.
+    /// `commit`, or with `abandon` when it finds no work or fails.
     write,
     /// Writes inside a transaction its caller opened, and ends with `apply`:
     /// how unconverted code runs a rule that has an Access form.
@@ -34,14 +34,16 @@ pub const Failure = error{
     OutOfMemory,
     StatementFailed,
     CanonicalStorageFull,
+    CanonicalRollbackFailed,
     CorruptStore,
     ContentWriteFailed,
     SqliteExecFailed,
     ClockReadFailed,
     SessionPositionExhausted,
     IdentityExhausted,
+    IdentityOutsideTransaction,
     IdentityReadFailed,
-    TooManySessions,
+    TooManyPositionClaims,
     RoundFull,
     StatementQueuedTwice,
 };
@@ -77,25 +79,35 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         const max_queued = 8;
 
         store: *Store,
-        /// The Host's Unix second, bound to @now: read once, by the first
-        /// statement that uses it.
-        now: ?i64 = null,
         opened: bool = false,
+        /// Set by `commit` and `abandon`; `deinit` refuses a write Access
+        /// that opened its transaction without either.
+        ended: bool = false,
         /// The first failure; every later call does nothing and every round
         /// reports it.
         failure: ?Error = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
-        claims: [change_ring.Touched.max]Positions = undefined,
+        claims: [max_claims]Positions = undefined,
         claimed: u8 = 0,
 
+        /// No transition takes positions in more Sessions than the change
+        /// ring tracks; touching more only degrades the ring's record.
+        const max_claims = change_ring.Touched.max;
+
         const Queued = struct {
+            run: *const fn (*Self, *const Queued) Error!void,
             /// Null for a content payload.
             statement: ?*c.sqlite3_stmt,
-            run: *const fn (*Self, *const Queued) Error!void,
-            destination: ?*anyopaque = null,
-            content_id: u64 = 0,
-            bytes: []const u8 = "",
+            target: union {
+                /// A read's result.
+                destination: *anyopaque,
+                payload: struct { content_id: u64, bytes: []const u8 },
+                none: void,
+            },
+            /// The reference a write's @session binds, read in place when
+            /// the round runs.
+            session_ref: change_ring.Id = undefined,
         };
 
         /// An Access under `entry`'s lock.
@@ -114,7 +126,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Queues a read; `destination` is defined once the round runs.
         pub fn read(a: *Self, comptime S: type, args: S.Args, destination: *S.Result) void {
             comptime std.debug.assert(S.kind == .read);
-            a.queueStatement(S, &args, runRead(S), destination);
+            a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, null);
         }
 
         /// Ends the round: runs every queued statement in order.
@@ -132,27 +144,23 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// Records that this Access changes `head`'s Session, and returns
         /// its position claimer.
-        pub fn touch(a: *Self, head: rsql.SessionHead) error{TooManySessions}!*Positions {
+        pub fn positions(a: *Self, head: rsql.SessionHead) error{TooManyPositionClaims}!*Positions {
             comptime std.debug.assert(mode != .read);
+            a.touch(head);
             for (a.claims[0..a.claimed]) |*claim| if (std.mem.eql(u8, &claim.head.ref, &head.ref)) return claim;
-            if (a.claimed == a.claims.len) return error.TooManySessions;
-            const touched = &a.store.touched;
-            if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
+            if (a.claimed == a.claims.len) return error.TooManyPositionClaims;
             a.claims[a.claimed] = .{ .head = head };
             a.claimed += 1;
             return &a.claims[a.claimed - 1];
         }
 
-        /// Queues a write, touching the Session it binds. A failed guard
-        /// fails the round that runs it.
+        /// Queues a write, touching the Session its @session names. A
+        /// failed guard fails the round that runs it.
         pub fn write(a: *Self, comptime S: type, args: S.Args) void {
             comptime std.debug.assert(S.kind == .write and mode != .read);
-            if (S.session_field) |field| if (a.failure == null) {
-                _ = a.touch(@field(args, field)) catch |err| {
-                    a.failure = err;
-                };
-            };
-            a.queueStatement(S, &args, runWrite(S), null);
+            const session: ?rsql.SessionHead = if (S.session_field) |field| @field(args, field) else null;
+            if (session) |head| a.touch(head);
+            a.queueStatement(S, &args, runWrite(S), .{ .none = {} }, if (session) |head| head.ref else null);
         }
 
         /// The next value of `column`, inside this transaction.
@@ -168,7 +176,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// outlive the round.
         pub fn writeContent(a: *Self, content_id: u64, bytes: []const u8) void {
             comptime std.debug.assert(mode != .read);
-            a.push(.{ .statement = null, .run = runPayload, .content_id = content_id, .bytes = bytes });
+            if (a.reserve()) |slot| {
+                slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
+                a.queued += 1;
+            }
         }
 
         /// Runs the queued writes and one compare-and-set per Session that
@@ -181,6 +192,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = err;
                 return err;
             };
+            a.ended = true;
         }
 
         /// `commit` without COMMIT: the caller's transaction stays open.
@@ -189,20 +201,36 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             try a.finishWrites();
         }
 
-        /// Ends a write Access that found no work: nothing queued runs.
-        pub fn abandon(a: *Self) Error!void {
+        /// Ends a write Access without committing: drops what it queued
+        /// and rolls back the transaction it opened, as the Entry would,
+        /// `faults` included. A transition that finds no work calls it,
+        /// and `end` calls it on every error.
+        pub fn abandon(a: *Self, faults: store_core.Faults) Error!void {
             comptime std.debug.assert(mode == .write);
             a.resetQueued();
             a.claimed = 0;
-            if (a.opened) store_core.rollback(a.store) catch |err| {
-                a.failure = err;
-                return err;
-            };
+            a.ended = true;
+            if (a.opened) try store_core.rollbackAfterError(a.store, faults);
         }
 
-        /// Clears statements queued but never run, after an early return.
+        /// The transition's `result`, after abandoning the Access when it
+        /// is an error. A write Access's entry point returns through it, so
+        /// no exit leaves the transaction open; a failed rollback takes the
+        /// error's place, and the Entry fences on it.
+        pub fn end(a: *Self, faults: store_core.Faults, result: anytype) @TypeOf(result) {
+            comptime std.debug.assert(mode == .write);
+            _ = result catch |err| {
+                a.abandon(faults) catch |failed| return failed;
+                return err;
+            };
+            return result;
+        }
+
+        /// Clears statements queued but never run. A write Access that
+        /// opened its transaction must have ended by now, in every build.
         pub fn deinit(a: *Self) void {
             a.resetQueued();
+            if (mode == .write and a.opened and !a.ended) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
         fn finishWrites(a: *Self) Error!void {
@@ -210,7 +238,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             try a.run();
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
-                a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), null);
+                a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} }, claim.head.ref);
                 try a.run();
             };
             a.claimed = 0;
@@ -227,14 +255,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             };
         }
 
-        fn hostSecond(a: *Self) Error!i64 {
-            if (a.now) |now| return now;
-            const now = @divFloor(try store_core.readUnixMilliseconds(a.store.io), 1000);
-            a.now = now;
-            return now;
+        /// Records the change of `head`'s Session for the change ring. A
+        /// fifth Session makes the record "everything", as `Store.touch`
+        /// does; it never fails.
+        fn touch(a: *Self, head: rsql.SessionHead) void {
+            const touched = &a.store.touched;
+            if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
         }
 
-        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, destination: ?*anyopaque) void {
+        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target"), session_ref: ?change_ring.Id) void {
             a.ensureOpen();
             if (a.failure != null) return;
             const statement = store_core.cachedTyped(a.store, S) catch |err| {
@@ -245,27 +274,29 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = error.StatementQueuedTwice;
                 return;
             };
-            const now = if (S.uses_now) a.hostSecond() catch |err| {
+            const now = if (S.uses_now) store_core.transactionSecond(a.store) catch |err| {
                 a.failure = err;
                 return;
             } else 0;
-            sqlite.bindArgs(statement, S, args, now) catch |err| {
+            const slot = a.reserve() orelse return;
+            slot.* = .{ .statement = statement, .run = runner, .target = target };
+            if (session_ref) |ref| slot.session_ref = ref;
+            sqlite.bindArgs(statement, S, args, now, if (session_ref != null) &slot.session_ref else null) catch |err| {
                 sqlite.resetCached(statement);
                 a.failure = err;
                 return;
             };
-            a.push(.{ .statement = statement, .run = runner, .destination = destination });
-            if (a.failure != null) sqlite.resetCached(statement);
+            a.queued += 1;
         }
 
-        fn push(a: *Self, entry: Queued) void {
-            if (a.failure != null) return;
+        /// The next queue slot, or null after recording `RoundFull`.
+        fn reserve(a: *Self) ?*Queued {
+            if (a.failure != null) return null;
             if (a.queued == a.queue.len) {
                 a.failure = error.RoundFull;
-                return;
+                return null;
             }
-            a.queue[a.queued] = entry;
-            a.queued += 1;
+            return &a.queue[a.queued];
         }
 
         fn resetQueued(a: *Self) void {
@@ -277,7 +308,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             return &struct {
                 fn run(_: *Self, entry: *const Queued) Error!void {
                     const statement = entry.statement.?;
-                    const destination: *S.Result = @ptrCast(@alignCast(entry.destination.?));
+                    const destination: *S.Result = @ptrCast(@alignCast(entry.target.destination));
                     // A read whose keys allow one row takes no step to look for a second.
                     switch (S.cardinality) {
                         .one => {
@@ -319,11 +350,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         fn runPayload(a: *Self, entry: *const Queued) Error!void {
-            if (entry.bytes.len == 0) return;
+            const payload = entry.target.payload;
+            if (payload.bytes.len == 0) return;
             var blob: ?*c.sqlite3_blob = null;
-            if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(entry.content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
+            if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(payload.content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
             defer _ = c.sqlite3_blob_close(blob);
-            if (c.sqlite3_blob_write(blob, entry.bytes.ptr, @intCast(entry.bytes.len), 0) != c.SQLITE_OK) return error.ContentWriteFailed;
+            if (c.sqlite3_blob_write(blob, payload.bytes.ptr, @intCast(payload.bytes.len), 0) != c.SQLITE_OK) return error.ContentWriteFailed;
         }
     };
 }

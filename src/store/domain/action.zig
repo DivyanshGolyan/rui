@@ -287,7 +287,7 @@ pub fn settleActionAttempt(
         if (found.stopped) .{ .code = .cancelled, .text = content_domain.stop_cancellation_text, .content = &cancellation } else .{ .code = code, .text = result, .content = &effect };
 
     if (faults.content_import) return error.InjectedContentImportFailure;
-    const positions = try a.touch(found.session);
+    const positions = try a.positions(found.session);
     const content_id = try content_domain.importBytes(a, settled.content, settled.text);
     a.write(resolve_action, .{
         .action_id = binding.action_id,

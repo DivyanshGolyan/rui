@@ -338,7 +338,7 @@ pub fn statementError(comptime kind: StatementKind, comptime sql: []const u8, co
         if (highest != arguments) return std.fmt.comptimePrint("rsql: Args has {d} fields but the text binds up to ?{d}", .{ arguments, highest });
         for (uses[0..highest], 1..) |count, number| if (count == 0) return std.fmt.comptimePrint("rsql: ?{d} is never used", .{number});
         return switch (kind) {
-            .read => rowError(tokens, Row),
+            .read => if (sessionField(Args) != null) "rsql: a read binds no SessionHead; it names a Session by its reference text" else rowError(tokens, Row),
             .write => sessionError(tokens, Args, uses),
         };
     }
