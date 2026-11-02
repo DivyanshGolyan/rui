@@ -327,7 +327,7 @@ pub fn renderSessionListLocked(self: *Store, request: *const protocol.ListSessio
 fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
     var ceiling = request.ceiling;
     if (request.after == 0) {
-        const maximum = try store_core.cached(self, "SELECT coalesce(max(rowid),0) FROM session");
+        const maximum = try store_core.cached(self, "SELECT coalesce(max(created_seq),0) FROM session");
         defer sqlite.resetCached(maximum);
         if (c.sqlite3_step(maximum) != c.SQLITE_ROW) return error.SessionReadFailed;
         const value = c.sqlite3_column_int64(maximum, 0);
@@ -342,9 +342,9 @@ fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, 
     var more = false;
     {
         const statement = if (request.workspace == null)
-            try store_core.cached(self, "SELECT rowid,session_ref FROM session WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 9")
+            try store_core.cached(self, "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT 9")
         else
-            try store_core.cached(self, "SELECT rowid,session_ref FROM session INDEXED BY session_workspace_list WHERE rowid>?1 AND rowid<=?2 AND workspace=?3 ORDER BY rowid LIMIT 9");
+            try store_core.cached(self, "SELECT created_seq,session_ref FROM session INDEXED BY session_workspace_list WHERE created_seq>?1 AND created_seq<=?2 AND workspace=?3 ORDER BY created_seq LIMIT 9");
         defer sqlite.resetCached(statement);
         try sqlite.bindU64(statement, 1, request.after);
         try sqlite.bindU64(statement, 2, ceiling);
@@ -1181,7 +1181,7 @@ fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReport
         self,
         "SELECT stopped.command_key,stopped.admission_cutoff FROM session_stop stopped " ++
             "JOIN core_command command ON command.command_key=stopped.command_key " ++
-            "WHERE stopped.session_ref=?1 ORDER BY command.rowid",
+            "WHERE stopped.session_ref=?1 ORDER BY command.command_seq",
     );
     defer sqlite.resetCached(stops);
     try sqlite.bindText(stops, 1, session_ref);
@@ -1382,7 +1382,7 @@ fn appendAllActions(self: *Store, session_ref: []const u8, capture: *SessionRepo
 }
 
 fn appendPermissionDecisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT decision.command_key,decision.action_id,decision.decision,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.rowid");
+    const statement = try store_core.cached(self, "SELECT decision.command_key,decision.action_id,decision.decision,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.command_seq");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;
@@ -1404,7 +1404,7 @@ fn appendPermissionDecisions(self: *Store, session_ref: []const u8, capture: *Se
 }
 
 fn appendSessionStops(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key WHERE command.kind=3 AND command.target=?1 ORDER BY command.rowid");
+    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key WHERE command.kind=3 AND command.target=?1 ORDER BY command.command_seq");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;
@@ -1422,7 +1422,7 @@ fn appendSessionStops(self: *Store, session_ref: []const u8, capture: *SessionRe
 }
 
 fn appendModelInterruptions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id FROM model_interruption_command interruption JOIN core_command command ON command.command_key=interruption.command_key WHERE interruption.session_ref=?1 ORDER BY command.rowid");
+    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id FROM model_interruption_command interruption JOIN core_command command ON command.command_key=interruption.command_key WHERE interruption.session_ref=?1 ORDER BY command.command_seq");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;

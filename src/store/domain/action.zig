@@ -201,7 +201,7 @@ pub fn actionSupersededByStopLocked(self: *Store, binding: ActionAttemptBinding)
     const statement = try store_core.cached(
         self,
         "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
-            "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
+            "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.command_seq LIMIT 1) " ++
             "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
             "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
     );

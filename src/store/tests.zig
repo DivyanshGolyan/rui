@@ -4529,8 +4529,8 @@ test "Full Message projection work does not multiply Messages by stops" {
             }
             for (1..stop_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
-                    "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) " ++
-                        "VALUES('stop-{0}',3,'{2s}',zeroblob(32),NULL,NULL,1,'accepted',0,0);" ++
+                    "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+                        "VALUES('stop-{0}',3,'{2s}',zeroblob(32),NULL,NULL,1,'accepted',0,0,(SELECT coalesce(max(command_seq),0)+1 FROM core_command));" ++
                         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) " ++
                         "VALUES('stop-{0}','{2s}',NULL,{1},{0},1)",
                     .{ index, message_count, session.slice() },
@@ -9532,7 +9532,8 @@ test "runnable discovery measures eligible ineligible and history populations in
                 try sqlite.exec(
                     database,
                     "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
-                        "output_schema_content_id,revision,next_position,created_at) VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1)",
+                        "output_schema_content_id,revision,next_position,created_at,created_seq) " ++
+                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,1000000)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -9549,8 +9550,8 @@ test "runnable discovery measures eligible ineligible and history populations in
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
-                    "output_schema_content_id,revision,next_position,created_at) " ++
-                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1 FROM sequence; " ++
+                    "output_schema_content_id,revision,next_position,created_at,created_seq) " ++
+                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
@@ -9702,8 +9703,9 @@ fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try sqlite.exec(
         database,
         "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask," ++
-            "permission_mode,revision,next_position,created_at) " ++
-            "SELECT DISTINCT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1 FROM model_operation",
+            "permission_mode,revision,next_position,created_at,created_seq) " ++
+            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1,base+row_number() OVER (ORDER BY session_ref) " ++
+            "FROM (SELECT DISTINCT session_ref FROM model_operation),(SELECT coalesce(max(created_seq),0) AS base FROM session)",
     );
 }
 

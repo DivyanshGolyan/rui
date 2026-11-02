@@ -22,7 +22,7 @@ pub const schema_version: u32 = 46;
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
-    .{ .schema_version = 46, .digest = 0x27b543d1c7b1fe2a },
+    .{ .schema_version = 46, .digest = 0x9300a2cbc17b6266 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -192,8 +192,12 @@ pub const tables = [_]Table{
             label_column,
             .{ .name = "created_at", .type = .int, .check = "created_at>0" },
             .{ .name = "next_position", .type = .int, .check = "next_position>0" },
+            // Creation order: list cursors and the Workspace key, allocated
+            // max+1 in the creating transaction.
+            .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
         },
         .primary_key = &.{"session_ref"},
+        .uniques = &.{&.{"created_seq"}},
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
             references("output_schema_content_id", "content", content_reference),
@@ -212,8 +216,11 @@ pub const tables = [_]Table{
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
+            // Command order, allocated max+1 in the recording transaction.
+            .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
         },
         .primary_key = &.{"command_key"},
+        .uniques = &.{&.{"command_seq"}},
         .foreign_keys = &.{
             references("primary_content_id", "content", content_reference),
             references("secondary_content_id", "content", content_reference),
