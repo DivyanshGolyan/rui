@@ -395,7 +395,10 @@ const RecallStaging = struct {
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = .{ .io = task.io, .cancellation = job.interrupted }, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
-    return run.into(job.files.inspection, &job.result.rendering, &job.result.command_stderr_restored);
+    const ended = run.into(job.files.inspection);
+    job.result.rendering = ended.rendering;
+    job.result.command_stderr_restored = ended.stderr_restored;
+    return ended.outcome;
 }
 
 /// One Host command line, run as a screen runs it: by `command`, for
@@ -409,27 +412,34 @@ pub const CommandRun = struct {
     /// Decoded in place.
     line: []u8,
 
+    /// How a run ended.
+    pub const Ended = struct {
+        /// The output became the page's, after which any failure is the
+        /// caller's to end on.
+        rendering: bool = false,
+        /// Stderr came back from the page. Only then may the caller write
+        /// the page to stderr: otherwise fd 2 may still be the page.
+        stderr_restored: bool = false,
+        outcome: anyerror!void = {},
+    };
+
     /// Runs the command with its complete stdout and stderr written to
-    /// `page` from its start. `rendering` turns true once the output is the
-    /// page's, after which any failure is the caller's to end on;
-    /// `stderr_restored` says whether stderr came back.
-    pub fn into(self: CommandRun, page: std.Io.File, rendering: *bool, stderr_restored: *bool) !void {
+    /// `page` from its start.
+    pub fn into(self: CommandRun, page: std.Io.File) Ended {
         const io = self.requests.io;
-        try page.setLength(io, 0);
-        try io.vtable.fileSeekTo(io.userdata, page, 0);
+        page.setLength(io, 0) catch |err| return .{ .outcome = err };
+        io.vtable.fileSeekTo(io.userdata, page, 0) catch |err| return .{ .outcome = err };
         // Saved descriptors must not leak into anything the command executes.
         const saved = [2]c_int{ std.c.fcntl(1, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)), std.c.fcntl(2, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)) };
         defer for (saved) |fd| if (fd >= 0) {
             _ = std.c.close(fd);
         };
-        if (saved[0] < 0 or saved[1] < 0) return error.TerminalCleanupFailed;
+        if (saved[0] < 0 or saved[1] < 0) return .{ .outcome = error.TerminalCleanupFailed };
         // Redirected descriptors are output custody: any failure now is fatal.
-        rendering.* = true;
         const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, self.requests, self.store, self.session, self.line);
         const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
-        stderr_restored.* = std.c.dup2(saved[1], 2) >= 0;
-        if (!stdout_restored or !stderr_restored.*) return error.TerminalCleanupFailed;
-        return result;
+        const stderr_restored = std.c.dup2(saved[1], 2) >= 0;
+        return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = if (!stdout_restored or !stderr_restored) error.TerminalCleanupFailed else result };
     }
 };
 

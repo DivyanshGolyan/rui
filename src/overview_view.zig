@@ -363,10 +363,10 @@ pub const Ran = struct {
     output: []const u8,
     /// It printed more than `output` holds.
     cut: bool = false,
-    outcome: union(enum) {
+    outcome: enum {
         done,
-        /// It never started, for the error this names.
-        not_run: []const u8,
+        /// It never started.
+        not_run,
         /// It failed once its output was being kept, which ends the
         /// overview, as a conversation ends.
         failed,
@@ -411,12 +411,13 @@ pub const Panel = union(enum) {
 
 /// What /help shows under its heading: the overview's keys, then its
 /// commands, which its table lists.
-const help_text = "Up/Down or Home/End select a Session · Enter on an empty draft opens it\n" ++
-    "Ctrl-X twice stops the selected Session\n" ++
-    "Typing a message and Enter starts a new Session with it\n" ++
-    "Typing / lists the commands · Up/Down highlight one · Tab or Enter takes it\n" ++
-    "Esc or Ctrl-G clears the draft, then the held start settings\n" ++
-    "Ctrl-C or Ctrl-D leaves; Host work continues\n" ++
+const help_text = "Up/Down select a Session past the draft's lines · Shift-Up/Down always\n" ++
+    "Home/End select the first or last Session while the draft is empty\n" ++
+    "Enter on an empty draft opens the selected Session · Ctrl-X twice stops it\n" ++
+    "A message and Enter starts a new Session with it\n" ++
+    "/ lists the commands · Up/Down move the highlight · Tab or Enter takes it\n" ++
+    "Esc or Ctrl-G closes the list, this panel, the draft, then held settings\n" ++
+    "Ctrl-C, or Ctrl-D on an empty draft, leaves; Host work continues\n" ++
     "\n" ++ std.mem.trimEnd(u8, commands.help, "\n");
 
 /// How a model-list read ended.
@@ -729,6 +730,11 @@ pub const Notice = struct {
 
     pub fn text(self: *const Notice) []const u8 {
         return self.bytes[0..self.len];
+    }
+
+    fn firstLine(self: *const Notice) []const u8 {
+        const all = self.text();
+        return all[0 .. std.mem.indexOfScalar(u8, all, '\n') orelse all.len];
     }
 };
 
@@ -1951,7 +1957,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             .exit => effects.add(.exit),
             .stop => {
                 state.closePanel();
-                const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session first.", .{});
+                const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
                 stopKey(state, prompt, row.reference, row.state.asOf(state.now_ms), effects);
             },
         },
@@ -2041,7 +2047,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         if (text.len != 0) effects.add(.clear_draft);
         const row = state.selectedRow() orelse return;
         // The conversation's own commands write where this one does.
-        if (state.command) |running| return state.say(.attention, "! Wait for /{s} to finish.", .{@tagName(running.name)});
+        if (waitForCommand(state)) return;
         state.closePanel();
         return effects.add(.{ .open = row.reference });
     }
@@ -2080,7 +2086,10 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
             effects.add(.clear_draft);
         },
         .rename => {
-            const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session first.", .{});
+            // As a key that acts on a Session, it acts where the Sessions
+            // show, so the list shows the row it names.
+            state.closePanel();
+            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
             try requestCommand(state, .rename, row.reference, text, effects);
         },
         .setup => try requestCommand(state, .setup, null, text, effects),
@@ -2090,15 +2099,26 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
 /// Asks the shell to run `text`, the line of command `name`, once no other
 /// command runs.
 fn requestCommand(state: *State, name: commands.Name, ref: ?Reference, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
-    if (state.command) |running| return state.say(.attention, "! Wait for /{s} to finish.", .{@tagName(running.name)});
+    if (waitForCommand(state)) return;
     state.command = .{ .name = name, .session = ref, .text = try state.gpa.dupe(u8, text) };
     effects.add(.clear_draft);
     effects.add(.{ .command = state.command.? });
 }
 
-/// Takes a command's answer: a line it printed is a notice, more open a
-/// panel. What the overview cannot show (an answer after the person left,
-/// a failure that ends it) waits for the way out.
+/// True, and says so, while a command runs: one runs at a time.
+fn waitForCommand(state: *State) bool {
+    const running = state.command orelse return false;
+    state.say(.attention, "! Wait for /{s} to finish.", .{@tagName(running.name)});
+    return true;
+}
+
+/// What a key or command that needs a selected Session says without one.
+const no_selection = "! Select a Session first.";
+
+/// Takes a command's answer: short output is a notice, as a conversation
+/// shows it, and more opens a panel. What the overview cannot show (an
+/// answer after the person left, a failure that ends it) waits for the way
+/// out.
 fn ranCommand(state: *State, ran: Ran) error{OutOfMemory}!void {
     const command = &state.command.?;
     std.debug.assert(!command.answered);
@@ -2117,19 +2137,14 @@ fn ranCommand(state: *State, ran: Ran) error{OutOfMemory}!void {
     if (name == .rename) state.next_list_ms = 0;
     switch (ran.outcome) {
         .done => {},
-        .not_run => |why| return state.say(.attention, "! /{s} not run: {s}", .{ @tagName(name), why }),
+        // As a conversation says of an inspection that could not start.
+        .not_run => return state.say(.attention, "! /{s} unavailable.", .{@tagName(name)}),
         .failed => unreachable,
     }
-    if (text.len == 0 and !ran.cut) return state.say(.quiet, slash_commands.no_output, .{});
-    if (std.mem.indexOfScalar(u8, text, '\n') == null and !ran.cut) {
-        var notice: Notice = .{ .colour = if (std.mem.startsWith(u8, text, "rui: ")) .attention else .quiet };
-        var writer = std.Io.Writer.fixed(&notice.bytes);
-        // A line longer than the notice is cut, as `say` cuts.
-        slash_commands.writeResult(&writer, text) catch {};
-        notice.len = writer.buffered().len;
-        state.notice = notice;
-        return;
-    }
+    var said: [slash_commands.result_notice_bytes]u8 = undefined;
+    if (!ran.cut) if (slash_commands.resultNotice(&said, ran.output)) |notice| {
+        return state.say(if (std.mem.startsWith(u8, notice, "!")) .attention else .quiet, "{s}", .{notice});
+    };
     state.showPanel(.{ .output = .{ .name = name, .text = try keptOutput(state.gpa, text, ran.cut) } });
 }
 
@@ -2697,7 +2712,7 @@ pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout 
     const top: u16 = @intCast(@min(topRows(state), height));
     const kept: u16 = @intFromBool(state.selected != null and state.rows.items.len != 0);
     const fits = height >= 6 and state.size.width >= 6;
-    const below = if (fits) height - 2 - draft_rows else height;
+    const below = if (fits) height - 1 - hintRows(state) - draft_rows else height;
     const listed: u16 = if (fits) @intCast(@min(command_rows, draft_layout.cap(height) -| draft_rows, below -| (top + 1 + kept))) else 0;
     const input = below - listed;
     var picker: Layout.Rows = .{ .start = input, .end = input };
@@ -2705,6 +2720,14 @@ pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout 
         picker.start = input - @as(u16, @intCast(pickerFit(state, input - (top + 1 + kept)).used()));
     }
     return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input, .commands = .{ .start = input + 1, .end = below + 1 } };
+}
+
+/// Rows the line under the input takes: one, or as many as a notice has
+/// lines, up to a command's short result. A picker's keys share the first.
+fn hintRows(state: *const State) u16 {
+    if (state.prompt != null or state.picker != null) return 1;
+    const notice = state.notice orelse return 1;
+    return @intCast(@min(1 + std.mem.count(u8, notice.text(), "\n"), slash_commands.short_result_lines));
 }
 
 /// The top's rows: the title, the alarm bands or else the headline, the
@@ -2770,8 +2793,20 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
         lines[at.input] = try ruleLine(&painter, input.view);
         screen.listed = at.commands.len() != 0;
         if (screen.listed) try commandLines(&painter, &matches.?, state.list_row, lines[at.commands.start..at.commands.end]);
-        try composer(&painter, state, draft, &input, lines[at.commands.end .. height - 1]);
-        lines[height - 1] = try hints(&painter, state, draft, screen.listed);
+        const hinted = height - hintRows(state);
+        try composer(&painter, state, draft, &input, lines[at.commands.end..hinted]);
+        lines[hinted] = try hints(&painter, state, draft, screen.listed);
+        // A notice's further lines follow its first.
+        if (hinted + 1 < height) {
+            const notice = &state.notice.?;
+            var rest = std.mem.splitScalar(u8, notice.text(), '\n');
+            _ = rest.next();
+            for (lines[hinted + 1 ..]) |*line| {
+                painter.begin(false);
+                _ = try painter.put(1, rest.next().?, width -| 2, .{ .colour = notice.colour });
+                line.* = try painter.finish();
+            }
+        }
         screen.draft_anchor = input.lines[0].start;
         if (state.inputMode() == .compose) screen.cursor = .{ .row = @intCast(at.commands.end + input.shape.caret_line - input.view.first), .column = @intCast(@min(width - 1, 3 + input.shape.caret_column)) };
     }
@@ -3275,19 +3310,22 @@ fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) err
     painter.begin(false);
     const room = painter.width -| 2;
     const dot = painter.glyphs.dot;
+    // What Esc does here, as `compose` reads it: a list or a panel closes
+    // before the draft and the held settings clear.
+    const esc_does: ?[]const u8 = if (listed or state.panel != null) "esc close" else if (draft.bytes.len != 0 or !state.settings.empty()) "esc clear" else null;
     if (state.prompt) |prompt| {
         const text = try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
         _ = try painter.put(1, text, room, .{ .colour = .attention });
     } else if (state.shownPicker()) |picker| {
         // A notice shares the row, so the picker's keys stay in view.
-        const used = if (state.notice) |*notice| try painter.put(1, notice.text(), room, .{ .colour = notice.colour }) + 1 else 0;
+        const used = if (state.notice) |*notice| try painter.put(1, notice.firstLine(), room, .{ .colour = notice.colour }) + 1 else 0;
         const text = if (picker.step == .sign_in)
             try std.fmt.allocPrint(painter.arena, "{s}{s} choose {s} enter pick {s} esc models", .{ if (used != 0) " " else "", painter.glyphs.sides, dot, dot })
         else
             try std.fmt.allocPrint(painter.arena, "{s}{s} choose {s} enter pick {s} esc close", .{ if (used != 0) " " else "", painter.glyphs.arrows, dot, dot });
         _ = try painter.put(used, text, room -| used, .{ .colour = .quiet });
     } else if (state.notice) |*notice| {
-        _ = try painter.put(1, notice.text(), room, .{ .colour = notice.colour });
+        _ = try painter.put(1, notice.firstLine(), room, .{ .colour = notice.colour });
     } else if (state.starting()) {
         _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "Starting{s}", .{painter.glyphs.ellipsis}), room, .{ .colour = .quiet });
     } else if (!state.settings.empty()) {
@@ -3295,20 +3333,22 @@ fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) err
         text.writer.writeAll("start settings:") catch return error.OutOfMemory;
         writeSettings(&state.settings, &text.writer) catch return error.OutOfMemory;
         // Long settings are cut so the way out stays on screen.
-        const suffix = try std.fmt.allocPrint(painter.arena, " {s} esc clear", .{dot});
+        const suffix = try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ dot, esc_does.? });
         const used = try painter.put(1, text.written(), room -| painter.measure(suffix), .{ .colour = .quiet });
         _ = try painter.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
     } else if (draft.bytes.len != 0) {
         // What Enter and Esc do to this draft, as `enter` and `compose` read it.
         const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
         const enter_does: []const u8 = if (!slashed) "enter start " else if (commands.parse(draft.bytes) == .command) "enter run " else "";
-        const esc_does: []const u8 = if (listed) "esc close" else "esc clear";
-        const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does });
+        const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does.? });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
         const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(painter.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
-        const text = try std.fmt.allocPrint(painter.arena, "{s} select {s} enter open{s}", .{ painter.glyphs.arrows, dot, stop });
+        const close = if (esc_does) |does| try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ dot, does }) else "";
+        const text = try std.fmt.allocPrint(painter.arena, "{s} select {s} enter open{s}{s}", .{ painter.glyphs.arrows, dot, stop, close });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
+    } else if (esc_does) |does| {
+        _ = try painter.put(1, does, room, .{ .colour = .quiet });
     }
     return painter.finish();
 }
@@ -3897,8 +3937,8 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     }
 }
 
-/// A notice, which reads whole on a 40-column overview in the row under its
-/// input.
+/// A notice, which reads whole on a 40-column overview in the rows under
+/// its input, a row for each line.
 fn expectNotice(state: *State, expected: ?[]const u8) !void {
     return expectNoticeAt(state, expected, true);
 }
@@ -3917,8 +3957,9 @@ fn expectNoticeAt(state: *State, expected: ?[]const u8, whole_at_40: bool) !void
             const screen = try screenText(state, 40, 24, .{});
             defer std.testing.allocator.free(screen);
             var lines = std.mem.splitScalar(u8, screen, '\n');
-            for (0..23) |_| _ = lines.next();
-            try std.testing.expectEqualStrings(text, std.mem.trim(u8, lines.next().?, " "));
+            for (0..24 - (1 + std.mem.count(u8, text, "\n"))) |_| _ = lines.next();
+            var said = std.mem.splitScalar(u8, text, '\n');
+            while (said.next()) |line| try std.testing.expectEqualStrings(line, std.mem.trim(u8, lines.next().?, " "));
         }
     } else if (state.notice) |*notice| try std.testing.expectEqualStrings("", notice.text());
 }
@@ -7040,12 +7081,13 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     try std.testing.expect(std.mem.endsWith(u8, top, "Esc returns"));
     try std.testing.expectEqual(@as(usize, 79), top.len);
     for ([_][]const u8{
-        " Up/Down or Home/End select a Session · Enter on an empty draft opens it",
-        " Ctrl-X twice stops the selected Session",
-        " Typing a message and Enter starts a new Session with it",
-        " Typing / lists the commands · Up/Down highlight one · Tab or Enter takes it",
-        " Esc or Ctrl-G clears the draft, then the held start settings",
-        " Ctrl-C or Ctrl-D leaves; Host work continues",
+        " Up/Down select a Session past the draft's lines · Shift-Up/Down always",
+        " Home/End select the first or last Session while the draft is empty",
+        " Enter on an empty draft opens the selected Session · Ctrl-X twice stops it",
+        " A message and Enter starts a new Session with it",
+        " / lists the commands · Up/Down move the highlight · Tab or Enter takes it",
+        " Esc or Ctrl-G closes the list, this panel, the draft, then held settings",
+        " Ctrl-C, or Ctrl-D on an empty draft, leaves; Host work continues",
         "",
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
@@ -7055,10 +7097,19 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
         " /setup [OPTIONS]      future defaults",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
+    // The line under the input says Esc closes it, over held settings or a
+    // typed draft.
+    try expectScreenLine(&state, 23, " start settings: --permission-mode ask · esc close");
+    const draft = try typeText(&state, "fix the build");
+    const held = state.settings;
+    state.settings = .{};
+    const hinted = try draftLines(&state, draft, 80, 24);
+    defer std.testing.allocator.free(hinted);
+    state.settings = held;
+    try std.testing.expect(std.mem.indexOf(u8, hinted, " enter start · esc close") != null);
     // A draft typed under it stays when Esc closes it, and so do the held
     // start settings: Esc returns to the Sessions first. (Over a shown
     // command list, Esc closes the list first.)
-    const draft = try typeText(&state, "fix the build");
     try expectEffects(&.{}, try press(&state, draft, .clear));
     try std.testing.expect(state.panel == null);
     try std.testing.expect(!state.settings.empty());
@@ -7119,7 +7170,10 @@ test "/rename names the selected Session through the shell, as a conversation do
     var empty = try opened(&.{});
     defer empty.deinit();
     try expectEffects(&.{}, try submit(&empty, try typeText(&empty, "/rename lane four")));
-    try expectNotice(&empty, "Select a Session first.");
+    try expectNotice(&empty, "! Select a Session first.");
+    try std.testing.expectEqual(Colour.attention, empty.notice.?.colour);
+    try expectEffects(&.{}, try press(&empty, .{}, .stop));
+    try expectNotice(&empty, "! Select a Session first.");
 
     var state = try opened(&mixed);
     defer state.deinit();
@@ -7143,13 +7197,29 @@ test "/rename names the selected Session through the shell, as a conversation do
     for ([_]struct { Ran, []const u8, Colour }{
         .{ .{ .output = "rui: no session k7m2qx in this Store\n" }, "! no session k7m2qx in this Store", .attention },
         .{ .{ .output = "" }, slash_commands.no_output, .quiet },
-        .{ .{ .output = "", .outcome = .{ .not_run = "FileNotFound" } }, "! /rename not run: FileNotFound", .attention },
+        .{ .{ .output = "", .outcome = .not_run }, "! /rename unavailable.", .attention },
+        // Two lines are a notice too, as in a conversation.
+        .{ .{ .output = "Rui: Configured.\nrui: label saved locally only\n" }, "Configured.\n! label saved locally only", .quiet },
     }) |case| {
         _ = try submit(&state, try typeText(&state, "/rename x"));
         try ranWith(&state, case[0]);
         try expectNotice(&state, case[1]);
         try std.testing.expectEqual(case[2], state.notice.?.colour);
     }
+    // Both lines show under the input.
+    try expectScreenLine(&state, 22, " Configured.");
+    try expectScreenLine(&state, 23, " ! label saved locally only");
+}
+
+test "/rename under a panel brings the Sessions back, so the list shows the row it names" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
+    _ = try submit(&state, try typeText(&state, "/help"));
+    try std.testing.expect(state.panel != null);
+    var line = "/rename lane four".*;
+    try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .rename, .session = state.selected.?, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
+    try std.testing.expect(state.panel == null);
 }
 
 test "/setup needs no Session, and output of more than a line takes the Sessions' rows until Esc" {
@@ -7157,11 +7227,11 @@ test "/setup needs no Session, and output of more than a line takes the Sessions
     defer state.deinit();
     var line = "/setup --notifications off".*;
     try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
-    try ranWith(&state, .{ .output = "Saved defaults for future Sessions. Active Session unchanged.\nNotifications: off\n" });
+    try ranWith(&state, .{ .output = "Saved defaults for future Sessions.\nStore: /s (saved)\nNotifications: off\n" });
     try expectNotice(&state, null);
     const shown = try listRows(&state, .{});
     defer std.testing.allocator.free(shown);
-    try expectLines(shown, 1, &.{ " Saved defaults for future Sessions. Active Session unchanged.", " Notifications: off", "" });
+    try expectLines(shown, 1, &.{ " Saved defaults for future Sessions.", " Store: /s (saved)", " Notifications: off", "" });
     try std.testing.expect(std.mem.startsWith(u8, shown, " /setup "));
     try expectEffects(&.{}, try press(&state, .{}, .clear));
     try std.testing.expect(state.panel == null);

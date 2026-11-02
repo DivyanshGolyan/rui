@@ -169,12 +169,36 @@ pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) []const u8 {
 const max_unknown_name = 32;
 pub const unknown_bytes = "! Unknown command  · /help".len + max_unknown_name;
 
-/// Writes one line a command printed as a notice says it: the CLI's
-/// `Rui: ` dropped, and its `rui: ` diagnostics marked `!`.
-pub fn writeResult(writer: *std.Io.Writer, line: []const u8) std.Io.Writer.Error!void {
-    if (std.mem.startsWith(u8, line, "Rui: ")) return writer.writeAll(line[5..]);
-    if (std.mem.startsWith(u8, line, "rui: ")) return writer.print("! {s}", .{line[5..]});
-    return writer.writeAll(line);
+/// The most a command's output may hold and still show as a notice, on
+/// either screen; more opens a page.
+pub const short_result_bytes = 256;
+/// The most lines a command's output may hold and still show as a notice.
+pub const short_result_lines = 2;
+/// Room for a short result as a notice says it, a mark on each line.
+pub const result_notice_bytes = short_result_bytes + short_result_lines * "! ".len;
+
+/// What both screens say for `output`, a command's complete output, when it
+/// is short: each line with the CLI's `Rui: ` dropped and its `rui: `
+/// diagnostics marked `!`, or `no_output` for none. Null when the output
+/// takes a page.
+pub fn resultNotice(buffer: *[result_notice_bytes]u8, output: []const u8) ?[]const u8 {
+    if (output.len > short_result_bytes) return null;
+    const text = std.mem.trimEnd(u8, output, "\n");
+    if (text.len == 0) return no_output;
+    if (std.mem.count(u8, text, "\n") >= short_result_lines) return null;
+    // A mark replaces a longer prefix, and the buffer has room for one on
+    // every line besides, so the writes always fit.
+    var writer = std.Io.Writer.fixed(buffer);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (writer.buffered().len != 0) writer.writeByte('\n') catch unreachable;
+        if (std.mem.startsWith(u8, line, "Rui: ")) {
+            writer.writeAll(line[5..]) catch unreachable;
+        } else if (std.mem.startsWith(u8, line, "rui: ")) {
+            writer.print("! {s}", .{line[5..]}) catch unreachable;
+        } else writer.writeAll(line) catch unreachable;
+    }
+    return writer.buffered();
 }
 
 /// What a command that printed nothing says.
@@ -615,4 +639,16 @@ test "an unknown command names itself when it is short printable ASCII" {
     const long = "/" ++ @as([max_unknown_name]u8, @splat('x'));
     try std.testing.expectEqualStrings("! Unknown command · /help", unknown(&buffer, long));
     try std.testing.expectEqualStrings("! Unknown command " ++ long[0..max_unknown_name] ++ " · /help", unknown(&buffer, long[0..max_unknown_name]));
+}
+
+test "a command's short output is the same notice on both screens, and longer output takes a page" {
+    var buffer: [result_notice_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("Configured.", resultNotice(&buffer, "Rui: Configured.\n").?);
+    try std.testing.expectEqualStrings("Saved.\n! Host unavailable", resultNotice(&buffer, "Saved.\nrui: Host unavailable\n").?);
+    try std.testing.expectEqualStrings(no_output, resultNotice(&buffer, "").?);
+    try std.testing.expectEqualStrings(no_output, resultNotice(&buffer, "\n").?);
+    try std.testing.expect(resultNotice(&buffer, "one\ntwo\nthree\n") == null);
+    const long: [short_result_bytes + 1]u8 = @splat('x');
+    try std.testing.expect(resultNotice(&buffer, &long) == null);
+    try std.testing.expectEqual(@as(usize, short_result_bytes), resultNotice(&buffer, long[0..short_result_bytes]).?.len);
 }

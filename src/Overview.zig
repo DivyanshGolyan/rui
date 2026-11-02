@@ -840,11 +840,15 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             const ran: view.Ran = .{
                 .output = output.bytes[0..@min(output.len, view.max_output_bytes)],
                 .cut = output.len > view.max_output_bytes,
-                .outcome = if (outcome) |_| .done else |err| if (output.kept) .failed else .{ .not_run = @errorName(err) },
+                // As a conversation drops an inspection that could not
+                // start, the overview says only that it did not run.
+                .outcome = if (outcome) |_| .done else |_| if (output.kept) .failed else .not_run,
             };
-            const next = try self.event(.{ .ran = ran });
+            const next = self.event(.{ .ran = ran });
             // As in a conversation, a command that failed while it ran ends
-            // the overview; the core keeps its output for the way out.
+            // the overview, and its failure is the one reported, not one
+            // from taking the answer; the core keeps its output for the way
+            // out.
             if (ran.outcome == .failed) try outcome;
             return next;
         },
@@ -915,16 +919,18 @@ fn runCommand(self: *Self, requests: client.Requests, session: []const u8, line:
         self.command_page = file;
         break :page file;
     };
-    var stderr_restored = false;
     const command: session_reads.CommandRun = .{ .command = self.hooks.command, .init = self.init, .requests = requests, .store = self.options.store, .session = session, .line = line };
-    const ran = command.into(page, &self.output.kept, &stderr_restored);
-    if (!self.output.kept) return ran;
+    const ended = command.into(page);
+    self.output.kept = ended.rendering;
+    // Failed restoration may leave fd 2 on the page, so, as a conversation
+    // does, keep nothing for the way out to write there.
+    if (!ended.rendering or !ended.stderr_restored) return ended.outcome;
     // What it printed shows whether it ran to the end or not.
     self.output.len = page.readPositionalAll(self.init.io, &self.output.bytes, 0) catch |err| {
-        try ran;
+        try ended.outcome;
         return err;
     };
-    return ran;
+    return ended.outcome;
 }
 
 /// Saves the pick as `rui defaults configure --provider --model` would.
@@ -1245,11 +1251,7 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
-    // A ledger entry prints well under 512 bytes.
-    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
-    var guidance = std.Io.Writer.fixed(&bytes);
-    view.writeDeparture(&self.state, &guidance) catch unreachable;
-    _ = stderr.write(guidance.buffered());
+    self.writeDeparture();
     var ending = try ended;
     switch (ending) {
         .overview => {
@@ -1268,6 +1270,16 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             return self.leave(left.*, restored);
         },
     }
+}
+
+/// Writes the core's departure to stderr in one write. Never inlined: its
+/// buffer stays off `finish`'s frame.
+noinline fn writeDeparture(self: *const Self) void {
+    // A ledger entry prints well under 512 bytes.
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var guidance = std.Io.Writer.fixed(&bytes);
+    view.writeDeparture(&self.state, &guidance) catch unreachable;
+    _ = stderr.write(guidance.buffered());
 }
 
 /// Lets the conversation the person left join its borrowers and write its
@@ -3502,7 +3514,7 @@ test "a command that cannot start says why, and one that fails while it runs end
     try std.testing.expect(try rig.press("/setup\n") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 0), Printing.runs);
-    try std.testing.expectEqualStrings("! /setup not run: FileNotFound", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("! /setup unavailable.", rig.overview.state.notice.?.text());
 
     rig.overview.hooks.scratch = Printing.scratch;
     const said = "rui: configure: CanonicalStoreFailure; check saved requests before retrying\n";
@@ -3513,4 +3525,22 @@ test "a command that cannot start says why, and one that fails while it runs end
     var buffer: [1024]u8 = undefined;
     const written = try finishedGuidance(rig, &buffer);
     try std.testing.expect(std.mem.indexOf(u8, written, "rui: /rename output:\n" ++ said) != null);
+}
+
+test "a command that fails while it runs is the failure reported, even when taking its answer runs out of memory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cancellation: client.Cancellation = .{};
+    const rig = try commandRig(tmp.dir, &cancellation);
+    defer rig.close();
+    Printing.stderr_text = "rui: configure: CanonicalStoreFailure\n";
+    Printing.failure = error.CanonicalStoreFailure;
+    try std.testing.expect(try rig.press("/rename x\n") == null);
+    // The core keeps the output for the way out with memory it cannot get.
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    const gpa = rig.overview.state.gpa;
+    rig.overview.state.gpa = failing.allocator();
+    defer rig.overview.state.gpa = gpa;
+    try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
+    try std.testing.expect(failing.has_induced_failure);
 }
