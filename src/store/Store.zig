@@ -874,7 +874,7 @@ const EntryTrace = union(enum) {
 /// `release`. Errors leave through `finish` or `finishTransaction`, which
 /// return the entry point's declared ordinary errors and fence the rest.
 /// Only `lockAdmin` otherwise takes the mutex, for open/close diagnostics.
-const Entry = struct {
+pub const Entry = struct {
     const max_result_bytes = 1024;
 
     store: *Store,
@@ -1127,7 +1127,14 @@ pub inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt 
     return cachedStatic(self, sql);
 }
 
-/// Reached only through `cached`: a reused buffer would alias its key.
+/// A typed statement's prepared form, cached like `cached`'s. Its text was
+/// checked when the statement type was made.
+pub fn cachedTyped(self: *Store, comptime S: type) !*c.sqlite3_stmt {
+    return cachedStatic(self, S.sql);
+}
+
+/// Reached only through `cached` and `cachedTyped`: a reused buffer would
+/// alias its key.
 fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
     if (self.statements.find(sql.ptr)) |statement| {
         std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);

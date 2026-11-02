@@ -11,6 +11,8 @@ const output_decode = @import("../output_decode.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const store_core = @import("Store.zig");
+const store_access = @import("access.zig");
+const rsql = @import("rsql.zig");
 const Store = store_core.Store;
 const action_domain = @import("domain/action.zig");
 const command_domain = @import("domain/command.zig");
@@ -1133,6 +1135,77 @@ test "a rolled-back transaction's identities are handed out again, a committed o
         try std.testing.expectEqual(@as(i64, @intCast(content + 1)), try content_domain.importBytesContent(&storage, "identity rolled back", false, false));
         try store_core.rollbackAfterError(&storage, .{});
     }
+}
+
+const TestingRound = struct {
+    const head = rsql.Read(.{
+        .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
+        .Args = struct { session_ref: []const u8 },
+        .Row = struct { head: rsql.SessionHead },
+        .cardinality = .one,
+    });
+    const insert_content = rsql.Write(.{
+        .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),0)",
+        .Args = struct { content_id: u64, digest: [32]u8, length: u64 },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    });
+    const date_session = rsql.Write(.{
+        .sql = "UPDATE session SET created_at=@now WHERE session_ref=?1 AND revision=?2",
+        .Args = struct { session: rsql.SessionHead, revision: u64 },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
+    });
+
+    /// Reads `session`'s head, imports `text` and claims two positions,
+    /// then dates the Session where its revision is `revision`.
+    fn change(storage: *Store, session: []const u8, text: []const u8, revision: u64) !u64 {
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+        defer a.deinit();
+        return entry.finishTransaction(error{TestingGuard}, .{}, body(&a, session, text, revision));
+    }
+
+    fn body(a: anytype, session: []const u8, text: []const u8, revision: u64) !u64 {
+        var loaded: head.Result = undefined;
+        a.read(head, .{ .session_ref = session }, &loaded);
+        try a.run();
+        const positions = try a.touch(loaded.head);
+        const first = try positions.take(2);
+        const content_id = try a.identity(.content_id);
+        a.write(insert_content, .{ .content_id = content_id, .digest = protocol.contentDigest(text), .length = text.len });
+        a.writeContent(content_id, text);
+        a.write(date_session, .{ .session = loaded.head, .revision = revision });
+        try a.commit();
+        return first;
+    }
+};
+
+test "an Access commits its writes, positions and identities together, or none of them" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "round-config");
+    const next_sql = "SELECT next_position FROM session";
+    const position = try queryU64(storage.database, next_sql);
+    const contents = try queryU64(storage.database, "SELECT count(*) FROM content");
+    const content_id = storage.ids.next.get(.content_id);
+
+    // A failed guard stops the round before COMMIT: no row, position or id stays.
+    try std.testing.expectError(error.TestingGuard, TestingRound.change(&storage, session.slice(), "round rolled back", 99));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(position, try queryU64(storage.database, next_sql));
+    try std.testing.expectEqual(contents, try queryU64(storage.database, "SELECT count(*) FROM content"));
+    try std.testing.expectEqual(content_id, storage.ids.next.get(.content_id));
+
+    const before = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
+    try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
+    const after = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
+    try std.testing.expectEqual(position + 2, try queryU64(storage.database, next_sql));
+    try std.testing.expectEqual(content_id, try queryU64(storage.database, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND CAST(payload AS TEXT)='round committed'"));
+    const dated: i64 = @intCast(try queryU64(storage.database, "SELECT created_at FROM session"));
+    try std.testing.expect(before <= dated and dated <= after);
 }
 
 test "the touch oracle names a Session whose rows changed without a touch" {
@@ -2539,6 +2612,7 @@ test "Store entry points lock and fence only through canonical access" {
     // without returning through a classifier.
     const sources = .{
         @embedFile("Store.zig"),
+        @embedFile("access.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
