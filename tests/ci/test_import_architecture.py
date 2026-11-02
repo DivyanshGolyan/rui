@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from import_architecture import (check, cyclic_edges, production_imports, store_access_sources, store_boundary,
+                                 tests_reached,
                                  store_unit)
 
 
@@ -17,6 +18,39 @@ class ImportArchitectureTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         store_boundary(root)
         store_access_sources(root)
+
+    def test_repository_tests_are_all_named_by_a_test(self):
+        tests_reached(Path(__file__).resolve().parents[2])
+
+    def test_a_production_import_alone_does_not_reach_a_files_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "tests").mkdir()
+            files = {
+                "tests.zig": 'const cores = .{@import("core.zig")};\ntest { _ = @import("used.zig"); }',
+                "core.zig": 'test "a test-only root names every import" {}',
+                "used.zig": 'const alias = @import("aliased.zig");\nconst lazy = @import("lazy.zig");\n'
+                            'test "used" { _ = alias.f; }',
+                "aliased.zig": 'pub fn f() void {}\ntest "named through an alias" {}',
+                "lazy.zig": 'pub fn f() void {}\ntest "never named by a test" {}',
+                "plain.zig": 'pub fn f() void {}',
+            }
+            files["module.zig"] = ('const production = @import("production.zig");\nconst Nested = struct { pub const deep = '
+                                   '@import("deep.zig"); };\npub fn f() void { _ = production; }\ntest { _ = Nested.deep; }')
+            files["production.zig"] = 'test "a module root counts only what its tests name" {}'
+            files["deep.zig"] = 'test "a nested alias" {}'
+            for name, source in files.items():
+                (root / "src" / name).write_text(source)
+            (root / "build.zig").write_text('b.path("src/tests.zig"); b.path("src/module.zig");')
+            roots = (("src/tests.zig",), ("src/module.zig",))
+            with self.assertRaisesRegex(ValueError, r"tests may never compile[^\n]*\n  src/lazy\.zig\n  src/production\.zig$"):
+                tests_reached(root, *roots)
+            (root / "src/used.zig").write_text(files["used.zig"] + '\ntest { _ = lazy; _ = @import("production.zig"); }')
+            tests_reached(root, *roots)
+            (root / "build.zig").write_text('b.path("src/tests.zig");')
+            with self.assertRaisesRegex(ValueError, r"no longer builds test roots \['src/module.zig'\]"):
+                tests_reached(root, *roots)
 
     def test_baseline_test_only_and_new_cycle_controls(self):
         with tempfile.TemporaryDirectory() as directory, patch(

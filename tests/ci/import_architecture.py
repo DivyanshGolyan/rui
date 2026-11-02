@@ -15,6 +15,13 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
+# build.zig's addTest roots. Zig compiles a file's tests only when the test
+# build analyzes the file, and a production import is analyzed only if
+# something the tests run uses it. A test that names the file is the
+# guarantee. The test-only roots name their imports from tests, so each
+# of their imports counts; a module root counts only what its tests name.
+TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "tests/integration/mysql_wire_test.zig")
+MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig")
 BASELINE = Path(__file__).with_name("import_cycles.json")
 STORE_DIRECTORY = "src/store/"
 STORE_FACADE = "src/store.zig"
@@ -28,35 +35,52 @@ BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
 
 
-def production_imports(source, tests=False):
-    """Literal imports outside test declarations, or every import with tests=True."""
+def scoped_imports(source):
+    """Literal imports outside test declarations, the imports a test
+    declaration references (literally or through a top-level alias), and
+    whether the source declares a test."""
     tokens = [m.group() for m in TOKEN.finditer(source)
               if not m.group().startswith(("//", "\\\\"))]
     depth = 0
     test_depth = None
-    imports = set()
+    has_tests = False
+    production, tested, aliases, named = set(), set(), {}, set()
     for i, token in enumerate(tokens):
-        if token == "test" and not tests and test_depth is None and (i == 0 or tokens[i - 1] != "@"):
+        if token == "test" and test_depth is None and (i == 0 or tokens[i - 1] != "@"):
             # Preserve the outermost test scope, including nested container tests.
             following = i + 1
             if following < len(tokens) and tokens[following].startswith('"'):
                 following += 1
             if following < len(tokens) and tokens[following] == "{":
                 test_depth = depth + 1
+                has_tests = True
         if token == "{":
             depth += 1
         elif token == "}":
             if test_depth == depth:
                 test_depth = None
             depth -= 1
-        elif token == "@import" and test_depth is None:
+        elif token == "@import":
             if tokens[i + 1:i + 2] != ["("] or i + 3 >= len(tokens):
                 raise ValueError("unrecognized @import syntax")
             literal = tokens[i + 2]
             if not literal.startswith('"') or tokens[i + 3] != ")":
                 raise ValueError("architecture check requires literal @import")
-            imports.add(json.loads(literal))
-    return imports
+            (production if test_depth is None else tested).add(json.loads(literal))
+            if test_depth is None and i >= 3 and tokens[i - 3] == "const" and tokens[i - 1] == "=":
+                aliases[tokens[i - 2]] = json.loads(literal)
+        elif test_depth is not None:
+            # Zig forbids a local from shadowing a declaration. A name after
+            # "." still counts, since nested aliases are reached that way.
+            named.add(token)
+    tested.update(target for name, target in aliases.items() if name in named)
+    return production, tested, has_tests
+
+
+def production_imports(source, tests=False):
+    """Literal imports outside test declarations, or every import with tests=True."""
+    production, tested, _ = scoped_imports(source)
+    return production | tested if tests else production
 
 
 def graph(root, roots=ROOTS, read_source=None):
@@ -86,6 +110,34 @@ def graph(root, roots=ROOTS, read_source=None):
         result[name] = dependencies
         pending.extend(dependencies)
     return result
+
+
+def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
+    """Every Zig file under src/ and tests/ that declares tests is named by a
+    test reached from a test root, so its tests cannot silently stop running."""
+    build = (root / "build.zig").read_text()
+    if stale := [name for name in (*test_only, *modules) if f'b.path("{name}")' not in build]:
+        raise ValueError(f"build.zig no longer builds test roots {stale}; update TEST_ONLY_ROOTS/MODULE_TEST_ROOTS")
+    scanned = {path.resolve(): scoped_imports(path.read_text())
+               for directory in ("src", "tests") for path in (root / directory).rglob("*.zig")}
+    reached = set()
+    pending = [((root / name).resolve(), name in test_only) for name in (*test_only, *modules)]
+    while pending:
+        path, every_import = pending.pop()
+        if path in reached or path not in scanned:
+            continue
+        reached.add(path)
+        production, tested, _ = scanned[path]
+        pending.extend(((path.parent / imported).resolve(), False)
+                       for imported in (production | tested if every_import else tested)
+                       if imported.endswith(".zig"))
+    resolved = root.resolve()
+    unreached = sorted(path.relative_to(resolved).as_posix()
+                       for path, (_, _, has_tests) in scanned.items() if has_tests and path not in reached)
+    if unreached:
+        raise ValueError("no test names these files, so their tests may never compile; import each "
+                         "from a test that a test root reaches (src/tests.zig, for example):\n"
+                         + "\n".join(f"  {name}" for name in unreached))
 
 
 def store_boundary(root):
@@ -210,6 +262,7 @@ def main():
     try:
         store_boundary(args.root)
         store_access_sources(args.root)
+        tests_reached(args.root)
         print(json.dumps(check(args.root, args.baseline), indent=2))
     except ValueError as error:
         parser.exit(1, f"{error}\n")
