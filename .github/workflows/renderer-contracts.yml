@@ -1,20 +1,8 @@
 name: Renderer contracts
-# Nonblocking: Selected checks and the landing rule never require these. The
+# Nonblocking: Selected checks and merging never require these. The
 # nightly run adds the mutation campaign and files an issue on failure.
 on:
   pull_request:
-    paths:
-      - 'src/**'
-      - 'build.zig'
-      - 'tests/ci/renderer_mutation*'
-      - 'tests/integration/session_sequence_model*'
-      - 'tests/integration/input_equivalence.py'
-      - 'tests/integration/terminal_input_replay.py'
-      - 'tests/integration/terminal_restoration_integration.py'
-      - 'tests/qualification/direct-pty/**'
-      - '.github/workflows/renderer-contracts.yml'
-  push:
-    branches: ['wip/land-*']
     paths:
       - 'src/**'
       - 'build.zig'

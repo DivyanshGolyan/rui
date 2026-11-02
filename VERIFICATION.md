@@ -31,8 +31,8 @@ Where the shell is root, as in many containers, use an ordinary account that own
 | Change class | Required gate or evidence |
 | --- | --- |
 | Documentation | References, consistency and `git diff --check` |
-| Runtime behavior | Subsystem mapping below on the landing tip for Linux main acceptance; Mac mapping and full Debug recovery on the exact main SHA before stable promotion. A skip is not evidence |
-| Build or dependency | Linux `check-full` and mapped checks on the landing tip; macOS `check-full` and empty-cache acceptance daily |
+| Runtime behavior | Subsystem mapping below on the PR head for Linux main acceptance; Mac mapping and full Debug recovery on the exact main SHA before stable promotion. A skip is not evidence |
+| Build or dependency | Linux `check-full` and mapped checks on the PR head; macOS `check-full` and empty-cache acceptance daily |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig).
@@ -73,8 +73,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 Neither composed gate covers that root, so run it with a selected composed gate.
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
-`wip/land-*` pushes select the tip's complete delta against the main merge base.
-An exact-tip dispatch replaces a cancelled push run; a dispatched Selected run lands only if main contains its `base` and `base..tip` spans `main..tip`'s paths.
+A stable qualification qualifies a main SHA only if stable contains its `base` and `base..sha` spans `stable..sha`'s paths.
 
 Qualification Go changes select `measurement-check`.
 Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux.
@@ -85,12 +84,12 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 ### Landing cadence
 
 [AGENTS.md](AGENTS.md#landing) owns the landing rule and per-commit proof.
-Append each small, coherent green change to the single open `wip/land-N` immediately and qualify its current exact tip.
+Each small, coherent change lands on main by merging its PR.
 Lane completion and review signoff are not prerequisites.
 Focused checks on changed layers are development feedback.
 Daily suites do not qualify intermediate merges.
 
-Selected CI runs affected-owner targets on Linux for PRs and `wip/land-*`; upgrade checks run once, on stable candidates.
+Selected CI runs affected-owner targets on Linux for PRs; upgrade checks run once, on stable candidates.
 Linux predicts Mac except where code may differ by platform: a ready PR that changes a Mac-specific path also runs its native mapping on Mac (`check` when none is mapped).
 [platform_boundary.py](tests/ci/platform_boundary.py) owns those paths: C, patches, build and packaging inputs, Mac CI wiring, `src/os/` and `tests/integration/os_semantics.py`.
 Its test fails when any other Zig source or fixture names the platform or calls a syscall whose Darwin semantics diverge.
@@ -167,8 +166,8 @@ Artificial shared setup or pair deadlines and prelaunch fit reserves are not rou
 
 ### Renderer contracts
 
-[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests and `wip/land-*` pushes that touch source or the harnesses, and nightly: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix with tmux smoke and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
-No gate root imports their sources, and neither Selected checks nor the landing rule requires them; a red result is a defect to fix, not a waiver.
+[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch source or the harnesses, and nightly: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix with tmux smoke and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
+No gate root imports their sources, and neither Selected checks nor merging requires them; a red result is a defect to fix, not a waiver.
 The nightly run adds the [renderer mutation runner](tests/ci/renderer_mutation.py) for `test`, `test-logic` and `sequence-model` and files an issue on failure.
 Its anchors are checked per change: [`renderer_mutation_test.py`](tests/ci/renderer_mutation_test.py), run by the Selected `policy` job, requires each mutation's anchor exactly once in current source, so moving a protection re-anchors its mutation in the same change.
 
@@ -245,7 +244,7 @@ Apart from the shard rerun above, test execution has no automatic retry.
 [Daily Mac CI](.github/workflows/daily-macos.yml) runs full sharded native qualification, including macOS `check-full`, and the complete resource campaign when main changed since its last completed scheduled attempt.
 [report_issue.py](tests/ci/report_issue.py) files each failure under its cause signature: the failing fixture and its raising line, a Zig test, or a gate's own error, read from the full job logs.
 One `ci-red` issue holds each signature and its recurrences.
-Stable qualification files its reds the same way, labelled `stable-red`; a `wip/land-*` tip files only the failures its passing jobs retried.
+Stable qualification files its reds the same way, labelled `stable-red`.
 A later green run never closes an issue: the commit that fixes the fixture or its owner says `Fixes #N`, and a recurrence reopens the issue.
 These backstops report the actual main SHA, not coverage of intermediate merges.
 A failed, cancelled or skipped attempt is never a pass.

@@ -66,33 +66,21 @@ Honor narrower user limits.
 
 Standing grant: land each small, coherent green change without further stage approval or waiting for lane completion.
 Proof gates landing, not review signoff.
-Known failed counterexamples require fixes and passing proof before the affected change joins the stack.
+Known failed counterexamples require fixes and passing proof before the affected change merges.
 Existing one-way-door approvals still apply.
 
-- Append each coherent green change immediately to the single open `wip/land-N` and gate only the current tip.
-  If no stack is open, start the next number.
-  Serialize shared-ref writes.
-  Before every push, run `python3 tests/ci/auto_land.py --preflight wip/land-N` on the tip; it fails when any other unlanded `wip/land-*` exists, even one the tip contains, or a higher number exists.
-  Retire an abandoned stack (back it up, then delete it) before starting another.
-  Selected's plan job repeats the check.
-- Before exact-tip qualification, every introduced landing commit must state its actual test commands and results, plus applicable performance A/B numbers.
+- Changes reach `main` only by merging their PR; there is no other landing path.
+- Every PR commit states its actual test commands and results, plus applicable performance A/B numbers.
   TUI changes also include a real-screen tmux capture.
-  Each commit carries its owning lane's `Amp-Thread-ID: <thread URL>` trailer; inspect Amp's generated trailers and avoid duplicates.
-  Preserve published source refs rather than rewriting them.
-  Changing a commit message changes its SHA and invalidates its exact-tip receipts.
-- Before landing on `main`, the exact tip must pass the Linux Selected aggregate, including mapped recovery checks.
+  Each commit carries its owning lane's `Amp-Thread-ID: <thread URL>` trailer when an Amp lane wrote it; inspect Amp's generated trailers and avoid duplicates.
+- Before merging, the PR head must pass the Linux Selected aggregate, including mapped recovery checks.
   Strict paths add no Mac or upgrade gate to main.
   Missing, pending or red Mac checks delay only `stable`.
-- [Auto-land](.github/workflows/auto-land.yml) fast-forwards `main` non-force.
-  Its always-run promotion phase first dispatches any genuinely missing Mac or upgrade qualification for current main, including after an interrupted landing.
-  Existing pending, offline, failed or cancelled runs are not absence and are never automatically retried.
-  Agents assemble and push `wip/land-N`.
-  GITHUB_TOKEN cannot push workflow-file changes, so those tips require an explicitly authorized agent or user bootstrap after exact-tip Linux CI passes.
-- Separately, Auto-land fast-forwards `stable` to the newest main commit whose Mac Selected and Linux/macOS upgrade workflows passed on that exact SHA.
+- [Auto-land](.github/workflows/auto-land.yml) fast-forwards `stable` to the newest main commit whose Mac Selected and Linux/macOS upgrade workflows passed on that exact SHA.
   Every stable candidate runs real Mac checks, full Debug admission recovery and upgrades even when its changed paths would select none.
   Missing or failed checks never qualify descendants; older completions never rewind stable.
   An open `stable-red` issue holds every promotion ([Landing cadence](VERIFICATION.md#landing-cadence)).
-  Both writers share one serialized job.
+  Its promotion job is serialized, and it first dispatches any genuinely missing Mac or upgrade qualification for current main; existing pending, offline, failed or cancelled runs are never automatically retried.
 - Run the independent review when [Review](CODING_STANDARDS.md#review) says; its signoff does not block green changes.
 - A PR whose CI is green and whose Codex review is clean merges now.
   Do not hold it for a local run of tests CI repeats (full `zig build test`, `check`, or a local mirror of Selected); [Evidence](CODING_STANDARDS.md#evidence) sets the focused pre-push checks.
@@ -106,8 +94,7 @@ Existing one-way-door approvals still apply.
 - Run PRs in parallel only when they touch different files.
   Work that shares a file with an open PR, in this lane or another, is dependent: stack it on that PR and land the stack in order.
   Before splitting work across lanes, check the open PRs for files the new work would touch.
-- For work published as PRs, open a PR that depends on another after its base lands on `main`, rebased onto `origin/main`.
-  Changes that join `wip/land-N` stack as above.
+- Open a PR that depends on another after its base lands on `main`, rebased onto `origin/main`.
 - Mac and upgrade qualification run after main advances; daily full runs remain backstops.
   Fix Mac reds forward on main; revert only if the fix is slow.
   Keep the previous stable until a newer main SHA qualifies.
@@ -137,4 +124,4 @@ To recover a lost completion without rerunning tests, use `gh workflow run auto-
 
 The strict paths are `src/store*`, every path under `src/store/`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`.
 [strict_paths.py](tests/ci/strict_paths.py) owns this list for fail-without-retry handling.
-A PR or `wip/land-N` push runs Linux [Selected checks](.github/workflows/check.yml), and a ready PR that changes a [Mac-specific path](tests/ci/platform_boundary.py) also runs Mac Selected; every main-tip stable qualification runs Mac Selected and the [upgrade check](.github/workflows/previous-release-upgrade.yml), regardless of strict paths.
+A PR runs Linux [Selected checks](.github/workflows/check.yml), and a ready PR that changes a [Mac-specific path](tests/ci/platform_boundary.py) also runs Mac Selected; every main-tip stable qualification runs Mac Selected and the [upgrade check](.github/workflows/previous-release-upgrade.yml), regardless of strict paths.
