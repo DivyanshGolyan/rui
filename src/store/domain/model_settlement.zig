@@ -34,6 +34,8 @@ const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 /// Every model Operation resolution ends its Attempt or retry wait at once.
 pub const operation_resolved_at_sql = "resolved_at=unixepoch(),attempt_at=NULL,retry_scheduled_at=NULL";
 /// `operation_resolved_at_sql` for typed statements, dated by the Access.
+/// The two stay until this file's settlements convert (PR 5c), which
+/// deletes `operation_resolved_at_sql` with its last caller.
 pub const operation_resolved_now_sql = "resolved_at=@now,attempt_at=NULL,retry_scheduled_at=NULL";
 
 pub const ModelFailureClass = union(enum) {

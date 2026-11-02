@@ -94,13 +94,16 @@ pub const stopped_turn = rsql.Read(.{
     .cardinality = .optional,
 });
 
-const close_turn = rsql.Write(.{
-    .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now " ++
-        "WHERE turn_id=?1 AND session_ref=@session(?5) AND outcome_code IS NULL",
-    .Args = struct { turn_id: u64, code: []const u8, content_id: ?u64, position: u64, session: rsql.SessionHead },
-    // Its round read the Turn open, under the single writer.
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
+/// Ends an open Turn; `otherwise` is the guard's error when it is not
+/// open. One text, so the statement differs only in what it reports.
+fn CloseTurn(comptime otherwise: anyerror) type {
+    return rsql.Write(.{
+        .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now " ++
+            "WHERE turn_id=?1 AND session_ref=@session(?5) AND outcome_code IS NULL",
+        .Args = struct { turn_id: u64, code: []const u8, content_id: ?u64, position: u64, session: rsql.SessionHead },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = otherwise } },
+    });
+}
 
 const record_continuation = rsql.Write(.{
     .sql = "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND session_ref=@session(?2) AND outcome_code IS NULL " ++
@@ -111,12 +114,19 @@ const record_continuation = rsql.Write(.{
 });
 
 /// Queues ending the open Turn `turn_id` of `positions`' Session with
-/// `outcome`, at the Session's next position.
+/// `outcome`, at the Session's next position. Its round read the Turn
+/// open, under the single writer, so a closed one is a corrupt Store.
 pub fn queueClose(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome) !void {
+    return queueCloseOr(a, positions, turn_id, outcome, error.CorruptStore);
+}
+
+/// `queueClose`, reporting `otherwise` when the Turn is not open: a model
+/// interruption's target changed, as on main.
+pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome, comptime otherwise: anyerror) !void {
     const content_id = outcome.content();
     // A failure code spelling a fixed outcome would read back as that outcome.
     std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
-    a.write(close_turn, .{
+    a.write(CloseTurn(otherwise), .{
         .turn_id = turn_id,
         .code = outcome.code(),
         .content_id = if (content_id) |id| @intCast(id) else null,

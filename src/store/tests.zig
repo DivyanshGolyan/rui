@@ -11082,41 +11082,56 @@ test "the queued Messages cost the queue, not the history after a page's end" {
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
-test "a stop cancels more Actions than one write names, in call order at dense positions" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSessionAsk(&storage, "many-config");
-    try submitTestMessage(&storage, &tmp, "many-input", "many-input", session.slice(), "propose");
-    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // Two whole writes of 8 and one more: the chunk boundary and the tail.
-    var texts: [17][4][96]u8 = undefined;
-    var calls: [17]TestingCall = undefined;
-    for (&calls, &texts, 0..) |*call, *text, index| {
-        const id = try std.fmt.bufPrint(&text[0], "many-{d}", .{index});
-        call.* = .{
-            .item_id = id,
-            .name = "bash",
-            .encoded_call_id = id,
-            .decoded_call_id = id,
-            .encoded_arguments = try std.fmt.bufPrint(&text[1], "{{\\\"description\\\":\\\"Run {d}\\\",\\\"cmd\\\":\\\"{d}\\\",\\\"timeout_ms\\\":null}}", .{ index, index }),
-            .decoded_arguments = try std.fmt.bufPrint(&text[2], "{{\"description\":\"Run {d}\",\"cmd\":\"{d}\",\"timeout_ms\":null}}", .{ index, index }),
-        };
+test "a stop cancels its Actions in pages of one write each, in call order at dense positions" {
+    // No Action, one, a page's edges and the next, two pages and one more.
+    inline for (.{ 0, 1, 8, 9, 13, 14, 16, 17, 26, 27 }) |count| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "many-config");
+        try submitTestMessage(&storage, &tmp, "many-input", "many-input", session.slice(), "propose");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // With no Action, the model still runs, and the stop interrupts it.
+        if (count != 0) {
+            var texts: [count][4][96]u8 = undefined;
+            var calls: [count]TestingCall = undefined;
+            for (&calls, &texts, 0..) |*call, *text, index| {
+                const id = try std.fmt.bufPrint(&text[0], "many-{d}", .{index});
+                call.* = .{
+                    .item_id = id,
+                    .name = "bash",
+                    .encoded_call_id = id,
+                    .decoded_call_id = id,
+                    .encoded_arguments = try std.fmt.bufPrint(&text[1], "{{\\\"description\\\":\\\"Run {d}\\\",\\\"cmd\\\":\\\"{d}\\\",\\\"timeout_ms\\\":null}}", .{ index, index }),
+                    .decoded_arguments = try std.fmt.bufPrint(&text[2], "{{\"description\":\"Run {d}\",\"cmd\":\"{d}\",\"timeout_ms\":null}}", .{ index, index }),
+                };
+            }
+            try settleCallsForTesting(&storage, &tmp, binding, "many-calls", &calls);
+        }
+        try std.testing.expectEqual(@as(u64, count), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND attempt_ordinal=0"));
+        var stop = try completeSessionStop("many-stop", session.slice());
+        var statements: TestingStatements = .{};
+        statements.begin(storage.database);
+        const reply = storage.stopSession(&stop, .{});
+        statements.end(storage.database);
+        try std.testing.expect(reply.accepted.completion == .completed);
+        // BEGIN, the three reads of round 1, the command, the stop, the
+        // Turn's close, the position advance and COMMIT; with no Action the
+        // interruption; with Actions the text's lookup and insert, then a
+        // page read and a write per `cancel_chunk` (13) Actions.
+        const pages = (count + 12) / 13;
+        const expected: u64 = if (count == 0) 10 else 11 + 2 * pages;
+        try std.testing.expectEqual(expected, statements.count);
+        try std.testing.expectEqual(@as(u64, count), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'"));
+        // Acceptance follows call order.
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation a JOIN action_operation b " ++
+            "ON b.parent_operation_id=a.parent_operation_id AND a.call_ordinal<b.call_ordinal WHERE a.acceptance_position>=b.acceptance_position"));
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM turn WHERE outcome_code='cancelled'"));
+        try expectDenseSessionPositions(&storage, session.slice());
+        try std.testing.expect(!storage.isFenced());
     }
-    try settleCallsForTesting(&storage, &tmp, binding, "many-calls", &calls);
-    try std.testing.expectEqual(@as(u64, 17), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND attempt_ordinal=0"));
-    var stop = try completeSessionStop("many-stop", session.slice());
-    const reply = storage.stopSession(&stop, .{});
-    try std.testing.expect(reply.accepted.completion == .completed);
-    try std.testing.expectEqual(@as(u64, 17), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'"));
-    // Acceptance follows call order.
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation a JOIN action_operation b " ++
-        "ON b.parent_operation_id=a.parent_operation_id AND a.call_ordinal<b.call_ordinal WHERE a.acceptance_position>=b.acceptance_position"));
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM turn WHERE outcome_code='cancelled'"));
-    try expectDenseSessionPositions(&storage, session.slice());
-    try std.testing.expect(!storage.isFenced());
 }
 
 test "every activity row is dated by the fact that owns it" {

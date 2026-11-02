@@ -452,9 +452,11 @@ const insert_stop = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// The most Actions one cancelling write names: its ids, then the
-/// content, first position, Session and @now, fit SQLite's 17 parameters.
-const cancel_chunk = 8;
+/// The most Actions one cancelling write names: the largest count whose
+/// ids, with the content, first position and Session before them and @now
+/// after, fit the 17 parameters the Store allows a statement
+/// (SQLITE_LIMIT_VARIABLE_NUMBER, as in `Store.open`): 3 + 13 + 1.
+const cancel_chunk = 13;
 
 /// `cancel_actions[n - 1]` cancels the `n` Actions it names, keyed from
 /// Zig (an UPDATE that numbers its rows from the table it updates is not
@@ -501,7 +503,7 @@ fn CancelArgs(comptime n: usize) type {
     return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
 
-/// Collects one `cancellable_actions` chunk.
+/// Collects one `cancellable_actions` page, of at most one write's ids.
 const CancelChunk = struct {
     action_ids: [cancel_chunk]u64 = undefined,
     len: usize = 0,
@@ -552,12 +554,19 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
 
 /// Round 1 reads the saved answer, the Session with its admission cutoff,
 /// and its open Turn with its Actions' counts. A replay reads the saved
-/// selection in a round of its own. When Actions are cancelled, a second
-/// round reads the cancellation text's row and the first chunk of them
-/// (it depends on the Turn), and each further chunk of `cancel_chunk` is
-/// one more round. The write round saves the command and the stop,
-/// interrupts a running Operation, cancels the Actions, closes the Turn
-/// unless an attempted Action keeps it open, and commits.
+/// selection and the Operation it interrupted in a round of its own.
+///
+/// Otherwise the writes are queued in this order: the command, the stop,
+/// the interruption of a running Operation, the cancelled Actions and the
+/// Turn's close (unless an attempted Action keeps it open). When Actions
+/// are cancelled, the cancellation text's row and the first page of up to
+/// `cancel_chunk` Actions are read in a second round (they depend on the
+/// Turn), which also runs the command, stop and interruption writes queued
+/// before it. Each further page is one more round, which runs the previous
+/// page's write (the first one with the cancellation text's insert, when
+/// the text is new). The last page's write and the Turn's close run in the
+/// final round, at commit, with the position advance. With no Actions to
+/// cancel, every write runs at commit.
 fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
     const digest = command.semanticDigest();
     const key = command.key.slice();
@@ -659,8 +668,10 @@ fn cancelActions(
     if (faults.content_import) return error.InjectedContentImportFailure;
     const content_id = try content_domain.importBytes(a, cancellation, content_domain.stop_cancellation_text);
     var cancelled: u64 = 0;
-    while (true) {
-        if (chunk.len != 0) switch (chunk.len) {
+    // The count says when the last page was read, so a multiple of
+    // `cancel_chunk` costs no empty round.
+    while (chunk.len != 0) {
+        switch (chunk.len) {
             inline 1...cancel_chunk => |n| {
                 @setEvalBranchQuota(100_000);
                 var args: CancelArgs(n) = undefined;
@@ -671,9 +682,12 @@ fn cancelActions(
                 a.write(cancel_actions[n - 1], args);
             },
             else => unreachable,
-        };
+        }
         cancelled += chunk.len;
-        if (chunk.len < cancel_chunk) break;
+        if (cancelled >= open.cancellable or chunk.len < cancel_chunk) break;
+        // A statement binds when it is queued, so `cancel_actions[n - 1]`
+        // runs once a round: the next page reads in the round that runs
+        // this page's write.
         chunk.len = 0;
         a.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = chunk.next }, cancel_chunk, &chunk);
         try a.run();
@@ -827,7 +841,7 @@ pub fn interruptModel(a: anytype, command: *const protocol.ModelInterruptionComm
     if (rejection == null) {
         const head = target.?.session;
         a.write(interrupt_operation, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
-        if (!pending.pending) try turn_domain.queueClose(a, try a.positions(head), command.turn_id, .cancelled);
+        if (!pending.pending) try turn_domain.queueCloseOr(a, try a.positions(head), command.turn_id, .cancelled, error.InterruptionTargetChanged);
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
