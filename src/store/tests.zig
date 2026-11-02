@@ -2568,8 +2568,8 @@ fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
         "UNION ALL SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind!=3), " ++
         "model(position) AS (SELECT admission_position FROM model_operation WHERE session_ref=?1 " ++
         "UNION ALL SELECT session_position FROM model_output_item WHERE session_ref=?1 " ++
-        "UNION ALL SELECT call.acceptance_position FROM model_tool_call call JOIN model_operation op ON op.operation_id=call.operation_id " ++
-        "WHERE op.session_ref=?1 AND call.acceptance_position IS NOT NULL), " ++
+        "UNION ALL SELECT tool_call.acceptance_position FROM model_tool_call tool_call JOIN model_operation op ON op.operation_id=tool_call.operation_id " ++
+        "WHERE op.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL), " ++
         "settled(position) AS (SELECT acceptance_position FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NOT NULL " ++
         "UNION ALL SELECT outcome_position FROM turn WHERE session_ref=?1 AND outcome_position IS NOT NULL " ++
         "UNION ALL SELECT position FROM session_stop WHERE session_ref=?1), " ++
@@ -2613,7 +2613,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=4 AND rejection_code='unknown_tool'"));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=5 AND rejection_code='unknown_tool'"));
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal WHERE call.rejection_code IS NOT NULL"));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal WHERE tool_call.rejection_code IS NOT NULL"));
     try expectDenseSessionPositions(&storage, allocated_session_0.slice());
     {
         const rejected_action = try sqlite.prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");

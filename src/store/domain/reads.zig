@@ -24,19 +24,19 @@ const SessionReportCapture = report_domain.SessionReportCapture;
 const TurnOutcome = turn_domain.TurnOutcome;
 const accepted_resolutions = store_schema.accepted_resolutions;
 
-const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
-    "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-    "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+const public_tool_groups_sql = "WITH tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
+    "FROM model_operation op JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+    "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
     "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
     "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-    "AND count(coalesce(call.acceptance_position,action.acceptance_position))=count(*) " ++
-    "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), ";
+    "AND count(coalesce(tool_call.acceptance_position,action.acceptance_position))=count(*) " ++
+    "AND count(coalesce(tool_call.rejection_content_id,action.resolution_content_id))=count(*)), ";
 const activity_sql = public_tool_groups_sql ++
     "entries AS (SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission WHERE session_ref=?1 " ++
     "UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN (1,3) " ++
     "UNION ALL SELECT session_position,0,4,NULL FROM model_output_item WHERE session_ref=?1 AND item_kind=3 " ++
     "UNION ALL SELECT sender_position,0,8,admission_id FROM message_admission WHERE sender_session_ref=?1), " ++
-    "completions AS (SELECT groups.position AS position,call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
+    "completions AS (SELECT tool_groups.position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
     "UNION ALL SELECT outcome_position,0,6,turn_id FROM turn WHERE session_ref=?1 AND outcome_code IS NOT NULL " ++
     "UNION ALL SELECT position,0,7,NULL FROM session_stop WHERE session_ref=?1 " ++
     // Each compound keeps within the Store's four-term limit.
@@ -199,10 +199,10 @@ pub fn publicConversationPageLocked(self: *Store, request: *const protocol.Conve
     const statement = try store_core.cached(self, public_tool_groups_sql ++
         "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
         "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
-        "UNION ALL SELECT groups.position,call.call_ordinal+1,4,coalesce(call.rejection_content_id,action.resolution_content_id) " ++
-        "FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-        "WHERE groups.position<=?2) " ++
+        "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4,coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
+        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+        "WHERE tool_groups.position<=?2) " ++
         "SELECT position,ordinal,kind,content_id FROM public WHERE (?3=0 OR position<?3 OR (position=?3 AND ordinal<?4)) " ++
         "ORDER BY position DESC,ordinal DESC LIMIT 17");
     defer sqlite.resetCached(statement);
@@ -298,23 +298,23 @@ pub fn publicConversationContentLocked(self: *Store, session: []const u8, positi
             "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)",
     ) else try store_core.cached(
         self,
-        "SELECT coalesce(call.rejection_content_id,action.resolution_content_id),NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
+        "SELECT coalesce(tool_call.rejection_content_id,action.resolution_content_id),NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
             "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
             "LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
             "LEFT JOIN action_operation a ON a.parent_operation_id=linked.operation_id AND a.call_ordinal=linked.call_ordinal " ++
             "LEFT JOIN content result ON result.content_id=a.resolution_content_id " ++
             "WHERE linked.operation_id=op.operation_id AND CASE WHEN item.item_kind=3 AND item.session_ref=op.session_ref AND t.session_ref=op.session_ref " ++
             "AND item.attempt_ordinal=op.attempt_ordinal AND " ++
-            "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,call.call_ordinal," ++
+            "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,tool_call.call_ordinal," ++
             // A rejected call is accepted when its Operation resolves; an
             // Action call when the Action does. The last acceptance is the
             // one at the greatest position: times order nothing.
             "(SELECT coalesce(a.resolved_at,op.resolved_at) FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
             "WHERE c.operation_id=op.operation_id ORDER BY coalesce(c.acceptance_position,a.acceptance_position) DESC LIMIT 1) " ++
             "FROM model_operation op " ++
-            "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-            "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND call.call_ordinal+1=?3 " ++
+            "JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+            "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND tool_call.call_ordinal+1=?3 " ++
             "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
             "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
             "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
@@ -431,7 +431,7 @@ pub const ContentSource = struct {
 };
 
 fn toolPresentationLocked(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
-    const statement = try store_core.cached(self, "SELECT call.description,coalesce(call.rejection_code,a.resolution_code),a.authorized,item.session_ref,item.session_position FROM model_tool_call call LEFT JOIN action_operation a ON a.parent_operation_id=call.operation_id AND a.call_ordinal=call.call_ordinal LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal WHERE call.operation_id=?1 AND call.call_ordinal=?2");
+    const statement = try store_core.cached(self, "SELECT tool_call.description,coalesce(tool_call.rejection_code,a.resolution_code),a.authorized,item.session_ref,item.session_position FROM model_tool_call tool_call LEFT JOIN action_operation a ON a.parent_operation_id=tool_call.operation_id AND a.call_ordinal=tool_call.call_ordinal LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, operation);
     try sqlite.bindU64(statement, 2, ordinal);
@@ -548,10 +548,10 @@ pub fn personMessageLocked(self: *Store, request: *const protocol.ReadPersonMess
 // Turn lifetime. It is staged until the frontend acknowledges that page.
 fn readCallActivityLocked(self: *Store, session: []const u8, position: u64, ordinal: ?u64) !protocol.CallActivity {
     const statement = try store_core.cached(self, public_tool_groups_sql ++
-        "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM model_operation op " ++
-        "LEFT JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-        "LEFT JOIN groups ON groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
-        "AND (groups.position IS NULL OR groups.position>?2 OR (groups.position=?2 AND ?3 IS NOT NULL AND call.call_ordinal+1>?3))) " ++
+        "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM model_operation op " ++
+        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+        "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
+        "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3))) " ++
         "SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session);
@@ -837,18 +837,18 @@ const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_i
 // The page, continuation cursor and byte route share one provenance check.
 // LEFT JOIN keeps missing/contradictory owners visible as corruption.
 pub fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
-    const statement = try store_core.cached(self, "SELECT item.operation_id,op.turn_id,call.call_ordinal,action.action_id,call.rejection_code," ++
-        "call.name_content_id,call.call_id_content_id,call.arguments_content_id," ++
+    const statement = try store_core.cached(self, "SELECT item.operation_id,op.turn_id,tool_call.call_ordinal,action.action_id,tool_call.rejection_code," ++
+        "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id," ++
         "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
         store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND op.attempt_ordinal=item.attempt_ordinal AND " ++
-        "((call.rejection_code IS NOT NULL AND action.action_id IS NULL AND call.acceptance_position IS NOT NULL AND " ++
+        "((tool_call.rejection_code IS NOT NULL AND action.action_id IS NULL AND tool_call.acceptance_position IS NOT NULL AND " ++
         "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
-        "(call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
-        "THEN 1 ELSE 0 END,call.field_metadata FROM model_output_item item " ++
+        "(tool_call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
+        "THEN 1 ELSE 0 END,tool_call.field_metadata FROM model_output_item item " ++
         "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
-        "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
-        "LEFT JOIN content rejection ON rejection.content_id=call.rejection_content_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
+        "LEFT JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
+        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=3");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session);

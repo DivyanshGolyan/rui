@@ -739,8 +739,8 @@ fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bound
     if (actions.running == 0) return actions;
     const oldest = try store_core.cached(
         self,
-        "SELECT a.attempt_at,call.description,a.call_ordinal FROM action_operation a " ++
-            "JOIN model_tool_call call ON call.operation_id=a.parent_operation_id AND call.call_ordinal=a.call_ordinal " ++
+        "SELECT a.attempt_at,tool_call.description,a.call_ordinal FROM action_operation a " ++
+            "JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
             "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
     );
     defer sqlite.resetCached(oldest);
@@ -886,10 +886,10 @@ fn appendUnresolvedActions(
             "FROM turn active INDEXED BY turn_one_active_per_session " ++
             "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
             "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
-            "CROSS JOIN model_tool_call call ON call.operation_id=a.parent_operation_id " ++
-            "AND call.call_ordinal=a.call_ordinal CROSS JOIN content call_id " ++
-            "ON call_id.content_id=call.call_id_content_id CROSS JOIN content arguments " ++
-            "ON arguments.content_id=call.arguments_content_id " ++
+            "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id " ++
+            "AND tool_call.call_ordinal=a.call_ordinal CROSS JOIN content call_id " ++
+            "ON call_id.content_id=tool_call.call_id_content_id CROSS JOIN content arguments " ++
+            "ON arguments.content_id=tool_call.arguments_content_id " ++
             "WHERE active.session_ref=?1 " ++
             "AND active.outcome_code IS NULL AND a.resolution_code IS NULL ORDER BY a.action_id",
     );
@@ -999,20 +999,20 @@ fn appendRejectedCalls(
 ) !void {
     const statement = try store_core.cached(
         self,
-        "SELECT call.operation_id,call.call_ordinal,call.rejection_code,call.acceptance_position," ++
+        "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
             "rejection.byte_length,rejection.digest," ++
             "name.byte_length,name.digest," ++
             "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest " ++
             "FROM turn active INDEXED BY turn_one_active_per_session " ++
             "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
             "ON operation.turn_id=active.turn_id " ++
-            "CROSS JOIN model_tool_call call ON call.operation_id=operation.operation_id " ++
-            "CROSS JOIN content name ON name.content_id=call.name_content_id " ++
-            "CROSS JOIN content call_id ON call_id.content_id=call.call_id_content_id " ++
-            "CROSS JOIN content arguments ON arguments.content_id=call.arguments_content_id " ++
-            "CROSS JOIN content rejection ON rejection.content_id=call.rejection_content_id " ++
-            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND call.rejection_code IS NOT NULL " ++
-            "ORDER BY call.operation_id,call.call_ordinal",
+            "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
+            "CROSS JOIN content name ON name.content_id=tool_call.name_content_id " ++
+            "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
+            "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
+            "CROSS JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
+            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND tool_call.rejection_code IS NOT NULL " ++
+            "ORDER BY tool_call.operation_id,tool_call.call_ordinal",
     );
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
@@ -1326,10 +1326,10 @@ fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *Sessio
 fn appendToolCalls(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
     const statement = try store_core.cached(
         self,
-        "SELECT call.operation_id,call.call_ordinal,call.item_ordinal,call.rejection_code,call.acceptance_position," ++
-            "call.name_content_id,call.call_id_content_id,call.arguments_content_id,call.rejection_content_id " ++
-            "FROM model_tool_call call JOIN model_operation operation ON operation.operation_id=call.operation_id " ++
-            "WHERE operation.session_ref=?1 ORDER BY call.operation_id,call.call_ordinal",
+        "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.item_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
+            "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id,tool_call.rejection_content_id " ++
+            "FROM model_tool_call tool_call JOIN model_operation operation ON operation.operation_id=tool_call.operation_id " ++
+            "WHERE operation.session_ref=?1 ORDER BY tool_call.operation_id,tool_call.call_ordinal",
     );
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
@@ -1442,13 +1442,13 @@ fn appendModelInterruptions(self: *Store, session_ref: []const u8, capture: *Ses
 fn appendToolResults(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
     const statement = try store_core.cached(
         self,
-        "SELECT call.operation_id,call.call_ordinal,coalesce(call.acceptance_position,action.acceptance_position)," ++
-            "call.call_id_content_id,coalesce(call.rejection_code,action.resolution_code)," ++
-            "coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_tool_call call " ++
-            "JOIN model_operation operation ON operation.operation_id=call.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-            "WHERE operation.session_ref=?1 AND coalesce(call.rejection_code,action.resolution_code) IS NOT NULL " ++
-            "ORDER BY call.operation_id,coalesce(call.acceptance_position,action.acceptance_position)",
+        "SELECT tool_call.operation_id,tool_call.call_ordinal,coalesce(tool_call.acceptance_position,action.acceptance_position)," ++
+            "tool_call.call_id_content_id,coalesce(tool_call.rejection_code,action.resolution_code)," ++
+            "coalesce(tool_call.rejection_content_id,action.resolution_content_id) FROM model_tool_call tool_call " ++
+            "JOIN model_operation operation ON operation.operation_id=tool_call.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+            "WHERE operation.session_ref=?1 AND coalesce(tool_call.rejection_code,action.resolution_code) IS NOT NULL " ++
+            "ORDER BY tool_call.operation_id,coalesce(tool_call.acceptance_position,action.acceptance_position)",
     );
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
@@ -1532,8 +1532,8 @@ pub fn countRejectedCalls(self: *Store, session_ref: []const u8) !u64 {
         "SELECT count(*) FROM turn active INDEXED BY turn_one_active_per_session " ++
             "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
             "ON operation.turn_id=active.turn_id " ++
-            "CROSS JOIN model_tool_call call ON call.operation_id=operation.operation_id " ++
-            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND call.rejection_code IS NOT NULL",
+            "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
+            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND tool_call.rejection_code IS NOT NULL",
     );
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
@@ -1582,29 +1582,29 @@ pub fn readToolOutcomeFacts(
     const statement = try store_core.cached(
         self,
         "SELECT (SELECT count(*) FROM model_output_item expected " ++
-            "WHERE expected.operation_id=?1 AND expected.item_kind=3),count(call.operation_id)," ++
+            "WHERE expected.operation_id=?1 AND expected.item_kind=3),count(tool_call.operation_id)," ++
             "coalesce(sum(CASE WHEN item.operation_id IS NOT NULL AND item.item_kind=3 " ++
             "AND name.content_id IS NOT NULL AND call_id.content_id IS NOT NULL " ++
-            "AND arguments.content_id IS NOT NULL AND ((call.rejection_code IS NOT NULL " ++
-            "AND rejection.content_id IS NOT NULL AND call.acceptance_position IS NOT NULL " ++
-            "AND action.action_id IS NULL) OR (call.rejection_code IS NULL AND action.action_id IS NOT NULL " ++
+            "AND arguments.content_id IS NOT NULL AND ((tool_call.rejection_code IS NOT NULL " ++
+            "AND rejection.content_id IS NOT NULL AND tool_call.acceptance_position IS NOT NULL " ++
+            "AND action.action_id IS NULL) OR (tool_call.rejection_code IS NULL AND action.action_id IS NOT NULL " ++
             "AND ((action.resolution_code IS NULL AND action.resolution_content_id IS NULL " ++
             "AND action.acceptance_position IS NULL) OR (action.resolution_code IS NOT NULL " ++
             "AND result.content_id IS NOT NULL AND action.acceptance_position IS NOT NULL)))) THEN 1 ELSE 0 END),0)," ++
-            "coalesce(sum(CASE WHEN call.rejection_code IS NOT NULL AND rejection.content_id IS NOT NULL " ++
-            "AND call.acceptance_position IS NOT NULL OR call.rejection_code IS NULL " ++
+            "coalesce(sum(CASE WHEN tool_call.rejection_code IS NOT NULL AND rejection.content_id IS NOT NULL " ++
+            "AND tool_call.acceptance_position IS NOT NULL OR tool_call.rejection_code IS NULL " ++
             "AND action.resolution_code IS NOT NULL AND result.content_id IS NOT NULL " ++
             "AND action.acceptance_position IS NOT NULL THEN 1 ELSE 0 END),0)," ++
-            "max(coalesce(call.acceptance_position,action.acceptance_position)) " ++
-            "FROM model_tool_call call LEFT JOIN model_output_item item ON item.operation_id=call.operation_id " ++
-            "AND item.item_ordinal=call.item_ordinal " ++
-            "LEFT JOIN content name ON name.content_id=call.name_content_id " ++
-            "LEFT JOIN content call_id ON call_id.content_id=call.call_id_content_id " ++
-            "LEFT JOIN content arguments ON arguments.content_id=call.arguments_content_id " ++
-            "LEFT JOIN content rejection ON rejection.content_id=call.rejection_content_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id " ++
-            "AND action.call_ordinal=call.call_ordinal LEFT JOIN content result " ++
-            "ON result.content_id=action.resolution_content_id WHERE call.operation_id=?1",
+            "max(coalesce(tool_call.acceptance_position,action.acceptance_position)) " ++
+            "FROM model_tool_call tool_call LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id " ++
+            "AND item.item_ordinal=tool_call.item_ordinal " ++
+            "LEFT JOIN content name ON name.content_id=tool_call.name_content_id " ++
+            "LEFT JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
+            "LEFT JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
+            "LEFT JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id " ++
+            "AND action.call_ordinal=tool_call.call_ordinal LEFT JOIN content result " ++
+            "ON result.content_id=action.resolution_content_id WHERE tool_call.operation_id=?1",
     );
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, operation_id);
@@ -1617,9 +1617,9 @@ pub fn readToolOutcomeFacts(
         (require_terminal and terminal != expected)) return error.CorruptStore;
     const position = try sqlite.readNullablePositiveI64(statement, 4);
     if (require_terminal and position == null) return error.CorruptStore;
-    const sources = try store_core.cached(self, "SELECT item.session_ref,item.session_position FROM model_tool_call call " ++
-        "LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal " ++
-        "WHERE call.operation_id=?1 ORDER BY call.call_ordinal");
+    const sources = try store_core.cached(self, "SELECT item.session_ref,item.session_position FROM model_tool_call tool_call " ++
+        "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
+        "WHERE tool_call.operation_id=?1 ORDER BY tool_call.call_ordinal");
     defer sqlite.resetCached(sources);
     try sqlite.bindU64(sources, 1, operation_id);
     while (true) {

@@ -16,12 +16,13 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 45;
+pub const schema_version: u32 = 46;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes needs a new row, and so a new schema_version.
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
+    .{ .schema_version = 46, .digest = 0x27b543d1c7b1fe2a },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -151,10 +152,10 @@ pub const tables = [_]Table{
     .{
         .name = "store_meta",
         .columns = &.{
-            .{ .name = "key", .type = .{ .text = null } },
-            .{ .name = "value", .type = .{ .text = null } },
+            .{ .name = "meta_key", .type = .{ .text = null } },
+            .{ .name = "meta_value", .type = .{ .text = null } },
         },
-        .primary_key = &.{"key"},
+        .primary_key = &.{"meta_key"},
     },
     .{
         .name = "content",
@@ -646,7 +647,7 @@ const identity_sql = std.fmt.comptimePrint("PRAGMA application_id={d}", .{applic
 const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
 /// a wire bump is no schema change.
-const store_meta_sql = "INSERT INTO store_meta(key,value) VALUES('wire_version',?1),('store_selector',?2)";
+const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2)";
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
 fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8 {
@@ -780,7 +781,7 @@ pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         }
     }
     {
-        const statement = try sqlite.prepare(database, "SELECT value FROM store_meta WHERE key='wire_version'");
+        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
         var version: protocol.Bounded(16) = .{};
@@ -788,7 +789,7 @@ pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
     }
     {
-        const statement = try sqlite.prepare(database, "SELECT value FROM store_meta WHERE key='store_selector'");
+        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
