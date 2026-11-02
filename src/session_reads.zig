@@ -10,17 +10,39 @@ const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const View = @import("session_view.zig");
+const Editor = @import("TerminalEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
 const Viewport = @import("ConversationViewport.zig");
+const session_line = @import("session_line.zig");
+const slash_commands = @import("slash_commands.zig");
+const queued_line = @import("queued_line.zig");
+const Bounded = @import("bounded.zig").Bounded;
+const AnswerRenderer = @import("AnswerRenderer.zig");
+const Terminal = @import("SessionTerminal.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 /// Writes /status from one Current capture whose attention rows are in the file.
 pub const Status = *const fn (std.Io, []const u8, []const u8, *const protocol_reply.Current, std.Io.File, *std.Io.Writer) anyerror!void;
-pub const Inspection = enum { status, requests, help, command };
+pub const Inspection = union(enum) { status, requests, help, command, copy: Copy };
+
+/// What a /copy sends: the last answer or its last code block to the
+/// clipboard, or the last answer to a file.
+pub const Copy = slash_commands.Copy;
+
+/// What a /copy read found. The clipboard takes its range of the scratch
+/// file after the UI joins the read.
+pub const Copied = union(enum) { no_answer, no_code, too_large, clipboard: AnswerRenderer.LastCode.Range, saved };
+
+pub const copy_name_bytes = "rui--answer.md".len + protocol.session_id_bytes;
+
+/// The file /copy file writes, in the directory Rui runs in.
+pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
+    return std.fmt.bufPrint(buffer, "rui-{s}-answer.md", .{session}) catch unreachable;
+}
 
 /// One read. Inputs are frozen at launch; the worker writes only `result`,
 /// which the UI reads after join. No worker reads or writes the controller.
@@ -28,6 +50,127 @@ pub const Inspection = enum { status, requests, help, command };
 /// its footer, status and cursor, in one UI step after join.
 /// The frontend's private scratch files, which a read borrows whole.
 pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
+
+/// The moment a Session line was read at. Every input of the context
+/// estimate takes a Session position and every settings change a revision,
+/// so a page with another moment may show other facts.
+pub const Moment = struct { revision: u64, end: u64 };
+
+/// What the Session line shows from Current, as the UI keeps it between
+/// reads. A scan reads Current again only when its page's moment differs.
+pub const Line = struct {
+    comptime {
+        std.debug.assert(@max(protocol.max_label_bytes, protocol.max_session_bytes) <= session_line.max_name_bytes);
+    }
+
+    /// Null until the first read.
+    read: ?Moment = null,
+    label: ?Bounded(protocol.max_label_bytes) = null,
+    first_position: ?u64 = null,
+    model: Bounded(protocol.max_model_bytes) = .{},
+    effort: ?protocol.ReasoningEffort = null,
+    left: ?u8 = null,
+    asks: bool = false,
+
+    fn stale(read: ?Moment, page: *const protocol.ActivityFacts) bool {
+        const moment = read orelse return true;
+        return moment.revision != page.work.revision or moment.end != page.end;
+    }
+
+    /// Fills `line` with the facts this read's Current capture holds.
+    fn take(line: *?Line, current: *const protocol_reply.Current, moment: Moment) void {
+        const settings = &current.settings;
+        const first = (current.first_message.value orelse null) orelse null;
+        const trigger = settings.compaction_trigger;
+        const estimate = (settings.context_estimate.value orelse null) orelse null;
+        line.* = .{
+            .read = moment,
+            .label = if (settings.label) |label| plain(protocol.max_label_bytes, label.slice()) else null,
+            .first_position = if (first) |message| message.value.position else null,
+            .model = plain(protocol.max_model_bytes, settings.model.slice()),
+            .effort = if (settings.reasoning_effort) |effort| effort.value else null,
+            .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
+            .asks = settings.permission_mode.value == .ask,
+        };
+    }
+
+    /// Null until the first read.
+    pub fn facts(self: *const Line, hint: *const Hint, reference: []const u8) ?session_line.Facts {
+        if (self.read == null) return null;
+        const label: ?[]const u8 = if (self.label) |*text| text.slice() else null;
+        const line: ?[]const u8 = switch (hint.*) {
+            .line => |*text| text.slice(),
+            .unread, .absent => null,
+        };
+        return .{
+            .name = session_line.name(label, line, reference).text,
+            .model = self.model.slice(),
+            .effort = self.effort,
+            .left = self.left,
+            .asks = self.asks,
+        };
+    }
+};
+
+/// An unlabelled Session's name: its first Message's first line, read once,
+/// since that Message never changes.
+pub const Hint = union(enum) {
+    unread,
+    /// The lookup found no line to show; the reference names the Session.
+    absent,
+    line: Bounded(session_line.max_line_bytes),
+};
+
+/// Reads the hint from the first Message at `position`. The name is only a
+/// hint, so a Message the Host refuses or that is not text names the Session
+/// by its reference instead.
+fn readHint(requests: client.Requests, job: *const Job, position: u64) !Hint {
+    const line = try readFirstLine(requests, job, position, .absent) orelse return .absent;
+    return if (line.len == 0) .absent else .{ .line = line };
+}
+
+/// The first line of the Message at `position`, terminal-safe. A canonical
+/// Store, transport or cancellation failure fails the read, as the page's
+/// would; so does a refusal or bytes that are not text, unless `refused` is
+/// `.absent`, which returns null for them.
+fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, refused: enum { absent, fails }) !?queued_line.Line {
+    var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
+    const reply = requests.readActivityPrefix(job.store, job.session, position, &buffer) catch |err| switch (err) {
+        error.InvalidResponse => return if (refused == .absent) null else err,
+        else => return err,
+    };
+    return switch (reply) {
+        .line => |bytes| plain(session_line.max_line_bytes, session_line.firstLine(bytes)),
+        .failure => |failure| if (refused == .absent and failure.err() != error.CanonicalStoreFailure) null else requests.failRead(failure),
+    };
+}
+
+/// Text the Host holds, without terminal controls and with its tabs and line
+/// ends as spaces, within `limit` bytes: cut at a code point and ended with
+/// an ellipsis when longer. One pass, straight into the value.
+fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
+    var value: Bounded(limit) = .{ .len = 0 };
+    var text: TerminalText = .{ .mode = .multiline };
+    // The longest kept text an ellipsis can still follow.
+    var room: usize = 0;
+    for (bytes, 1..) |byte, count| {
+        var storage: [32]u8 = undefined;
+        var piece = std.Io.Writer.fixed(&storage);
+        text.feed(&piece, &.{byte}) catch unreachable;
+        if (count == bytes.len) text.finish(&piece) catch unreachable;
+        const shown = piece.buffered();
+        if (value.len + shown.len > limit) {
+            value.len = room;
+            @memcpy(value.bytes[room..][0..session_line.ellipsis.len], session_line.ellipsis);
+            value.len += session_line.ellipsis.len;
+            return value;
+        }
+        for (shown, value.bytes[value.len..][0..shown.len]) |from, *to| to.* = if (from == '\n' or from == '\t') ' ' else from;
+        value.len += shown.len;
+        if (value.len + session_line.ellipsis.len <= limit) room = value.len;
+    }
+    return value;
+}
 
 pub const Job = struct {
     init: std.process.Init = undefined,
@@ -46,8 +189,19 @@ pub const Job = struct {
     listing: ?Listing = null,
     // A message read shows this collapsed block's Message in full.
     message_target: ?View.Collapsed = null,
+    recall: ?Input.Step = null,
+    // The latest live work held queued input: a listed echo, whose read
+    // was earlier, is labelled by it.
+    held: bool = false,
     // Messages shown in live output before this read.
     messages: Messages = .{},
+    // The Messages waiting at the live cursor, as the Host reported them;
+    // the newest live output showed while it waited (see View.Taking),
+    // which each read sets in place; and the Message whose first line the
+    // queued row holds.
+    queued: protocol.Queued = .{},
+    drawn: queued_line.Drawn = .{},
+    queued_line: u64 = 0,
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -61,10 +215,18 @@ pub const Job = struct {
     open_status: bool = false,
     watch_status: bool = false,
     status_shown: u64 = 0,
+    // The moment the UI's Session line was read at, and whether it still
+    // needs the unlabelled Session's name.
+    line_read: ?Moment = null,
+    hint_wanted: bool = false,
     result: struct {
         // The work the page's own Store read saw: its history, footer and
         // consent describe one moment.
         work: protocol.PageWork = .{},
+        // The Session line's facts, when this read took them.
+        line: ?Line = null,
+        // The unlabelled Session's name, when this read looked it up.
+        hint: ?Hint = null,
         // /status from one Current capture is in the status file.
         status: bool = false,
         status_digest: u64 = 0,
@@ -77,10 +239,19 @@ pub const Job = struct {
         echoes: Echoes = .{},
         // The Messages of the collapsed blocks in this read's output, in order.
         collapsed: Collected = .{},
-        // The opening's lowest unapplied position (see View.Pending).
+        // Where a transcript's search for Messages a seam lists may stop
+        // (see `seam`): the opening's start, an echo's position or the
+        // lowest a stop showed.
         lowest: ?u64 = null,
+        // A seam's listing searched down to its range's lowest position and
+        // found nothing it lists below this one (see `list`).
+        searched: ?u64 = null,
         // The job's Messages after this read.
         messages: Messages = .{},
+        // The Messages waiting at this read's cursor, and the newest one's
+        // first line when the row shows it and does not hold it yet.
+        queued: protocol.Queued = .{},
+        queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
@@ -95,7 +266,92 @@ pub const Job = struct {
         summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
+        copied: Copied = .no_answer,
+        // The sent Message a recall step found, its text staged in scratch.
+        recalled: ?Input.Found = null,
+        // The step passed over a sent Message the draft cannot hold.
+        recall_passed: bool = false,
     } = .{},
+};
+
+/// One step over the Messages the person sent, from the one the draft
+/// shows or from the newest: one Store row, then that Message's content
+/// staged in scratch. One the draft cannot hold as typed text (over its
+/// capacity, or with a control character) is passed over, its content read
+/// at most once, and the result says so.
+pub fn recall(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const requests = task.requests();
+    const step = job.recall.?;
+    std.debug.assert(step.older or step.from != null);
+    var request: protocol.ReadPersonMessage = .{
+        .end = if (step.from) |from| from.end else null,
+        .position = if (step.from) |from| from.position else 0,
+        .direction = if (step.older) .backward else .forward,
+    };
+    try request.session.set(job.session);
+    while (true) {
+        const reply = switch (try requests.personMessage(job.store, request)) {
+            .found => |reply| reply,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        const message = reply.message orelse return;
+        const at: Input.Recalled = .{ .position = message.position, .end = reply.end };
+        if (message.content.length <= Input.capacity) if (try stageRecalled(requests, job, task.io, at, message.content)) |found| {
+            job.result.recalled = found;
+            return;
+        };
+        job.result.recall_passed = true;
+        request.end = reply.end;
+        request.position = message.position;
+    }
+}
+
+/// Stages a sent Message's text in scratch; null when the draft cannot hold
+/// it as typed text.
+fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Input.Recalled, content: protocol.ActivityItem.Content) !?Input.Found {
+    try job.files.scratch.setLength(io, 0);
+    var staging: RecallStaging = .{ .io = io, .file = job.files.scratch };
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
+    if (try requests.readActivityContent(job.store, job.session, at.position, 0, reference, &staging)) |failure| return requests.failRead(failure);
+    if (staging.offset != content.length) return error.ContentLengthMismatch;
+    const slash = staging.first == '/';
+    if (!staging.editable or staging.need != 0 or staging.offset + @intFromBool(slash) > Input.capacity) return null;
+    return .{ .at = at, .length = @intCast(staging.offset), .slash = slash };
+}
+
+/// A sent Message's text in scratch, checked scalar by scalar as the
+/// editor checks literal text.
+const RecallStaging = struct {
+    io: std.Io,
+    file: std.Io.File,
+    offset: u64 = 0,
+    first: ?u8 = null,
+    editable: bool = true,
+    scalar: [4]u8 = undefined,
+    have: u3 = 0,
+    need: u3 = 0,
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        try self.file.writePositionalAll(self.io, bytes, self.offset);
+        self.offset += bytes.len;
+        if (self.first == null and bytes.len != 0) self.first = bytes[0];
+        for (bytes) |byte| {
+            if (!self.editable) return;
+            if (self.need == 0) self.need = std.unicode.utf8ByteSequenceLength(byte) catch {
+                self.editable = false;
+                return;
+            };
+            self.scalar[self.have] = byte;
+            self.have += 1;
+            if (self.have != self.need) continue;
+            Editor.validateText(self.scalar[0..self.have]) catch {
+                self.editable = false;
+            };
+            self.have = 0;
+            self.need = 0;
+        }
+    }
 };
 
 /// Host commands keep their one-shot output owners. Their complete stdout and
@@ -127,7 +383,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
-        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.files.scratch, &output, job.colour);
+        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour);
         job.result.compact_tools = false;
         job.result.action = action;
     }
@@ -144,26 +400,35 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     };
     // The page carries its work from its own Store read.
     job.result.work = page.facts.work;
-    // Only /status reads Current, once; it may be newer than the page.
-    if (job.open_status or job.watch_status) {
+    // /status and a stale Session line read Current, once; it may be newer
+    // than the page.
+    const line_stale = Line.stale(job.line_read, &page.facts);
+    if (job.open_status or job.watch_status or line_stale) {
         const current = try View.current(requests, job.store, job.session, job.files.scratch);
+        if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
         // Before anything else reuses scratch, which holds this capture's rows.
-        job.result.status_digest = try statusDigest(job, task.io, &current);
-        if (job.open_status or job.result.status_digest != job.status_shown) {
-            try job.files.status.setLength(task.io, 0);
-            try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
-            var buffer: [4096]u8 = undefined;
-            var output = job.files.status.writerStreaming(task.io, &buffer);
-            try writeStatus(job, task.io, &current, &output.interface);
-            try output.flush();
-            job.result.status = true;
+        if (job.open_status or job.watch_status) {
+            job.result.status_digest = try statusDigest(job, task.io, &current);
+            if (job.open_status or job.result.status_digest != job.status_shown) {
+                try job.files.status.setLength(task.io, 0);
+                try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
+                var buffer: [4096]u8 = undefined;
+                var output = job.files.status.writerStreaming(task.io, &buffer);
+                try writeStatus(job, task.io, &current, &output.interface);
+                try output.flush();
+                job.result.status = true;
+            }
         }
     }
+    if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first_position) |position| {
+        job.result.hint = try readHint(requests, job, position);
+    };
     job.result.live = View.Live.init(page.facts.call_activity);
-    // Admission ids follow Session positions, so the newest one shown
-    // means every earlier Message was delivered too.
+    // Selection and a stop take admission-order prefixes, so a row or a
+    // stop takes every earlier Message too.
     for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
-        .admission, .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
+        .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
+        .stop => |stop| job.result.delivered = @max(job.result.delivered, stop.cutoff),
         else => {},
     };
     if (job.opening) {
@@ -177,26 +442,33 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // Nothing showed before the opening, so its start is a boundary even
         // when it shows nothing. Every Message it shows is at or after its
         // page's lowest item, a row included; one admitted before that page
-        // and not applied is listed there.
+        // and not applied is listed there, unless it waits above the input.
         const lowest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else page.facts.end + 1;
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .messages = job.messages, .end = page.facts.end };
-    if (job.opening) {
-        const pending = try View.pending(requests, job.store, job.session, page.facts.end);
-        try pending.render(&output);
-        job.result.lowest = pending.lowest;
-        // A queued Message older than the page shows only in a transcript's
-        // listing, at the opening's seam. No later boundary may precede its
-        // row, which shows nothing live.
-        output.messages.shown = @max(output.messages.shown, pending.newest);
-    }
-    try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
+    // Which Messages before the opening's page a seam lists is known only
+    // by reading them, so its search starts at the history's first
+    // position, at the first transcript that reaches the seam and not here:
+    // opening reads the same after any history (see `list`).
+    if (job.opening) job.result.lowest = 1;
+    // A stop searches only from the oldest Message that waited at the last
+    // read: queued input joins the work at its next input boundary, so that
+    // is at most one model step back, never the history.
+    const from: ?u64 = if (job.queued.count != 0) job.queued.oldest_position - 1 else null;
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .messages = job.messages, .end = page.facts.end, .drawn = job.drawn.admission };
+    job.drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = from });
+    // One shown at its Admission is delivered too.
+    job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
-    job.result.collapsed = output.blocks;
+    if (output.lowest) |lowest| job.result.lowest = lowest;
+    const queued = page.facts.queued;
+    job.result.queued = queued;
+    if (queued_line.unshown(queued.count, queued.oldest_position, job.drawn) != 0 and queued.newest_admission != job.queued_line) {
+        job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, .fails)).? };
+    }
     if (!job.opening) {
         job.result.boundaries = output.boundaries;
         if (readEnd(job.result.messages, page.facts.more, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
@@ -238,10 +510,9 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
     try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
-    job.result.collapsed = output.blocks;
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
@@ -250,12 +521,11 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
 fn list(job: *Job, task: *Task, step: Listing) !void {
     const requests = task.requests();
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
-    defer job.result.collapsed = output.blocks;
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
-            try View.message(requests, job.store, job.session, item, echo.message, true, &output, job.colour);
+            try View.message(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour);
             job.result.listing = null;
         },
         .range => |range| {
@@ -267,12 +537,8 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 };
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
-                    const value = switch (item.value) {
-                        .admission => |value| value,
-                        else => continue,
-                    };
-                    if (!range.all and value.state == .applied) continue;
-                    try View.message(requests, job.store, job.session, item, value, true, &output, job.colour);
+                    const value = listed(item, range.shown) orelse continue;
+                    try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
                     job.result.listing = .{ .range = next };
@@ -282,31 +548,261 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                     continue;
                 }
                 job.result.listing = null;
+                // A seam's search found nothing it lists below where it
+                // began or last listed one, at an end no earlier than any a
+                // later seam reads: a later search may stop there. Applied
+                // Messages stay applied, and one waiting that a stop later
+                // excludes shows at the stop, which lowers it again.
+                if (range.shown == null) job.result.searched = if (range.cursor.position == 0) range.end + 1 else range.cursor.position;
                 return;
             }
         },
     }
 }
 
-/// The collapsed blocks one read writes: a page shows each item at most once.
-pub const Collected = struct {
-    items: [@max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items)]View.Collapsed = undefined,
-    count: usize = 0,
+/// Whether a range lists this item, and its Message.
+///
+/// A span of dropped echoes (`shown`, read at its newest echo's position)
+/// lists each Message live output showed in it once. Live output shows another
+/// Session's Message as its Admission. It shows a person's or script's at
+/// its Admission when the Message showed while it waited (`DrawnSpan`),
+/// otherwise as its row or labelled at the stop that excluded it, so it
+/// judges each by the newest such Message before the span and after it:
+/// - A row shows unless its Message showed while it waited, which it did
+///   before the span only if no newer one had, and in the span only with
+///   its Admission there too. Either way the row is listed exactly when its
+///   Message is newer than the one before the span.
+/// - An Admission whose row is in the span is listed there instead. One
+///   still waiting at the span's end showed in it exactly when no newer
+///   Message showed while it waited by then: any that did was taken next,
+///   so this one had been taken before it. One a stop excluded is listed at
+///   the stop's seam.
+///
+/// A seam lists each Message not applied at the range's end, except a
+/// person's or script's still waiting: one that showed at its Admission has
+/// its row before any later boundary (see `Messages`), and any other waits
+/// above the input and shows live once taken.
+fn listed(item: protocol.ActivityItem, shown: ?DrawnSpan) ?protocol.ActivityItem.Message {
+    return switch (item.value) {
+        .admission => |value| if (value.sender != null)
+            (if (shown != null or value.state != .applied) value else null)
+        else if (shown) |drawn|
+            (if (value.state == .queued and value.admission <= drawn.after) value else null)
+        else if (value.state == .excluded) value else null,
+        .user => |value| if (shown) |drawn| (if (value.sender == null and value.admission > drawn.before) value else null) else null,
+        else => null,
+    };
+}
 
-    pub fn slice(self: *const Collected) []const View.Collapsed {
-        return self.items[0..self.count];
+test "a range lists the Messages live output showed, never queued Messages still waiting above the input" {
+    const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
+    const peer: protocol.Peer = .{ .session = .{ .len = 0 } };
+    const Case = struct { kind: enum { admission, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, shown: ?DrawnSpan, listed: bool };
+    // Live output showed Message 10 while it waited before the dropped
+    // span, and Message 14 by its end.
+    const span: DrawnSpan = .{ .before = 10, .after = 14 };
+    for ([_]Case{
+        // A dropped live span: what live output showed. Another Session's
+        // Admission, a person's or script's row, and the Admission of one
+        // that showed while it waited and still waits at the span's end.
+        .{ .kind = .admission, .sender = true, .state = .applied, .admission = 12, .shown = span, .listed = true },
+        .{ .kind = .user, .sender = false, .state = .applied, .admission = 12, .shown = span, .listed = true },
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 14, .shown = span, .listed = true },
+        // Not the row of one that showed while it waited before the span,
+        // another Session's row, an Admission whose row the span lists,
+        // one still waiting above the input, or one a stop excluded, which
+        // shows at the stop.
+        .{ .kind = .user, .sender = false, .state = .applied, .admission = 10, .shown = span, .listed = false },
+        .{ .kind = .user, .sender = true, .state = .applied, .admission = 12, .shown = span, .listed = false },
+        .{ .kind = .admission, .sender = false, .state = .applied, .admission = 12, .shown = span, .listed = false },
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 15, .shown = span, .listed = false },
+        .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 12, .shown = span, .listed = false },
+        // A seam: each Message not applied at its end, except a person's
+        // or script's still queued, which shows live once taken, at the
+        // opening too.
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 10, .shown = null, .listed = false },
+        .{ .kind = .admission, .sender = false, .state = .queued, .admission = 11, .shown = null, .listed = false },
+        .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 11, .shown = null, .listed = true },
+        .{ .kind = .admission, .sender = true, .state = .queued, .admission = 11, .shown = null, .listed = true },
+        .{ .kind = .admission, .sender = false, .state = .applied, .admission = 9, .shown = null, .listed = false },
+        .{ .kind = .user, .sender = false, .state = .applied, .admission = 11, .shown = null, .listed = false },
+    }) |case| {
+        const message: protocol.ActivityItem.Message = .{ .admission = case.admission, .key = .{}, .turn = null, .state = case.state, .content = content, .admitted_at = 1, .sender = if (case.sender) peer else null };
+        const item: protocol.ActivityItem = .{ .position = 30, .at = 1, .value = switch (case.kind) {
+            .admission => .{ .admission = message },
+            .user => .{ .user = message },
+        } };
+        try std.testing.expectEqual(case.listed, listed(item, case.shown) != null);
+    }
+    try std.testing.expect(listed(.{ .position = 30, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 12, .completion = .completed } } }, span) == null);
+}
+
+/// A live history for transcript tests: each item as of the newest dropped
+/// echo's position, and the echoes live output recorded, in order.
+const Shown = struct {
+    items: [160]protocol.ActivityItem = undefined,
+    count: usize = 0,
+    record: Record = .{},
+    drawn: u64 = 0,
+    output: u64 = 0,
+
+    fn message(admission: u64, state: @FieldType(protocol.ActivityItem.Message, "state"), sender: bool) protocol.ActivityItem.Message {
+        return .{ .admission = admission, .key = .{}, .turn = if (state == .applied) 1 else null, .state = state, .content = .{ .length = 1, .digest = @splat(0) }, .admitted_at = 1, .sender = if (sender) .{ .session = .{ .len = 0 } } else null };
+    }
+
+    /// Appends an item at the next position; live output shows it as an
+    /// echo when `shown`, moving the watermark to `drew` if it showed while
+    /// it waited.
+    fn add(self: *Shown, value: protocol.ActivityItem.Value, shown: bool, drew: ?u64, opening: bool) void {
+        const item: protocol.ActivityItem = .{ .position = self.count + 1, .at = 1, .value = value };
+        self.items[self.count] = item;
+        self.count += 1;
+        if (!shown) return;
+        const before = self.drawn;
+        if (drew) |admission| self.drawn = admission;
+        const echoed = switch (value) {
+            .admission, .user => |echoed| echoed,
+            else => unreachable,
+        };
+        self.record.add(.{ .output = self.output, .end = self.output + 1, .position = item.position, .ordinal = 0, .message = echoed, .drawn = .{ .before = before, .after = self.drawn } }, opening);
+        self.output += 1;
+    }
+
+    /// How many times a transcript reaches each Message by admission ID:
+    /// its kept echoes, and the dropped span listed as `list` reads it.
+    fn reached(self: *const Shown, counts: []u8) !void {
+        @memset(counts, 0);
+        for (self.record.opening[0..self.record.opening_count]) |echo| counts[echo.message.admission] += 1;
+        for (self.record.live[0..self.record.live_count]) |echo| counts[echo.message.admission] += 1;
+        const range = (plan(&Marks{}, &self.record, self.output, null).dropped orelse return error.NothingDropped).range;
+        for (self.items[0..self.count]) |item| if (item.position >= range.lowest and item.position <= range.end) {
+            if (listed(item, range.shown)) |value| counts[value.admission] += 1;
+        };
     }
 };
+
+test "a dropped span lists a Message taken from the queued row once, after a newer one showed while it waited" {
+    // X waits behind work and leaves the queued row as its row R; another
+    // Session's Messages keep live output from marking, so R falls into the
+    // dropped span with X's Admission below it. Later Y shows at its
+    // Admission while it waits. R is still X's only showing.
+    var shown: Shown = .{};
+    const x = 1;
+    const y = 68;
+    shown.add(.{ .admission = Shown.message(x, .applied, false) }, false, null, false);
+    for (2..4) |admission| shown.add(.{ .admission = Shown.message(admission, .queued, true) }, true, null, false);
+    const row = shown.count + 1;
+    shown.add(.{ .user = Shown.message(x, .applied, false) }, true, null, false);
+    for (4..y) |admission| shown.add(.{ .admission = Shown.message(admission, .queued, true) }, true, null, false);
+    shown.add(.{ .admission = Shown.message(y, .queued, false) }, true, y, false);
+    const span = shown.record.dropped.?;
+    try std.testing.expect(span.low > 1 and span.low < row and row <= span.high);
+    var counts: [100]u8 = undefined;
+    try shown.reached(&counts);
+    for (1..y + 1) |admission| try std.testing.expectEqual(@as(u8, 1), counts[admission]);
+}
+
+test "Messages waiting at the opening reach a transcript once after their rows fall into the dropped span" {
+    // The opening shows A at its Admission, since nothing holds the queue
+    // and it is the oldest; B to the last wait in the queued row. Their
+    // rows show live once taken, A's excepted, and more than a Record
+    // holds fall into the dropped span; a later Message shows while it
+    // waits.
+    var shown: Shown = .{};
+    const waiting = 70;
+    for (1..waiting + 1) |admission| shown.add(.{ .admission = Shown.message(admission, .applied, false) }, admission == 1, if (admission == 1) 1 else null, true);
+    for (1..waiting + 1) |admission| shown.add(.{ .user = Shown.message(admission, .applied, false) }, admission != 1, null, false);
+    shown.add(.{ .admission = Shown.message(waiting + 1, .queued, false) }, true, waiting + 1, false);
+    try std.testing.expect(shown.record.dropped != null);
+    var counts: [100]u8 = undefined;
+    try shown.reached(&counts);
+    for (1..waiting + 2) |admission| try std.testing.expectEqual(@as(u8, 1), counts[admission]);
+}
+
+test "a stop answers every Message up to its cutoff, and no boundary precedes queued Messages it shows" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "output", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null } } };
+    const stop: protocol.ActivityItem = .{ .position = 20, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 5, .completion = .completed } } };
+    // Another Session's Message 5 showed as its Admission and has no row:
+    // nothing may begin a transcript until the stop answers it.
+    var answered: DisplayCapture = .{ .task = &task, .file = file, .messages = .{ .shown = 5, .answered = 3 }, .end = 30 };
+    answered.item(outcome);
+    try answered.feed("✓ done\n");
+    try std.testing.expectEqual(@as(usize, 0), answered.boundaries.count);
+    answered.item(stop);
+    try answered.feed("! Session stopped.\n");
+    try std.testing.expectEqualDeep(@as([]const Boundary, &.{.{ .output = 9, .cursor = .{ .end = 19 }, .admitted = 20 }}), answered.boundaries.slice());
+    try std.testing.expect(answered.finish().settled());
+    // The Messages a stop shows belong to no item, and nothing before the
+    // stop in this read begins a transcript: once they are excluded, one
+    // beginning there would list them at its seam too.
+    var shown: DisplayCapture = .{ .task = &task, .file = file, .end = 30 };
+    shown.item(outcome);
+    try shown.feed("✓ done\n");
+    try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
+    shown.excluding(12);
+    try shown.feed("! Stopped before it ran · send it again to run it\n› later\n");
+    try std.testing.expectEqual(@as(usize, 0), shown.boundaries.count);
+    try std.testing.expectEqual(@as(usize, 0), shown.echoes.count);
+    try std.testing.expectEqual(@as(?u64, 12), shown.lowest);
+    shown.item(stop);
+    try shown.feed("! Session stopped.\n");
+    try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
+    try std.testing.expectEqual(@as(u64, 20), shown.boundaries.items[0].admitted);
+}
+
+/// The collapsed blocks one read writes, oldest first. A page shows each
+/// item at most once, but its stop also shows every queued Message it
+/// excluded: beyond capacity only the newest blocks are kept, and older ones
+/// are only counted, as `View.Blocks` keeps them.
+pub const Collected = struct {
+    pub const capacity = @max(@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len, protocol.public_conversation_page_items);
+    items: [capacity]View.Collapsed = undefined,
+    count: usize = 0,
+
+    fn add(self: *Collected, value: View.Collapsed) void {
+        self.items[self.count % capacity] = value;
+        self.count += 1;
+    }
+
+    /// The block at `index` in write order, if kept.
+    pub fn at(self: *const Collected, index: usize) ?View.Collapsed {
+        std.debug.assert(index < self.count);
+        return if (self.count - index > capacity) null else self.items[index % capacity];
+    }
+};
+
+test "a read's collapsed blocks keep the newest beyond capacity, as a stop's queued Messages may need" {
+    var blocks: Collected = .{};
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    for (0..Collected.capacity + 3) |index| blocks.add(.{ .source = .activity, .position = index, .ordinal = 0, .content = content, .row = false });
+    for (0..3) |index| try std.testing.expect(blocks.at(index) == null);
+    for (3..blocks.count) |index| try std.testing.expectEqual(@as(u64, index), blocks.at(index).?.position);
+}
 
 const DisplayCapture = struct {
     task: *Task,
     file: std.Io.File,
     offset: u64 = 0,
-    blocks: Collected = .{},
+    /// Where its collapsed blocks are recorded, if anywhere: the job's
+    /// result, filled in place.
+    blocks: ?*Collected = null,
     /// The page's end, for boundary cursors.
     end: u64 = 0,
     /// Messages shown before the current item.
     messages: Messages = .{},
+    /// The newest Message a person or script sent that live output showed
+    /// while it waited, as of the bytes written last (see `drew`), and as of
+    /// the current item's start.
+    drawn: u64 = 0,
+    current_drawn: u64 = 0,
+    /// The lowest Admission position of a Message a stop showed.
+    lowest: ?u64 = null,
     /// Shown items where a transcript may begin.
     boundaries: Boundaries = .{},
     /// Shown Messages.
@@ -317,14 +813,31 @@ const DisplayCapture = struct {
 
     pub fn item(self: *@This(), value: protocol.ActivityItem) void {
         _ = self.finish();
+        // Every Message up to a stop's cutoff has its row before the stop,
+        // or never gets one.
+        if (value.value == .stop) self.messages.answered = @max(self.messages.answered, value.value.stop.cutoff);
         self.current = value;
         self.current_start = self.offset;
+        self.current_drawn = self.drawn;
+    }
+
+    /// The current item is a Message shown while it waited.
+    pub fn drew(self: *@This(), admission: u64) void {
+        self.drawn = admission;
+    }
+
+    /// A stop shows the queued Messages it excluded next, from the one
+    /// admitted at `position`. Their bytes, until the stop's own item, belong
+    /// to no item, and no transcript begins earlier in this read: once they
+    /// are excluded, it would list them at its seam too.
+    pub fn excluding(self: *@This(), position: u64) void {
+        _ = self.finish();
+        self.boundaries.count = 0;
+        self.lowest = @min(self.lowest orelse position, position);
     }
 
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
-        if (self.blocks.count == self.blocks.items.len) return error.TooManyCollapsedBlocks;
-        self.blocks.items[self.blocks.count] = value;
-        self.blocks.count += 1;
+        if (self.blocks) |blocks| blocks.add(value);
     }
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
@@ -343,7 +856,7 @@ const DisplayCapture = struct {
         if (self.current) |current| {
             self.messages.observe(current, self.current_shown);
             if (self.current_shown) switch (current.value) {
-                .admission, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .read_end = self.end }),
+                .admission, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .drawn = .{ .before = self.current_drawn, .after = self.drawn } }),
                 else => {},
             };
         }
@@ -353,16 +866,17 @@ const DisplayCapture = struct {
     }
 };
 
-/// Messages shown in live output, by admission id. A Message shows first as
-/// its Admission, or is listed at the opening's seam, and gains its
-/// conversation row later:
-/// at model-attempt admission, after a running tool's result when steered, or
-/// after the answer it queued behind. Admission ids follow Session positions,
-/// so the newest of each stands for every earlier one.
+/// Messages shown in live output, by admission id. Another Session's Message
+/// shows first as its Admission, as does a person's or script's taken next;
+/// each gains its conversation row later: at model-attempt
+/// admission, after a running tool's result when steered, or after the
+/// answer it queued behind. Admission ids follow Session positions, so the
+/// newest of each stands for every earlier one.
 pub const Messages = struct {
-    /// The newest Message shown as its Admission or listed at the opening's seam.
+    /// The newest Message shown as its Admission.
     shown: u64 = 0,
-    /// The newest Message whose conversation row a read returned.
+    /// The newest Message whose conversation row a read returned, or up to
+    /// which a stop excluded every Message without one.
     answered: u64 = 0,
 
     /// Every shown Message has its conversation row before the next item, so
@@ -393,17 +907,23 @@ pub const Boundary = struct {
     admitted: u64,
 };
 
-/// One Message as a read's output shows it: its Admission live, or in the
-/// opening its row or unapplied input. `output` and `end` are output offsets
-/// until the UI records live ones. The state is as of `read_end`.
+/// One Message as a read's output shows it: live, another Session's
+/// Admission, or a person's or script's at its Admission or as its row; in
+/// the opening, its row or unapplied input. `output` and `end` are output
+/// offsets until the UI records live ones. The state is as of the read's end.
 pub const Echo = struct {
     output: u64,
     end: u64,
     position: u64,
     ordinal: u64,
     message: protocol.ActivityItem.Message,
-    read_end: u64,
+    drawn: DrawnSpan = .{},
 };
+
+/// The newest Message a person or script sent that live output showed while
+/// it waited (see View.Taking), by admission ID: just before the first of
+/// some shown items and just after the last.
+pub const DrawnSpan = struct { before: u64 = 0, after: u64 = 0 };
 
 /// The Messages one read shows, in order: a page holds at most one each.
 pub const Echoes = struct {
@@ -425,15 +945,16 @@ pub const Echoes = struct {
 pub const Listing = union(enum) {
     /// A shown Message whose output left the view, from its own item.
     echo: Echo,
-    /// Admissions in `[lowest, before)` at `end`, newest first: every one, or
-    /// only those not applied at `end`. `cursor` is where the next one is
+    /// Messages at positions in `[lowest, before)` at `end`, newest first:
+    /// every one live output showed in a span it dropped (`shown`), or those
+    /// not applied at `end` (see `listed`). `cursor` is where the next one is
     /// searched for, backward.
-    range: struct { end: u64, lowest: u64, all: bool, cursor: protocol_reply.ActivityCursor },
+    range: struct { end: u64, lowest: u64, shown: ?DrawnSpan, cursor: protocol_reply.ActivityCursor },
 
-    pub fn within(end: u64, lowest: u64, before: u64, all: bool) ?Listing {
+    pub fn within(end: u64, lowest: u64, before: u64, shown: ?DrawnSpan) ?Listing {
         if (lowest >= before) return null;
         // Position 0 searches back from the end itself.
-        return .{ .range = .{ .end = end, .lowest = lowest, .all = all, .cursor = .{ .end = end, .position = if (before > end) 0 else before, .direction = .backward } } };
+        return .{ .range = .{ .end = end, .lowest = lowest, .shown = shown, .cursor = .{ .end = end, .position = if (before > end) 0 else before, .direction = .backward } } };
     }
 };
 
@@ -447,9 +968,10 @@ pub const Record = struct {
     opening_count: usize = 0,
     live: [capacity]Echo = undefined,
     live_count: usize = 0,
-    /// Live echoes dropped beyond capacity: admissions echo live in position
-    /// order, so they are every admission in `[low, high]`.
-    dropped: ?struct { low: u64, high: u64, end: u64, read_end: u64 } = null,
+    /// Live echoes dropped beyond capacity: live echoes follow position
+    /// order, so they are every item live output showed as a Message in
+    /// `[low, high]` (see `listed`), and `drawn` is around them.
+    dropped: ?struct { low: u64, high: u64, end: u64, drawn: DrawnSpan } = null,
 
     pub fn add(self: *Record, echo: Echo, opening: bool) void {
         if (opening) {
@@ -459,7 +981,7 @@ pub const Record = struct {
         }
         if (self.live_count == self.live.len) {
             const old = self.live[0];
-            self.dropped = if (self.dropped) |span| .{ .low = span.low, .high = old.position, .end = old.end, .read_end = @max(span.read_end, old.read_end) } else .{ .low = old.position, .high = old.position, .end = old.end, .read_end = old.read_end };
+            self.dropped = if (self.dropped) |span| .{ .low = span.low, .high = old.position, .end = old.end, .drawn = .{ .before = span.drawn.before, .after = old.drawn.after } } else .{ .low = old.position, .high = old.position, .end = old.end, .drawn = old.drawn };
             std.mem.copyForwards(Echo, self.live[0 .. self.live_count - 1], self.live[1..self.live_count]);
             self.live_count -= 1;
         }
@@ -537,7 +1059,9 @@ pub fn plan(marks: *const Marks, record: *const Record, front: u64, lowest: ?u64
     // after the newest so none shows twice, and list them all.
     if (record.dropped) |span| {
         result.start = @max(result.start, span.end);
-        result.dropped = Listing.within(span.read_end, span.low, span.high + 1, true);
+        // Read at the newest dropped echo's position: a Message applied
+        // there has its row in the span (see `listed`).
+        result.dropped = Listing.within(span.high, span.low, span.high + 1, span.drawn);
     }
     // An echo that the front cuts is listed whole, and the copy starts after it.
     const echoes = [_][]const Echo{ record.opening[0..record.opening_count], record.live[0..record.live_count] };
@@ -555,7 +1079,8 @@ pub fn plan(marks: *const Marks, record: *const Record, front: u64, lowest: ?u64
 test "a transcript lists each recorded Message once, whole, before the copy that follows it" {
     const Make = struct {
         fn echo(position: u64, output: u64) Echo {
-            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .read_end = 300, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) }, .admitted_at = 1 } };
+            // Each one moves the newest Message shown while it waited.
+            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) }, .admitted_at = 1 }, .drawn = .{ .before = position, .after = position + 1 } };
         }
     };
     const opening: Marks.Mark = .{ .offset = 0, .cursor = .{ .end = 20 }, .admitted = 5 };
@@ -570,12 +1095,13 @@ test "a transcript lists each recorded Message once, whole, before the copy that
     record.add(Make.echo(94, 740), false);
     try std.testing.expectEqual(@as(usize, 16), record.opening_count);
     try std.testing.expectEqual(@as(usize, 64), record.live_count);
-    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 30, .end = 108, .read_end = 300 }, record.dropped);
-    // A second wrap widens the span to the next dropped echo and its end.
+    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 30, .end = 108, .drawn = .{ .before = 30, .after = 31 } }, record.dropped);
+    // A second wrap widens the span to the next dropped echo, its end and
+    // what showed by then.
     var wrapped = record;
     wrapped.add(Make.echo(95, 750), false);
-    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 31, .end = 118, .read_end = 300 }, wrapped.dropped);
-    try std.testing.expectEqualDeep(Listing.within(300, 30, 32, true), plan(&marks, &wrapped, 105, 3).dropped);
+    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 31, .end = 118, .drawn = .{ .before = 30, .after = 32 } }, wrapped.dropped);
+    try std.testing.expectEqualDeep(Listing.within(31, 30, 32, .{ .before = 30, .after = 32 }), plan(&marks, &wrapped, 105, 3).dropped);
     try std.testing.expectEqual(@as(u64, 118), plan(&marks, &wrapped, 105, 3).start);
 
     // The newest dropped echo ends after the front: the copy starts at its
@@ -585,8 +1111,8 @@ test "a transcript lists each recorded Message once, whole, before the copy that
     var result = plan(&marks, &record, 105, 3);
     try std.testing.expectEqual(@as(u64, 108), result.start);
     try std.testing.expect(result.gap);
-    try std.testing.expectEqualDeep(Listing.within(300, 30, 31, true), result.dropped);
-    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, false), result.unapplied);
+    try std.testing.expectEqualDeep(Listing.within(30, 30, 31, .{ .before = 30, .after = 31 }), result.dropped);
+    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, null), result.unapplied);
     try std.testing.expectEqual(@as(u64, 20), result.older.?.end);
     try std.testing.expectEqual(@as(usize, 16), result.echo_count);
     // Before the front, it is listed as well; the copy starts at the front.
@@ -602,7 +1128,7 @@ test "a transcript lists each recorded Message once, whole, before the copy that
     // older echoes; the gap's label precedes the seam.
     try std.testing.expectEqual(@as(u64, 31), result.next().?.echo.position);
     result.listed(result.next().?, null);
-    try std.testing.expectEqualDeep(Listing.within(300, 30, 31, true), result.next());
+    try std.testing.expectEqualDeep(Listing.within(30, 30, 31, .{ .before = 30, .after = 31 }), result.next());
     result.listed(result.next().?, null);
     for (0..16) |index| {
         try std.testing.expectEqual(@as(u64, 20 - index), result.next().?.echo.position);
@@ -610,7 +1136,7 @@ test "a transcript lists each recorded Message once, whole, before the copy that
     }
     try std.testing.expectEqual(@as(?Listing, null), result.next());
     result.gap = false;
-    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, false), result.next());
+    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, null), result.next());
     result.listed(result.next().?, null);
     try std.testing.expectEqual(@as(?Listing, null), result.next());
 
@@ -638,7 +1164,7 @@ test "the opening mark is retained through 64 marks and dropped by the 65th" {
 /// show them.
 fn seam(mark: Marks.Mark, lowest: ?u64) ?Listing {
     const cursor = mark.cursor orelse return null;
-    return Listing.within(cursor.end, lowest orelse return null, mark.admitted, false);
+    return Listing.within(cursor.end, lowest orelse return null, mark.admitted, null);
 }
 
 /// A read's newest boundaries, oldest first. Any boundary at or after the
@@ -907,6 +1433,81 @@ const MessagePage = struct {
     }
 };
 
+/// /copy: the newest answer, bound to its length and digest before its last
+/// window arrives. A file takes it as it arrives; the clipboard's bytes wait
+/// in scratch, which only the UI may write to the terminal.
+pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const requests = task.requests();
+    const answer = (try lastAnswer(requests, job.store, job.session)) orelse return;
+    const Sink = struct {
+        io: std.Io,
+        file: std.Io.File,
+        offset: u64 = 0,
+        code: ?AnswerRenderer.LastCode,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.file.writePositionalAll(self.io, bytes, self.offset);
+            self.offset += bytes.len;
+            if (self.code) |*code| code.feed(bytes);
+        }
+    };
+    const copy = job.inspection_kind.copy;
+    if (copy == .file) {
+        var name: [copy_name_bytes]u8 = undefined;
+        const path = copyName(&name, job.session);
+        const directory = std.Io.Dir.cwd();
+        var random: [8]u8 = undefined;
+        try std.Io.randomSecure(task.io, &random);
+        var temporary_name: [copy_name_bytes + 22]u8 = undefined;
+        const temporary = std.fmt.bufPrint(&temporary_name, ".{s}.{s}.tmp", .{ path, std.fmt.bytesToHex(random, .lower) }) catch unreachable;
+        // Exclusive creation never follows a link planted at either name, and
+        // the rename replaces whatever sits at the export name, never its
+        // target.
+        const file = try directory.createFile(task.io, temporary, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        var published = false;
+        defer if (!published) directory.deleteFile(task.io, temporary) catch {};
+        {
+            defer file.close(task.io);
+            var sink: Sink = .{ .io = task.io, .file = file, .code = null };
+            if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
+            if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
+        }
+        try directory.rename(temporary, directory, path, task.io);
+        published = true;
+        job.result.copied = .saved;
+        return;
+    }
+    if (copy == .answer and answer.content.bytes > Terminal.clipboard_limit) {
+        job.result.copied = .too_large;
+        return;
+    }
+    try job.files.scratch.setLength(task.io, 0);
+    var sink: Sink = .{ .io = task.io, .file = job.files.scratch, .code = if (copy == .code) .{} else null };
+    if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
+    if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
+    const range: AnswerRenderer.LastCode.Range = if (sink.code) |*code|
+        code.finish() orelse {
+            job.result.copied = .no_code;
+            return;
+        }
+    else
+        .{ .start = 0, .length = sink.offset };
+    job.result.copied = if (range.length > Terminal.clipboard_limit) .too_large else .{ .clipboard = range };
+}
+
+/// The Conversation's newest assistant answer, or null before the first.
+fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8) !?protocol_reply.ConversationPage.Item {
+    var cursor: protocol_reply.ConversationCursor = .{ .end = 0 };
+    while (true) {
+        const page = switch (try requests.conversationPage(store, session, cursor)) {
+            .page => |value| value,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.items[0..page.count]) |item| if (item.kind == .assistant) return item;
+        cursor = page.continuation() orelse return null;
+    }
+}
+
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try job.files.inspection.setLength(task.io, 0);
@@ -924,7 +1525,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\n/status shows whether Bash asks first · an Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAn Action takes a or d + Enter\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands · Tab completes one\n\n" ++ slash_commands.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: rui auth login codex in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
@@ -995,4 +1596,305 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     try std.testing.expectEqual(@as(?c_int, null), Probe.leaked);
     var bytes: [16]u8 = undefined;
     try std.testing.expectEqualStrings("page\n", bytes[0..try page.readPositionalAll(io, &bytes, 0)]);
+}
+
+test "the Session line takes its facts from Current and reads again after a change" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+    const reference_format = "{{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}";
+    var line: ?Line = null;
+    const unread: Hint = .unread;
+    try std.testing.expect((Line{}).facts(&unread, "k7m2qx") == null);
+    const moment: Moment = .{ .revision = 3, .end = 40 };
+    var page: protocol.ActivityFacts = .{ .end = 40, .work = .{ .revision = 3 } };
+    try std.testing.expect(Line.stale(null, &page));
+    for ([_]struct { label: []const u8, mode: []const u8, effort: []const u8, trigger: []const u8, estimate: []const u8, first: []const u8, name: []const u8, left: ?u8 }{
+        .{ .label = "\"Fix \\u001b[31mtests\"", .mode = "ask", .effort = "\"low\"", .trigger = "\"1000\"", .estimate = "\"310\"", .first = "null", .name = "Fix \\x1b[31mtests", .left = 69 },
+        .{ .label = "null", .mode = "bypass", .effort = "null", .trigger = "null", .estimate = "null", .first = "null", .name = "k7m2qx", .left = null },
+        .{ .label = "null", .mode = "bypass", .effort = "\"high\"", .trigger = "\"1000\"", .estimate = "\"1000\"", .first = "{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1\",\"sender\":null,\"content\":" ++ reference ++ "}", .name = "k7m2qx", .left = 0 },
+    }) |case| {
+        var bytes: [4096]u8 = undefined;
+        const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, case.first });
+        try file.setLength(io, 0);
+        try file.writePositionalAll(io, report, 0);
+        const reply = protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } }) catch |err| {
+            std.debug.print("{s}\n", .{report});
+            return err;
+        };
+        Line.take(&line, &reply.current, moment);
+        try std.testing.expect(!Line.stale(line.?.read, &page));
+        const facts = line.?.facts(&unread, "k7m2qx").?;
+        try std.testing.expectEqualStrings(case.name, facts.name);
+        // The model's control byte shows as text, not as a terminal control.
+        try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
+        try std.testing.expectEqual(case.left, facts.left);
+        try std.testing.expectEqual(std.mem.eql(u8, case.mode, "ask"), facts.asks);
+        try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
+        try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first_position != null);
+    }
+    // The first line names an unlabelled Session once read; a blank one
+    // leaves the reference.
+    const hint: Hint = .{ .line = plain(session_line.max_line_bytes, session_line.firstLine("  Summarize\tCI\r\nand more")) };
+    try std.testing.expectEqualStrings("Summarize CI", line.?.facts(&hint, "k7m2qx").?.name);
+    const absent: Hint = .absent;
+    try std.testing.expectEqualStrings("k7m2qx", line.?.facts(&absent, "k7m2qx").?.name);
+    // Another revision or end position makes the facts stale; another page
+    // of the same moment does not.
+    for ([_]Moment{ .{ .revision = 4, .end = 40 }, .{ .revision = 3, .end = 41 } }) |next| {
+        page.work.revision = next.revision;
+        page.end = next.end;
+        try std.testing.expect(Line.stale(moment, &page));
+    }
+    page.end = 40;
+    page.work.revision = 3;
+    page.work.work = .{ .turn = 9, .operation = 12 };
+    try std.testing.expect(!Line.stale(moment, &page));
+}
+
+test "plain text keeps whole code points within its bound, escapes controls and cuts once" {
+    try std.testing.expectEqualStrings("a b c", plain(16, "a\tb\nc").slice());
+    try std.testing.expectEqualStrings("x\\x1b[31my", plain(16, "x\x1b[31my").slice());
+    // Every length around the bound, with two-byte code points and escapes:
+    // the value is the whole escaped text when it fits, else its longest
+    // whole-code-point start that leaves room for the ellipsis, then one.
+    for ([_][]const u8{ "é", "a", "\x01", "中" }) |unit| for (0..12) |count| {
+        var bytes: [64]u8 = undefined;
+        for (0..count) |at| @memcpy(bytes[at * unit.len ..][0..unit.len], unit);
+        const source = bytes[0 .. count * unit.len];
+        var escaped: [256]u8 = undefined;
+        var out = std.Io.Writer.fixed(&escaped);
+        var text: TerminalText = .{ .mode = .multiline };
+        try text.feed(&out, source);
+        try text.finish(&out);
+        const whole = out.buffered();
+        const value = plain(12, source);
+        const shown = value.slice();
+        try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
+        try std.testing.expect(shown.len <= 12);
+        if (whole.len <= 12) {
+            try std.testing.expectEqualStrings(whole, shown);
+        } else {
+            const kept = shown[0 .. shown.len - session_line.ellipsis.len];
+            try std.testing.expect(std.mem.endsWith(u8, shown, session_line.ellipsis));
+            try std.testing.expect(std.mem.startsWith(u8, whole, kept));
+            // One more escaped unit would not leave room for the ellipsis.
+            const unit_len = whole.len / count;
+            try std.testing.expect(kept.len % unit_len == 0 and kept.len + unit_len + session_line.ellipsis.len > 12);
+        }
+    };
+}
+
+/// A Host for tests of what a Session read asks: it answers Activity pages
+/// and Message content from a history of `history` completed Turns'
+/// outcomes followed by `tail`, and counts the pages it served.
+const FakeHost = struct {
+    history: u64,
+    tail: []const Tail,
+    /// The Store's end, which a page asked for at no end reads.
+    end: u64,
+    held: bool = false,
+    refuse_content: bool = false,
+    pages: usize = 0,
+    contents: usize = 0,
+    others: usize = 0,
+    stopping: std.atomic.Value(bool) = .init(false),
+    output: [4096]u8 = undefined,
+    shown: []const u8 = "",
+
+    /// A tail item; a Message a stop at `excluded_at` excludes reads as
+    /// excluded at that end and later.
+    const Tail = struct { value: protocol.ActivityItem.Value, excluded_at: ?u64 = null };
+    const text = "please wait\nfor the build";
+
+    fn content() protocol.ActivityItem.Content {
+        var hash = protocol.contentHasher();
+        hash.update(text);
+        return .{ .length = text.len, .digest = hash.finalResult() };
+    }
+
+    fn message(admission: u64) protocol.ActivityItem.Value {
+        return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = content(), .admitted_at = 1 } };
+    }
+
+    fn item(self: *const FakeHost, position: u64, end: u64) protocol.ActivityItem {
+        if (position <= self.history) {
+            var code: Bounded(protocol.max_code_bytes) = .{};
+            code.set("completed") catch unreachable;
+            return .{ .position = position, .at = 1, .value = .{ .outcome = .{ .turn = position, .operation = position, .code = code, .content = content() } } };
+        }
+        const tail = self.tail[position - self.history - 1];
+        var value = tail.value;
+        if (tail.excluded_at) |at| if (end >= at) {
+            value.admission.state = .excluded;
+        };
+        return .{ .position = position, .at = 1, .value = value };
+    }
+
+    fn page(self: *const FakeHost, end: u64, position: u64, direction: @FieldType(protocol.ActivityFacts, "direction")) protocol.ActivityFacts {
+        var facts: protocol.ActivityFacts = .{ .end = end, .direction = direction };
+        var next = if (direction == .forward) position + 1 else if (position == 0) end else position - 1;
+        while (facts.count < facts.items.len and next >= 1 and next <= end) {
+            facts.items[facts.count] = self.item(next, end);
+            facts.count += 1;
+            next = if (direction == .forward) next + 1 else next - 1;
+        }
+        facts.more = facts.count == facts.items.len and next >= 1 and next <= end;
+        const boundary = if (direction == .forward and facts.more) facts.items[facts.count - 1].position else end;
+        for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
+            if (at > boundary) break;
+            const value = self.item(at, end).value;
+            if (value != .admission or value.admission.state != .queued or value.admission.sender != null) continue;
+            if (facts.queued.count == 0) facts.queued.oldest_position = at;
+            facts.queued.count += 1;
+            facts.queued.newest_admission = value.admission.admission;
+            facts.queued.newest_position = at;
+        }
+        facts.work = .{ .work = if (self.held) .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } else .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 };
+        facts.work.workspace.set("/") catch unreachable;
+        return facts;
+    }
+
+    fn respond(fd: std.posix.fd_t, status: []const u8, kind: []const u8, extra: []const u8, body: []const u8) void {
+        var header: [512]u8 = undefined;
+        const head = std.fmt.bufPrint(&header, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ status, kind, body.len, extra }) catch unreachable;
+        // The client may close once it has what it needs.
+        for ([_][]const u8{ head, body }) |bytes| {
+            var sent: usize = 0;
+            while (sent < bytes.len) {
+                const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, std.c.MSG.NOSIGNAL);
+                if (count <= 0) return;
+                sent += @intCast(count);
+            }
+        }
+    }
+
+    fn answer(self: *FakeHost, fd: std.posix.fd_t) !void {
+        var request: [8192]u8 = undefined;
+        var used: usize = 0;
+        const body_start = while (true) {
+            const count = try std.posix.read(fd, request[used..]);
+            if (count == 0) return;
+            used += count;
+            if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |at| break at + 4;
+        };
+        const marker = "Content-Length: ";
+        const length_at = std.mem.indexOf(u8, request[0..body_start], marker).? + marker.len;
+        const length = try std.fmt.parseInt(usize, request[length_at..std.mem.indexOfScalarPos(u8, request[0..body_start], length_at, '\r').?], 10);
+        while (used < body_start + length) used += try std.posix.read(fd, request[used..]);
+        const body = request[body_start .. body_start + length];
+        var storage: [4096]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const Cursor = struct { end: ?[]const u8 = null, position: []const u8, direction: []const u8 = "forward" };
+        const cursor = try std.json.parseFromSliceLeaky(Cursor, fixed.allocator(), body, .{ .ignore_unknown_fields = true });
+        const position = try std.fmt.parseInt(u64, cursor.position, 10);
+        if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
+            self.pages += 1;
+            const end = if (cursor.end) |value| try std.fmt.parseInt(u64, value, 10) else self.end;
+            const facts = self.page(end, position, if (std.mem.eql(u8, cursor.direction, "backward")) .backward else .forward);
+            var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer out.deinit();
+            try facts.writeJson(&out.writer);
+            respond(fd, "200 OK", "application/json", "", out.written());
+        } else if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-content ")) {
+            self.contents += 1;
+            if (self.refuse_content) {
+                var out: [256]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&out);
+                try protocol.writeShape(&writer, protocol.error_reply, .{ protocol.ErrorType.activity_unavailable, "ContentNotFound" });
+                return respond(fd, "409 Conflict", "application/json", "", writer.buffered());
+            }
+            var extra: [128]u8 = undefined;
+            respond(fd, "200 OK", "application/octet-stream", try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len }), text);
+        } else self.others += 1;
+    }
+
+    fn serve(self: *FakeHost, listener: *std.Io.net.Server) void {
+        while (true) {
+            const peer = listener.accept(std.testing.io) catch return;
+            defer peer.close(std.testing.io);
+            if (self.stopping.load(.acquire)) return;
+            self.answer(peer.socket.handle) catch {};
+        }
+    }
+
+    /// Runs `job` as a read against this Host at a Store it serves; what it
+    /// showed is then in `shown`.
+    fn read(self: *FakeHost, job: *Job) !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        try tmp.dir.setPermissions(io, .fromMode(0o700));
+        var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+        var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        const paths = lease.paths;
+        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+        defer {
+            listener.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        }
+        const thread = try std.Thread.spawn(.{}, serve, .{ self, &listener });
+        defer {
+            self.stopping.store(true, .release);
+            if ((std.Io.net.UnixAddress.init(paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
+            thread.join();
+            self.stopping.store(false, .release);
+        }
+        const inspection = try tmp.dir.createFile(io, "inspection", .{ .read = true });
+        defer inspection.close(io);
+        job.store = root;
+        job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection };
+        var task: Task = .{ .io = io };
+        try scan(job, &task);
+        self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
+    }
+};
+
+test "opening reads one Activity page whatever the history before it" {
+    // A Store with 10 or 10,000 earlier rows and the same newest page: the
+    // opening reads that page alone, not the rows before it.
+    for ([_]u64{ 10, 10_000 }) |earlier| {
+        var host: FakeHost = .{ .history = earlier, .tail = &.{}, .end = earlier };
+        var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = earlier } };
+        try host.read(&job);
+        try std.testing.expectEqual(@as(usize, 1), host.pages);
+        try std.testing.expectEqual(@as(usize, 0), host.others);
+    }
+}
+
+test "the queued row's line fails the read when the Host refuses it" {
+    // One Message waits behind work at the opening. The row would show it
+    // with no line; the read fails instead, as a refused page does.
+    const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
+    var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21, .held = true, .refuse_content = true };
+    var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
+    try std.testing.expectError(error.HostInvocationFailed, host.read(&job));
+    try std.testing.expectEqual(@as(usize, 1), host.contents);
+}
+
+test "a stop labels a Message that showed while it waited at the opening" {
+    // Nothing holds the queue at the opening, so A, the oldest waiting,
+    // shows unlabelled at its Admission. A stop then excludes it before it
+    // is taken: the stop says so, as for any Message it excluded.
+    const tail = [_]FakeHost.Tail{
+        .{ .value = FakeHost.message(1), .excluded_at = 22 },
+        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } } },
+    };
+    var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21 };
+    var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
+    try host.read(&opening);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "please wait") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Stopped") == null);
+    try std.testing.expectEqual(@as(u64, 1), opening.drawn.admission);
+    host.end = 22;
+    var live: Job = .{ .session = "k7m2qx", .cursor = opening.result.cursor, .messages = opening.result.messages, .queued = opening.result.queued, .drawn = opening.drawn, .line_read = .{ .revision = 1, .end = 22 } };
+    try host.read(&live);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Stopped before it ran · send it again to run it") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Session stopped.") != null);
 }

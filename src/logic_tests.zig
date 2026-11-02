@@ -10,26 +10,38 @@ const cores = .{
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
-    .{ "ChoiceLine.zig", @import("ChoiceLine.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
+    .{ "codec_abi.zig", @import("codec_abi.zig") },
+    .{ "codecs/json.zig", @import("codecs/json.zig") },
+    .{ "codecs/responses.zig", @import("codecs/responses.zig") },
     .{ "codex_credential_policy.zig", @import("codex_credential_policy.zig") },
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
+    .{ "draft_layout.zig", @import("draft_layout.zig") },
+    .{ "environment.zig", @import("environment.zig") },
+    .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
     .{ "keymap.zig", @import("keymap.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
+    .{ "model_list.zig", @import("model_list.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
+    .{ "path_list.zig", @import("path_list.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
+    .{ "provider_name.zig", @import("provider_name.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
+    .{ "queued_line.zig", @import("queued_line.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
+    .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
-    .{ "terminal_control.zig", @import("terminal_control.zig") },
+    .{ "slash_commands.zig", @import("slash_commands.zig") },
+    .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
+    .{ "work_line.zig", @import("work_line.zig") },
 };
 
 test {
@@ -39,6 +51,9 @@ test {
     _ = @import("execution_turn.zig");
     _ = @import("history_memo.zig");
     _ = @import("named_scratch.zig");
+    _ = @import("prefix_seal.zig");
+    _ = @import("codec_abi.zig");
+    _ = @import("codecs.zig");
     _ = @import("new_session_selection.zig");
     _ = @import("request_encoding.zig");
     _ = @import("ResponseTiming.zig");
@@ -47,26 +62,40 @@ test {
     _ = @import("TerminalFrame.zig");
     _ = @import("TerminalInput.zig");
     _ = @import("TerminalEditor.zig");
-    _ = @import("TerminalText.zig");
     _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("tools.zig");
     inline for (cores) |core| _ = core[1];
 }
 
 test "functional cores stay within the core boundary" {
-    const names = comptime blk: {
-        var list: [cores.len][]const u8 = undefined;
-        for (cores, 0..) |core, index| list[index] = core[0];
-        break :blk list;
-    };
     inline for (cores) |core| {
         // The checked source is the imported one.
-        try std.testing.expectEqualStrings(core[0], @typeName(core[1]) ++ ".zig");
+        const path = comptime blk: {
+            var name = @typeName(core[1]).*;
+            std.mem.replaceScalar(u8, &name, '.', '/');
+            const slashed = name;
+            break :blk &slashed ++ ".zig";
+        };
+        try std.testing.expectEqualStrings(core[0], path);
+        const names = comptime importNames(core[0]);
         if (core_boundary.check(@embedFile(core[0]), &names)) |violation| {
             std.debug.print("{s}:{d}: `{s}` is outside the core boundary; see src/core_boundary.zig\n", .{ core[0], violation.line, violation.text });
             return error.CoreBoundaryViolation;
         }
     }
+}
+
+/// Every core as `importer`, a core one directory deep at most, spells its
+/// import.
+fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
+    @setEvalBranchQuota(10_000);
+    const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
+    var names: [cores.len][]const u8 = undefined;
+    for (cores, &names) |core, *name| name.* = if (std.mem.startsWith(u8, core[0], directory))
+        core[0][directory.len..]
+    else
+        "../" ++ core[0];
+    return names;
 }
 
 test "the HTTP/2 client's proxy logic stays within the core boundary" {
@@ -199,7 +228,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
             .pending => .{ .pending = .{ .since = since } },
             .working => .{ .working = .{ .since = since } },
             .retrying => .{ .retrying = .{ .since = since, .due_at_ms = (now_s + 30) * 1000, .cause = .{}, .attempt = 1 } },
-            .bash => .{ .bash = .{ .since = since, .description = null, .running = 1, .approvals = 0 } },
+            .bash => .{ .bash = .{ .since = since, .call = 0, .description = null, .running = 1, .approvals = 0 } },
             .approval => .{ .approval = .{ .since = since } },
             .stopping => .{ .stopping = .{ .since = since } },
             .finished => .{ .finished = .{ .since = since } },

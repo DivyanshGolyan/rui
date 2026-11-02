@@ -27,6 +27,41 @@ from model_fixture import (
 )
 
 
+def without_prose(schema):
+    """Tool wording is prompt prose; compare the schema without it."""
+    if isinstance(schema, list):
+        return [without_prose(item) for item in schema]
+    if isinstance(schema, dict):
+        return {key: without_prose(value) for key, value in schema.items() if not (key == "description" and isinstance(value, str))}
+    return schema
+
+
+def content_reference(text):
+    data = text.encode()
+    domain = b"rui/content/v1"
+    digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).hexdigest()
+    return {"bytes": str(len(data)), "sha256": digest}
+
+
+def stored_message_parts(database):
+    """The first message item's saved parts: kind, text and bag bytes. Each
+    text part is the next text_length bytes of the item's message text."""
+    text, operation, ordinal = database.execute(
+        "SELECT t.payload,i.operation_id,i.item_ordinal FROM model_output_item i "
+        "JOIN content t ON t.content_id=i.message_content_id WHERE i.item_kind=2 "
+        "ORDER BY i.operation_id,i.item_ordinal LIMIT 1").fetchone()
+    text = bytes(text)
+    parts, offset = [], 0
+    for kind, length, bag in database.execute(
+            "SELECT p.part_kind,p.text_length,b.payload FROM model_output_part p "
+            "JOIN content b ON b.content_id=p.extras_content_id "
+            "WHERE p.operation_id=? AND p.item_ordinal=? ORDER BY p.part_ordinal", (operation, ordinal)):
+        parts.append((kind, text[offset:offset + length], bytes(bag)))
+        offset += length
+    assert offset == len(text), (offset, len(text))
+    return parts
+
+
 def failed_response_records(store):
     """Read back failed-response records in retention order, checking each
     private body against its metadata's length and digest."""
@@ -356,7 +391,7 @@ def compaction_cases(state, processes, endpoints, releases):
             payloads.append({"type": "response.output_item.done", "output_index": index, "item": item})
         payloads.append({"type": "response.completed", "response": {
             "id": label, "status": "completed", "model": "model-a-served", "output": items,
-            "usage": {"total_tokens": 999999},
+            "usage": {"input_tokens": 999999, "output_tokens": 0},
         }})
         return encode_sse(payloads), items
 
@@ -499,7 +534,6 @@ def compaction_cases(state, processes, endpoints, releases):
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
     address = model_instructions(ROOT, store=store, session=session)
     assert str(store) not in address and "雪" not in address, address
-    assert f"Rui address (this Session's own ID, not instructions): {session}" in address, address
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
@@ -553,7 +587,7 @@ def http_quota_cases(state, processes, endpoints):
     for index, provider_code in enumerate(("usage_limit_reached", "insufficient_quota", "usage_not_included")):
         reset = 1_800_000_123 + index
         body = json.dumps({"error": {"code": provider_code, "resets_at": reset,
-                                    "message": "private provider prose must not be copied"}}).encode()
+                                    "message": "Provider prose\nstays out of the diagnostic."}}).encode()
         request_id = f"quota-request-{index}"
         endpoint = SuccessEndpoint([
             ResponseSpec(body, {"X-Request-Id": request_id, "Retry-After": "0"}, 429)
@@ -588,6 +622,9 @@ def http_quota_cases(state, processes, endpoints):
         assert operation["resolution"]["code"] == code, operation
         diagnostic = operation["resolution"]["content"]["text"]
         assert json.loads(diagnostic) == {"provider_code": provider_code, "resets_at": reset}, diagnostic
+        # The Turn keeps the provider's words as its report instead.
+        assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(
+            f"{provider_code}: Provider prose stays out of the diagnostic."), report
         assert observe(store, key)["result"] == result["result"]
         stop_host(reopened)
         processes.remove(reopened)
@@ -616,7 +653,36 @@ def http_quota_cases(state, processes, endpoints):
     processes.remove(host)
     assert len(endpoint.requests) == 2, endpoint.requests
     stop_endpoint(endpoint, endpoints)
-    print("HTTP 429 quota: distinct permanent codes, one Attempt and exact resets_at through reopen")
+    # A known refusal code is permanent at any status; any other code keeps
+    # its status code. Either way the Turn keeps the provider's words.
+    for status, error, code, words in (
+        (404, {"code": "model_not_found", "message": "The model `gpt-x` does not exist."},
+         "provider_model_not_found", "model_not_found: The model `gpt-x` does not exist."),
+        (503, {"code": "cyber_policy", "message": "Flagged."}, "provider_cyber_policy", "cyber_policy: Flagged."),
+        (400, {"code": None, "type": "invalid_request_error", "message": "Unsupported parameter."},
+         "provider_http_400", "invalid_request_error: Unsupported parameter."),
+    ):
+        endpoint = SuccessEndpoint([ResponseSpec(json.dumps({"error": error}).encode(), {}, status) for _ in range(4)])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / f"refusal-{status}"
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                          "--test-retry-waits-ms", "1,1,1")
+        processes.append(host)
+        session = configure(state, store, f"refusal-{status}-config", None, "gpt-6-sol")
+        message(state, store, f"refusal-{status}", session, "refused")
+        result = wait_for(lambda: (value := observe(store, f"refusal-{status}")).get("result") and value,
+                          "permanent HTTP refusal")
+        assert result["result"] == {"status": "failed", "code": code}, result
+        assert result["processing"]["attempt"] == "1", result
+        report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+        assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(words), report
+        stop_host(host)
+        processes.remove(host)
+        assert len(endpoint.requests) == 1, endpoint.requests
+        stop_endpoint(endpoint, endpoints)
+    print("HTTP refusals: distinct permanent codes, one Attempt, exact resets_at and the provider's words through reopen")
 
 
 def failure_correlation_cases(state, processes, endpoints, selected="all"):
@@ -762,11 +828,12 @@ def stream_failure_cases(state, processes, endpoints):
     for event_type in ("error", "response.failed"):
         for code, temporary in (("server_is_overloaded", True), ("rate_limit_exceeded", True),
                                 ("future_error", True), ("insufficient_quota", False), ("bio_policy", False)):
-            event = {"type": event_type, "code": code} if event_type == "error" else {
-                "type": event_type, "response": {"status": "failed", "error": {"code": code}}}
+            failure = {"code": code, "message": f"Words for\n{code}."}
+            event = {"type": event_type, **failure} if event_type == "error" else {
+                "type": event_type, "response": {"status": "failed", "error": failure}}
             body = partial + encode_sse([event])
             cases.append((event_type + "-" + code, [body, answer] if temporary else [body],
-                          "completed" if temporary else "provider_permanent_error", 2 if temporary else 1))
+                          "completed" if temporary else "provider_" + code, 2 if temporary else 1))
     overloaded = encode_sse([{"type": "response.failed", "response": {
         "status": "failed", "error": {"code": "server_is_overloaded"}}}])
     nullable = answer.replace(b'"model":"model-a-served"', b'"model":null').replace(
@@ -804,6 +871,13 @@ def stream_failure_cases(state, processes, endpoints):
         if label == "exhausted":
             detail = json.loads(operation["resolution"]["content"]["text"])
             assert detail == {"reason": "TemporaryProviderFailure", "stage": "event", "byte_offset": "6", "output_index": None}, detail
+        # A failed Turn keeps the provider's own words as its report.
+        outcome = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["turns"][0]["outcome"]
+        if code.startswith("provider_"):
+            provider_code = code.removeprefix("provider_")
+            assert outcome["content"] == content_reference(f"{provider_code}: Words for {provider_code}."), (label, outcome)
+        elif code == "retry_exhausted":
+            assert outcome["content"] == content_reference("server_is_overloaded"), (label, outcome)
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
@@ -883,12 +957,13 @@ def refusal_cases(state, processes, endpoints):
         assert replay[1] == {key: value for key, value in item.items() if key != "created_by"}, replay
         stop_host(host)
         processes.remove(host)
-        # Public reads are projections; canonical raw bytes retain refusal kind,
-        # unknown metadata and created_by independently of replay filtering.
+        # Public reads are projections; the saved parts keep the refusal kind
+        # and each block's unknown members in its bag.
         with sqlite3.connect(store / "rui.sqlite3") as database:
-            raw = database.execute("SELECT c.payload FROM model_output_item i JOIN content c "
-                "ON c.content_id=i.content_id WHERE i.item_kind=2 ORDER BY i.operation_id LIMIT 1").fetchone()
-            assert raw is not None and bytes(raw[0]) == json.dumps(item, separators=(",", ":")).encode(), raw
+            parts = stored_message_parts(database)
+        refusal_part = (2, refusal.encode(), b'"future":{"retained":true}')
+        want = [(1, b"Before. ", b""), refusal_part, (1, b"After.", b"")] if phased else [refusal_part]
+        assert parts == want, parts
         assert not failed_response_records(store), "accepted refusal became failed-response diagnostics"
         stop_endpoint(endpoint, endpoints)
     print("Refusal: public result/conversation, crash recovery and exact typed replay passed")
@@ -898,7 +973,7 @@ def sse_framing_cases(state, processes, endpoints):
     """Spec framing, exact decoded replay, and immutable raw failure evidence."""
     state = state / "sse-framing-cases"
     state.mkdir(mode=0o700)
-    # Replay rebuilds top-level separators; nested value spelling is verbatim.
+    # Replay is written canonically and parses equal to what was received.
     reasoning = b'{"type":"reasoning","id":"r","encrypted_content":"' + b"x" * 9001 + b'","future":{\n"raw":true}}'
     item = b'{"type":"message","id":"m","role":"assistant","content":[{\n"type":"output_text","text":"Hi \\u00e9\\n"}]}'
     notification = b'data: {"type":"response.future.notice","item":{"type":"future_tool"}}\r\r'
@@ -933,7 +1008,8 @@ def sse_framing_cases(state, processes, endpoints):
     message(state, store, "sse-next", session, "second")
     result, answer, _ = wait_for_result_release(store, "sse-next", session, time.monotonic() + 10)
     assert result["result"]["status"] == "completed" and answer == b"Next", (result, answer)
-    assert reasoning in endpoint.requests[1] and item in endpoint.requests[1], "decoded item bytes changed in replay"
+    replayed = json.loads(endpoint.requests[1])["input"]
+    assert json.loads(reasoning) in replayed and json.loads(item) in replayed, ("replayed items changed", replayed)
     assert len(endpoint.requests) == 2 and failed_response_records(store) == []
     stop_host(host)
     processes.remove(host)
@@ -1125,6 +1201,79 @@ def phased_message_cases(state, processes, endpoints):
     print("Synthetic commentary, partial_answer and unphased streams: exact replay, visible order, final result and crash recovery passed")
 
 
+def held_message_denial_cases(state, processes, endpoints):
+    """A Message admitted while a Bash call waits for approval is held until
+    its call group settles, then reaches the model in the same request as the
+    group's results, after them."""
+    def bash_call(label, ordinal, command_text):
+        return ("bash", f"{label}-call-{ordinal}", json.dumps(
+            {"cmd": command_text, "timeout_ms": None, "description": f"Run {label} command {ordinal}"},
+            separators=(",", ":")))
+
+    for label, siblings in (("single", 1), ("siblings", 2)):
+        store = state / f"{label}-held-store"
+        forbidden = state / f"{label}-held-must-not-launch"
+        calls = [bash_call(label, 0, f"touch {forbidden}")]
+        if siblings == 2:
+            calls.append(bash_call(label, 1, "printf sibling-ran"))
+        endpoint = SuccessEndpoint([
+            sse_tool_calls(f"{label}-tools", calls),
+            sse_answer(f"{label}-answer", f"{label}-reasoning", f"{label}-message", "Understood")[0],
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        processes.append(host)
+        session = configure(state, store, f"{label}-held-config", None, "gpt-6-sol")
+        message(state, store, f"{label}-start", session, "Run the command")
+        actions = wait_for(lambda: len(unresolved := command("session", "inspect", "--store", store, "--session", session)
+                                       ["actions"]["unresolved"]) == siblings and unresolved,
+                           "Bash Actions waiting for permission")
+        assert all(action["authorization"] == "pending" for action in actions), actions
+        actions.sort(key=lambda action: int(action["call_ordinal"]))
+
+        # The person's reason is admitted first, while every Action waits.
+        message(state, store, f"{label}-reason", session, "Don't run that; use the cached copy instead")
+        assert observe(store, f"{label}-reason").get("result") is None
+        assert len(endpoint.requests) == 1, endpoint.requests
+
+        command("action", "deny", "--store", store, "--session", session, "--action", actions[0]["action"],
+                "--record", state / f"{label}-deny.json", "--key", f"{label}-deny")
+        if siblings == 2:
+            # The group is incomplete: the reason stays held. Settle the
+            # sibling by running it; its output must precede the reason too.
+            assert len(endpoint.requests) == 1, endpoint.requests
+            assert observe(store, f"{label}-reason").get("result") is None
+            command("action", "allow", "--store", store, "--session", session, "--action", actions[1]["action"],
+                    "--record", state / f"{label}-allow.json", "--key", f"{label}-allow")
+
+        for key in (f"{label}-start", f"{label}-reason"):
+            wait_for(lambda key=key: completed_observation(store, key), f"{key} result")
+            assert read_result(store, key) == b"Understood"
+        assert not forbidden.exists(), "denied Bash was launched"
+        # One continuation request, carrying the denial and the reason together.
+        assert len(endpoint.requests) == 2, endpoint.requests
+        continuation = json.loads(endpoint.requests[1])["input"]
+        outputs = [item for item in continuation if item.get("type") == "function_call_output"]
+        tail = continuation[-(siblings + 1):]
+        assert tail[:siblings] == outputs, continuation
+        assert outputs[0] == {"type": "function_call_output", "call_id": f"{label}-call-0",
+                              "output": "Permission denied."}, outputs
+        if siblings == 2:
+            assert outputs[1]["call_id"] == f"{label}-call-1", outputs
+            assert "sibling-ran" in outputs[1]["output"], outputs
+        assert tail[-1] == {"role": "user", "content": [
+            {"type": "input_text", "text": "Don't run that; use the cached copy instead"}]}, continuation
+        users = [item for item in continuation if item.get("role") == "user"]
+        assert [item["content"][0]["text"] for item in users] == [
+            "Run the command", "Don't run that; use the cached copy instead"], users
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+    print("Held Message: denial and pending reason share one continuation request, after the complete call group")
+
+
 def main(mode="all", correlation_case="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
@@ -1176,6 +1325,11 @@ def main(mode="all", correlation_case="all"):
         if mode in ("all", "failed-response-export"):
             failed_response_export_case(state, processes, endpoints)
             if mode == "failed-response-export":
+                completed = True
+                return
+        if mode in ("all", "held-message-denial"):
+            held_message_denial_cases(state, processes, endpoints)
+            if mode == "held-message-denial":
                 completed = True
                 return
         phased_message_cases(state, processes, endpoints)
@@ -1890,15 +2044,16 @@ def main(mode="all", correlation_case="all"):
         try:
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 4
             assert database.execute(
-                "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.content_id WHERE c.private=1"
+                "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id WHERE c.private=1"
             ).fetchone()[0] == 4
             assert database.execute(
                 "SELECT attempt_ordinal,count(*) FROM model_output_item GROUP BY attempt_ordinal"
             ).fetchall() == [(1, 4)]
-            raw_reasoning = database.execute(
-                "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
+            # Item-level created_by is dropped at import; the bag keeps the rest.
+            reasoning_bag = database.execute(
+                "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.extras_content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
             ).fetchone()[0]
-            assert json.loads(raw_reasoning)["created_by"] == "d" * 64
+            assert "created_by" not in json.loads("{" + reasoning_bag + "}"), reasoning_bag
             observations = database.execute(
                 "SELECT response_id,model_evidence,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
             ).fetchall()
@@ -1929,6 +2084,11 @@ def main(mode="all", correlation_case="all"):
                 {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
                 {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
             ]
+            neutral_usage = database.execute(
+                "SELECT usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens "
+                "FROM model_operation ORDER BY operation_id"
+            ).fetchall()
+            assert neutral_usage == [(7, 0, 0, 11), (7, 0, 0, 11)], neutral_usage
         finally:
             database.close()
         offline_success = start_host(success_store, None)
@@ -2458,11 +2618,11 @@ def main(mode="all", correlation_case="all"):
             0, "answer", "contradictory-response",
             ("model-body", "model-openai-header", "model-x-openai-header"), contradictory_request_id,
         ), saved
-        raw_items = database.execute(
-            "SELECT c.payload FROM model_output_item i JOIN content c ON c.content_id=i.content_id ORDER BY i.item_ordinal"
-        ).fetchall()
-        assert raw_items == [(json.dumps(item, separators=(",", ":")).encode(),)
-                             for item in (contradictory_reasoning, contradictory_item)], raw_items
+        assert database.execute(
+            "SELECT item_kind FROM model_output_item ORDER BY item_ordinal"
+        ).fetchall() == [(1,), (2,)]
+        saved_parts = stored_message_parts(database)
+        assert saved_parts == [(1, b"preserved model evidence", b'"annotations":[],"extension":{"kept":true}')], saved_parts
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
         ).fetchone()[0] == 1
@@ -3224,13 +3384,13 @@ def main(mode="all", correlation_case="all"):
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"
         ).fetchone()[0] == 33
-        assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
-        assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
+        # The answer's text is saved once, as its public part, with no raw copy.
+        assert database.execute("SELECT private,length(payload) FROM content WHERE byte_length>=?", (len(large_answer),)).fetchall() == [(0, len(large_answer))]
         database.close()
         stop_endpoint(growth_endpoint, endpoints)
 
-        # Public answers are projections of immutable provider items. Exercise
-        # both dedup orders: answer then caller input, and caller then answer.
+        # A public answer is its message's saved part text. Exercise both dedup
+        # orders: answer then caller input, and caller then answer.
         parts = ["", "x" * 4093 + "\n", "🙂\t\\", ""]
         projected_answer = "".join(parts).encode()
         projection_endpoint = SuccessEndpoint([
@@ -3258,9 +3418,9 @@ def main(mode="all", correlation_case="all"):
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(projection_store / "rui.sqlite3") as database:
-            assert database.execute("SELECT c.payload IS NULL FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(1,), (0,)]
-            assert database.execute("SELECT count(*) FROM answer_text_projection").fetchone()[0] == len(parts)
-            assert database.execute("SELECT count(*) FROM answer_text_projection p JOIN content c ON c.content_id=p.source_content_id WHERE c.private<>1 OR c.payload IS NULL").fetchone()[0] == 0
+            assert database.execute("SELECT c.payload FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(projected_answer,), (b"caller-first",)]
+            assert database.execute("SELECT count(*) FROM model_output_part WHERE operation_id=1 AND part_kind=1").fetchone()[0] == len(parts)
+            assert database.execute("SELECT count(*) FROM model_output_item i JOIN content c ON c.content_id=i.message_content_id WHERE c.private<>0").fetchone()[0] == 0
         host = start_host(projection_store, projection_url)
         processes.append(host)
         assert read_result(projection_store, "projection-first") == projected_answer
@@ -3404,23 +3564,15 @@ def main(mode="all", correlation_case="all"):
                 {
                     "type": "function",
                     "name": "bash",
-                    "description": "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.",
                     "strict": True,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "cmd": {"type": "string"},
-                            "stdin": {
-                                "type": ["string", "null"],
-                                "description": "Stdin is empty unless set. Supply literal UTF-8 text, at most 122880 decoded bytes, read exactly then EOF. Missing or null uses /dev/null.",
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests",
-                            },
+                            "stdin": {"type": ["string", "null"]},
+                            "description": {"type": "string"},
                             "timeout_ms": {
                                 "type": ["integer", "null"],
-                                "description": "Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.",
                                 "minimum": 1,
                                 "maximum": 9223372036854775807,
                             },
@@ -3440,6 +3592,7 @@ def main(mode="all", correlation_case="all"):
                 }
             },
         }
+        observed["tools"] = without_prose(observed["tools"])
         assert observed == expected, (observed, expected)
         stop_host(host)
         frozen_peers.finish(time.monotonic() + 5)
@@ -5005,7 +5158,7 @@ def main(mode="all", correlation_case="all"):
             # cases through the Message protocol without changing their input.
             from control_integration import raw_request
             for index in range(40):
-                wire = {"version": "1", "kind": "message", "store": str(store),
+                wire = {"version": "4", "kind": "message", "store": str(store),
                     "key": f"{prefix}-{index}", "session": session, "sender": None, "sender_handle": None,
                     "text": {"state": "value", "value": ""}}
                 head, body = raw_request(host.rui_ready_fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
@@ -5568,8 +5721,8 @@ if __name__ == "__main__":
     host_process.enter()
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

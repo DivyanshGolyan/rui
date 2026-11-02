@@ -1,15 +1,20 @@
 const std = @import("std");
 const bash = @import("bash.zig");
+const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
+const failure_class = @import("failure_class.zig");
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
+const model_list = @import("model_list.zig");
 const named_scratch = @import("named_scratch.zig");
+const output_decode = @import("output_decode.zig");
 const output_format = @import("output_format.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const process = @import("os/process.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -19,6 +24,8 @@ const signal_stack = @import("signal_stack.zig");
 const tools = @import("tools.zig");
 const test_poll = @import("test_poll");
 const bash_service = @import("testing/bash_service.zig");
+const environment = @import("environment.zig");
+const SessionEnvironments = @import("SessionEnvironments.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
 const pages = @import("os/pages.zig");
@@ -60,7 +67,15 @@ const ProviderSlot = struct {
     owner: AttemptOwner,
     /// The leased credential generation a managed transfer presented.
     credential_generation: ?u64 = null,
+    /// The transfer presented an API key, so a 401 rejects that key.
+    presented_key: bool = false,
     transfer: provider.Transfer = undefined,
+
+    /// The code a failure saves: a rejected API key names its remedy.
+    fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
+        if (self.presented_key and execution.rejectsCredential(failure)) return failure_class.api_key_rejected;
+        return failure.codeText(buffer);
+    }
 };
 
 const NamedScratchSlot = struct {
@@ -99,9 +114,11 @@ const ModelPreparingSlot = struct {
     binding: store_module.AttemptBinding,
 };
 
+/// A prepared request waiting for its credential. The request stays where
+/// it was built, in `Workspace.model_preparation`, which no other Attempt
+/// opens while this slot waits (`modelPreparationOpen`).
 const ModelAuthenticatingSlot = struct {
     owner: ModelPreparingSlot,
-    request: provider.PreparedRequest,
     /// The shared worker accepted this slot's lease job.
     requested: bool = false,
     cancelled: bool = false,
@@ -344,9 +361,6 @@ const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     /// Live Bash service and shutdown share this window.
     bash_window: [bash.copy_window_bytes]u8,
-    /// Response import's output item grammar; only the pages one item uses
-    /// become resident.
-    item_check: model_adapter.Output.OutputItemCheck,
     /// Written only in a Host with managed authentication.
     auth_worker: AuthWorker,
     /// One Bash Action's state. The slots say which part is live: a
@@ -360,9 +374,35 @@ const Workspace = struct {
     /// One transfer's response import: the decoded event data, the
     /// interpretation and the settled output, live from a completed transfer
     /// to its settlement.
-    event_data: model_adapter.Output.EventData,
-    interpretation: model_adapter.OutputInterpretation,
+    event_data: output_decode.EventData,
+    /// The codec's interpretation scratch and the Host's grammar state.
+    interpret: output_decode.Interpret,
+    interpretation: output_decode.Interpretation,
+    /// What the provider said of a failure, from its HTTP error body or
+    /// error event, live from interpretation to settlement.
+    provider_failure: output_decode.ProviderFailure,
+    /// An HTTP error body's classification, live while it is classified.
+    decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
+    /// The OpenAI key's model list while its one GET is live.
+    model_list: ModelListWork,
+};
+
+/// The model list GET's own parts: the Reactor holds its stream, and these
+/// its credential use and answer buffer until it ends. Zero bytes are none.
+const ModelListWork = struct {
+    fetch: provider.ModelListFetch,
+    credential: ?*provider.SharedCredential,
+    response: ?[]u8,
+};
+
+/// The codec whose headers the Reactor observes: every provider's, so far.
+const observed_codec = blk: {
+    const codec = protocol.Provider.codex.codec();
+    for (std.enums.values(protocol.Provider)) |served| {
+        if (served.codec() != codec) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a second codec");
+    }
+    break :blk codec;
 };
 
 pub fn executionMain(host: *Host) void {
@@ -372,7 +412,7 @@ pub fn executionMain(host: *Host) void {
     };
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
-    const auth_worker: ?*AuthWorker = if (host.authentication) |authentication| worker: {
+    const auth_worker: ?*AuthWorker = if (host.providers.chatgpt()) |authentication| worker: {
         workspace.auth_worker = .{ .io = host.io, .authentication = authentication };
         break :worker &workspace.auth_worker;
     } else null;
@@ -426,22 +466,31 @@ pub fn executionMain(host: *Host) void {
     const budget = host.retention.sharedBudget().narrowed(
         if (host.hooks.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
     );
+    const model_list_url: ?[]const u8 = if (host.providers.modelListKey()) |served|
+        std.fmt.allocPrint(host.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch null
+    else
+        null;
+    defer if (model_list_url) |url| host.allocator.free(url);
     var reactor_storage: provider.Reactor = undefined;
     // With no slots no Transfer can start, so a zero-capacity Host runs no
     // transport (h2 requires a positive stream capacity).
-    const endpoint_with_slots = if (slots.len == 0) null else host.provider_endpoint;
-    const reactor: ?*provider.Reactor = if (endpoint_with_slots) |endpoint| reactor: {
+    const reactor: ?*provider.Reactor = if (slots.len != 0 and host.providers.any()) reactor: {
+        var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
+        for (host.providers.table.values, &endpoints.values) |served, *endpoint| {
+            if (served) |value| endpoint.* = value.endpoint;
+        }
         reactor_storage.init(host.allocator, host.io, .{
-            .endpoint = endpoint,
-            .ca_file = host.provider_ca_file,
+            .endpoints = endpoints,
+            .ca_file = host.providers.ca_file,
             .capacity = slots.len,
             .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
             .observation = .{
-                .names = model_adapter.observation_names,
-                .turn_state = if (host.authentication != null) host.turn_states.sink() else null,
+                .names = codecs.manifest(observed_codec).observe,
+                .turn_state = if (host.providers.chatgpt() != null) host.turn_states.sink() else null,
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
+            .model_list_url = model_list_url,
         }) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
@@ -449,6 +498,11 @@ pub fn executionMain(host: *Host) void {
         break :reactor &reactor_storage;
     } else null;
     defer if (reactor) |active| active.deinit();
+    if (reactor) |active| startModelList(host, active, &workspace.model_list) else if (host.providers.modelListKey() != null) {
+        // No slot can run, so nothing is fetched: the table stands.
+        host.model_lists.set(.table);
+    }
+    defer if (reactor) |active| endModelList(active, &workspace.model_list);
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     defer shutdownExecution(host, slots, workspace);
@@ -577,7 +631,7 @@ const NativeTurn = struct {
     }
 
     pub fn providerConfigured(self: *const NativeTurn) bool {
-        return self.host.provider_endpoint != null;
+        return self.host.providers.any();
     }
 
     pub fn freeSlots(self: *const NativeTurn) usize {
@@ -604,7 +658,7 @@ const NativeTurn = struct {
     pub fn hasTransport(self: *const NativeTurn) bool {
         if (slotsHaveTransport(self.slots)) return true;
         const reactor = self.reactor orelse return false;
-        return reactor.hasConnections();
+        return reactor.hasConnections() or reactor.modelListPending();
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
@@ -710,7 +764,12 @@ const NativeTurn = struct {
     }
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
-        return callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace);
+        if (callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace)) return true;
+        // The model list ends inside `nextCompletion`, which skips it.
+        const reactor = self.reactor orelse return false;
+        if (reactor.finishedModelList() == null) return false;
+        finishModelList(self.host, reactor, &self.workspace.model_list);
+        return true;
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -731,6 +790,50 @@ const NativeTurn = struct {
         );
     }
 };
+
+/// Launches the OpenAI key's model list on the Reactor, with the key's
+/// own request fields and endpoint rule. One that cannot start leaves the
+/// table, and says why.
+noinline fn startModelList(host: *Host, reactor: *provider.Reactor, work: *ModelListWork) void {
+    const served = host.providers.modelListKey() orelse return;
+    if (reactor.model_list_endpoint == null) return host.model_lists.publish(error.OutOfMemory);
+    const key = served.credential.key_file;
+    var headers: model_adapter.Headers = undefined;
+    headers.initKey(served.endpoint, host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err|
+        return host.model_lists.publish(err);
+    work.credential = headers.takeCredential();
+    defer headers.deinit();
+    work.response = std.heap.page_allocator.alloc(u8, model_list.max_response_bytes) catch |err| {
+        endModelList(reactor, work);
+        return host.model_lists.publish(err);
+    };
+    reactor.startModelList(&work.fetch, headers.fields(), work.response.?) catch |err| {
+        endModelList(reactor, work);
+        return host.model_lists.publish(err);
+    };
+}
+
+/// Publishes the ended GET's answer, then releases it.
+noinline fn finishModelList(host: *Host, reactor: *provider.Reactor, work: *ModelListWork) void {
+    const stream = &reactor.finishedModelList().?.stream;
+    const body: anyerror![]const u8 = if (stream.end().?.cause != .complete)
+        error.ModelListTransportFailed
+    else if (stream.status() != 200)
+        error.ModelListRefused
+    else
+        work.response.?[0..@intCast(stream.responseLength())];
+    host.model_lists.publish(body);
+    endModelList(reactor, work);
+}
+
+/// Cancels a live GET and releases its stream, credential use and buffer.
+fn endModelList(reactor: *provider.Reactor, work: *ModelListWork) void {
+    reactor.endModelList();
+    if (work.credential) |shared| reactor.credentials.release(shared);
+    work.credential = null;
+    if (work.response) |response| std.heap.page_allocator.free(response);
+    work.response = null;
+}
 
 const callServiceOneCompletion = serviceOneCompletion;
 const callAdvanceBashPreparation = advanceBashPreparation;
@@ -884,8 +987,13 @@ fn cancelSupersededTransfers(
 
 test "an execution slot is sized for a model Attempt, not for Bash" {
     // Bash keeps its large state in Host.bash_work, so no arm outgrows the
-    // provider arm every held model agent occupies.
-    try std.testing.expect(@sizeOf(ExecutionSlot) <= @sizeOf(ProviderSlot) + @alignOf(ExecutionSlot));
+    // model arms a held model agent occupies: the provider arm, or an
+    // Attempt waiting for its credential or its forced refresh. A request
+    // waiting for its credential stays in the preparation, so its arm is
+    // small; the provider arm keeps no request headers, so the refresh arm
+    // (its 256-byte request id) is the largest.
+    const model = @max(@sizeOf(ProviderSlot), @sizeOf(ModelAuthenticatingSlot), @sizeOf(ModelRefreshingSlot));
+    try std.testing.expect(@sizeOf(ExecutionSlot) <= model + @alignOf(ExecutionSlot));
 }
 
 test "zeroed pages are free slots and empty Turn and history memo entries" {
@@ -1126,6 +1234,14 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     }
+    // The Session's client environment, copied outside the Store lock and
+    // `launch_mutex`; none falls back to the Host facts.
+    const base = launchBase(host.environments, prepared.session.slice(), prepared.allocator) catch {
+        settleActionFailure(host, token, action_binding, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
+        discardBashResources(host, slot, prepared.takeCleanup());
+        return;
+    };
+    defer if (base) |bytes| prepared.allocator.free(bytes);
     host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }) catch |err| {
         fenceDispatch(host, "Bash launch authority", err);
         discardBashResources(host, slot, prepared.takeCleanup());
@@ -1133,23 +1249,28 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     };
     // The Execution launches straight into its custody record's entry.
     const work = &host.bash_work[token.index];
+    var refused: bash.ArgumentSizes = .{};
     host.store.withActionDispatchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
+        .base = base,
         .work = work,
+        .refused = &refused,
     }, struct {
         fn handoff(context: anytype) !void {
             try context.host.withEffectLaunch(context, launch);
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_environment) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
             settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
         } else if (err == error.BashSpawnFailed) {
             settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
+        } else if (err == error.BashArgumentsTooLarge) {
+            settleArgumentsTooLarge(host, token, action_binding, refused);
         } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
@@ -1296,6 +1417,12 @@ fn retainBashPreparedCleanup(
     });
 }
 
+/// Rare, so its message buffer stays off the dispatch frame.
+noinline fn settleArgumentsTooLarge(host: *Host, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding, sizes: bash.ArgumentSizes) void {
+    var message: [bash.arguments_message_bytes]u8 = undefined;
+    settleActionFailure(host, token, binding, .spawn_failed, bash.argumentsTooLargeMessage(&message, sizes));
+}
+
 fn settleActionFailure(
     host: *Host,
     token: execution.CustodyToken,
@@ -1374,7 +1501,7 @@ fn beginAdmittedAttempt(
         host.io,
         host.lease.paths.scratch.slice(),
         host.scratch_budget.?,
-        if (host.authentication != null) .managed else .endpoint,
+        host.providers.routes(),
         &host.history_memos,
         host.hooks.preparationFaults(),
         &retained_scratch,
@@ -1395,7 +1522,7 @@ fn advanceModelPreparation(
     item_allowance: usize,
 ) bool {
     if (host.auth_worker) |worker| {
-        if (advanceCredentialWork(host, reactor.?, slots, worker)) return true;
+        if (advanceCredentialWork(host, reactor.?, slots, worker, &preparation.request)) return true;
         for (slots) |*slot| if (slot.* == .model_authenticating) return false;
     }
     const slot = for (slots) |*candidate| switch (candidate.*) {
@@ -1422,16 +1549,16 @@ fn advanceModelPreparation(
             preparation.cancel();
             finishModelPreparationFailure(host, slot, owner, err, null);
         },
-        .prepared => |value| {
+        .prepared => |request| {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
-            var request = value;
-            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
+            const route = protocol.routeOf(host.providers.routes(), request.provider);
+            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = route == .chatgpt_device } })) {
                 .authenticate => {
-                    moveSlot(host, slot, .model_authenticating, .{ .owner = owner, .request = request });
-                    _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?);
+                    moveSlot(host, slot, .model_authenticating, .{ .owner = owner });
+                    _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?, request);
                 },
-                .launch => launchPreparedRequest(host, reactor.?, slot, owner, &request, null),
+                .launch => launchPreparedRequest(host, reactor.?, slot, owner, request, null),
                 else => unreachable,
             }
         },
@@ -1441,9 +1568,10 @@ fn advanceModelPreparation(
 
 /// The one worker serves one job at a time: first the slot whose job it
 /// holds, then, once idle, the next waiting lease or refresh job.
-fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker) bool {
+/// `request` is the authenticating slot's prepared request.
+fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker, request: *provider.PreparedRequest) bool {
     for (slots) |*slot| switch (slot.*) {
-        .model_authenticating => |*active| if (active.requested) return advanceAuthentication(host, reactor, slot),
+        .model_authenticating => |*active| if (active.requested) return advanceAuthentication(host, reactor, slot, request),
         .model_refreshing => |*active| if (active.requested) return advanceRefresh(host, slot),
         else => {},
     };
@@ -1451,7 +1579,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| {
             if (active.cancelled) {
-                active.request.deinit(host.io, host.scratch_budget.?);
+                request.deinit(host.io, host.scratch_budget.?);
                 finishCustodyNow(host, slot);
             } else {
                 active.requested = true;
@@ -1480,7 +1608,7 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
     const result = host.auth_worker.?.take() orelse return false;
     const active = slot.model_refreshing;
     if (!active.cancelled) {
-        const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id } };
+        const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id, .report = "" } };
         switch (result) {
             .refreshed => |refreshed| settleFailure(host, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary),
             .failed => |err| settleUnansweredFailure(host, active.owner.token, active.owner.binding, model_adapter.authenticationFailureCode(err), .ordinary),
@@ -1512,7 +1640,7 @@ fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const Answer
     return true;
 }
 
-fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) bool {
+fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot, request: *provider.PreparedRequest) bool {
     const worker = host.auth_worker.?;
     const result = worker.take();
     const active = &slot.model_authenticating;
@@ -1524,9 +1652,8 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
     if (decision == .wait) return false;
     defer if (result.? == .ready) worker.finish();
     const owner = active.owner;
-    var request = active.request;
     switch (decision) {
-        .launch => launchPreparedRequest(host, reactor, slot, owner, &request, result.?.ready),
+        .launch => launchPreparedRequest(host, reactor, slot, owner, request, result.?.ready),
         .abandon, .settle_authentication_failure => {
             request.deinit(host.io, host.scratch_budget.?);
             if (decision == .settle_authentication_failure)
@@ -1587,21 +1714,31 @@ fn launchPreparedRequest(
         const account = model_adapter.TurnStates.owner(&value.record);
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, &reactor.credentials, request.session_affinity, replay.value) catch |err| {
+        const served = host.providers.get(request.provider).?;
+        headers.init(served.endpoint, host.providers.ca_file, served.credential.chatgpt_device, value, &reactor.credentials, replay.value) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot);
             return;
         };
-    }
+    } else if (host.providers.get(request.provider)) |served| switch (served.credential) {
+        .key_file => |key| headers.initKey(served.endpoint, host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
+            request.deinit(host.io, host.scratch_budget.?);
+            fenceDispatch(host, "provider preparation", err);
+            finishCustodyNow(host, slot);
+            return;
+        },
+        .none, .chatgpt_device => {},
+    };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
+        .presented_key = if (host.providers.get(request.provider)) |served| served.credential == .key_file else false,
     });
     const active = &slot.provider;
-    active.transfer.start(reactor, request.*, binding, .{
+    active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
         .credential = headers.takeCredential(),
         .turn_state = turn_state,
@@ -1692,7 +1829,7 @@ fn completeTransfer(
                 // borrows it; this owner still disposes it before settlement.
                 answered_response = active.transfer.takeResponse();
                 const response = &answered_response.?;
-                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
+                error_response = model_adapter.interpretErrorResponse(&workspace.decode, active.transfer.codec(), host.io, response.file, response.length, evidence.http_status, &workspace.provider_failure);
                 if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
             }
         },
@@ -1708,7 +1845,7 @@ fn completeTransfer(
     if (answered_response) |*response| {
         retainFailedResponse(host, .{ .file = response.file, .length = response.length, .transfer = .complete }, .{
             .binding = owner.binding,
-            .code = decision.fail.codeText(&code_buffer),
+            .code = active.failureCode(decision.fail, &code_buffer),
             .diagnostic = diagnostic,
             .http_status = http_status,
             .request_id = active.transfer.requestId(),
@@ -1730,7 +1867,7 @@ fn completeTransfer(
         },
         .fence_request_source => fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed),
         .fail => |failure| {
-            const code = failure.codeText(&code_buffer);
+            const code = active.failureCode(failure, &code_buffer);
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
@@ -1738,9 +1875,9 @@ fn completeTransfer(
                     if (beginForcedRefresh(host, slot, &answered, generation)) return;
                 };
                 if (diagnostic) |detail| {
-                    answered.reject(code, detail, disposition);
+                    answered.reject(code, detail, workspace.provider_failure.report.slice(), disposition);
                 } else {
-                    answered.fail(code, disposition);
+                    answered.fail(code, workspace.provider_failure.report.slice(), disposition);
                 }
             } else {
                 // Writes are synchronous, so the unsealed capture holds every
@@ -1789,6 +1926,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     openai_model.set(active.transfer.observedModel()) catch unreachable;
     var x_openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
     x_openai_model.set(active.transfer.observedAlternateModel()) catch unreachable;
+    const codec = active.transfer.codec();
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
@@ -1797,7 +1935,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         var detail: [512]u8 = undefined;
         const diagnostic = rejection.format(&detail);
         retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-        answered.reject(rejection.code, diagnostic, .ordinary);
+        answered.reject(rejection.code, diagnostic, "", .ordinary);
         return .cleanup;
     }
 
@@ -1823,7 +1961,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(host, rejected, answered.retention("response_metadata_exhausted", null, http_status));
-        answered.fail("response_metadata_exhausted", .ordinary);
+        answered.fail("response_metadata_exhausted", "", .ordinary);
         return .cleanup;
     };
     defer metadata.deinit();
@@ -1841,7 +1979,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         }
         stderr.print("rui: response data acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(host, rejected, answered.retention("response_data_exhausted", null, http_status));
-        answered.fail("response_data_exhausted", .ordinary);
+        answered.fail("response_data_exhausted", "", .ordinary);
         return .cleanup;
     };
     defer event_data.deinit();
@@ -1850,12 +1988,11 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, event_data, operation, .{
+    metadata.fail_writes = host.hooks.fails(.response_metadata);
+    output_decode.interpret(&workspace.interpret, codec, host.io, response.file, response.length, &metadata, event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
-    }, &workspace.item_check, .{
-        .metadata = host.hooks.fails(.response_metadata),
-    }, &workspace.interpretation);
+    }, &workspace.provider_failure, &workspace.interpretation);
     const accepted = switch (workspace.interpretation) {
         .accepted => |*value| value,
         .rejected => |*rejection| {
@@ -1864,7 +2001,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
             var detail: [512]u8 = undefined;
             const diagnostic = rejection.format(&detail);
             retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-            answered.reject(rejection.code, diagnostic, failureClass(host, rejection.kind, null, null));
+            answered.reject(rejection.code, diagnostic, workspace.provider_failure.report.slice(), failureClass(host, rejection.kind, null, null));
             return .cleanup;
         },
     };
@@ -1890,13 +2027,14 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+            const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = response.length };
             var detail: [512]u8 = undefined;
             const diagnostic = rejection.format(err, &detail);
             retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
             host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
                 "contradictory_provider_output",
                 diagnostic,
+                "",
             ), .ordinary, host.hooks.storeFaults(.model_failure)) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);
         } else {
@@ -1942,8 +2080,8 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             workspace.model_preparation.cancel();
             finishCustodyNow(host, slot);
         },
-        .model_authenticating => |*active| {
-            active.request.deinit(host.io, host.scratch_budget.?);
+        .model_authenticating => {
+            workspace.model_preparation.request.deinit(host.io, host.scratch_budget.?);
             finishCustodyNow(host, slot);
         },
         // Shutdown saves no failure: the claimed Attempt stays uncertain
@@ -2003,20 +2141,23 @@ const AnsweredAttempt = struct {
         return .{ .host = host, .owner = owner, .request_id = request_id };
     }
 
-    fn fail(self: *const AnsweredAttempt, code: []const u8, disposition: store_module.ModelFailureClass) void {
+    /// `report` is the provider's own words for the failure; empty when it
+    /// sent none.
+    fn fail(self: *const AnsweredAttempt, code: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
         settleFailure(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
             .code = code,
             .request_id = self.request_id,
+            .report = report,
         } }, disposition);
     }
 
-    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, disposition: store_module.ModelFailureClass) void {
-        settleFailure(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic), disposition);
+    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
+        settleFailure(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic, report), disposition);
     }
 
     /// For a settlement whose terminal delivery is already claimed.
-    fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8) store_module.ModelFailure {
-        return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id } };
+    fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8) store_module.ModelFailure {
+        return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id, .report = report } };
     }
 
     /// The same failure facts for its optional failed-response record.
@@ -2180,21 +2321,23 @@ test "authentication handoff borrows the sole credential lease and releases it o
         try tmp.dir.deleteFile(io, "request");
         host.scratch_used.store(4, .release);
         host.scratch_budget = .{ .used = &host.scratch_used, .limit = 4 };
+        var request: provider.PreparedRequest = .{
+            .file = input,
+            .length = 4,
+            .charged = 4,
+            .structured_output = false,
+            .provider = .codex,
+            .codec = .@"openai-responses/1",
+            .headers = .{ .count = 0 },
+        };
         var slot = ExecutionSlot{ .model_authenticating = .{
             .owner = .{ .token = token, .binding = binding },
             .cancelled = true,
-            .request = .{
-                .file = input,
-                .length = 4,
-                .charged = 4,
-                .structured_output = false,
-                .session_affinity = @splat(0),
-            },
         } };
-        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit(io, host.scratch_budget.?);
+        defer if (slot == .model_authenticating) request.deinit(io, host.scratch_budget.?);
         var reactor: provider.Reactor = undefined;
         worker.state = .requested;
-        try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot));
+        try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot, &request));
         try std.testing.expect(slot == .model_authenticating);
         try std.testing.expectEqual(@as(u64, 4), host.scratch_used.load(.acquire));
         try std.testing.expect(host.custody.reserve() == null);
@@ -2205,7 +2348,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
             worker.failure = error.AuthenticationFailed;
             worker.state = .failed;
         }
-        try std.testing.expect(advanceAuthentication(&host, &reactor, &slot));
+        try std.testing.expect(advanceAuthentication(&host, &reactor, &slot, &request));
         try std.testing.expect(slot == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
@@ -2293,7 +2436,7 @@ test "HTTP error capture retires before execution custody" {
         // Prepared, never launched: no socket exists for this endpoint.
         var reactor: provider.Reactor = undefined;
         try reactor.init(std.testing.allocator, io, .{
-            .endpoint = "http://127.0.0.1:1/responses",
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
             .capacity = 1,
             .inactivity_seconds = 1,
             .scratch_path = root,
@@ -2301,12 +2444,14 @@ test "HTTP error capture retires before execution custody" {
         });
         defer reactor.deinit();
         var retained: ?named_scratch.Owner = null;
-        try slot.provider.transfer.start(&reactor, .{
+        try slot.provider.transfer.start(&reactor, &.{
             .file = request_file,
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .session_affinity = @splat(0),
+            .provider = .codex,
+            .codec = .@"openai-responses/1",
+            .headers = .{ .count = 0 },
         }, binding, .{}, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
@@ -2320,7 +2465,8 @@ test "HTTP error capture retires before execution custody" {
             // A short sealed read is a real classifier error, not malformed
             // JSON's negative-overflow result.
             response.length += 1;
-            try std.testing.expectError(error.ShortSealedRead, model_adapter.Output.contextOverflow(io, response.file, response.length, 400));
+            const unreadable = model_adapter.interpretErrorResponse(&workspace.value.decode, slot.provider.transfer.codec(), io, response.file, response.length, 400, &workspace.value.provider_failure);
+            try std.testing.expectEqual(execution.ErrorResponse{ .unreadable = error.ShortSealedRead }, unreadable);
         }
         completeTransfer(&host, workspace.value, &slot, .{
             .transfer = &slot.provider.transfer,
@@ -2491,7 +2637,8 @@ test "cleanup publication follows complete execution retirement" {
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
-    var launched = try prepared.launch(&bash.empty_environment);
+    var refused: bash.ArgumentSizes = .{};
+    var launched = try prepared.launch(bash.default_facts, null, &refused);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
@@ -2803,7 +2950,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
-            const configured = storage.configure(&command, true, .{});
+            const configured = storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
@@ -2818,7 +2965,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .digest = protocol.contentDigest("hello"),
             };
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
             if (kind != .message) {
                 try std.testing.expectError(
                     error.InjectedAttemptCommitFailure,
@@ -3024,7 +3171,7 @@ test "preparing slots belong to their live preparations" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    const configured = storage.configure(&command, true, .{});
+    const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
@@ -3039,7 +3186,7 @@ test "preparing slots belong to their live preparations" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, true, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 
@@ -3049,7 +3196,7 @@ test "preparing slots belong to their live preparations" {
     var retained: ?named_scratch.Owner = null;
     var preparation: model_adapter.Preparation = undefined;
     try storage.openHistoricalView(binding_a, &preparation.view);
-    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .endpoint, null, .{}, &retained);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
@@ -3238,7 +3385,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     );
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        metadata.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
@@ -3246,7 +3393,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     stdout.close(std.testing.io);
     stderr_file.close(std.testing.io);
     try retention.publishPair(pair);
-    try metadata.append(.{ .tag = .usage, .start = 0, .length = 0 });
+    try metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
     metadata.deinit();
@@ -3263,7 +3410,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     defer limited.deinit();
     try std.testing.expectError(
         error.MetadataScratchExhausted,
-        limited.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+        limited.append(&.{ .tag = .usage, .start = 0, .length = 0 }),
     );
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
@@ -3296,7 +3443,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
             std.testing.io,
             root,
             .{ .used = &host.scratch_used, .limit = 1024 },
-            .endpoint,
+            protocol.routesAll(.endpoint),
             null,
             .{},
             &retained,
@@ -3321,6 +3468,88 @@ test "Host fences dispose admitted preparation without touching canonical state"
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     }
+}
+
+test "an encode failure settles unanswered and releases request scratch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+    defer directory.close(std.testing.io);
+    const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+    var command: protocol.ConfigureCommand = .{};
+    try command.key.set("encode-failure-config");
+    command.configuration.workspace.state = .value;
+    try command.configuration.workspace.value.set(workspace);
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
+    command.configuration.model.state = .value;
+    try command.configuration.model.value.set("model-a");
+    const configured = storage.configure(&command, .{});
+    try std.testing.expect(configured == .accepted);
+    const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, "hello");
+    try file.sync(std.testing.io);
+    var message: protocol.MessageCommand = .{};
+    try message.key.set("encode-failure-key");
+    message.session = configured.accepted.session;
+    message.text = .{
+        .state = .value,
+        .file = file,
+        .length = 5,
+        .digest = protocol.contentDigest("hello"),
+    };
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+
+    var records: [1]execution.CustodyRecord = @splat(.{});
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = &storage,
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    const token = host.custody.reserve().?;
+    const binding = try host.custody.attach(token, &admitted.permit);
+    var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
+    var preparation: model_adapter.Preparation = undefined;
+    var retained: ?named_scratch.Owner = null;
+    try storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(
+        std.testing.io,
+        root,
+        .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
+        protocol.routesAll(.endpoint),
+        null,
+        // The codec declines at request_end: every earlier item has already
+        // written request scratch.
+        .{ .codec_declines = .request_end },
+        &retained,
+    );
+    defer if (preparation.state.active) preparation.cancel();
+    var advances: usize = 0;
+    while (slots[0] != .free) : (advances += 1) {
+        try std.testing.expect(advances < 4096);
+        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, 64, 4));
+    }
+    try std.testing.expect(advances > 1);
+    try std.testing.expect(!preparation.state.active and !preparation.view.active);
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    const observed = try storage.observeCommand("encode-failure-key");
+    const failed = observed.message.?.queue.?.state.failed;
+    try std.testing.expectEqualStrings("provider_codec_failed", failed.code.slice());
+    try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
 }
 
 test "Host fences dispose a sealed request before native transfer construction" {
@@ -3354,7 +3583,9 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .length = 2,
             .charged = 2,
             .structured_output = false,
-            .session_affinity = @splat(0),
+            .provider = .codex,
+            .codec = .@"openai-responses/1",
+            .headers = .{ .count = 0 },
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };
@@ -3454,4 +3685,39 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "suppressed-bash", .{}));
         }
     }
+}
+
+/// The environment a Session's Bash starts from: its client environment,
+/// owned by the caller, or null for the Host facts when the register holds
+/// none, as after a restart or once the register replaced it.
+fn launchBase(environments: ?*SessionEnvironments, session: []const u8, allocator: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
+    const table = environments orelse return null;
+    return table.copy(session, allocator);
+}
+
+test "a Session the register does not hold launches with the system PATH and the Host's HOME" {
+    // A restarted Host's register is empty; one that replaced the Session
+    // holds others.
+    var environments: SessionEnvironments = undefined;
+    try environments.init(std.testing.io, std.testing.allocator);
+    defer environments.deinit();
+    var offer: SessionEnvironments.Offer = try .init(std.testing.allocator, "PATH=/client/bin\x00HOME=/client\x00".len);
+    defer offer.deinit(std.testing.allocator);
+    @memcpy(offer.room(), "PATH=/client/bin\x00HOME=/client\x00");
+    environments.offer("n3w5es", .{ .origin = .person, .admission = 1 }, &offer);
+    const facts: environment.HostFacts = .{ .executable_dir = "/opt/rui/bin", .system_path = "/usr/bin:/bin", .home = "/home/host" };
+    const identity: environment.Identity = .{ .address = "k7m2qx", .store = "/store", .sender_handle = "" };
+    for ([_]?*SessionEnvironments{ null, &environments }) |table| {
+        const base = try launchBase(table, "k7m2qx", std.testing.allocator);
+        try std.testing.expectEqual(null, base);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const block = try environment.childBlock(arena.allocator(), base, facts, identity);
+        try std.testing.expectEqualStrings("PATH=/opt/rui/bin:/usr/bin:/bin", std.mem.span(block[0].?));
+        try std.testing.expectEqualStrings("HOME=/home/host", std.mem.span(block[1].?));
+    }
+    // The Session it holds starts from its client environment.
+    const held = (try launchBase(&environments, "n3w5es", std.testing.allocator)).?;
+    defer std.testing.allocator.free(held);
+    try std.testing.expectEqualStrings("PATH=/client/bin\x00HOME=/client\x00", held);
 }

@@ -20,6 +20,15 @@ import os_semantics
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
+PUBLISH = pathlib.Path(__file__).resolve().parents[2] / "release/publish.sh"
+
+
+def installer_view(home):
+    """What the installer's report reads from this build: the selected Store and its Host status."""
+    result = subprocess.run(["sh", "-c", '. "$1"; _rui_selected "$2"', "sh", PUBLISH, RUI],
+        env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stderr == "", result
+    return result.stdout.splitlines()
 
 
 def status(store):
@@ -34,11 +43,11 @@ def cli_status(home, *args):
     result = subprocess.run([RUI, "host", "status", *map(str, args)],
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
     value = json.loads(result.stdout)
-    assert value["version"] == "1" and value["type"] == "host_status", result
+    assert value["version"] == "4" and value["type"] == "host_status", result
     failed = value["status"] in ("incompatible", "access_failure")
     assert (result.returncode != 0) == failed, result
     if value["status"] != "ready":
-        assert value == {"version": "1", "type": "host_status", "status": value["status"]}, result
+        assert value == {"version": "4", "type": "host_status", "status": value["status"]}, result
     return value
 
 
@@ -98,8 +107,8 @@ def socket_path(store):
 
 
 def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info", extra=None):
-    payload = json.dumps({"version": "1", "kind": kind, "store": str(store), **(extra or {})}).encode()
-    header = b"X-Rui-Wire-Version: 1\r\n"
+    payload = json.dumps({"version": "4", "kind": kind, "store": str(store), **(extra or {})}).encode()
+    header = b"X-Rui-Wire-Version: 4\r\n"
     if instance is not None:
         header += f"X-Rui-Host-Instance: {instance}\r\n".encode()
     with socket.socket(socket.AF_UNIX) as stream:
@@ -155,7 +164,7 @@ def held_request(store, route, length=512, *, complete_headers=True):
     stream.sendall(f"POST /v1/{route} HTTP/1.1\r\n".encode())
     if complete_headers:
         stream.sendall((f"Host: local\r\nContent-Type: application/json\r\n"
-                       f"X-Rui-Wire-Version: 1\r\nContent-Length: {length}\r\n\r\n").encode())
+                       f"X-Rui-Wire-Version: 4\r\nContent-Length: {length}\r\n\r\n").encode())
     return stream
 
 
@@ -242,7 +251,7 @@ def protected_saturation(root):
         ack = raw_info(socket_path(store), store, identity,
                        kind="host_stop", route="control/host-stop")
         assert ack.startswith(b"HTTP/1.1 200") and json.loads(ack.split(b"\r\n\r\n", 1)[1]) == {
-            "version": "1", "type": "host_stop_reply", "status": "acknowledged"}, ack
+            "version": "4", "type": "host_stop_reply", "status": "acknowledged"}, ack
         deadline = time.monotonic() + 2
         wait_for(lambda: not socket_path(store).exists(), "stop to close the listener", interval=.01, deadline=deadline)
         # These peers never handed a complete request to a worker. They must
@@ -327,9 +336,9 @@ def discovery_body_deadline(root):
         with held_request(store, "host-info", complete_headers=False) as stream:
             # Header time is charged to the same original acceptance budget.
             time.sleep(2)
-            stream.sendall(b"Host: local\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 512\r\n\r\n")
+            stream.sendall(b"Host: local\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 512\r\n\r\n")
             diagnostics.wait("connection_request_host_info", timeout=2)
-            prefix = json.dumps({"version": "1", "kind": "host_info", "store": str(store)}).encode()[:-1]
+            prefix = json.dumps({"version": "4", "kind": "host_info", "store": str(store)}).encode()[:-1]
             stream.sendall(prefix)
             stream.settimeout(.5)
             closed = False
@@ -374,6 +383,7 @@ def main():
         store = pathlib.Path(root) / "store"
         home = pathlib.Path(root) / "home"
         home.mkdir(mode=0o700)
+        assert installer_view(home) == [f"{home}/.local/share/rui/store", "store_unavailable"]
         assert status(store) == "unavailable"
         assert cli_status(home, "--store", store)["status"] == "unavailable"
         assert not store.exists(), "observation created a Store"
@@ -398,7 +408,7 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             assert status(store) == "owned_unavailable"
             assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
-            for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{"):
+            for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\n{"):
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
@@ -433,7 +443,7 @@ def main():
                             read_request(connection)
                             connection.sendall(
                                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                                b"Content-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\n{}"
+                                b"Content-Length: 2\r\nX-Rui-Wire-Version: 5\r\n\r\n{}"
                             )
 
                 peer = threading.Thread(target=incompatible_peer)
@@ -455,9 +465,9 @@ def main():
                         stale.chmod(0o600)
                 stale.unlink()
             noncanonical = json.dumps({
-                "version": "1", "type": "host_info", "store": str(store.resolve()),
+                "version": "4", "type": "host_info", "store": str(store.resolve()),
                 "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
-                "capabilities": {"bash": True, "model": False, "managed_authentication": False},
+                "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}},
             }).encode()
             valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
             ambiguous_bodies = (
@@ -474,24 +484,24 @@ def main():
                 valid_body.replace(b'"custody_occupied": "1", ', b''),
             )
             for response in (
-                b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
+                b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\n{}",
                 (f"HTTP/1.1 200\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
-                 "X-Rui-Wire-Version: 1\r\n\r\n").encode() + valid_body,
+                 "X-Rui-Wire-Version: 4\r\n\r\n").encode() + valid_body,
                 (f"HTTP/1.1 0200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
-                 "X-Rui-Wire-Version: 1\r\n\r\n").encode() + valid_body,
+                 "X-Rui-Wire-Version: 4\r\n\r\n").encode() + valid_body,
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
-                 "X-Rui-Wire-Version : 1\r\n\r\n").encode() + valid_body,
+                 "X-Rui-Wire-Version : 3\r\n\r\n").encode() + valid_body,
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
-                 "X-Rui-Wire-Version: 1\r\nTransfer-Encoding: chunked\r\n\r\n").encode() + valid_body,
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999999999\r\nX-Rui-Wire-Version: 1\r\n\r\n",
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
-                b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
+                 "X-Rui-Wire-Version: 4\r\nTransfer-Encoding: chunked\r\n\r\n").encode() + valid_body,
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\n{}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999999999\r\nX-Rui-Wire-Version: 4\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 5\r\nX-Rui-Wire-Version: 4\r\n\r\n{}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\nX-Rui-Wire-Version: 4\r\n\r\n{}",
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\n{}",
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(noncanonical)}\r\n"
-                 "X-Rui-Wire-Version: 1\r\n\r\n").encode() + noncanonical,
+                 "X-Rui-Wire-Version: 4\r\n\r\n").encode() + noncanonical,
                 *((f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
-                   "X-Rui-Wire-Version: 1\r\n\r\n").encode() + body for body in ambiguous_bodies),
+                   "X-Rui-Wire-Version: 4\r\n\r\n").encode() + body for body in ambiguous_bodies),
             ):
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
@@ -515,9 +525,9 @@ def main():
                 stale.unlink()
             for kind, code in (("busy", "ordinary_capacity_exhausted"),
                                ("host_unavailable", "dispatch_fenced")):
-                body = json.dumps({"version": "1", "type": kind, "code": code}).encode()
+                body = json.dumps({"version": "4", "type": kind, "code": code}).encode()
                 response = (f"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
-                            f"Content-Length: {len(body)}\r\nX-Rui-Wire-Version: 1\r\n\r\n").encode() + body
+                            f"Content-Length: {len(body)}\r\nX-Rui-Wire-Version: 4\r\n\r\n").encode() + body
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(2)
@@ -567,7 +577,7 @@ def main():
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            first, fields = start(store, 3, "--codex", "--test-phase-trace")
+            first, fields = start(store, 3, "--provider", "codex", "--test-phase-trace")
             assert fields["execution"] == "enabled"
             diagnostics = HostDiagnostics(first)
             if os_semantics.PROC_FS:
@@ -578,7 +588,7 @@ def main():
                 before = wait_for_descriptors(first.pid)
                 before_fd = len(before)
             first_status = exchange("host_info", lambda: status(store))
-            match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true ([1-9][0-9]*) 0", first_status)
+            match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true chatgpt_device ([1-9][0-9]*) 0", first_status)
             assert match, first_status
             # The Host's start, not the call's: fixed for this Host's life.
             started_at = match.group(2)
@@ -589,12 +599,15 @@ def main():
             setup = exchange("host_info", lambda: subprocess.run([RUI, "defaults", "configure", "--store", str(alias)],
                 env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10))
             assert setup.returncode == 0, setup.stderr
+            # Configure saves the canonical path, which the installer then shows.
+            view = exchange("host_info", lambda: installer_view(home))
+            assert view == [str(store.resolve()), "ready"], view
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected == {
-                "version": "1", "type": "host_status", "status": "ready", "store": str(store.resolve()),
+                "version": "4", "type": "host_status", "status": "ready", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
                 "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
-                "capabilities": {"bash": True, "model": True, "managed_authentication": True},
+                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
                 "diagnostics": f"{store.resolve()}/diagnostics",
             }, selected
             assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
@@ -609,11 +622,11 @@ def main():
             assert head.startswith(b"HTTP/1.1 200 OK\r\n")
             assert f"Content-Length: {len(body)}".encode() in head.split(b"\r\n")
             assert json.loads(body) == {
-                "version": "1", "type": "host_info", "store": str(store.resolve()),
+                "version": "4", "type": "host_info", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "started_at": started_at, "custody_occupied": "0",
-                "capabilities": {"bash": True, "model": True, "managed_authentication": True},
+                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             changed = exchange("host_info", lambda: raw_info(stale, store.resolve(), "0" * 32), 5)
@@ -646,14 +659,14 @@ def main():
         completed = False
         try:
             second_status = exchange("host_info", lambda: status(store))
-            match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true false false ([1-9][0-9]*) 0", second_status)
+            match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true unserved ([1-9][0-9]*) 0", second_status)
             assert match_second, second_status
             # A replacement Host starts no earlier than the one it replaced.
             assert int(match_second.group(2)) >= int(started_at), (first_status, second_status)
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected["status"] == "ready" and selected["store"] == str(store.resolve()), selected
             assert selected["active_capacity"] == "7", selected
-            assert selected["capabilities"] == {"bash": True, "model": False, "managed_authentication": False}, selected
+            assert selected["capabilities"] == {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}}, selected
             assert selected["instance"] == match_second.group(1), selected
             assert match_second.group(1) != match.group(1), "replacement reused instance identity"
             old_instance = exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)

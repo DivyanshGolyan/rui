@@ -251,5 +251,28 @@ else:
         self.assertFalse((self.root / 'gates').exists())
 
 
+    def test_a_package_link_to_its_own_file_ships_as_that_file_and_other_links_are_refused(self):
+        packages = build_artifact.roots()['packages']
+        package = packages / 'linked-package'
+        (package / 'bindings').mkdir(parents=True)
+        (package / 'LICENSE').write_text('license text')
+        (package / 'bindings/LICENSE').symlink_to('../LICENSE')
+        build_artifact.package(['test'], self.root / 'linked')
+        with tarfile.open(self.root / 'linked/compiled.tar.gz') as archive:
+            member = archive.getmember('packages/linked-package/bindings/LICENSE')
+            self.assertTrue(member.isfile())
+            self.assertEqual(archive.extractfile(member).read(), b'license text')
+        (self.root / 'outside').write_text('not the package')
+        for target in ('../../outside', '../../pinned-source'):
+            (package / 'bindings/LICENSE').unlink()
+            (package / 'bindings/LICENSE').symlink_to(target)
+            with self.assertRaisesRegex(ValueError, 'Unexpected build symlink'):
+                build_artifact.package(['test'], self.root / 'refused')
+        (package / 'bindings/LICENSE').unlink()
+        binary = build_artifact.roots()['binaries'] / 'linked-tests'
+        binary.symlink_to('test-tests')
+        with self.assertRaisesRegex(ValueError, 'Unexpected build file'):
+            build_artifact.package(['test'], self.root / 'refused')
+
 if __name__ == '__main__':
     unittest.main()

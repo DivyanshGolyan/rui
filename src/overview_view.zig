@@ -12,16 +12,19 @@
 //! overview state.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
+const session_line = @import("session_line.zig");
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
 const codex_credential_policy = @import("codex_credential_policy.zig");
+const draft_layout = @import("draft_layout.zig");
+const failure_class = @import("failure_class.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const session_work = @import("session_work.zig");
-const terminal_control = @import("terminal_control.zig");
+const TerminalText = @import("TerminalText.zig");
+const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
-const transport_policy = @import("transport_policy.zig");
 
 const Allocator = std.mem.Allocator;
 pub const Kind = session_work.Kind;
@@ -37,7 +40,7 @@ pub const max_page_rows = 8;
 /// First lines one refresh asks for.
 pub const max_first_line_reads = 8;
 /// Bytes of a first line kept for its title; a longer line ends in an ellipsis.
-pub const max_line_bytes = 256;
+pub const max_line_bytes = session_line.max_line_bytes;
 /// The shell reads this much of a first line: one byte more than a row keeps,
 /// so a longer line shows that it was cut.
 pub const max_line_read_bytes = max_line_bytes + 1;
@@ -63,7 +66,7 @@ pub const Mark = enum { active, waiting, finished, failed, stopped };
 pub const Colour = enum {
     /// The brightest ink: the wordmark, your Sessions, the headline's opening.
     strong,
-    /// What works or matters: named Sessions, headings, counts.
+    /// What works or matters: named Sessions, headings.
     ink,
     normal,
     quiet,
@@ -78,26 +81,21 @@ pub const Colour = enum {
 /// Cell grounds. The overview paints `ground` under every cell it owns.
 pub const Background = enum { ground, bar, selection, band };
 
-/// What a row adds to its word.
-pub const Detail = enum {
-    none,
-    /// The running Bash call's saved description, in place of the word.
-    description,
-    /// The seconds until the retry is due.
-    due,
-    /// The Session that sent the first Message, by Label, else reference.
-    starter,
-};
-
-/// How one work state looks and what Ctrl-X may do to it.
+/// How one work state looks and what Ctrl-X may do to it. Work under way
+/// says what `work_line` says, in its tone; `word` names an idle or ended
+/// state, which has no work line.
 pub const Rule = struct {
     group: Group,
     mark: Mark,
+    /// The mark's colour, unless the work line's tone asks for attention
+    /// or quiet.
     colour: Colour,
-    word: []const u8,
+    word: ?[]const u8 = null,
     /// The group heading already says `word`, so rows under it omit it.
     said_by_group: bool = false,
-    detail: Detail = .none,
+    /// A failed or stopped row names the Session that sent its first
+    /// Message, by Label, else reference.
+    starter: bool = false,
     /// Ctrl-X may stop a Session in this state.
     stoppable: bool,
 };
@@ -105,30 +103,27 @@ pub const Rule = struct {
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .group = .idle, .mark = .waiting, .colour = .normal, .word = "idle", .said_by_group = true, .stoppable = false },
-    .pending = .{ .group = .working, .mark = .waiting, .colour = .normal, .word = "starting", .stoppable = true },
-    .working = .{ .group = .working, .mark = .active, .colour = .ink, .word = "working", .said_by_group = true, .stoppable = true },
-    .retrying = .{ .group = .working, .mark = .active, .colour = .attention, .word = "retrying", .detail = .due, .stoppable = true },
-    .bash = .{ .group = .working, .mark = .active, .colour = .ink, .word = "using a tool", .detail = .description, .stoppable = true },
-    .approval = .{ .group = .working, .mark = .waiting, .colour = .attention, .word = "waiting for you", .stoppable = true },
-    .stopping = .{ .group = .working, .mark = .active, .colour = .quiet, .word = "stopping", .stoppable = false },
+    .pending = .{ .group = .working, .mark = .waiting, .colour = .normal, .stoppable = true },
+    .working = .{ .group = .working, .mark = .active, .colour = .ink, .stoppable = true },
+    .retrying = .{ .group = .working, .mark = .active, .colour = .ink, .stoppable = true },
+    .bash = .{ .group = .working, .mark = .active, .colour = .ink, .stoppable = true },
+    .approval = .{ .group = .working, .mark = .waiting, .colour = .normal, .stoppable = true },
+    .stopping = .{ .group = .working, .mark = .active, .colour = .ink, .stoppable = false },
     .finished = .{ .group = .finished, .mark = .finished, .colour = .mark, .word = "finished", .said_by_group = true, .stoppable = false },
-    .failed = .{ .group = .ended, .mark = .failed, .colour = .failure, .word = "failed", .detail = .starter, .stoppable = false },
-    .stopped = .{ .group = .ended, .mark = .stopped, .colour = .normal, .word = "stopped", .detail = .starter, .stoppable = false },
+    .failed = .{ .group = .ended, .mark = .failed, .colour = .failure, .word = "failed", .starter = true, .stoppable = false },
+    .stopped = .{ .group = .ended, .mark = .stopped, .colour = .normal, .word = "stopped", .starter = true, .stoppable = false },
 });
 
-/// `colour` draws the mark on the counts line.
-pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8, word: []const u8, colour: Colour }).init(.{
-    .active = .{ .unicode = "●", .ascii = "*", .word = "working", .colour = .ink },
-    .waiting = .{ .unicode = "○", .ascii = "o", .word = "waiting", .colour = .normal },
-    .finished = .{ .unicode = "✓", .ascii = "+", .word = "finished", .colour = .mark },
-    .failed = .{ .unicode = "×", .ascii = "x", .word = "failed", .colour = .failure },
-    .stopped = .{ .unicode = "■", .ascii = "#", .word = "stopped", .colour = .normal },
+pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8 }).init(.{
+    .active = .{ .unicode = "●", .ascii = "*" },
+    .waiting = .{ .unicode = "○", .ascii = "o" },
+    .finished = .{ .unicode = "✓", .ascii = "+" },
+    .failed = .{ .unicode = "×", .ascii = "x" },
+    .stopped = .{ .unicode = "■", .ascii = "#" },
 });
 
 /// A pulsing mark steps through its steady mark and these, one per frame.
 pub const pulse_dots = [_][]const u8{ "·", "∙", "•" };
-/// Counts-line order: finished last, so a narrow screen cuts the least telling count.
-const counts_marks = [_]Mark{ .active, .waiting, .failed, .stopped, .finished };
 
 pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: []const u8 = "", folds: bool }).init(.{
     .yours = .{ .title = "Yours", .folds = false },
@@ -148,7 +143,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_g = .clear,
     .ctrl_c = .exit,
     .ctrl_d = .exit,
+    .ctrl_n = null,
     .ctrl_o = null,
+    .ctrl_p = null,
     .ctrl_r = null,
     .ctrl_x = .stop,
     .up = .previous,
@@ -162,8 +159,11 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_end = null,
 });
 
-/// The composer's text and caret, as the shell's line editor holds them.
-pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0 };
+/// The composer's text and caret, as the shell's line editor holds them,
+/// and the draft line the previous frame showed first.
+/// `anchor` is the byte that started the composer's first shown line last
+/// frame.
+pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0 };
 
 /// What the composer made of one input, and its draft as that input left it.
 pub const Composed = struct { outcome: keymap.Outcome(Action), draft: Draft };
@@ -308,7 +308,13 @@ pub const Event = union(enum) {
     host: ?Host,
     /// The person pressed a key, at this Unix millisecond.
     looked: u64,
+    conversed: Conversed,
 };
+
+/// An input in the open conversation of `reference`, whose work it shows as
+/// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
+/// Session's row does, and any other input cancels the prompt.
+pub const Conversed = struct { reference: Reference, work: Kind, stop: bool };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
 pub const Reads = struct {
@@ -440,6 +446,33 @@ pub const OwnedStart = struct {
 
 pub const Prompt = struct { stop: Reference };
 
+/// What both screens say while a stop waits for its second Ctrl-X: the
+/// Session's reference and a separator dot.
+const stop_prompt = "Stop {s}? ctrl+x yes {s} esc no";
+
+/// The bytes the conversation's stop prompt takes.
+pub const max_prompt_bytes = stop_prompt.len - 2 * "{s}".len + @typeInfo(Reference).array.len + "·".len;
+
+/// What the overview says under the input of the conversation of `ref`,
+/// whose work shows as `work`: its stop prompt for that Session, else its
+/// notice, and whether Ctrl-X would ask to stop the work.
+pub const Said = struct {
+    /// Null when the overview says nothing; the conversation's own notice
+    /// then shows.
+    text: ?[]const u8,
+    /// The text is the stop prompt, which Esc or Ctrl-G only cancels.
+    asking: bool,
+    stoppable: bool,
+};
+
+pub fn conversation(state: *const State, ref: Reference, work: Kind, buffer: *[max_prompt_bytes]u8) Said {
+    const asking = if (state.prompt) |open| std.mem.eql(u8, &open.stop, &ref) else false;
+    const text: ?[]const u8 = if (asking)
+        std.fmt.bufPrint(buffer, stop_prompt, .{ &ref, "·" }) catch unreachable
+    else if (state.notice) |*notice| notice.text() else null;
+    return .{ .text = text, .asking = asking, .stoppable = stoppable(state, ref, work) };
+}
+
 /// A start or stop `step` asked the shell to send. Only its answer removes
 /// it, and only while the overview shows that answer; one that may have
 /// reached the Host keeps its recover handle until departure. Nothing is
@@ -454,7 +487,8 @@ pub const Request = struct {
 };
 
 pub const Notice = struct {
-    bytes: [256]u8 = undefined,
+    /// Room for a refused environment's reason, its longest notice.
+    bytes: [768]u8 = undefined,
     len: usize = 0,
     colour: Colour,
 
@@ -510,7 +544,6 @@ pub const State = struct {
     order: Vec(u32) = .{},
     /// Each group's run in `order`.
     runs: std.enums.EnumArray(Group, Run) = .initFill(.{}),
-    counts: std.enums.EnumArray(Mark, u32) = .initFill(0),
     /// What the top lines say of the rows, kept as they change so a frame
     /// reads it without walking every row.
     summary: Summary = .{},
@@ -633,7 +666,7 @@ pub const State = struct {
     /// ledger is full, and the overview says so.
     fn request(self: *State, kind: @FieldType(Request, "kind"), ref: ?Reference) bool {
         if (self.request_count == max_requests) {
-            self.say(.attention, "! Too many requests waiting. Try again shortly.", .{});
+            self.say(.attention, "! Busy; try again shortly.", .{});
             return false;
         }
         self.requests[self.request_count] = .{ .kind = kind, .session = ref };
@@ -652,7 +685,11 @@ pub const State = struct {
         }
         const held = &self.requests[at];
         held.status = status;
-        held.text.set(text) catch unreachable;
+        // A long failure, such as a refused environment, keeps its start,
+        // cut between characters.
+        var end = @min(text.len, held.text.bytes.len);
+        while (end < text.len and end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+        held.text.set(text[0..end]) catch unreachable;
     }
 
     /// Interns a Workspace: Sessions share few, and a row keeps an index.
@@ -689,6 +726,7 @@ pub const Summary = struct {
     /// A row works: its state is in the working group, whatever its section.
     working: bool = false,
     approvals: usize = 0,
+    failed: usize = 0,
     /// The newest state's time, Unix seconds.
     latest: u64 = 0,
     /// Every Session you messaged has finished.
@@ -793,17 +831,23 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
         },
         .first_line => |result| try firstLine(state, result),
+        .conversed => |input| {
+            state.notice = null;
+            const prompt = state.prompt;
+            state.prompt = null;
+            if (input.stop) stopKey(state, prompt, input.reference, input.work, &effects);
+        },
         .stop => |result| {
             const at = state.pendingAt(.stop, result.reference).?;
             switch (result.outcome) {
                 .stopped => state.answer(at, .done, ""),
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! Could not stop {s}. ({s})", .{ &result.reference, code });
+                    state.say(.attention, "! {s} not stopped: {s}", .{ &result.reference, code });
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! Not sure {s} stopped. Details when you leave.", .{&result.reference});
+                    state.say(.attention, "! {s} stop unsure; details on exit", .{&result.reference});
                 },
             }
             state.next_list_ms = 0;
@@ -823,7 +867,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! Could not start the Session. ({s})", .{code});
+                    state.say(.attention, "! Not started: {s}", .{code});
                 },
                 .unconfirmed => |handle| {
                     // The saved request holds the text; recovery, not a
@@ -832,7 +876,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     if (!state.left) effects.add(.clear_draft);
                     state.settings = .{};
                     state.next_list_ms = 0;
-                    state.say(.attention, "! Not sure the Session started. Details when you leave.", .{});
+                    state.say(.attention, "! Start unsure; details on exit", .{});
                 },
             }
         },
@@ -1013,20 +1057,19 @@ fn reindex(state: *State) error{OutOfMemory}!void {
     state.by_reference.items.len = kept;
 }
 
-/// Rebuilds the screen order, each group's run and the counts, then keeps the
+/// Rebuilds the screen order, each group's run and the summary, then keeps the
 /// selection on a listed, visible row.
 fn arrange(state: *State) error{OutOfMemory}!void {
     const rows = state.rows.items;
     try state.sort_keys.ensure(state.gpa, rows.len);
     try state.order.ensure(state.gpa, rows.len);
     state.sort_keys.items.len = rows.len;
-    state.counts = .initFill(0);
     state.summary = .{};
     const latest = std.math.maxInt(u34);
     const looked_s = if (state.looked_ms) |at| at / 1000 else null;
     for (state.sort_keys.items, rows, 0..) |*key, *row, at| {
         const rule = rules.get(row.state);
-        state.counts.getPtr(rule.mark).* += 1;
+        state.summary.failed += @intFromBool(row.state == .failed);
         state.summary.working = state.summary.working or rule.group == .working;
         state.summary.approvals += @intFromBool(row.state == .approval);
         state.summary.latest = @max(state.summary.latest, row.state.since());
@@ -1103,32 +1146,8 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
         row.line = .unavailable;
         return;
     };
-    try state.lines.append(state.gpa, firstLineText(bytes));
+    try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
     row.line = .{ .read = @intCast(state.lines.items.len - 1) };
-}
-
-/// The line up to its first line end, trimmed, within `max_line_bytes`.
-fn firstLineText(bytes: []const u8) Bounded(max_line_bytes) {
-    const end = std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len;
-    const line = std.mem.trim(u8, bytes[0..end], " \t");
-    var value: Bounded(max_line_bytes) = .{};
-    const ellipsis = "…";
-    const kept = if (line.len <= max_line_bytes) line.len else codepointStart(line, max_line_bytes - ellipsis.len);
-    @memcpy(value.bytes[0..kept], line[0..kept]);
-    value.len = kept;
-    if (kept < line.len) {
-        @memcpy(value.bytes[kept..][0..ellipsis.len], ellipsis);
-        value.len += ellipsis.len;
-    }
-    return value;
-}
-
-/// The start of the code point holding byte `at`, so a cut there keeps whole
-/// code points.
-fn codepointStart(bytes: []const u8, at: usize) usize {
-    var start = at;
-    while (start > 0 and start < bytes.len and bytes[start] & 0xc0 == 0x80) start -= 1;
-    return start;
 }
 
 /// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
@@ -1144,11 +1163,9 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
-            .stop => if (prompt) |asked| confirmStop(state, asked.stop, effects) else {
+            .stop => {
                 const row = state.selectedRow() orelse return state.say(.quiet, "Select a Session first.", .{});
-                if (rules.get(shownKind(state, row)).stoppable) {
-                    state.prompt = .{ .stop = row.reference };
-                } else refuseStop(state, row);
+                stopKey(state, prompt, row.reference, row.state.asOf(state.now_ms), effects);
             },
         },
         .none, .append, .redraw => {},
@@ -1156,31 +1173,56 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
         .refused => |why| {
             if (why.endsLine()) effects.add(.clear_draft);
             switch (why) {
-                .invalid => state.say(.attention, "! That text had bytes that are not text, so it was not sent.", .{}),
-                .overflow => state.say(.attention, "! That's too long to send.", .{}),
-                .edit_rejected => state.say(.attention, "! That character cannot stand alone, so it was not added.", .{}),
-                .unbound => state.say(.attention, "! That key combination does nothing here.", .{}),
+                .invalid => state.say(.attention, "! Not valid text; nothing sent.", .{}),
+                .overflow => state.say(.attention, "! Too long to send.", .{}),
+                .edit_rejected => state.say(.attention, "! Can't add that character alone.", .{}),
+                .unbound => state.say(.attention, "! That key does nothing here.", .{}),
             }
         },
     }
 }
 
-fn confirmStop(state: *State, ref: Reference, effects: *Effects) void {
-    const row = state.find(ref) orelse return;
-    if (!rules.get(shownKind(state, row)).stoppable) return refuseStop(state, row);
-    if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
+/// Ctrl-X on either screen, for the Session `ref` whose work shows as
+/// `work`: the first asks, and a second while `prompt` names it sends the stop.
+fn stopKey(state: *State, prompt: ?Prompt, ref: Reference, work: Kind, effects: *Effects) void {
+    const kind = kindShown(state, ref, work);
+    if (!rules.get(kind).stoppable) return refuseStop(state, ref, kind);
+    const asked = if (prompt) |open| std.mem.eql(u8, &open.stop, &ref) else false;
+    if (!asked) {
+        state.prompt = .{ .stop = ref };
+    } else if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
 }
 
-/// Says why `row` takes no stop. An unconfirmed one says leaving gives the details.
-fn refuseStop(state: *State, row: *const Row) void {
-    if (state.openStop(row.reference)) |held| if (held.status == .unknown)
-        return state.say(.attention, "! Not sure {s} stopped. Details when you leave.", .{&row.reference});
-    state.say(.quiet, "{s} is already {s}.", .{ &row.reference, rules.get(shownKind(state, row)).word });
+/// Says why `ref` takes no stop. An unconfirmed one says leaving gives the
+/// details; work being stopped says so in its work line's words.
+fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
+    if (state.openStop(ref)) |held| if (held.status == .unknown)
+        return state.say(.attention, "! {s} stop unsure; details on exit", .{&ref});
+    if (rules.get(kind).word) |word_| return state.say(.quiet, "{s} is already {s}.", .{ &ref, word_ });
+    std.debug.assert(kind == .stopping);
+    state.say(.quiet, "{s}: {s}", .{ &ref, work_line.stopping.words });
 }
 
-/// The kind a row shows: `stopping` while a stop of it is open.
+/// The kind `ref` shows: `stopping` while a stop of it is open, else `work`.
+fn kindShown(state: *const State, ref: Reference, work: Kind) Kind {
+    return if (state.openStop(ref) != null) .stopping else work;
+}
+
+/// Ctrl-X would ask to stop `ref`, whose work shows as `work`.
+fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
+    return rules.get(kindShown(state, ref, work)).stoppable;
+}
+
+/// The kind a row shows, with a retry that has fallen due as the work it
+/// became.
 fn shownKind(state: *const State, row: *const Row) Kind {
-    return if (state.openStop(row.reference) != null) .stopping else row.state;
+    return kindShown(state, row.reference, row.state.asOf(state.now_ms));
+}
+
+/// What a row's work is doing now, as `shownKind` reads it; null for idle or
+/// ended work.
+fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
+    return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, &row.state, null, state.now_ms);
 }
 
 fn enter(state: *State, text: []const u8, effects: *Effects) void {
@@ -1198,7 +1240,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) void {
     }
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     if (std.mem.eql(u8, name, "/exit")) return effects.add(.exit);
-    if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown command. Try /configure or /exit.", .{});
+    if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown; try /configure or /exit", .{});
     if (configure(state, text[name.len..])) effects.add(.clear_draft);
 }
 
@@ -1228,20 +1270,20 @@ fn configure(state: *State, arguments: []const u8) bool {
     }
     for (cli_args.live_configure.options) |option| {
         if (parsed.has(option.name) and startOption(option.name) == null) {
-            state.say(.attention, "! --{s} is not a start setting; set it once the Session starts.", .{option.name});
+            state.say(.attention, "! Set --{s} after the start", .{option.name});
             return false;
         }
     }
     // The Host admits any model name, so the client checks release support,
     // as `session start` does.
     if (parsed.get("model")) |model| if (!model_capability.supportsModel(model)) {
-        state.say(.attention, "! Unsupported model {s}; rui session configure --help lists them.", .{model});
+        state.say(.attention, "! Unsupported; session configure -h", .{});
         return false;
     };
     var next: StartSettings = .{};
     inline for (start_options, 0..) |name, option| {
         if (parsed.get(name) orelse state.settings.get(option)) |value| next.put(option, value) catch {
-            state.say(.attention, "! Start settings hold at most {d} bytes.", .{StartSettings.max_bytes});
+            state.say(.attention, "! Settings over {d} bytes", .{StartSettings.max_bytes});
             return false;
         };
     }
@@ -1316,7 +1358,7 @@ fn lastVisible(state: *const State, at: usize) usize {
 /// Sign-in, quota or rate-limit trouble that stops every Session reaching
 /// the model, from rows alone: rows survive Host restarts, so no Host memory
 /// is needed.
-pub const Trouble = enum { sign_in, quota, rate_limit };
+pub const Trouble = enum { sign_in, api_key, quota, rate_limit };
 pub const Band = struct {
     trouble: Trouble,
     /// Rows retrying a rate limit.
@@ -1341,33 +1383,24 @@ const BandRule = struct {
 /// In priority order.
 const band_rules = [_]BandRule{
     .{ .trouble = .sign_in, .kind = .failed, .matches = signInCode, .after_login = true },
+    .{ .trouble = .api_key, .kind = .failed, .matches = apiKeyCode, .after_login = true },
     .{ .trouble = .quota, .kind = .failed, .matches = quotaCode, .until_reset = true },
-    .{ .trouble = .rate_limit, .kind = .retrying, .matches = rateLimitCode },
-};
-
-/// Failure codes a new `rui auth login` resolves.
-const sign_in_codes = codes: {
-    var codes: []const []const u8 = &.{"provider_http_401"};
-    for (@typeInfo(codex_credential_policy.LoginRequired).error_set.error_names.?) |name| {
-        const code = codex_credential_policy.failureCode(@field(anyerror, name));
-        for (codes) |known| {
-            if (std.mem.eql(u8, known, code)) break;
-        } else codes = codes ++ .{code};
-    }
-    break :codes codes;
+    .{ .trouble = .rate_limit, .kind = .retrying, .matches = failure_class.rateLimited },
 };
 
 fn signInCode(code: []const u8) bool {
-    for (sign_in_codes) |known| if (std.mem.eql(u8, known, code)) return true;
-    return false;
+    return failure_class.of(code) == .sign_in;
+}
+
+fn apiKeyCode(code: []const u8) bool {
+    return failure_class.of(code) == .api_key;
 }
 
 fn quotaCode(code: []const u8) bool {
-    return transport_policy.Quota.ofFailureCode(code) != null;
-}
-
-fn rateLimitCode(code: []const u8) bool {
-    return std.mem.eql(u8, code, "provider_temporary_http_429");
+    return switch (failure_class.of(code)) {
+        .quota, .plan => true,
+        else => false,
+    };
 }
 
 pub fn band(rows: []const Row, now_ms: u64, login_at: ?u64) ?Band {
@@ -1549,6 +1582,9 @@ pub const Screen = struct {
     /// Where the terminal's cursor shows: the composer's caret, unless the
     /// composer is locked.
     cursor: ?Cursor = null,
+    /// The byte the composer's first shown line starts at, for the next
+    /// frame's `Draft.anchor`.
+    draft_anchor: usize = 0,
     /// A mark it drew changes with the frame: the shell draws the next one
     /// in `pulse_interval_ms`.
     pulses: bool = false,
@@ -1673,9 +1709,9 @@ pub const Screen = struct {
     }
 };
 
-const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, ellipsis: []const u8, arrows: []const u8, newline: []const u8 };
-const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = "·", .rule = "─", .ellipsis = "…", .arrows = "↑↓", .newline = "↵" };
-const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = "-", .rule = "-", .ellipsis = ".", .arrows = "^v", .newline = "|" };
+const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, ellipsis: []const u8, arrows: []const u8, up: []const u8, down: []const u8, newline: []const u8 };
+const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.unicode).dot, .rule = "─", .ellipsis = work_line.glyphs.get(.unicode).ellipsis, .arrows = "↑↓", .up = "↑", .down = "↓", .newline = "↵" };
+const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .up = "^", .down = "v", .newline = "|" };
 
 /// Draws the overview. `frame` picks each pulsing mark's glyph.
 pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
@@ -1687,9 +1723,9 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, hei
     screen.lines = lines;
     if (height == 0 or width == 0) return screen;
     // The top: title, the alarm bands or else the headline, the Host's
-    // health, the counts, what changed since the person looked, a gap.
-    // At most: title, two bands, health, counts, since.
-    var top: [6][]const Span = undefined;
+    // health, what changed since the person looked, a gap.
+    // At most: title, two bands, health, since.
+    var top: [5][]const Span = undefined;
     var count: usize = 0;
     top[count] = try header(&painter, state);
     count += 1;
@@ -1710,23 +1746,27 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, hei
     // The health line keeps its row before the first host-info read, so
     // the list does not move when it comes.
     top[count] = try healthLine(&painter, state);
-    top[count + 1] = try countsLine(&painter, state);
-    count += 2;
+    count += 1;
     if (sinceLooked(state)) |news| {
         top[count] = try sinceLine(&painter, news);
         count += 1;
     }
     const row = @min(count, height);
     @memcpy(lines[0..row], top[0..row]);
-    const bottom = height -| 3;
-    if (row + 1 < bottom) try list(&painter, state, lines[row + 1 .. bottom]);
-    if (height >= 6) {
-        lines[height - 3] = try ruleLine(&painter);
-        var column: usize = 3;
-        lines[height - 2] = try composer(&painter, state, draft, &column);
+    // The bottom: the rule, the composer's rows and the hints, in the same
+    // rows a conversation gives its input.
+    var bottom = height;
+    if (height >= 6 and width >= 6) {
+        var layout: ComposerLayout = undefined;
+        layout.plan(&painter, draft, height);
+        bottom = height - 2 - layout.view.rows;
+        lines[bottom] = try ruleLine(&painter, layout.view);
+        try composer(&painter, state, draft, &layout, lines[bottom + 1 .. height - 1]);
         lines[height - 1] = try hints(&painter, state, draft);
-        if (!state.starting()) screen.cursor = .{ .row = height - 2, .column = @min(width - 1, column) };
+        screen.draft_anchor = layout.lines[0].start;
+        if (!state.starting()) screen.cursor = .{ .row = @intCast(bottom + 1 + layout.shape.caret_line - layout.view.first), .column = @intCast(@min(width - 1, 3 + layout.shape.caret_column)) };
     }
+    if (row + 1 < bottom) try list(&painter, state, lines[row + 1 .. bottom]);
     screen.pulses = painter.pulsed;
     return screen;
 }
@@ -1745,6 +1785,11 @@ const Painter = struct {
     column: usize = 0,
     /// The selection's ground across the line, inside its margins.
     selected: bool = false,
+
+    /// The glyph set `work_line` draws this screen's clocks with.
+    fn script(self: *const Painter) work_line.Script {
+        return if (self.caps.unicode) .unicode else .ascii;
+    }
 
     fn begin(self: *Painter, selected: bool) void {
         self.count = 0;
@@ -1865,11 +1910,13 @@ const Painter = struct {
     }
 
     /// The glyph shown for a code point that cannot reach the terminal: a
-    /// control or bidi character or an invalid byte, or without Unicode
-    /// anything past ASCII.
+    /// control character or an invalid byte, or without Unicode anything
+    /// past ASCII.
     fn standIn(self: *const Painter, codepoint: u21) ?[]const u8 {
         if (codepoint == '\n') return self.glyphs.newline;
-        if (terminal_control.isControl(codepoint) or codepoint == replacement) return "?";
+        // A tab shows as one space, as in a conversation.
+        if (codepoint == '\t') return " ";
+        if (TerminalText.isControl(codepoint) or codepoint == replacement) return "?";
         if (!self.caps.unicode and codepoint > 0x7e) return "?";
         return null;
     }
@@ -1953,7 +2000,7 @@ fn header(painter: *Painter, state: *const State) error{OutOfMemory}![]const Spa
     return painter.finish();
 }
 
-/// One sentence above the counts: whether anything works, and what needs
+/// One sentence under the title: whether anything works, and what needs
 /// the person.
 fn headline(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
     painter.begin(false);
@@ -1968,7 +2015,7 @@ fn headline(painter: *Painter, state: *const State) error{OutOfMemory}![]const S
     var span: [16]u8 = undefined;
     var number: [32]u8 = undefined;
     const summary = state.summary;
-    const failed = state.counts.get(.failed);
+    const failed = state.summary.failed;
     const yours = state.runs.get(.yours).len;
     const sessions = state.rows.items.len;
     // Failures are counted. Waits for approval are not named, but they
@@ -2008,28 +2055,6 @@ fn healthLine(painter: *Painter, state: *const State) error{OutOfMemory}![]const
     if (state.host) |host| {
         const text = try std.fmt.allocPrint(painter.arena, "slots {d}/{d}", .{ host.slots_in_use, host.slots });
         _ = try painter.put(column, text, painter.width -| column -| 1, .{ .colour = if (host.slots_in_use >= host.slots) .ink else .normal });
-    }
-    return painter.finish();
-}
-
-fn countsLine(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    var column: usize = 1;
-    for (counts_marks) |mark| {
-        const count = state.counts.get(mark);
-        if (count == 0) continue;
-        const look = marks.get(mark);
-        var number: [32]u8 = undefined;
-        const digits = grouped(&number, count);
-        const cells = 1 + 1 + digits.len + 1 + look.word.len;
-        if (column + cells > painter.width -| 1) {
-            _ = try painter.put(@min(column, painter.width -| 2), painter.glyphs.ellipsis, 1, .{ .colour = .quiet });
-            break;
-        }
-        _ = try painter.put(column, if (painter.caps.unicode) look.unicode else look.ascii, 1, .{ .colour = look.colour });
-        _ = try painter.put(column + 2, try painter.arena.dupe(u8, digits), digits.len, .{ .colour = .ink });
-        _ = try painter.put(column + 3 + digits.len, look.word, look.word.len, .{});
-        column += cells + 3;
     }
     return painter.finish();
 }
@@ -2074,6 +2099,7 @@ fn providerBand(painter: *Painter, trouble: Band, now_ms: u64) error{OutOfMemory
     var buffer: [8]u8 = undefined;
     return bandLine(painter, switch (trouble.trouble) {
         .sign_in => "Sign-in expired. Run rui auth login codex.",
+        .api_key => "OpenAI API key rejected. Run rui auth login openai, then rui host stop.",
         .quota => if (trouble.resets_at) |at|
             try std.fmt.allocPrint(painter.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else
@@ -2108,31 +2134,82 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
     return buffer[0..used];
 }
 
-fn ruleLine(painter: *Painter) error{OutOfMemory}![]const Span {
+/// The rule above the composer. It names the draft lines hidden above or
+/// below the composer when there are any.
+fn ruleLine(painter: *Painter, view: draft_layout.View) error{OutOfMemory}![]const Span {
     painter.begin(false);
     const cells = painter.width -| 2;
-    const text = try painter.arena.alloc(u8, cells * painter.glyphs.rule.len);
-    for (0..cells) |at| @memcpy(text[at * painter.glyphs.rule.len ..][0..painter.glyphs.rule.len], painter.glyphs.rule);
+    var buffer: [64]u8 = undefined;
+    const label = draft_layout.label(&buffer, view, .{ .up = painter.glyphs.up, .down = painter.glyphs.down, .dot = painter.glyphs.dot });
+    const label_cells = painter.measure(label);
     try painter.pad(1, .{});
-    painter.push(text, cells, .{ .colour = .rule });
+    const left = draft_layout.labelColumn(label_cells, cells) orelse {
+        try ruleRun(painter, cells);
+        return painter.finish();
+    };
+    try ruleRun(painter, left);
+    _ = try painter.put(1 + left, label, label_cells, .{ .colour = .quiet });
+    try ruleRun(painter, cells - left - label_cells);
     return painter.finish();
 }
 
-/// The draft on one line, its caret in view: text before the caret keeps
-/// its end, text after it its start. `caret` gets the caret's column.
-fn composer(painter: *Painter, state: *const State, draft: Draft, caret: *usize) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
+fn ruleRun(painter: *Painter, cells: usize) error{OutOfMemory}!void {
+    if (cells == 0) return;
+    const text = try painter.arena.alloc(u8, cells * painter.glyphs.rule.len);
+    for (0..cells) |at| @memcpy(text[at * painter.glyphs.rule.len ..][0..painter.glyphs.rule.len], painter.glyphs.rule);
+    painter.push(text, cells, .{ .colour = .rule });
+}
+
+/// The composer's lines as `draft_layout` breaks them, at three cells in.
+const ComposerLayout = struct {
+    shape: draft_layout.Shape,
+    view: draft_layout.View,
+    lines: [draft_layout.max_rows]draft_layout.Line,
+
+    fn plan(self: *ComposerLayout, painter: *const Painter, draft: Draft, height: u16) void {
+        const width = painter.width - 4;
+        const pieces: DraftPieces = .{ .pieces = .{ .bytes = draft.bytes, .painter = painter }, .width = width };
+        self.shape = draft_layout.shape(pieces, width, draft.cursor, draft.anchor);
+        self.view = draft_layout.fit(pieces, width, draft.cursor, self.shape, draft_layout.cap(height), &self.lines);
+    }
+};
+
+/// The draft as the composer draws it, for `draft_layout`: a newline breaks
+/// the line, and every other piece is what `Pieces` draws. A cluster wider
+/// than the line counts as filling it, which `put` shortens it to.
+const DraftPieces = struct {
+    pieces: Pieces,
+    width: u16,
+
+    pub fn next(self: *DraftPieces) ?draft_layout.Piece {
+        const before = self.pieces.at;
+        if (before < self.pieces.bytes.len and self.pieces.bytes[before] == '\n') {
+            self.pieces.at += 1;
+            return .{ .len = 1, .cells = 0, .kind = .newline };
+        }
+        const piece = self.pieces.next() orelse return null;
+        return .{ .len = self.pieces.at - before, .cells = @intCast(@min(piece.cells, self.width)), .kind = draft_layout.kindOf(piece.bytes) };
+    }
+};
+
+/// The draft's shown lines, one per row of `rows`, the prompt on its first.
+fn composer(painter: *Painter, state: *const State, draft: Draft, layout: *const ComposerLayout, rows: [][]const Span) error{OutOfMemory}!void {
+    std.debug.assert(rows.len == layout.view.rows);
     const room = painter.width -| 4;
     if (draft.bytes.len == 0) {
+        painter.begin(false);
+        _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
         _ = try painter.put(3, "Type a task to start a Session", room, .{ .colour = .quiet });
-    } else {
-        const style: Style = .{ .colour = if (state.starting()) .quiet else .strong };
-        const before = try painter.putTail(3, draft.bytes[0..draft.cursor], room, style);
-        caret.* = 3 + before;
-        if (draft.cursor < draft.bytes.len and room > before) _ = try painter.put(caret.*, draft.bytes[draft.cursor..], room - before, style);
+        rows[0] = try painter.finish();
+        return;
     }
-    return painter.finish();
+    const style: Style = .{ .colour = if (state.starting()) .quiet else .strong };
+    for (layout.lines[0..rows.len], rows, 0..) |line, *out, index| {
+        painter.begin(false);
+        if (layout.view.first + index == 0) _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
+        _ = try painter.put(3, draft.bytes[line.start..line.end], room, style);
+        out.* = try painter.finish();
+    }
 }
 
 fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory}![]const Span {
@@ -2140,7 +2217,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
     const room = painter.width -| 2;
     const dot = painter.glyphs.dot;
     if (state.prompt) |prompt| {
-        const text = try std.fmt.allocPrint(painter.arena, "Stop {s}? ctrl+x yes {s} esc no", .{ &prompt.stop, dot });
+        const text = try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
         _ = try painter.put(1, text, room, .{ .colour = .attention });
     } else if (state.notice) |*notice| {
         _ = try painter.put(1, notice.text(), room, .{ .colour = notice.colour });
@@ -2158,7 +2235,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
         const text = try std.fmt.allocPrint(painter.arena, "enter start {s} esc clear", .{dot});
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
-        const stop = if (rules.get(shownKind(state, row)).stoppable) try std.fmt.allocPrint(painter.arena, " {s} ctrl+x stop", .{dot}) else "";
+        const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(painter.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
         const text = try std.fmt.allocPrint(painter.arena, "{s} select {s} enter open{s}", .{ painter.glyphs.arrows, dot, stop });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     }
@@ -2197,7 +2274,7 @@ fn list(painter: *Painter, state: *const State, lines: [][]const Span) error{Out
         const item = layout.item(state, number) orelse break;
         line.* = switch (item) {
             .gap => &.{},
-            .heading => |group| try heading(painter, state, group),
+            .heading => |group| try heading(painter, group),
             .row => |at| try rowLine(painter, state, at, columns),
             .more => |more| try moreLine(painter, more),
         };
@@ -2249,12 +2326,10 @@ const Layout = struct {
     }
 };
 
-fn heading(painter: *Painter, state: *const State, group: Group) error{OutOfMemory}![]const Span {
+fn heading(painter: *Painter, group: Group) error{OutOfMemory}![]const Span {
     painter.begin(false);
     const info = groups.get(group);
-    var column = 1 + try painter.put(1, info.title, painter.width -| 2, .{ .colour = .ink, .bold = true });
-    const count = try std.fmt.allocPrint(painter.arena, "  {d}", .{state.runs.get(group).len});
-    column += try painter.put(column, count, painter.width -| column -| 1, .{});
+    const column = 1 + try painter.put(1, info.title, painter.width -| 2, .{ .colour = .ink, .bold = true });
     if (info.help.len != 0) _ = try painter.put(column + 2, info.help, painter.width -| column -| 3, .{ .colour = .quiet });
     return painter.finish();
 }
@@ -2280,6 +2355,8 @@ const Columns = struct {
 
     /// A Workspace column narrower than this names nothing, so it is left out.
     const min_workspace = 8;
+    /// The cells a title keeps when a long word takes from its room.
+    const min_title = 16;
 
     fn of(width: usize) Columns {
         const end = width -| 1;
@@ -2299,6 +2376,8 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     painter.begin(selected);
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
+    var words: [work_line.max_words_bytes]u8 = undefined;
+    const line = workLine(&words, state, row);
     const faded = state.unreachable_since_ms != null;
     const mark = marks.get(rule.mark);
     // A mark pulses while its change is fresh, from a phase its change
@@ -2308,7 +2387,7 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     painter.pulsed = painter.pulsed or pulses;
     const phase = if (pulses) (painter.frame +% row.mark_since) % (pulse_dots.len + 1) else 0;
     const glyph = if (phase != 0) pulse_dots[phase - 1] else if (painter.caps.unicode) mark.unicode else mark.ascii;
-    _ = try painter.put(2, glyph, 1, .{ .colour = if (faded) .quiet else rule.colour });
+    _ = try painter.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
 
     // Yours in the brightest ink, then named work; unnamed and ended grey.
     const yours = row.group() == .yours;
@@ -2321,16 +2400,23 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
         const path = shortPath(state.home, state.workspaces.items[row.workspace]);
         break :workspace try std.mem.concat(painter.arena, u8, &.{ path.prefix, path.rest });
     } else "";
-    const workspace_cells = @min(painter.measure(workspace), columns.workspace);
-    const title_end = (columns.word -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2);
+    // A word longer than its column, such as a retry's countdown, starts
+    // early and takes from the title's room, down to `min_title` cells.
+    var word_bytes: [max_word_bytes]u8 = undefined;
+    const text = if (columns.word != columns.end) word(&word_bytes, state, row, rule, line, painter.script()) else "";
+    const word_end = columns.end -| Columns.age_cells -| 1;
+    const overflow = painter.measure(text) -| (word_end -| columns.word);
+    const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
+    const workspace_cells = if (word_column < columns.word) 0 else @min(painter.measure(workspace), columns.workspace);
+    const title_end = (word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2);
     _ = try painter.put(Columns.title, named.text, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
     _ = try painter.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
 
     if (columns.word != columns.end) {
-        const text = try word(painter.arena, state, row, rule, painter.glyphs);
-        // Colour only for what needs the person.
-        const tone: Colour = if (faded) .quiet else if (rule.colour == .attention or rule.colour == .failure) rule.colour else .normal;
-        _ = try painter.put(columns.word, text, columns.end -| Columns.age_cells -| 1 -| columns.word, .{ .colour = tone });
+        // Colour only for what needs the person, or quiet as the work asks.
+        const settled: Colour = if (rule.colour == .failure) .failure else .normal;
+        const tone = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, .normal) else settled;
+        _ = try painter.put(word_column, text, word_end -| word_column, .{ .colour = tone });
     }
     var buffer: [8]u8 = undefined;
     try painter.putRight(columns.end, ageText(&buffer, (state.now_ms / 1000) -| row.state.since()), .{ .colour = .quiet });
@@ -2344,25 +2430,44 @@ fn pulseEnd(row: *const Row) u64 {
 
 /// The row title: its Label, else the first line of its first Message (a
 /// greyed hint), else its reference.
-fn title(state: *const State, row: *const Row) struct { text: []const u8, hint: bool } {
-    if (row.label) |*text| return .{ .text = text.slice(), .hint = false };
-    if (state.lineOf(row)) |line| return .{ .text = line, .hint = true };
-    return .{ .text = &row.reference, .hint = true };
+fn title(state: *const State, row: *const Row) session_line.Name {
+    return session_line.name(if (row.label) |*text| text.slice() else null, state.lineOf(row), &row.reference);
 }
 
-/// What the row says beside its title, unless its group heading says it.
-fn word(arena: Allocator, state: *const State, row: *const Row, rule: Rule, glyphs: Glyphs) error{OutOfMemory}![]const u8 {
-    const own = rule.said_by_group and row.group() == rule.group;
-    return switch (rule.detail) {
-        .none => if (own) "" else rule.word,
-        .description => if (row.state == .bash) if (row.state.bash.description) |*text| text.slice() else rule.word else rule.word,
-        .due => if (row.state == .retrying) try std.fmt.allocPrint(arena, "{s} in {d}s", .{ rule.word, (row.state.retrying.due_at_ms -| state.now_ms + 999) / 1000 }) else rule.word,
-        .starter => {
-            const sender = (row.first orelse return rule.word).sender orelse return rule.word;
-            if (state.find(sender)) |starter| if (starter.label) |*text| return std.fmt.allocPrint(arena, "{s} {s} for \"{s}\"", .{ rule.word, glyphs.dot, text.slice() });
-            return std.fmt.allocPrint(arena, "{s} {s} for {s}", .{ rule.word, glyphs.dot, &sender });
-        },
+/// The colour a work line's tone asks for, else `neutral`.
+fn toneColour(tone: work_line.Tone, neutral: Colour) Colour {
+    return switch (tone) {
+        .normal => neutral,
+        .quiet => .quiet,
+        .attention => .attention,
     };
+}
+
+/// Bytes the row's word takes at most: work's words and its clock, or an
+/// ended state's word naming its starter by quoted Label or reference.
+const max_word_bytes = max: {
+    var said = 0;
+    for (rules.values) |rule| if (rule.word) |text| {
+        said = @max(said, text.len);
+    };
+    const starter = said + " ".len + work_line.max_dot_bytes + " for ".len + @max("\"\"".len + max_label_bytes, @sizeOf(Reference));
+    break :max @max(work_line.max_words_bytes + work_line.max_clock_bytes, starter);
+};
+
+/// What the row says beside its title, unless its group heading says it:
+/// work under way in the conversation's words, else the state's word.
+fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) []const u8 {
+    if (rule.said_by_group and row.group() == rule.group) return "";
+    if (line) |shown| {
+        var clock: [work_line.max_clock_bytes]u8 = undefined;
+        return std.fmt.bufPrint(buffer, "{s}{s}", .{ shown.words, work_line.clockText(&clock, shown.clock, .row, script) }) catch unreachable;
+    }
+    const said = rule.word.?;
+    if (!rule.starter) return said;
+    const dot = work_line.glyphs.get(script).dot;
+    const sender = (row.first orelse return said).sender orelse return said;
+    if (state.find(sender)) |starter| if (starter.label) |*text| return std.fmt.bufPrint(buffer, "{s} {s} for \"{s}\"", .{ said, dot, text.slice() }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{s} {s} for {s}", .{ said, dot, &sender }) catch unreachable;
 }
 
 /// Compact age: 42s, 7m, 3h, 12d.
@@ -2493,10 +2598,29 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     }
 }
 
+/// A notice, which reads whole on a 40-column overview in the row under its
+/// input.
 fn expectNotice(state: *const State, expected: ?[]const u8) !void {
+    return expectNoticeAt(state, expected, true);
+}
+
+/// A notice whose data (a Host's code, the list of start settings) may be
+/// cut at the edge of a narrow overview; its wording is not.
+fn expectNoticeWithData(state: *const State, expected: []const u8) !void {
+    return expectNoticeAt(state, expected, false);
+}
+
+fn expectNoticeAt(state: *const State, expected: ?[]const u8, whole_at_40: bool) !void {
     if (expected) |text| {
         const notice = state.notice orelse return error.TestExpectedNotice;
         try std.testing.expectEqualStrings(text, notice.text());
+        if (whole_at_40 and state.prompt == null) {
+            const screen = try screenText(state, 40, 24, .{});
+            defer std.testing.allocator.free(screen);
+            var lines = std.mem.splitScalar(u8, screen, '\n');
+            for (0..23) |_| _ = lines.next();
+            try std.testing.expectEqualStrings(text, std.mem.trim(u8, lines.next().?, " "));
+        }
     } else if (state.notice) |*notice| try std.testing.expectEqualStrings("", notice.text());
 }
 
@@ -2528,7 +2652,7 @@ const mixed = [_]Listed{
     session("k7m2qx", .{ .working = ago(40) }, .{ .label = "Fix the flaky resize test", .yours = true }),
     session("h8q2mz", .{ .finished = ago(12 * 60) }, .{ .yours = true }),
     session("r4t9vw", .{ .approval = ago(3 * 60) }, .{ .label = "Review PR 412", .yours = true }),
-    session("a1b2c3", .{ .bash = .{ .since = test_now_s - 60, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Find why store tests fail" }),
+    session("a1b2c3", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Find why store tests fail" }),
     session("b2c3d4", .{ .working = ago(2 * 60) }, .{ .label = "Profile the curl send queue" }),
     session("c3d4e5", .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 12) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Audit permission paths" }),
     session("d4e5f6", .{ .pending = ago(5) }, .{ .label = "Trace Host shutdown order" }),
@@ -2549,16 +2673,16 @@ const mixed = [_]Listed{
 
 /// One row of each kind, its group heading and its row in Unicode and ASCII.
 const kind_cases = [_]struct { state: WorkState, heading: []const u8, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
-    .{ .state = .{ .idle = ago(7200) }, .heading = " Idle  1", .unicode = "  ○ Write the notes                                                          2h", .ascii = "  o Write the notes                                                          2h", .colour = .normal, .stoppable = false },
-    .{ .state = .{ .pending = ago(5) }, .heading = " Working  1", .unicode = "  ○ Write the notes                                  starting                5s", .ascii = "  o Write the notes                                  starting                5s", .colour = .normal, .stoppable = true },
-    .{ .state = .{ .working = ago(40) }, .heading = " Working  1", .unicode = "  ● Write the notes                                                         40s", .ascii = "  * Write the notes                                                         40s", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .heading = " Working  1", .unicode = "  ● Write the notes                                  retrying in 12s        30s", .ascii = "  * Write the notes                                  retrying in 12s        30s", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .heading = " Working  1", .unicode = "  ● Write the notes                                  Run the logic tests     1m", .ascii = "  * Write the notes                                  Run the logic tests     1m", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .approval = ago(3 * 60) }, .heading = " Working  1", .unicode = "  ○ Write the notes                                  waiting for you         3m", .ascii = "  o Write the notes                                  waiting for you         3m", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .stopping = ago(8) }, .heading = " Working  1", .unicode = "  ● Write the notes                                  stopping                8s", .ascii = "  * Write the notes                                  stopping                8s", .colour = .quiet, .stoppable = false },
-    .{ .state = .{ .finished = ago(12 * 60) }, .heading = " Finished  1", .unicode = "  ✓ Write the notes                                                         12m", .ascii = "  + Write the notes                                                         12m", .colour = .mark, .stoppable = false },
-    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed  1", .unicode = "  × Write the notes                                  failed                  3h", .ascii = "  x Write the notes                                  failed                  3h", .colour = .failure, .stoppable = false },
-    .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed  1", .unicode = "  ■ Write the notes                                  stopped                 2d", .ascii = "  # Write the notes                                  stopped                 2d", .colour = .normal, .stoppable = false },
+    .{ .state = .{ .idle = ago(7200) }, .heading = " Idle", .unicode = "  ○ Write the notes                                                          2h", .ascii = "  o Write the notes                                                          2h", .colour = .normal, .stoppable = false },
+    .{ .state = .{ .pending = ago(5) }, .heading = " Working", .unicode = "  ○ Write the notes                                  Starting                5s", .ascii = "  o Write the notes                                  Starting                5s", .colour = .normal, .stoppable = true },
+    .{ .state = .{ .working = ago(40) }, .heading = " Working", .unicode = "  ● Write the notes                                  Waiting                40s", .ascii = "  * Write the notes                                  Waiting                40s", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .heading = " Working", .unicode = "  ● Write the notes                        Provider error · retry 2 in 12s  30s", .ascii = "  * Write the notes                        Provider error - retry 2 in 12s  30s", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .heading = " Working", .unicode = "  ● Write the notes                                  Run the logic tests     1m", .ascii = "  * Write the notes                                  Run the logic tests     1m", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .approval = ago(3 * 60) }, .heading = " Working", .unicode = "  ○ Write the notes                                  Needs approval          3m", .ascii = "  o Write the notes                                  Needs approval          3m", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .stopping = ago(8) }, .heading = " Working", .unicode = "  ● Write the notes                                  Stopping…               8s", .ascii = "  * Write the notes                                  Stopping.               8s", .colour = .quiet, .stoppable = false },
+    .{ .state = .{ .finished = ago(12 * 60) }, .heading = " Finished", .unicode = "  ✓ Write the notes                                                         12m", .ascii = "  + Write the notes                                                         12m", .colour = .mark, .stoppable = false },
+    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                  failed                  3h", .ascii = "  x Write the notes                                  failed                  3h", .colour = .failure, .stoppable = false },
+    .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed", .unicode = "  ■ Write the notes                                  stopped                 2d", .ascii = "  # Write the notes                                  stopped                 2d", .colour = .normal, .stoppable = false },
 };
 
 test "every work state follows the rules table, in Unicode and ASCII" {
@@ -2568,28 +2692,61 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         var state = try opened(&.{session("k7m2qx", case.state, .{ .label = "Write the notes" })});
         defer state.deinit();
         const rule = rules.get(kind);
-        try std.testing.expectEqual(case.colour, rule.colour);
         try std.testing.expectEqual(case.stoppable, rule.stoppable);
+        // Only work under way has a work line, and only idle or ended work
+        // a word of its own.
+        try std.testing.expectEqual(case.state.progress() == null, rule.word != null);
         for ([_]Caps{ .{}, .{ .unicode = false } }, [_][]const u8{ case.unicode, case.ascii }) |caps, expected| {
             const text = try screenText(&state, 80, 24, caps);
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            for (0..5) |_| _ = lines.next();
+            for (0..4) |_| _ = lines.next();
             try std.testing.expectEqualStrings(case.heading, lines.next().?);
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
-        // The mark takes the rule's colour; the word only when it needs the
-        // person.
+        // The mark takes its colour, and the word one only when it needs
+        // the person or is quiet.
         var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, 0);
         defer screen.deinit();
-        try std.testing.expectEqual(Background.selection, screen.styleAt(6, 1).?.background);
+        try std.testing.expectEqual(Background.selection, screen.styleAt(5, 1).?.background);
         state.selected = null;
         var unselected = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, 0);
         defer unselected.deinit();
-        try std.testing.expectEqual(Style{ .colour = rule.colour }, unselected.styleAt(6, 2).?);
-        const tone: Colour = if (rule.colour == .attention or rule.colour == .failure) rule.colour else .normal;
-        if (unselected.styleAt(6, 53)) |style| try std.testing.expectEqual(Style{ .colour = tone }, style);
+        try std.testing.expectEqual(Style{ .colour = case.colour }, unselected.styleAt(5, 2).?);
+        const tone: Colour = switch (case.colour) {
+            .attention, .failure, .quiet => case.colour,
+            else => .normal,
+        };
+        if (unselected.styleAt(5, 53)) |style| try std.testing.expectEqual(Style{ .colour = tone }, style);
     }
+}
+
+test "a description's controls read escaped in its row's words, as its call row shows them" {
+    const bash: WorkState = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(max_label_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
+    var state = try opened(&.{session("k7m2qx", bash, .{ .label = "Write the notes" })});
+    defer state.deinit();
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    for (0..5) |_| _ = lines.next();
+    try std.testing.expectEqualStrings("  ● Write the notes                                Run\\t\\x1b[2J\\u202etests   1m", lines.next().?);
+}
+
+test "a retry that has fallen due reads as starting in its words, mark and colour" {
+    const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
+    var state = try opened(&.{session("k7m2qx", due, .{ .label = "Write the notes" })});
+    defer state.deinit();
+    state.selected = null;
+    const text = try screenText(&state, 80, 24, .{ .depth = .none });
+    defer std.testing.allocator.free(text);
+    const at = std.mem.indexOf(u8, text, "Write the notes").?;
+    const start = std.mem.lastIndexOfScalar(u8, text[0..at], '\n').? + 1;
+    const end = std.mem.indexOfScalarPos(u8, text, at, '\n').?;
+    try std.testing.expectEqualStrings("  ○ Write the notes                                  Starting                2s", text[start..end]);
+    var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{ .depth = .none }, 0);
+    defer screen.deinit();
+    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(5, 2).?);
+    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(5, 53).?);
 }
 
 /// Rows whose state changed 0, 1 and 2 seconds ago, so their marks pulse,
@@ -2640,7 +2797,7 @@ test "a mark pulses out of step with others for a moment after its row changes, 
         try std.testing.expect(screen.pulses);
         // A pulsing mark keeps its rule's colour.
         const asked = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Asked two seconds ago").?], "\n");
-        try std.testing.expectEqual(Style{ .colour = rules.get(.approval).colour }, screen.styleAt(asked, 2).?);
+        try std.testing.expectEqual(Style{ .colour = .attention }, screen.styleAt(asked, 2).?);
     }
     // ASCII, NO_COLOR and a faded screen hold still on every frame.
     for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
@@ -2671,7 +2828,7 @@ test "a state change under the same mark holds still, and a new mark pulses" {
         defer state.deinit();
         // Working, then Bash, then working again: each refresh's state is
         // new, but the mark stays ●.
-        const bash: WorkState = .{ .bash = .{ .since = state.now_ms / 1000 + 1, .description = null, .running = 1, .approvals = 0 } };
+        const bash: WorkState = .{ .bash = .{ .since = state.now_ms / 1000 + 1, .call = 0, .description = null, .running = 1, .approvals = 0 } };
         _ = try refresh(&state, delta, testToken(2), &.{session("k7m2qx", bash, .{ .label = "Keep working" })});
         try std.testing.expect(!try Pulses.at(&state));
         const working: WorkState = .{ .working = .{ .since = state.now_ms / 1000 + 1 } };
@@ -2795,7 +2952,8 @@ test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x 
         if (!case.stoppable) {
             try std.testing.expectEqual(@as(?Prompt, null), state.prompt);
             var buffer: [64]u8 = undefined;
-            try expectNotice(&state, try std.fmt.bufPrint(&buffer, "k7m2qx is already {s}.", .{rules.get(case.state).word}));
+            const expected = if (rules.get(case.state).word) |said| try std.fmt.bufPrint(&buffer, "k7m2qx is already {s}.", .{said}) else "k7m2qx: Stopping";
+            try expectNotice(&state, expected);
             continue;
         }
         try std.testing.expectEqualStrings("k7m2qx", &state.prompt.?.stop);
@@ -2806,12 +2964,48 @@ test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x 
         // ctrl-x finds nothing to stop.
         const text = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.indexOf(u8, text, "● Write the notes                                  stopping") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "● Write the notes                                  Stopping…") != null);
         try expectEffects(&.{}, try press(&state, .{}, .stop));
-        try expectNotice(&state, "k7m2qx is already stopping.");
+        try expectNotice(&state, "k7m2qx: Stopping");
         try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .stopped } }));
         try std.testing.expectEqual(@as(u64, 0), state.next_list_ms);
     }
+}
+
+fn expectSaid(text: ?[]const u8, asking: bool, stoppable_: bool, said: Said) !void {
+    try std.testing.expectEqualStrings(text orelse "", said.text orelse "");
+    try std.testing.expectEqual(text == null, said.text == null);
+    try std.testing.expectEqual(asking, said.asking);
+    try std.testing.expectEqual(stoppable_, said.stoppable);
+}
+
+test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
+    var state = try testState();
+    defer state.deinit();
+    const ref = "k7m2qx".*;
+    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .stop = true };
+    var buffer: [max_prompt_bytes]u8 = undefined;
+    try expectSaid(null, false, true, conversation(&state, ref, .working, &buffer));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
+    try expectSaid("Stop k7m2qx? ctrl+x yes · esc no", true, true, conversation(&state, ref, .working, &buffer));
+    // Another Session's conversation does not show the prompt.
+    try std.testing.expect(!conversation(&state, "b4n8wd".*, .working, &buffer).asking);
+    // Any other input there cancels, and the next ctrl-x asks afresh.
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .stop = false } }));
+    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, &buffer).text);
+    try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
+    try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
+    // Until its answer the work is stopping: no hint, and ctrl-x says so.
+    try std.testing.expect(!conversation(&state, ref, .working, &buffer).stoppable);
+    try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
+    try expectNotice(&state, "k7m2qx: Stopping");
+    try expectSaid("k7m2qx: Stopping", false, false, conversation(&state, ref, .working, &buffer));
+    try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
+    try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
+    // Ended work takes no stop.
+    try std.testing.expect(conversation(&state, ref, .working, &buffer).stoppable and !conversation(&state, ref, .finished, &buffer).stoppable);
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .stop = true } }));
+    try expectNotice(&state, "k7m2qx is already finished.");
 }
 
 test "a cancelled stop prompt sends nothing" {
@@ -2842,7 +3036,7 @@ test "a cancelled stop prompt sends nothing" {
     try expectEffects(&.{}, try press(&state, .{}, .stop));
     try expectEffects(&.{.{ .stop = "k7m2qx".* }}, try press(&state, .{}, .stop));
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = "k7m2qx".*, .outcome = .{ .failed = "session_not_found" } } }));
-    try expectNotice(&state, "! Could not stop k7m2qx. (session_not_found)");
+    try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
 }
 
 test "unconfirmed stops keep their handles until departure; a full ledger refuses another" {
@@ -2862,7 +3056,7 @@ test "unconfirmed stops keep their handles until departure; a full ledger refuse
         var bytes: [32]u8 = undefined;
         const handle = try std.fmt.bufPrint(&bytes, "stop-handle-{d}", .{n});
         var notice: [128]u8 = undefined;
-        const recover = try std.fmt.bufPrint(&notice, "! Not sure {s} stopped. Details when you leave.", .{ref});
+        const recover = try std.fmt.bufPrint(&notice, "! {s} stop unsure; details on exit", .{ref});
         try expectEffects(&.{}, try press(&state, .{}, .stop));
         try expectEffects(&.{.{ .stop = ref.* }}, try press(&state, .{}, .stop));
         try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref.*, .outcome = .{ .unconfirmed = handle } } }));
@@ -2882,7 +3076,7 @@ test "unconfirmed stops keep their handles until departure; a full ledger refuse
     for (stopped) |earlier| try std.testing.expect(!std.mem.eql(u8, &earlier, &last));
     try expectEffects(&.{}, try press(&state, .{}, .stop));
     try expectEffects(&.{}, try press(&state, .{}, .stop));
-    try expectNotice(&state, "! Too many requests waiting. Try again shortly.");
+    try expectNotice(&state, "! Busy; try again shortly.");
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer departure.deinit();
     try writeDeparture(&state, &departure.writer);
@@ -2953,7 +3147,7 @@ test "the composer starts a Session with its text and opens it" {
     draft = try typeText(&state, "Try again");
     _ = try submit(&state, draft);
     try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
-    try expectNotice(&state, "! Could not start the Session. (model_capability_unavailable)");
+    try expectNoticeWithData(&state, "! Not started: model_capability_unavailable");
     try std.testing.expect(!state.starting());
 }
 
@@ -2963,7 +3157,7 @@ test "the composer starts text with one slash from //, as a conversation does" {
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
     try expectEffects(&.{}, try submit(&state, draft));
-    try expectNotice(&state, "! Unknown command. Try /configure or /exit.");
+    try expectNotice(&state, "! Unknown; try /configure or /exit");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
@@ -3010,19 +3204,19 @@ test "/configure holds start settings for the Session the next Enter starts" {
 
     // Only `session start` options, in the conversation's grammar, are held.
     for ([_]struct { []const u8, []const u8 }{
-        .{ "/configure --instructions -", "! --instructions is not a start setting; set it once the Session starts." },
-        .{ "/configure --text-output", "! --text-output is not a start setting; set it once the Session starts." },
+        .{ "/configure --instructions -", "! Set --instructions after the start" },
+        .{ "/configure --text-output", "! Set --text-output after the start" },
         .{ "/configure", configure_usage },
         .{ "/configure --help", configure_usage },
         .{ "/configure --bogus 1", configure_usage },
         .{ "/configure --label \"open", configure_usage },
         // The Host would admit it; its Turns would fail at the provider.
-        .{ "/configure --model gpt-5", "! Unsupported model gpt-5; rui session configure --help lists them." },
-        .{ "/status", "! Unknown command. Try /configure or /exit." },
+        .{ "/configure --model gpt-5", "! Unsupported; session configure -h" },
+        .{ "/status", "! Unknown; try /configure or /exit" },
     }) |case| {
         draft = try typeText(&state, case[0]);
         try expectEffects(&.{}, try submit(&state, draft));
-        try expectNotice(&state, case[1]);
+        try if (case[1].ptr == configure_usage.ptr) expectNoticeWithData(&state, case[1]) else expectNotice(&state, case[1]);
         try std.testing.expect(state.settings.empty());
     }
 }
@@ -3061,10 +3255,10 @@ test "end of input, ctrl-c and /exit leave" {
 test "a line the editor rejects says why once; text it could not take clears" {
     var draft: Draft = .{};
     for ([_]struct { keymap.Outcome(Action), []const u8, bool }{
-        .{ .{ .refused = .invalid }, "! That text had bytes that are not text, so it was not sent.", true },
-        .{ .{ .refused = .overflow }, "! That's too long to send.", true },
-        .{ .{ .refused = .edit_rejected }, "! That character cannot stand alone, so it was not added.", false },
-        .{ .{ .refused = .unbound }, "! That key combination does nothing here.", false },
+        .{ .{ .refused = .invalid }, "! Not valid text; nothing sent.", true },
+        .{ .{ .refused = .overflow }, "! Too long to send.", true },
+        .{ .{ .refused = .edit_rejected }, "! Can't add that character alone.", false },
+        .{ .{ .refused = .unbound }, "! That key does nothing here.", false },
     }) |case| {
         var state = try opened(&mixed);
         defer state.deinit();
@@ -3106,8 +3300,8 @@ test "an unconfirmed start clears the composer and names the request that recove
     try expectEffects(&.{.clear_draft}, try step(&state, .{ .start = .{ .unconfirmed = handle } }));
     try std.testing.expect(!state.starting());
     try std.testing.expect(state.settings.empty());
-    try expectNotice(&state, "! Not sure the Session started. Details when you leave.");
-    try expectScreenLine(&state, 23, " ! Not sure the Session started. Details when you leave.");
+    try expectNotice(&state, "! Start unsure; details on exit");
+    try expectScreenLine(&state, 23, " ! Start unsure; details on exit");
     // The next tick lists at once, so a start that did land shows.
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
     // A second unconfirmed start keeps the first one's handle.
@@ -3180,18 +3374,54 @@ test "the cursor sits at the composer's caret and hides while a start is pending
     draft.cursor = 4;
     try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 7 });
     try Expect.composerLine(&state, draft, " › Fix 中");
-    // A draft wider than the composer keeps the caret in view: the text
-    // before it keeps its end, the text after it its start.
+    // A draft wider than the composer wraps between words into rows that
+    // grow upward from the bottom: "Fix ", 76 x, then 24 x and " end".
     const long = "Fix " ++ @as([100]u8, @splat('x')) ++ " end";
     draft = try typeText(&state, long);
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 79 });
-    try Expect.cursor(&state, draft, 6, .{ .row = 22, .column = 5 });
+    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 31 });
+    // Two cells wide, the space before "end" hangs past the edge: "en",
+    // then "d".
+    try Expect.cursor(&state, draft, 6, .{ .row = 22, .column = 4 });
+    // On the soft break after "Fix ", the caret starts the next row.
     draft.cursor = 4;
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 7 });
-    try Expect.composerLine(&state, draft, " › Fix " ++ @as([71]u8, @splat('x')) ++ "…");
+    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 3 });
+    try Expect.composerLine(&state, draft, "   " ++ @as([24]u8, @splat('x')) ++ " end");
     draft.cursor = long.len;
     _ = try submit(&state, draft);
     try Expect.cursor(&state, draft, 80, null);
+}
+
+test "a draft past its cap scrolls inside the composer and the rule counts what it hides" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13";
+    const Expect = struct {
+        fn rows(from: *const State, typed: Draft, caps: Caps, rule: []const u8, top: []const u8, anchor: usize) !void {
+            var screen = try render(std.testing.allocator, from, typed, 40, 40, caps, 0);
+            defer screen.deinit();
+            var written: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer written.deinit();
+            try screen.write(&written.writer);
+            var lines = std.mem.splitScalar(u8, written.written(), '\n');
+            for (0..28) |_| _ = lines.next();
+            // Ten rows of draft under the rule, the hints on the last row.
+            try std.testing.expectEqualStrings(rule, lines.next().?);
+            try std.testing.expectEqualStrings(top, lines.next().?);
+            try std.testing.expectEqual(anchor, screen.draft_anchor);
+        }
+    };
+    // At the end, the first three lines are hidden above.
+    var draft: Draft = .{ .bytes = text, .cursor = text.len };
+    try Expect.rows(&state, draft, .{}, " ─────────── ↑ 3 more lines ───────────", "   4", 6);
+    // The caret moving up inside the shown lines keeps them.
+    draft = .{ .bytes = text, .cursor = 10, .anchor = 2 };
+    try Expect.rows(&state, draft, .{}, " ──────── ↑ 1 · ↓ 2 more lines ────────", "   2", 2);
+    // Above them, the composer follows the caret to the top.
+    draft = .{ .bytes = text, .cursor = 0, .anchor = 6 };
+    try Expect.rows(&state, draft, .{}, " ─────────── ↓ 3 more lines ───────────", " › 1", 0);
+    // Without Unicode the rule draws in ASCII.
+    draft = .{ .bytes = text, .cursor = text.len };
+    try Expect.rows(&state, draft, .{ .unicode = false }, " ----------- ^ 3 more lines -----------", "   4", 6);
 }
 
 test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM" {
@@ -3214,8 +3444,8 @@ test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM
 
 test "a first line read one byte past the kept bound shows it was cut" {
     var line: [max_line_read_bytes]u8 = @splat('a');
-    try std.testing.expect(std.mem.endsWith(u8, firstLineText(&line).slice(), "…"));
-    try std.testing.expect(!std.mem.endsWith(u8, firstLineText(line[0..max_line_bytes]).slice(), "…"));
+    try std.testing.expect(std.mem.endsWith(u8, session_line.cut(max_line_bytes, session_line.firstLine(&line)).slice(), "…"));
+    try std.testing.expect(!std.mem.endsWith(u8, session_line.cut(max_line_bytes, session_line.firstLine(line[0..max_line_bytes])).slice(), "…"));
 }
 
 test "a first line arriving titles its unlabelled row" {
@@ -3236,7 +3466,7 @@ test "a first line arriving titles its unlabelled row" {
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
-    try expectScreenLine(&state, 8, "  ✓ summarize yesterday's CI failures                finished               12m");
+    try expectScreenLine(&state, 7, "  ✓ summarize yesterday's CI failures                finished               12m");
     // Lines in flight or unreadable are not asked for again, and a refresh
     // that replaces a row keeps the line of its unchanged first Message.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
@@ -3286,7 +3516,6 @@ test "Host facts give the health line, and a row from before a restart still say
     const before = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(before);
     try expectScreenLine(&state, 2, "");
-    try expectScreenLine(&state, 3, " ● 2 working   ○ 1 waiting");
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 2 } });
     try expectScreenLine(&state, 2, " Host up 20s   slots 2/2");
     try expectStyle(&state, 2, 15, .{ .colour = .ink });
@@ -3317,16 +3546,6 @@ test "a row from another Workspace keeps its title at every width" {
         const columns = Columns.of(width);
         try std.testing.expect(columns.workspace == 0 or columns.word -| 2 -| Columns.title -| 2 -| columns.workspace >= columns.workspace);
     }
-}
-
-test "a long first line keeps whole code points and ends in an ellipsis" {
-    var line: [400]u8 = undefined;
-    for (0..200) |at| @memcpy(line[at * 2 ..][0..2], "é");
-    const kept = firstLineText(&line);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(kept.slice()));
-    try std.testing.expect(std.mem.endsWith(u8, kept.slice(), "…"));
-    try std.testing.expect(kept.len <= max_line_bytes);
-    try std.testing.expectEqualStrings("short", firstLineText("short\nrest").slice());
 }
 
 test "the selection stays on its Session when it moves from working to finished" {
@@ -3504,7 +3723,9 @@ test "a tick moves a retry that fell due to pending" {
     _ = try step(&state, .{ .tick = (test_now_s + 12) * 1000 });
     const row = state.find("c3d4e5".*).?;
     try std.testing.expectEqual(WorkState{ .pending = .{ .since = test_now_s + 12 } }, row.state);
-    try expectScreenLine(&state, 3, " ● 5 working   ○ 4 waiting   × 2 failed   ■ 1 stopped   ✓ 8 finished");
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  ○ Audit permission paths                           Starting                0s\n") != null);
 }
 
 fn failedRow(ref: *const [6]u8, seconds_ago: u64, code: []const u8, resets_at: ?u64) Listed {
@@ -3524,13 +3745,16 @@ fn bandOf(rows: []const Listed, login_at: ?u64) !?Band {
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
     // Sign-in: an authentication failure newer than the newest completion.
-    for (sign_in_codes) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
+    for (codex_credential_policy.login_codes) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
     try std.testing.expect(signInCode("provider_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_authentication_failed"));
     try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     // A later completion clears it; a login in this terminal hides it until a newer failure.
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
     try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
+    // A rejected API key: its own remedy, not a sign-in.
+    try std.testing.expectEqual(Band{ .trouble = .api_key }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
+    try std.testing.expect(!signInCode(failure_class.api_key_rejected));
     // Quota: shown with its reset time until that time passes.
     try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200 }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_usage_limit_reached", test_now_s + 1200) }, null)).?);
     try std.testing.expectEqual(Band{ .trouble = .quota }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_insufficient_quota", null) }, null)).?);
@@ -3612,13 +3836,13 @@ test "render draws each band" {
         \\ रुई rui  ~/code/rui
         \\ Sign-in expired. Run rui auth login codex.
         \\
-        \\ × 1 failed   ✓ 1 finished
         \\
-        \\ Finished  1
+        \\ Finished
         \\  ✓ Summarize the CI failures                                               10m
         \\
-        \\ Stopped or failed  1
+        \\ Stopped or failed
         \\  × Ask the model                                    failed                  1m
+        \\
         \\
         \\
         \\
@@ -3638,13 +3862,13 @@ test "render draws each band" {
         \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
-        \\.f.i.nnnnnn...m.i.nnnnnnnn
         \\
-        \\.IIIIIIIInnn
+        \\.IIIIIIII
         \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
         \\
-        \\.IIIIIIIIIIIIIIIIInnn
+        \\.IIIIIIIIIIIIIIIII
         \\..f.qqqqqqqqqqqqq....................................ffffff..................qq
+        \\
         \\
         \\
         \\
@@ -3664,13 +3888,13 @@ test "render draws each band" {
         \\ रुई rui  ~/code/rui
         \\ Sign-in expired. Run rui auth login codex.
         \\
-        \\ × 1 failed   ✓ 1 finished
         \\
-        \\ Finished  1
+        \\ Finished
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
         \\
-        \\ Stopped or failed  1
+        \\ Stopped or failed
         \\  × Ask the model                                                                                                                                    failed                                          1m
+        \\
         \\
         \\
         \\
@@ -3727,13 +3951,13 @@ test "render draws each band" {
         \\ रुई rui  ~/code/rui
         \\ Quota used up. Resets in 20m.
         \\
-        \\ × 1 failed   ✓ 1 finished
         \\
-        \\ Finished  1
+        \\ Finished
         \\  ✓ Summarize the CI failures                                               10m
         \\
-        \\ Stopped or failed  1
+        \\ Stopped or failed
         \\  × Ask the model                                    failed                  1m
+        \\
         \\
         \\
         \\
@@ -3753,13 +3977,13 @@ test "render draws each band" {
         \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
-        \\.f.i.nnnnnn...m.i.nnnnnnnn
         \\
-        \\.IIIIIIIInnn
+        \\.IIIIIIII
         \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
         \\
-        \\.IIIIIIIIIIIIIIIIInnn
+        \\.IIIIIIIIIIIIIIIII
         \\..f.qqqqqqqqqqqqq....................................ffffff..................qq
+        \\
         \\
         \\
         \\
@@ -3779,13 +4003,13 @@ test "render draws each band" {
         \\ रुई rui  ~/code/rui
         \\ Quota used up. Resets in 20m.
         \\
-        \\ × 1 failed   ✓ 1 finished
         \\
-        \\ Finished  1
+        \\ Finished
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
         \\
-        \\ Stopped or failed  1
+        \\ Stopped or failed
         \\  × Ask the model                                                                                                                                    failed                                          1m
+        \\
         \\
         \\
         \\
@@ -3842,11 +4066,11 @@ test "render draws each band" {
         \\ रुई rui  ~/code/rui
         \\ Rate limited. 2 Sessions will retry.
         \\
-        \\ ● 2 working
         \\
-        \\ Working  2
-        \\  ● Ask the model again                              retrying in 10s         5s
-        \\  ● Ask the model again                              retrying in 20s         5s
+        \\ Working
+        \\  ● Ask the model again                      Rate limited · retry 1 in 10s   5s
+        \\  ● Ask the model again                      Rate limited · retry 1 in 20s   5s
+        \\
         \\
         \\
         \\
@@ -3868,11 +4092,11 @@ test "render draws each band" {
         \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
-        \\.i.i.nnnnnnn
         \\
-        \\.IIIIIIInnn
+        \\.IIIIIII
         \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
-        \\..a.iiiiiiiiiiiiiiiiiii..............................aaaaaaaaaaaaaaa.........qq
+        \\..a.iiiiiiiiiiiiiiiiiii......................aaaaaaaaaaaaaaaaaaaaaaaaaaaaa...qq
+        \\
         \\
         \\
         \\
@@ -3894,11 +4118,11 @@ test "render draws each band" {
         \\ रुई rui  ~/code/rui
         \\ Rate limited. 2 Sessions will retry.
         \\
-        \\ ● 2 working
         \\
-        \\ Working  2
-        \\  ● Ask the model again                                                                                                                              retrying in 10s                                 5s
-        \\  ● Ask the model again                                                                                                                              retrying in 20s                                 5s
+        \\ Working
+        \\  ● Ask the model again                                                                                                                              Rate limited · retry 1 in 10s                   5s
+        \\  ● Ask the model again                                                                                                                              Rate limited · retry 1 in 20s                   5s
+        \\
         \\
         \\
         \\
@@ -4082,24 +4306,24 @@ test "render draws twenty mixed rows" {
         \\ रुई rui  ~/code/rui
         \\ Running. 20 Sessions. 2 failed.
         \\
-        \\ ● 6 working   ○ 3 waiting   × 2 failed   ■ 1 stopped   ✓ 8 finished
         \\
-        \\ Yours  3
-        \\  ● Fix the flaky resize test                        working                40s
-        \\  ○ Review PR 412                                    waiting for you         3m
+        \\ Yours
+        \\  ● Fix the flaky resize test                        Waiting                40s
+        \\  ○ Review PR 412                                    Needs approval          3m
         \\  ✓ h8q2mz                                           finished               12m
         \\
-        \\ Working  6
-        \\  ○ Trace Host shutdown order                        starting                5s
-        \\  ● List unused build steps                          stopping                8s
-        \\  ● Audit permission paths                           retrying in 12s        30s
+        \\ Working
+        \\  ○ Trace Host shutdown order                        Starting                5s
+        \\  ● List unused build steps                          Stopping…               8s
+        \\  ● Audit permission paths                 Provider error · retry 2 in 12s  30s
         \\  ● Find why store tests fail                        Run the logic tests     1m
-        \\  ● f6g7h8                             ~/code/other                          1m
-        \\  ● Profile the curl send queue                                              2m
+        \\  ● f6g7h8                             ~/code/other  Waiting                 1m
+        \\  ● Profile the curl send queue                      Waiting                 2m
         \\
-        \\ Idle  1
+        \\ Idle
         \\  ○ Check macOS socket cleanup                                               2h
         \\
+        \\ Finished
         \\ ──────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
         \\ ↑↓ select · enter open · ctrl+x stop
@@ -4108,24 +4332,24 @@ test "render draws twenty mixed rows" {
         \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.SSSSSSSS.nnnnnnnnnnnnnnnnnnnnnn
         \\
-        \\.i.i.nnnnnnn...n.i.nnnnnnn...f.i.nnnnnn...n.i.nnnnnnn...m.i.nnnnnnnn
         \\
-        \\.IIIIInnn
+        \\.IIIII
         \\.rrRRRRRRRRRRRRRRRRRRRRRRRRRRrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
-        \\..a.SSSSSSSSSSSSS....................................aaaaaaaaaaaaaaa.........qq
+        \\..a.SSSSSSSSSSSSS....................................aaaaaaaaaaaaaa..........qq
         \\..m.SSSSSS...........................................nnnnnnnn...............qqq
         \\
-        \\.IIIIIIInnn
+        \\.IIIIIII
         \\..n.iiiiiiiiiiiiiiiiiiiiiiiii........................nnnnnnnn................qq
-        \\..q.iiiiiiiiiiiiiiiiiiiiiii..........................nnnnnnnn................qq
-        \\..a.iiiiiiiiiiiiiiiiiiiiii...........................aaaaaaaaaaaaaaa........qqq
+        \\..q.iiiiiiiiiiiiiiiiiiiiiii..........................qqqqqqqqq...............qq
+        \\..a.iiiiiiiiiiiiiiiiiiiiii.................aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..qqq
         \\..i.iiiiiiiiiiiiiiiiiiiiiiiii........................nnnnnnnnnnnnnnnnnnn.....qq
-        \\..i.qqqqqq.............................nnnnnnnnnnnn..........................qq
-        \\..i.iiiiiiiiiiiiiiiiiiiiiiiiiii..............................................qq
+        \\..i.qqqqqq.............................nnnnnnnnnnnn..nnnnnnn.................qq
+        \\..i.iiiiiiiiiiiiiiiiiiiiiiiiiii......................nnnnnnn.................qq
         \\
-        \\.IIIInnn
+        \\.IIII
         \\..n.iiiiiiiiiiiiiiiiiiiiiiiiii...............................................qq
         \\
+        \\.IIIIIIII
         \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
@@ -4134,25 +4358,24 @@ test "render draws twenty mixed rows" {
         \\ रुई rui  ~/code/rui
         \\ Running. 20 Sessions. 2 failed.
         \\
-        \\ ● 6 working   ○ 3 waiting   × 2 failed   ■ 1 stopped   ✓ 8 finished
         \\
-        \\ Yours  3
-        \\  ● Fix the flaky resize test                                                                                                                        working                                        40s
-        \\  ○ Review PR 412                                                                                                                                    waiting for you                                 3m
+        \\ Yours
+        \\  ● Fix the flaky resize test                                                                                                                        Waiting                                        40s
+        \\  ○ Review PR 412                                                                                                                                    Needs approval                                  3m
         \\  ✓ h8q2mz                                                                                                                                           finished                                       12m
         \\
-        \\ Working  6
-        \\  ○ Trace Host shutdown order                                                                                                                        starting                                        5s
-        \\  ● List unused build steps                                                                                                                          stopping                                        8s
-        \\  ● Audit permission paths                                                                                                                           retrying in 12s                                30s
+        \\ Working
+        \\  ○ Trace Host shutdown order                                                                                                                        Starting                                        5s
+        \\  ● List unused build steps                                                                                                                          Stopping…                                       8s
+        \\  ● Audit permission paths                                                                                                                           Provider error · retry 2 in 12s                30s
         \\  ● Find why store tests fail                                                                                                                        Run the logic tests                             1m
-        \\  ● f6g7h8                                                                                                                             ~/code/other                                                  1m
-        \\  ● Profile the curl send queue                                                                                                                                                                      2m
+        \\  ● f6g7h8                                                                                                                             ~/code/other  Waiting                                         1m
+        \\  ● Profile the curl send queue                                                                                                                      Waiting                                         2m
         \\
-        \\ Idle  1
+        \\ Idle
         \\  ○ Check macOS socket cleanup                                                                                                                                                                       2h
         \\
-        \\ Finished  7
+        \\ Finished
         \\  ✓ Explain provider output parsing                                                                                                                                                                 20m
         \\  ✓ Find the commit that broke WAL                                                                                                                                                                  45m
         \\  ✓ p3q4r5                                                                                                                                                                                           1h
@@ -4160,10 +4383,11 @@ test "render draws twenty mixed rows" {
         \\  ✓ Check the release notes                                                                                                               /srv/work                                                  2d
         \\   2 more
         \\
-        \\ Stopped or failed  3
+        \\ Stopped or failed
         \\  × Bisect the WAL regression                                                                                                                        failed · for "Fix the flaky resize test"       15m
         \\  ■ Rename the session tables                                                                                                                        stopped · for zzzzzz                           30m
         \\  × Retry the flaky upload                                                                                                                           failed                                         50m
+        \\
         \\
         \\
         \\
@@ -4204,24 +4428,24 @@ test "render draws ASCII without colour" {
         \\ rui  ~/code/rui
         \\ Running. 20 Sessions. 2 failed.
         \\
-        \\ * 6 working   o 3 waiting   x 2 failed   # 1 stopped   + 8 finished
         \\
-        \\ Yours  3
-        \\  * Fix the flaky resize test                        working                40s
-        \\  o Review PR 412                                    waiting for you         3m
+        \\ Yours
+        \\  * Fix the flaky resize test                        Waiting                40s
+        \\  o Review PR 412                                    Needs approval          3m
         \\  + r?sum? the na?ve caf? ? notes                    finished               12m
         \\
-        \\ Working  6
-        \\  o Trace Host shutdown order                        starting                5s
-        \\  * List unused build steps                          stopping                8s
-        \\  * Audit permission paths                           retrying in 12s        30s
+        \\ Working
+        \\  o Trace Host shutdown order                        Starting                5s
+        \\  * List unused build steps                          Stopping.               8s
+        \\  * Audit permission paths                 Provider error - retry 2 in 12s  30s
         \\  * Find why store tests fail                        Run the logic tests     1m
-        \\  * f6g7h8                             ~/code/other                          1m
-        \\  * Profile the curl send queue                                              2m
+        \\  * f6g7h8                             ~/code/other  Waiting                 1m
+        \\  * Profile the curl send queue                      Waiting                 2m
         \\
-        \\ Idle  1
+        \\ Idle
         \\  o Check macOS socket cleanup                                               2h
         \\
+        \\ Finished
         \\ ------------------------------------------------------------------------------
         \\ > Type a task to start a Session
         \\ ^v select - enter open - ctrl+x stop
@@ -4230,24 +4454,24 @@ test "render draws ASCII without colour" {
         \\.NNN..nnnnnnnnnn
         \\.NNNNNNNN.nnnnnnnnnnnnnnnnnnnnnn
         \\
-        \\.n.n.nnnnnnn...n.n.nnnnnnn...n.n.nnnnnn...n.n.nnnnnnn...n.n.nnnnnnnn
         \\
-        \\.NNNNNnnn
+        \\.NNNNN
         \\rrrRRRRRRRRRRRRRRRRRRRRRRRRRRrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
-        \\..n.NNNNNNNNNNNNN....................................nnnnnnnnnnnnnnn.........nn
+        \\..n.NNNNNNNNNNNNN....................................nnnnnnnnnnnnnn..........nn
         \\..n.NNNNNNNNNNNNNNNNNNNNNNNNNNNNN....................nnnnnnnn...............nnn
         \\
-        \\.NNNNNNNnnn
+        \\.NNNNNNN
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn........................nnnnnnnn................nn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnnn..........................nnnnnnnn................nn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnn...........................nnnnnnnnnnnnnnn........nnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnn..........................nnnnnnnnn...............nn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnn.................nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn..nnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn........................nnnnnnnnnnnnnnnnnnn.....nn
-        \\..n.nnnnnn.............................nnnnnnnnnnnn..........................nn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnn..............................................nn
+        \\..n.nnnnnn.............................nnnnnnnnnnnn..nnnnnnn.................nn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnn......................nnnnnnn.................nn
         \\
-        \\.NNNNnnn
+        \\.NNNN
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnn...............................................nn
         \\
+        \\.NNNNNNNN
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.n.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
@@ -4256,25 +4480,24 @@ test "render draws ASCII without colour" {
         \\ rui  ~/code/rui
         \\ Running. 20 Sessions. 2 failed.
         \\
-        \\ * 6 working   o 3 waiting   x 2 failed   # 1 stopped   + 8 finished
         \\
-        \\ Yours  3
-        \\  * Fix the flaky resize test                                                                                                                        working                                        40s
-        \\  o Review PR 412                                                                                                                                    waiting for you                                 3m
+        \\ Yours
+        \\  * Fix the flaky resize test                                                                                                                        Waiting                                        40s
+        \\  o Review PR 412                                                                                                                                    Needs approval                                  3m
         \\  + r?sum? the na?ve caf? ? notes                                                                                                                    finished                                       12m
         \\
-        \\ Working  6
-        \\  o Trace Host shutdown order                                                                                                                        starting                                        5s
-        \\  * List unused build steps                                                                                                                          stopping                                        8s
-        \\  * Audit permission paths                                                                                                                           retrying in 12s                                30s
+        \\ Working
+        \\  o Trace Host shutdown order                                                                                                                        Starting                                        5s
+        \\  * List unused build steps                                                                                                                          Stopping.                                       8s
+        \\  * Audit permission paths                                                                                                                           Provider error - retry 2 in 12s                30s
         \\  * Find why store tests fail                                                                                                                        Run the logic tests                             1m
-        \\  * f6g7h8                                                                                                                             ~/code/other                                                  1m
-        \\  * Profile the curl send queue                                                                                                                                                                      2m
+        \\  * f6g7h8                                                                                                                             ~/code/other  Waiting                                         1m
+        \\  * Profile the curl send queue                                                                                                                      Waiting                                         2m
         \\
-        \\ Idle  1
+        \\ Idle
         \\  o Check macOS socket cleanup                                                                                                                                                                       2h
         \\
-        \\ Finished  7
+        \\ Finished
         \\  + Explain provider output parsing                                                                                                                                                                 20m
         \\  + Find the commit that broke WAL                                                                                                                                                                  45m
         \\  + p3q4r5                                                                                                                                                                                           1h
@@ -4282,10 +4505,11 @@ test "render draws ASCII without colour" {
         \\  + Check the release notes                                                                                                               /srv/work                                                  2d
         \\   2 more
         \\
-        \\ Stopped or failed  3
+        \\ Stopped or failed
         \\  x Bisect the WAL regression                                                                                                                        failed - for "Fix the flaky resize test"       15m
         \\  # Rename the session tables                                                                                                                        stopped - for zzzzzz                           30m
         \\  x Retry the flaky upload                                                                                                                           failed                                         50m
+        \\
         \\
         \\
         \\
@@ -4323,7 +4547,7 @@ test "render draws ASCII without colour" {
     };
     // The selection is reverse video across the whole line, as before the
     // painted skins.
-    for ([_]usize{ 0, 1, 199 }) |column| try std.testing.expect(screen.styleAt(6, column).?.reverse);
+    for ([_]usize{ 0, 1, 199 }) |column| try std.testing.expect(screen.styleAt(5, column).?.reverse);
 }
 
 test "render fits any screen size" {
@@ -4337,6 +4561,32 @@ test "render fits any screen size" {
         const text = try screenText(&state, size[0], size[1], .{});
         std.testing.allocator.free(text);
     }
+}
+
+test "the composer needs six rows and six columns, and shows nothing smaller" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    for (1..9) |w| for (1..9) |h| {
+        const width: u16 = @intCast(w);
+        const height: u16 = @intCast(h);
+        var screen = try render(std.testing.allocator, &state, .{ .bytes = "draft", .cursor = 5 }, width, height, .{}, 0);
+        defer screen.deinit();
+        const fits = width >= 6 and height >= 6;
+        try std.testing.expectEqual(fits, screen.cursor != null);
+        if (screen.cursor) |cursor| {
+            try std.testing.expectEqual(height - 2, cursor.row);
+            try std.testing.expect(cursor.column < width);
+        }
+    };
+}
+
+test "a full-capacity draft of spaces keeps the composer's caret on screen" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const spaces: [65536]u8 = @splat(' ');
+    var screen = try render(std.testing.allocator, &state, .{ .bytes = &spaces, .cursor = spaces.len }, 80, 24, .{}, 0);
+    defer screen.deinit();
+    try std.testing.expectEqual(@as(?Screen.Cursor, .{ .row = 22, .column = 3 }), screen.cursor);
 }
 
 fn repeated(comptime text: []const u8, comptime count: usize) []const u8 {
@@ -4370,13 +4620,6 @@ test "every line fits the screen as the terminal measures it" {
     };
 }
 
-test "untrusted text cannot reach the terminal as control bytes" {
-    // Older than a pulse, so the mark is steady.
-    var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
-    defer state.deinit();
-    try expectScreenLine(&state, 6, "  ● Bell? and ?[31mred                                                       5s");
-}
-
 test "bidi controls in a title or a starter's Label cannot reorder a row" {
     const bidi = "\u{202e}\u{2066}\u{200f}\u{061c}";
     var state = try opened(&.{
@@ -4387,8 +4630,15 @@ test "bidi controls in a title or a starter's Label cannot reorder a row" {
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Pay ????evil") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "for \"Pay ?…") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "for \"Pay ?") != null);
     for ([_][]const u8{ "\u{202e}", "\u{2066}", "\u{200f}", "\u{061c}" }) |control| try std.testing.expect(std.mem.indexOf(u8, text, control) == null);
+}
+
+test "untrusted text cannot reach the terminal as control bytes" {
+    // Older than a pulse, so the mark is steady.
+    var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
+    defer state.deinit();
+    try expectScreenLine(&state, 5, "  ● Bell? and ?[31mred                               Waiting                 5s");
 }
 
 test "only the finished and the failed or stopped groups fold" {
@@ -4408,8 +4658,8 @@ test "your Sessions keep a bright title once they end" {
     state.selected = null;
     var screen = try render(std.testing.allocator, &state, .{}, 80, 24, .{}, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .strong, .bold = true }, screen.styleAt(6, 4).?);
-    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(9, 4).?);
+    try std.testing.expectEqual(Style{ .colour = .strong, .bold = true }, screen.styleAt(5, 4).?);
+    try std.testing.expectEqual(Style{ .colour = .quiet }, screen.styleAt(8, 4).?);
 }
 
 test "every role has an entry in both skins, and its 256-colour entry is the nearest" {
@@ -4427,7 +4677,7 @@ test "every role has an entry in both skins, and its 256-colour entry is the nea
     try std.testing.expectEqual(@as(u8, 214), nearestIndex(hex("#f2c200")));
 }
 
-test "counts group the Indian way" {
+test "numbers group the Indian way" {
     for ([_]struct { u64, []const u8 }{
         .{ 0, "0" },
         .{ 999, "999" },
@@ -4614,28 +4864,26 @@ test "each skin paints every cell of the screen at each colour depth" {
     for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| try expectPainted(&state, 80, 24, .{ .depth = depth });
 }
 
-test "the top reads as the mock: wordmark, headline, health, counts" {
+test "the top reads as the mock: wordmark, headline, health, and no counts" {
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 7500, .slots = 100, .slots_in_use = 3 } });
     try expectScreenLine(&state, 0, " रुई rui  ~/code/rui");
     try expectScreenLine(&state, 1, " Running. 20 Sessions. 2 failed.");
     try expectScreenLine(&state, 2, " Host up 2h05m   slots 3/100");
-    try expectScreenLine(&state, 3, " ● 6 working   ○ 3 waiting   × 2 failed   ■ 1 stopped   ✓ 8 finished");
+    // The rows show what the counts said, so no line counts them.
+    try expectScreenLine(&state, 3, "");
+    try expectScreenLine(&state, 4, " Yours");
     // The wordmark and the headline's opening are the only bold on the top.
     try expectStyle(&state, 0, 1, .{ .colour = .strong, .background = .bar, .bold = true });
     try expectStyle(&state, 0, 5, .{ .colour = .strong, .background = .bar, .bold = true });
     try expectStyle(&state, 0, 79, .{ .background = .bar });
     try expectStyle(&state, 1, 1, .{ .colour = .strong, .bold = true });
     try expectStyle(&state, 1, 10, .{});
-    try expectStyle(&state, 3, 1, .{ .colour = .ink });
-    try expectStyle(&state, 3, 3, .{ .colour = .ink });
-    try expectStyle(&state, 3, 5, .{});
-    try expectStyle(&state, 3, 29, .{ .colour = .failure });
     // ASCII has rui alone.
     const text = try screenText(&state, 80, 24, .{ .unicode = false });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ~/code/rui\n Running. 20 Sessions. 2 failed.\n Host up 2h05m   slots 3/100\n * 6 working   o 3 waiting   x 2 failed   # 1 stopped   + 8 finished\n"));
+    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ~/code/rui\n Running. 20 Sessions. 2 failed.\n Host up 2h05m   slots 3/100\n\n Yours\n"));
 }
 
 test "the headline says whether anything works, and counts failures" {
@@ -4674,13 +4922,13 @@ test "since you looked: a failure or a Host restart shows until the next keypres
     _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
     _ = try respond(&state, .changed, testToken(2), &.{session("b2c3d4", .{ .finished = .{ .since = test_now_s + 60 } }, .{ .label = "Profile the curl send queue" })});
     try std.testing.expectEqual(@as(?News, null), sinceLooked(&state));
-    try expectScreenLine(&state, 4, "");
+    try expectScreenLine(&state, 3, "");
     // A failure is news, with the finishes beside it.
     _ = try step(&state, .{ .tick = (test_now_s + 12 * 60) * 1000 });
     _ = try respond(&state, .changed, testToken(3), &.{session("a1b2c3", .{ .failed = .{ .since = test_now_s + 12 * 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Find why store tests fail" })});
     try std.testing.expectEqual(@as(?News, .{ .seconds = 12 * 60, .finished = 1, .failed = 1, .restarts = 0 }), sinceLooked(&state));
-    try expectScreenLine(&state, 4, " Since you looked 12m ago: 1 finished, 1 failed.");
-    try expectStyle(&state, 4, 1, .{ .colour = .ink });
+    try expectScreenLine(&state, 3, " Since you looked 12m ago: 1 finished, 1 failed.");
+    try expectStyle(&state, 3, 1, .{ .colour = .ink });
     // A keypress clears it. A failure in the keypress's own second stays
     // until the next one, since states keep whole seconds.
     _ = try step(&state, .{ .looked = (test_now_s + 12 * 60) * 1000 + 500 });
@@ -4693,9 +4941,9 @@ test "since you looked: a failure or a Host restart shows until the next keypres
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s + 13 * 60, .slots = 100, .slots_in_use = 0 } });
     try std.testing.expectEqual(@as(u32, 1), state.restarts);
     _ = try step(&state, .{ .tick = (test_now_s + 14 * 60) * 1000 });
-    try expectScreenLine(&state, 4, " Since you looked 1m ago: 0 finished, 0 failed, Host restarted.");
+    try expectScreenLine(&state, 3, " Since you looked 1m ago: 0 finished, 0 failed, Host restarted.");
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s + 14 * 60, .slots = 100, .slots_in_use = 0 } });
-    try expectScreenLine(&state, 4, " Since you looked 1m ago: 0 finished, 0 failed, Host restarted 2 times.");
+    try expectScreenLine(&state, 3, " Since you looked 1m ago: 0 finished, 0 failed, Host restarted 2 times.");
     _ = try step(&state, .{ .looked = (test_now_s + 14 * 60) * 1000 });
     try std.testing.expectEqual(@as(u32, 0), state.restarts);
     try std.testing.expectEqual(@as(?News, null), sinceLooked(&state));
@@ -4715,5 +4963,5 @@ test "the Host-stopped band comes first, over the provider bands and the faded r
     // No headline sentence claims calm under a band; the rows fade.
     try expectScreenLine(&state, 3, " Host not responding. Last update 3m ago.");
     try expectStyle(&state, 3, 1, .{ .colour = .failure });
-    try expectStyle(&state, 10, 4, .{ .colour = .quiet });
+    try expectStyle(&state, 9, 4, .{ .colour = .quiet });
 }

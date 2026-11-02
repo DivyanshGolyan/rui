@@ -86,6 +86,17 @@ func ModelInstructions(workspace, session string) string {
 		session + modelContextParts[2]
 }
 
+// InstructionsSession reads the Session ID from the slot after the escaped
+// Workspace, so it follows the prompt file rather than its wording.
+func InstructionsSession(instructions string) (string, bool) {
+	_, rest, ok := strings.Cut(instructions, modelContextParts[1])
+	if !ok {
+		return "", false
+	}
+	session, _, _ := strings.Cut(rest, modelContextParts[2][:1])
+	return session, true
+}
+
 func nested(value map[string]any, names ...string) any {
 	current := any(value)
 	for _, name := range names {

@@ -22,19 +22,18 @@ You need an Apple Silicon Mac with macOS 15 or newer, or x86-64 Linux with glibc
 
 ```sh
 curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Add the `export` line to your shell profile if `~/.local/bin` is not already on your `PATH`. To update, run the `curl` command again.
+The installer puts `rui` in `~/.local/bin` and checks the download's SHA-256 digest. If `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell profile.
 
-The installer checks the download's SHA-256 digest and keeps your Stores, credentials and earlier builds. Release versions look like `0.35.2`. The middle number is the Store format. An update that keeps it opens your existing saved work, and an update that changes it needs a [fresh Store](docs/store-reset.md). Run `rui --version` to see what you have.
+To update, run the `curl` command again. Updates keep your saved work, sign-in and earlier builds. Release versions look like `0.35.2`. The middle number is the Store format: the format of the database where your saved work lives. An update that keeps it opens your existing saved work. When it changes, the installer names a build that still opens your work and the [fresh Store](docs/store-reset.md) steps. It also tells you when an older background Host is still running and how to stop it. Run `rui --version` to see what you have.
 
 ## Start a conversation
 
 1. Sign in once with your ChatGPT account. Rui uses OpenAI's device code login, which you must enable first. Turn on device code authorization for Codex in your ChatGPT security settings. On a workspace account, an admin allows it in the workspace permissions instead. Then run:
 
 	```sh
-	rui auth login codex
+	rui auth login codex     # or: rui auth login openai, to use an OpenAI API key
 	```
 
 	Open the link it prints, sign in and enter the code. Never share the code. See [OpenAI's Codex sign-in guide](https://learn.chatgpt.com/docs/auth) if the setting is missing.
@@ -48,7 +47,9 @@ The installer checks the download's SHA-256 digest and keeps your Stores, creden
 
 3. Type a request at the `›` prompt, such as `Investigate the failing test`.
 
-By default, Bash runs without asking. To approve each command, enter `/configure --permission-mode ask` before your first request. Rui then shows each command, and you type `a` to allow it or `d` to deny it.
+Bash runs in your terminal's environment, so the agent finds the tools your shell finds. A tool you install or a venv you activate reaches the agent with your next message. The environment stays in memory and is never saved.
+
+By default, Bash runs without asking. To approve each command, enter `/configure --permission-mode ask` before your first request. Rui then shows each command above an Allow once / Deny choice: ← and → pick one, and Enter confirms it.
 
 To leave, type `/exit` or press Ctrl+C. Work continues in the background. Run `rui` again to see every conversation and press Enter on one to return to it.
 

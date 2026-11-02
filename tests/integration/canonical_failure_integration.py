@@ -25,7 +25,7 @@ import host_process
 from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
 import os_semantics
 
-ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
+ERROR = {"version": "4", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
 
 
@@ -207,10 +207,13 @@ class Exchange(socketserver.BaseRequestHandler):
             assert part, "truncated request body"
             body += part
         route = head.split(b" ")[1].decode()
+        # A Message's client environment precedes its saved record bytes;
+        # the record is what callers compare.
+        record = body[int(fields.get(b"X-Rui-Environment-Bytes", b"0")):]
         if route in ("/v1/message", "/v1/control/permission-decision"):
-            self.server.mutations.append((route, body))
+            self.server.mutations.append((route, record))
         if route == self.server.route and self.server.before_forward is not None:
-            if not self.server.before_forward(body):
+            if not self.server.before_forward(record):
                 return  # Held full request was cancelled before Host admission.
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as backend:
             backend.settimeout(15)
@@ -223,12 +226,12 @@ class Exchange(socketserver.BaseRequestHandler):
                     break
                 response += part
         if route == self.server.route:
-            self.server.exchanges.append((body, response))
+            self.server.exchanges.append((record, response))
             if self.server.rewrite is not None:
                 response = self.server.rewrite(response)
             else:
                 response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
-                    b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                    b"X-Rui-Wire-Version: 4\r\nConnection: close\r\nContent-Length: "
                     + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
         if response is not None:  # An explicitly held cancellation peer sends nothing.
             self.request.sendall(response)
@@ -253,7 +256,7 @@ def wrong_target(response, null_code=False):
             "000000" if answer.get("session") != "000000" else "111111")
     encoded = json.dumps(value, separators=(",", ":")).encode()
     return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
-        b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+        b"X-Rui-Wire-Version: 4\r\nConnection: close\r\nContent-Length: "
         + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
 
 
@@ -416,7 +419,7 @@ def interactive_cases(state, binding=False, null_code=False):
         session = json.loads(configured.stdout)["answer"]["session"]
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
-                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "d"),
+                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", ""),
                 ("/v1/message", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
                 continue  # Activity framing/binding is covered by opening cases.
@@ -446,14 +449,15 @@ def interactive_cases(state, binding=False, null_code=False):
                     if binding:
                         # An unconfirmed start stays recoverable: the overview
                         # says so and Ctrl-D still leaves.
-                        human.read_terminal(master, "! Not sure the Session started. Details when you leave.")
+                        human.read_terminal(master, "! Start unsure; details on exit")
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
-                        proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
-                        assert "\n? Run Bash · " in proposal and "\n  $ true\n" in proposal, proposal
-                        human.assert_permission_workspace(proposal, state)
+                        proposal = human.read_terminal(master, human.CHOICE)
+                        assert "\n? Check successful shell exit\n" in proposal and "\n  $ true\n" in proposal, proposal
                         proposal += human.action_ready(ready_read, master)
+                        # Deny is picked and shown before Enter counts.
+                        proposal += human.pick_deny(master, ready_read)
                     else:
                         human.read_terminal(master, "› ")
                         if route == "/v1/activity-page":
@@ -536,7 +540,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
                         assert record.read_bytes() == original
                         if route == "/v1/message":
-                            output += human.await_screen(master, "Type a + Enter to allow once · d + Enter to deny")
+                            output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
                     os.write(master, b"/exit\n")
                 # Supply output credit during the original exit budget for
@@ -650,11 +654,11 @@ def permission_read_cases(state):
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
         for status, body, expected in (
                 (500, ERROR_BYTES, "CanonicalStoreFailure"),
-                (503, b'{"version":"1","type":"busy","code":"host_busy"}', "ActionReadFailed"),
+                (503, b'{"version":"4","type":"busy","code":"host_busy"}', "ActionReadFailed"),
                 (500, ERROR_BYTES[:-1], "InvalidResponse"),
                 (409, ERROR_BYTES, "InvalidResponse")):
             response = (f"HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\n"
-                f"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
+                f"X-Rui-Wire-Version: 4\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
             proxy = ReplyProxy(host, "/v1/read-action-arguments", lambda reply: response)
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
@@ -676,12 +680,13 @@ def permission_read_cases(state):
                     assert "rui: Read failed: HTTP 503; type: busy; code: host_busy\n" in errors, errors
                 else:
                     assert "rui: Read failed:" not in errors and "type:" not in errors and "code:" not in errors, errors
-                # No committed frame offered the Action that failed to read.
+                # No committed frame offered the Action that failed to read;
+                # its call row may name it while it waits.
                 frames = []
                 screen = ScreenCapture(COLUMNS, ROWS)
                 screen.listener = lambda shown, x, y: frames.append(shown)
                 screen.feed(output)
-                assert not any("allow once" in frame or "? Run Bash" in frame for frame in frames), frames
+                assert not any("Allow once" in frame or "\n  $ true\n" in frame for frame in frames), frames
                 assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
                 assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
                 actual = termios.tcgetattr(slave)
@@ -710,9 +715,9 @@ def permission_read_cases(state):
         assert configured.returncode == 0, configured
         details_session = json.loads(configured.stdout)["answer"]["session"]
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
-        body = b'{"version":"1","type":"busy","code":"host_busy"}'
+        body = b'{"version":"4","type":"busy","code":"host_busy"}'
         response = (b"HTTP/1.1 503 Rejected\r\nContent-Type: application/json\r\n"
-            b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+            b"X-Rui-Wire-Version: 4\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
         proxy = ReplyProxy(host, "/v1/conversation-page", lambda reply: response)
         master, slave = open_pty()
@@ -723,8 +728,12 @@ def permission_read_cases(state):
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             os.write(master, b"/details\n")
-            output = human.read_terminal(master,
-                "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", timeout=10)
+            human.read_terminal(master, "host_busy", timeout=10)
+            output = human.current_screen(master)
+            # The transcript keeps the whole diagnostic, wrapped at the width;
+            # the notice under the input names only what failed.
+            assert "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
+            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Details unavailable; draft retained.", output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)
@@ -835,7 +844,7 @@ def keyed_observation_cases(state, only="keyed"):
             else:
                 observation["wire_only"] = "must-not-be-presented"
             encoded = json.dumps(value, indent=2, ensure_ascii=True).encode()
-            return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: "
+            return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: "
                 + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
         for omitted in (False, True):
             if only == "keyed-bindings" and not omitted or only == "keyed-output" and omitted:

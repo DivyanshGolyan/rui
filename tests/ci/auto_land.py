@@ -6,7 +6,8 @@ workflow and are non-force. Landing dispatches the existing qualification
 workflows, and promotion the release workflow, explicitly because
 GITHUB_TOKEN pushes do not emit push workflows.
 Missing or failed Mac qualification holds stable, never main, and so does an
-open stable-red issue.
+open stable-red issue. Promotion first closes the issues landed commits fix,
+because GitHub ignores closing keywords in GITHUB_TOKEN pushes.
 """
 import argparse
 import json
@@ -29,6 +30,10 @@ WORKFLOW_FILES = ".github/workflows/"
 # report_issue.py files each stable qualification red under this label. Only a
 # fix commit closes the issue, so a later green candidate cannot promote past it.
 STABLE_RED = "stable-red"
+# GitHub's closing keywords. It ignores them in GITHUB_TOKEN pushes, so
+# promotion applies them to what landed; the optional owner/repo is the target.
+CLOSING_KEYWORD = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+([\w.-]+/[\w.-]+)?#([0-9]+)\b",
+                             re.IGNORECASE)
 
 
 # Seconds before each repeated dispatch submission; long enough for a run the
@@ -70,6 +75,48 @@ def open_stable_reds():
     """Open stable-red issues; a listing failure propagates and holds promotion."""
     return json.loads(gh("issue", "list", "--repo", os.environ["GITHUB_REPOSITORY"], "--state", "open",
                          "--label", STABLE_RED, "--limit", "100", "--json", "number,title"))
+
+
+def close_fixed_issues(revisions):
+    """Close each open issue that a commit in revisions fixes, as a user push to main would.
+
+    Every issue counts, not only CI reds, because GitHub's keywords close any
+    issue. A commit closes its issue once: a closure after the commit's
+    reference or Auto-land's comment makes a later reopen a recurrence, which
+    stays open. A failure only warns; the open issue keeps holding stable.
+    """
+    repository = os.environ["GITHUB_REPOSITORY"]
+    for entry in git("log", "--reverse", "-z", "--format=%H%n%B", revisions).split("\0"):
+        sha, _, message = entry.strip().partition("\n")
+        subject = message.split("\n", 1)[0]
+        marker = f"Fixed by {sha}"
+        for target, issue in CLOSING_KEYWORD.findall(message):
+            if target and target.lower() != repository.lower():
+                continue
+            try:
+                state = json.loads(gh("api", f"repos/{repository}/issues/{issue}"))
+                if state["state"] != "open" or "pull_request" in state:
+                    continue
+                pages = json.loads(gh("api", f"repos/{repository}/issues/{issue}/timeline?per_page=100",
+                                      "--paginate", "--slurp"))
+                named = commented = closed = False
+                for event in (event for page in pages for event in page):
+                    kind = event.get("event")
+                    mine = kind == "commented" and (event.get("body") or "").startswith(marker)
+                    # GitHub's own close from a user push carries the commit.
+                    if kind == "closed" and (named or event.get("commit_id") == sha):
+                        closed = True
+                    elif mine or kind == "referenced" and event.get("commit_id") == sha:
+                        named, commented = True, commented or mine
+                if closed:
+                    print(f"#{issue} reopened after {sha} closed it; it stays open as a recurrence")
+                    continue
+                comment = () if commented else ("--comment", f"{marker} ({subject}), landed on main.")
+                gh("issue", "close", issue, "--repo", repository, "--reason", "completed", *comment)
+                print(f"Closed #{issue}, fixed by {sha} {subject}")
+            except (subprocess.CalledProcessError, ValueError, LookupError, TypeError) as failure:
+                print(f"::warning::Could not close #{issue}, fixed by {sha}; while open it holds stable "
+                      f"if labelled {STABLE_RED}: {getattr(failure, 'stderr', None) or failure}")
 
 
 def latest(workflow, sha, branch):
@@ -287,6 +334,9 @@ def promote_stable():
     if not contains(main_sha, stable_sha):
         print("stable is not on main's history; stable promotion held")
         return
+    # The landing just above, a merged PR or an earlier failed close: each
+    # fix still unpromoted closes its issue before the hold is read.
+    close_fixed_issues(f"{stable_sha}..{main_sha}")
     if reds := open_stable_reds():
         listed = ", ".join(f"#{red['number']} {red['title']}" for red in reds)
         print(f"Open stable-red issues hold stable at {stable_sha}: {listed}")

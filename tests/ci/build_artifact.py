@@ -60,6 +60,17 @@ def build(targets, part="all"):
     return prefix / "bin"
 
 
+def linked_package_file(root, link):
+    # A fetched package may link one of its files to another (WAMR links a
+    # LICENSE). Ship the linked file's bytes under the link's name, so the
+    # archive still holds regular files only; any other link is refused.
+    package_root = (root / link.relative_to(root).parts[0]).resolve()
+    target = link.resolve()
+    if not target.is_relative_to(package_root) or target.is_symlink() or not target.is_file():
+        raise ValueError(f"Unexpected build symlink: {link.relative_to(root)}")
+    return target
+
+
 def package(targets, destination, binaries=None, part="all"):
     destination.mkdir(parents=True, exist_ok=True)
     archive = destination / "compiled.tar.gz"
@@ -81,6 +92,8 @@ def package(targets, destination, binaries=None, part="all"):
                 for filename in sorted(files):
                     source = Path(directory) / filename
                     name = str(PurePosixPath(label, source.relative_to(root)))
+                    if label == "packages" and source.is_symlink():
+                        source = linked_package_file(root, source)
                     info = source.lstat()
                     if not stat.S_ISREG(info.st_mode):
                         raise ValueError(f"Unexpected build file: {name}")

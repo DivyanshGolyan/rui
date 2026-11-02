@@ -61,6 +61,25 @@ ZIG_FAIL = logged(
     "5/793 codex_auth.test.refresh transport keeps not-sent evidence...FAIL (TestUnexpectedResult)",
     "native failed: exit=1 elapsed=92.153s",
 )
+UNITTEST = logged(
+    "test_other (test_selection.SelectionTest.test_other) ... ok",
+    "",
+    "======================================================================",
+    "ERROR: test_root_disposal_requires_the_whole_group_to_retire (test_selection.FullCheckPartitionTest."
+    "test_root_disposal_requires_the_whole_group_to_retire) (delivery='lost')",
+    "----------------------------------------------------------------------",
+    "Traceback (most recent call last):",
+    '  File "/home/runner/work/rui/rui/tests/ci/test_selection.py", line 1082, in test_root_disposal_requires_the_whole_group_to_retire',
+    "    self.wait_for_group_retirement(group, time.monotonic() + 5)",
+    '  File "/home/runner/work/rui/rui/tests/ci/test_selection.py", line 683, in wait_for_group_retirement',
+    '    raise TimeoutError(f"live driver group {group} did not retire")',
+    "TimeoutError: live driver group 22993 did not retire",
+    "",
+    "----------------------------------------------------------------------",
+    "Ran 162 tests in 104.483s",
+    "",
+    "FAILED (errors=1)",
+)
 GATE = logged(
     "renderer mutation gate failed: mark-collision: expected exactly one anchor, found 0",
     "Evidence: /home/runner/work/_temp/mutations/report.json (logs beside it).",
@@ -127,6 +146,19 @@ class CauseTest(unittest.TestCase):
         [gate] = report_issue.failure_causes(GATE, self.cases)
         self.assertEqual(gate.signature,
                          'renderer mutation gate failed: mark-collision: expected exactly one anchor, found 0')
+
+    def test_a_python_unit_test_is_named_by_its_id_and_raising_line(self):
+        [cause] = report_issue.failure_causes(UNITTEST, self.cases)
+        self.assertEqual(cause.signature,
+                         "python test 'test_selection.FullCheckPartitionTest."
+                         "test_root_disposal_requires_the_whole_group_to_retire': "
+                         'raise TimeoutError(f"live driver group {group} did not retire") raised TimeoutError')
+        self.assertEqual(cause.paths, ['tests/ci/test_selection.py'])
+        self.assertEqual(cause.detail, 'TimeoutError: live driver group 22993 did not retire')
+        # Another subtest or group id files under the same signature.
+        [again] = report_issue.failure_causes(UNITTEST.replace("'lost'", "'delayed'").replace('22993', '7'),
+                                              self.cases)
+        self.assertEqual(again.signature, cause.signature)
 
     def test_cases_sharing_a_fixture_file_keep_their_own_raising_lines(self):
         def case(name, statement):
@@ -208,6 +240,11 @@ class FakeGitHub:
             log = self.logs[int(args[-1].split('/')[-2])]
             if log is None:
                 raise subprocess.CalledProcessError(1, ['gh', *args], stderr='HTTP 404')
+            # gh refuses escape sequences unless allowed, whatever stdout is.
+            if '\x1b' in log and '--allow-escape-sequences' not in args:
+                raise subprocess.CalledProcessError(1, ['gh', *args], stderr=(
+                    'the response contains terminal escape sequences; '
+                    'pass --allow-escape-sequences to output it anyway'))
             return log
         if args[0] == 'api':
             return json.dumps([{'jobs': self.jobs}])
@@ -302,7 +339,7 @@ class ReportTest(unittest.TestCase):
         body = fake.made('create')[0]
         self.assertIn('passed only on its automatic retry', body[body.index('--body') + 1])
         # The landing tip's own red belongs to its author, not an issue.
-        self.assertNotIn(('api', 'repos/o/r/actions/jobs/2/logs'), fake.calls)
+        self.assertNotIn('repos/o/r/actions/jobs/2/logs', [call[-1] for call in fake.calls])
 
         # A run that is not a landing tip reads only its failed jobs.
         fake = FakeGitHub(jobs, {1: retried, 2: GATE, 3: logged('planned')})
@@ -319,7 +356,7 @@ class ReportTest(unittest.TestCase):
         self.run_main(fake)
         [create] = fake.made('create')
         self.assertIn('tests/integration/bash_integration.py: assert process_exists', create[create.index('--title') + 1])
-        self.assertNotIn(('api', 'repos/o/r/actions/jobs/2/logs'), fake.calls)
+        self.assertNotIn('repos/o/r/actions/jobs/2/logs', [call[-1] for call in fake.calls])
         # Every aggregate step check.yml runs carries the name the reporter skips.
         steps = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/check.yml').read_text(),
                            re.M)
@@ -328,6 +365,16 @@ class ReportTest(unittest.TestCase):
         gate = dict(id=3, name='mutations', conclusion='failure',
                     steps=[dict(name='Require behavioral kills in isolated source copies', conclusion='failure')])
         self.assertFalse(report_issue.aggregate_only(gate))
+
+    def test_a_coloured_log_is_read_and_filed_under_its_cause(self):
+        # Shape of real job logs: run steps echo their commands in ANSI colour.
+        coloured = logged('\x1b[36;1mpython3 -B tests/integration/check.sh\x1b[0m') + BASH
+        fake = FakeGitHub([dict(id=1, name='macos suites (native)', conclusion='failure')], {1: coloured})
+        self.run_main(fake, '--label', 'stable-red')
+        [create] = fake.made('create')
+        self.assertIn('CI red: tests/integration/bash_integration.py: assert process_exists(child_pid) '
+                      'raised AssertionError', create)
+        self.assertNotIn('log unavailable', create[create.index('--title') + 1])
 
     def test_an_unavailable_log_is_retried_then_filed_without_aborting_the_run(self):
         jobs = [dict(id=1, name='macos / native', conclusion='failure'),

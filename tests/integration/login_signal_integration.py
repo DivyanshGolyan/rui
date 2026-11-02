@@ -9,10 +9,14 @@ import hashlib
 import json
 import os
 import pathlib
+import pty
+import select
 import signal
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 
 import host_process
 import os_semantics
@@ -104,6 +108,78 @@ int sigaction(int signal, const struct sigaction *action, struct sigaction *old)
         assert observed[1:] == b"00", "queued SIGINT must prevent network attempts"
 
 
+def read_until(master, process, needle, deadline):
+    output = b""
+    while needle not in output:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, output
+        ready, _, _ = select.select([master], [], [], min(remaining, 0.2))
+        if ready:
+            output += os.read(master, 4096)
+        elif needle == b"" and process.poll() is not None:
+            break
+    return output
+
+
+def key_entry(binary, typed):
+    """Run `rui auth login openai` on a PTY, type `typed` at the hidden
+    prompt, and return (exit code, output, home, attributes before, after)."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-key-entry-"))
+    home = root / "home"
+    home.mkdir(mode=0o700)
+    env = {key: value for key, value in os.environ.items() if key != "RUI_OPENAI_KEY_FILE"}
+    env["HOME"] = str(home)
+    # A Codex override must not stop a first OpenAI login creating its directory.
+    env["RUI_CODEX_CREDENTIAL_FILE"] = str(root / "elsewhere" / "codex.json")
+    master, slave = pty.openpty()
+    try:
+        before = termios.tcgetattr(slave)
+        process = subprocess.Popen([binary, "auth", "login", "openai"], env=env,
+                                   stdin=slave, stdout=slave, stderr=slave)
+        deadline = time.monotonic() + 10
+        output = read_until(master, process, b"(it is not shown): ", deadline)
+        # Typed the moment the prompt shows: echo must already be off.
+        os.write(master, typed)
+        process.wait(timeout=10)
+        while select.select([master], [], [], 0.2)[0]:
+            output += os.read(master, 4096)
+        return process.returncode, output, home, before, termios.tcgetattr(slave)
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def key_entry_journey(binary):
+    """The key prompt hides input, Ctrl+C cancels it with the terminal
+    restored and nothing saved, and Enter saves exactly the typed key."""
+    code, output, home, before, after = key_entry(binary, b"sk-partial\x03")
+    key = home / ".config" / "rui" / "openai.key"
+    assert code != 0 and b"Key entry cancelled" in output, (code, output)
+    assert b"sk-partial" not in output, output
+    assert after == before, "Ctrl+C left the terminal in key-entry mode"
+    assert not key.exists()
+    code, output, home, before, after = key_entry(binary, b"sk-typo\x7f\x7f\x7f\x7fgood\r")
+    key = home / ".config" / "rui" / "openai.key"
+    assert code == 0 and b"OpenAI API key saved" in output, (code, output)
+    assert b"sk-" not in output.split(b"(it is not shown): ", 1)[1], output
+    assert after == before
+    assert key.read_text() == "sk-good\n" and key.stat().st_mode & 0o777 == 0o600
+    # A receipt that cannot be written never skips the default: the key and
+    # the provider preference are both saved.
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-key-receipt-"))
+    home = root / "home"
+    home.mkdir(mode=0o700)
+    env = {key: value for key, value in os.environ.items() if key != "RUI_OPENAI_KEY_FILE"}
+    with open("/dev/full", "w") as full:
+        piped = subprocess.run([binary, "auth", "login", "openai"], input=b"sk-receipt\n", stdout=full,
+                               stderr=subprocess.PIPE, env={**env, "HOME": str(home)}, timeout=10)
+    assert piped.returncode != 0, piped
+    assert (home / ".config" / "rui" / "openai.key").read_text() == "sk-receipt\n"
+    assert "provider=openai" in (home / ".config" / "rui" / "preferences").read_text()
+    print("openai key entry passed: hidden input, Ctrl+C restores the terminal and saves nothing, Backspace edits, Enter saves, a failed receipt still saves the default")
+
+
 if __name__ == "__main__":
     host_process.enter()
     run(sys.argv[1])
+    key_entry_journey(sys.argv[1])
