@@ -224,11 +224,19 @@ pub const Lender = struct {
     /// Steps the overview with an input here: Ctrl-X when `ctrl_x`, else
     /// any other, which clears its notice and cancels its prompt.
     step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) anyerror!void,
-    /// Answers the overview's finished job and starts its next stop; true
-    /// when an answer came.
+    /// Runs the overview between the conversation's frames, without the
+    /// screen or input: answers its finished job, keeps its listing going,
+    /// so another Session's news still notifies, and starts its next stop
+    /// or listing job. True when an answer came. Its failure is the
+    /// overview's and ends the conversation.
     service: *const fn (context: *anyopaque) anyerror!bool,
     /// What the overview says under the input, until its next step.
     line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
+    /// Hands the overview each read of the Session's work, which it records
+    /// against what its listing read of the Session and notifies of as
+    /// news, named `name`, unless it is the read the conversation opens on.
+    /// Its failure is the overview's and ends the conversation.
+    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, name: []const u8, opening: bool) anyerror!void,
 
     pub const Said = struct {
         /// The stop prompt, or the overview's notice; null for neither.
@@ -252,7 +260,7 @@ pub const Outcome = enum { detached, interrupted, returned };
 /// cannot stop at once never holds the terminal raw. `self` stays in the
 /// caller's storage until `leave` returns.
 pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, lender: Lender) !Outcome {
-    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = init.environ_map.get("TMUX") != null };
+    self.* = .{ .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
@@ -848,6 +856,8 @@ fn driveActive(self: *Self) !void {
             self.reading.phase = .activity;
         }
         self.withdrawDecided();
+        // Another Session's notification goes out with the next frame.
+        if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
         if (self.expansion.pending) try self.expand();
         _ = try self.step(16);
@@ -1270,7 +1280,10 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
         error.InputDeadline => {
             const expired = try stream.expire();
-            if (expired != .none) try self.inputEvent(expired);
+            if (expired != .none) {
+                self.notice = null;
+                try self.inputEvent(expired);
+            }
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
@@ -1278,17 +1291,24 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         },
         else => return err,
     }) orelse return if (pending == .none) .empty else .decoder_pending;
-    self.notice = null;
     self.dirty = true;
     // One stream decodes every byte; replies never reach an editor, and an
     // event left in a suffix is delivered in order before the next byte.
+    // Input clears the notice; a reply, such as focus returning, keeps it.
     var decoded = stream.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
         .report => |report| switch (report) {
             .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
+            .focus => |focused| self.terminal.focused = focused,
+            // The overview sends the records once a listing steps it.
+            .program_status => _ = self.terminal.answered(.program_status),
+            .device_attributes => _ = self.terminal.answered(.device_attributes),
         },
-        else => try self.inputEvent(decoded),
+        else => {
+            self.notice = null;
+            try self.inputEvent(decoded);
+        },
     };
     return .byte;
 }
@@ -1760,6 +1780,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         return;
     }
     if (end != .complete) return;
+    var observed: ?struct { work: protocol.session_work.Work, opening: bool } = null;
     if (self.reading.output_started)
         self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
     if (self.reading.phase == .history or self.reading.phase == .message) {
@@ -1772,6 +1793,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.admission.delivered = @max(self.admission.delivered, result.delivered);
+        observed = .{ .work = result.work.work.core(), .opening = self.reading.opening };
         self.live.work = result.work.work;
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
@@ -1794,6 +1816,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     }
     // A /status asked for during this read is the next read's, at once.
     self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    // News goes out first in the next frame, once the read is applied.
+    if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
     self.dirty = true;
 }
 
@@ -2977,7 +3001,9 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
     fn line(_: *anyopaque, _: protocol.session_work.Kind) Lender.Said {
         return .{};
     }
-}.line };
+}.line, .observed = struct {
+    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: []const u8, _: bool) !void {}
+}.observed };
 
 /// An overview that lent the terminal, reduced to one Session's stop
 /// prompt, stop and notice.
@@ -3011,7 +3037,7 @@ const FakeOverview = struct {
     }
 
     fn lender(fake: *FakeOverview) Lender {
-        return .{ .context = fake, .step = FakeOverview.step, .service = FakeOverview.service, .line = FakeOverview.line };
+        return .{ .context = fake, .step = FakeOverview.step, .service = FakeOverview.service, .line = FakeOverview.line, .observed = quiet_overview.observed };
     }
 };
 

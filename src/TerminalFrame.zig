@@ -190,7 +190,10 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     try self.status.append(input.status);
     self.status_height = try rows(&self.status, layout);
     try self.notice.append(input.notice);
-    self.line_height = if (input.notice.len != 0) try rows(&self.notice, layout) else @intFromBool(input.height -| self.status_height >= 3);
+    const notice_rows: u16 = if (input.notice.len != 0) try rows(&self.notice, layout) else 0;
+    // A notice that cannot show whole gives way, as the live line does.
+    if (@as(u32, self.status_height) + notice_rows > input.height - 1) self.notice.clear();
+    self.line_height = if (self.notice.length != 0) notice_rows else @intFromBool(input.height -| self.status_height >= 3);
     // The input keeps one row: the draft's first line, or a waiting Action's
     // choice.
     if (@as(u32, self.status_height) + self.line_height > input.height - 1) return error.TerminalTooSmall;
@@ -554,12 +557,10 @@ test "the Session line shows once three rows remain under the status, then the r
         const height: u16 = @intCast(h);
         const notice_rows: u16 = @intFromBool(notice.len != 0);
         const input: Input = .{ .width = 20, .height = height, .draft = "/c", .cursor = 2, .status = status, .notice = notice, .command_rows = commands, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
-        if (height < status_rows + notice_rows + 1) {
-            try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
-            continue;
-        }
         try frame.plan(&document, input);
-        const line: u16 = if (notice_rows != 0) 1 else @intFromBool(height - status_rows >= 3);
+        const shown = notice_rows != 0 and height >= status_rows + notice_rows + 1;
+        try std.testing.expectEqualStrings(if (shown) notice else "", frame.notice.text());
+        const line: u16 = if (shown) 1 else @intFromBool(height - status_rows >= 3);
         try std.testing.expectEqual(line, frame.line_height);
         try std.testing.expectEqual(@as(u16, @intFromBool(height - status_rows - line >= 4)), frame.rule_height);
         try std.testing.expectEqual(height - line - 1, frame.draft_top);
@@ -570,6 +571,21 @@ test "the Session line shows once three rows remain under the status, then the r
         try std.testing.expectEqual(list, frame.list_height);
         try std.testing.expectEqual(height - line - 1 - list - frame.rule_height - status_rows, frame.status_row);
     };
+}
+
+test "a notice that does not fit whole gives way instead of failing the frame" {
+    var document: Viewport.Document = .{};
+    var frame: Self = undefined;
+    const notice = "! Read the whole Action first; nothing authorized.";
+    var input: Input = .{ .width = 20, .height = 4, .status = "Idle", .notice = notice, .cursor = 0, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings("", frame.notice.text());
+    try std.testing.expectEqual(@as(u16, 1), frame.line_height);
+    // With room for every row it wraps to, the notice shows whole.
+    input.height = 6;
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings(notice, frame.notice.text());
+    try std.testing.expectEqual(@as(u16, 4), frame.line_height);
 }
 
 test "a full-capacity draft of spaces keeps the caret on screen" {

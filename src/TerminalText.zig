@@ -6,6 +6,15 @@ pub const Mode = enum { line, multiline };
 /// The most bytes one input byte becomes: an escaped byte is `\xNN`.
 pub const max_bytes_per_byte = "\\x00".len;
 
+/// A code point that must never reach a terminal raw: C0, DEL and C1
+/// controls act on it, and bidi controls reorder the text the user reads.
+pub fn isControl(scalar: u21) bool {
+    return scalar < 0x20 or scalar >= 0x7f and scalar <= 0x9f or
+        scalar == 0x061c or scalar == 0x200e or scalar == 0x200f or
+        scalar >= 0x202a and scalar <= 0x202e or
+        scalar >= 0x2066 and scalar <= 0x2069;
+}
+
 mode: Mode,
 utf8: [4]u8 = undefined,
 utf8_len: usize = 0,
@@ -68,7 +77,7 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
                 if (value == '"') return out.writeAll("\\\"");
                 if (value == '\\') return out.writeAll("\\\\");
             }
-            if (value >= 0x20 and value != 0x7f or
+            if (!isControl(value) or
                 self.mode == .multiline and (value == '\n' or value == '\t'))
             {
                 return out.writeAll(&.{value});
@@ -90,11 +99,7 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
         const scalar = std.unicode.utf8Decode(slice) catch {
             return self.finish(out);
         };
-        if (scalar >= 0x80 and scalar <= 0x9f or scalar == 0x061c or
-            scalar >= 0x202a and scalar <= 0x202e or
-            scalar >= 0x2066 and scalar <= 0x2069 or
-            scalar == 0x200e or scalar == 0x200f)
-        {
+        if (isControl(scalar)) {
             var escaped: [12]u8 = undefined;
             try out.writeAll(try std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{scalar}));
         } else try out.writeAll(slice);

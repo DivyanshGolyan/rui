@@ -7,6 +7,7 @@ const core_boundary = @import("core_boundary.zig");
 /// to select test-logic.
 const cores = .{
     .{ "attempt.zig", @import("attempt.zig") },
+    .{ "attention.zig", @import("attention.zig") },
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
@@ -39,6 +40,7 @@ const cores = .{
     .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },
+    .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
@@ -86,16 +88,18 @@ test "functional cores stay within the core boundary" {
     }
 }
 
-/// Every core as `importer`, a core one directory deep at most, spells its
-/// import.
+/// Every core as `importer` spells its import: relative within its own
+/// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
     @setEvalBranchQuota(10_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
+    var up: []const u8 = "";
+    for (0..std.mem.count(u8, directory, "/")) |_| up = up ++ "../";
     var names: [cores.len][]const u8 = undefined;
-    for (cores, &names) |core, *name| name.* = if (std.mem.startsWith(u8, core[0], directory))
+    for (cores, &names) |core, *name| name.* = if (directory.len > 0 and std.mem.startsWith(u8, core[0], directory))
         core[0][directory.len..]
     else
-        "../" ++ core[0];
+        up ++ core[0];
     return names;
 }
 
