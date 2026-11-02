@@ -1088,7 +1088,7 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
-/// `complete` as the loop does, saves the default if the file is behind it,
+/// `complete` as the loop does, saves the newest pick whose save never ran,
 /// then writes the ledger's guidance before anything that can return. The departure is whole before the restore
 /// result is read. A conversation's own guidance and the Detached notice
 /// follow.

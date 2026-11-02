@@ -700,12 +700,12 @@ pub const State = struct {
     menu_read: enum { unread, read, unanswered, invalid } = .unread,
     /// A model-list read is in flight.
     asking_models: bool = false,
-    /// A `save_default` is unanswered.
-    asking_save: bool = false,
-    /// What the preferences file gives new Sessions: the default the
-    /// overview opened on, which it never saves, or the newest save that
-    /// ended and whether the person saw how. A save is wanted while
-    /// `default` is not this binding.
+    /// The binding of the `save_default` that is unanswered.
+    asking_save: ?Default = null,
+    /// The newest pick whose save has not ended. Every pick is saved, the
+    /// newest after any save already running; nothing else saves.
+    unsaved: ?Default = null,
+    /// The newest save that ended, and whether the person saw how.
     saved: ?struct { binding: Default, outcome: Saved, shown: bool } = null,
 
     /// The token of the last completed listing.
@@ -744,8 +744,6 @@ pub const State = struct {
     /// The caller owns `home` for the state's lifetime.
     pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
         self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default };
-        // Read or resolved before the overview opened, so only a pick asks for a save.
-        if (options.default) |binding| self.saved = .{ .binding = binding, .outcome = .done, .shown = true };
         errdefer self.deinit();
         self.cwd = try self.intern(options.cwd);
     }
@@ -755,11 +753,9 @@ pub const State = struct {
         return if (self.picker) |picker| picker.step == .sign_in else false;
     }
 
-    /// The default the preferences file is behind on, if any.
+    /// The pick still to be saved, if any.
     pub fn saveWanted(self: *const State) ?Default {
-        const current = self.default orelse return null;
-        if (self.saved) |*last| if (last.binding.eql(&current)) return null;
-        return current;
+        return self.unsaved;
     }
 
     /// The menu as the picker shows it, the default first.
@@ -1300,7 +1296,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .models => |read| readModels(state, read),
         .saved => |ended| {
-            state.asking_save = false;
+            state.asking_save = null;
+            // That pick's save ended, failed or not: only a new pick asks again.
+            if (state.unsaved) |*newest| if (newest.eql(&ended.binding)) {
+                state.unsaved = null;
+            };
             state.saved = .{ .binding = ended.binding, .outcome = ended.outcome, .shown = !state.left };
             // A pick that came while this save ran is said by its own save.
             if (!state.left and state.saveWanted() == null) {
@@ -1445,12 +1445,13 @@ fn askModels(state: *State, effects: *Effects) void {
     effects.add(.list_models);
 }
 
-/// Asks to save the default while the file is behind it, one save at a
-/// time: picks made while one runs are saved after it, only the newest.
+/// Asks to save the newest pick, one save at a time: picks made while one
+/// runs are saved after it, only the newest. A failed save is not retried;
+/// picking again is.
 fn askSave(state: *State, effects: *Effects) void {
-    if (state.asking_save) return;
-    const binding = state.saveWanted() orelse return;
-    state.asking_save = true;
+    if (state.asking_save != null) return;
+    const binding = state.unsaved orelse return;
+    state.asking_save = binding;
     effects.add(.{ .save_default = binding });
 }
 
@@ -1852,10 +1853,7 @@ fn pick(state: *State, effects: *Effects) void {
     var binding: Default = .{ .provider = provider, .model = .{ .len = 0 } };
     binding.model.set(entry.id) catch unreachable;
     state.default = binding;
-    // A pick asks again for a save that failed; only a failure never retries.
-    if (state.saved) |last| if (last.outcome == .failed and last.binding.eql(&binding)) {
-        state.saved = null;
-    };
+    state.unsaved = binding;
     state.closePicker();
     askSave(state, effects);
 }
@@ -6102,10 +6100,18 @@ test "picks made during one save are saved after it, only the newest" {
     try std.testing.expect(state.notice == null);
     try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-6.1-sol", .done)));
     try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "gpt-6.1-sol") != null);
-    // A pick back to the saved value saves nothing.
+}
+
+test "every pick is saved, even of the default the overview opened on, and an untouched overview saves nothing" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    try std.testing.expect(state.saveWanted() == null);
+    const draft = try typeText(&state, "");
     try openPicker(&state, &.{chatgpt});
-    try expectEffects(&.{}, try submit(&state, draft));
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.default.?.model.slice());
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try submit(&state, draft));
+    try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-6-luna", .done)));
+    try openPicker(&state, &.{chatgpt});
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try submit(&state, draft));
 }
 
 test "a failed save is not retried, but picking the same model again saves it" {
