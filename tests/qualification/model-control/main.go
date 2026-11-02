@@ -823,7 +823,7 @@ func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (n
 			}
 		}
 	}
-	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\nConnection: close\r\n\r\n", route, len(body))
+	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\n%sConnection: close\r\n\r\n", route, len(body), measurement.EnvironmentHeader(route))
 	if _, err := io.WriteString(connection, request); err != nil {
 		connection.Close()
 		return nil, err
@@ -854,7 +854,7 @@ func prepareUnixRequest(deadline measurement.Deadline, socketPath, route string,
 		connection.Close()
 		return preparedRequest{}, err
 	}
-	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\nConnection: close\r\n\r\n", route, len(body))
+	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\n%sConnection: close\r\n\r\n", route, len(body), measurement.EnvironmentHeader(route))
 	return preparedRequest{connection: connection, request: append([]byte(header), body...)}, nil
 }
 

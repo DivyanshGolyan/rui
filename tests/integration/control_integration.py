@@ -435,6 +435,11 @@ def open_partial(socket_path, route, *, complete_headers=True):
     return connection
 
 
+def environment_header(route):
+    """A Message carries a client environment; these raw ones carry none."""
+    return b"X-Rui-Environment-Bytes: 0\r\n" if route == "/v1/message" else b""
+
+
 def raw_request(socket_path, route, body, declared_length=None):
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -445,6 +450,7 @@ def raw_request(socket_path, route, body, declared_length=None):
             f"POST {route} HTTP/1.1\r\n".encode()
             + b"Content-Type: application/json\r\n"
             + f"Content-Length: {length}\r\n".encode()
+            + environment_header(route)
             + b"X-Rui-Wire-Version: 4\r\n\r\n"
             + body
         )
@@ -461,6 +467,7 @@ def prepare_raw_request(socket_path, route, body):
         f"POST {route} HTTP/1.1\r\n".encode()
         + b"Content-Type: application/json\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
+        + environment_header(route)
         + b"X-Rui-Wire-Version: 4\r\n\r\n"
         + body
     )

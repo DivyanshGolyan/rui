@@ -110,6 +110,7 @@ fn run(init: std.process.Init) !void {
         // Pre-admission refusals have one diagnostic, with no recovery handle.
         // A saved rejection or conflict already named its replay.
         if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted) return err;
+        if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
         stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
@@ -126,6 +127,18 @@ noinline fn printHelp(io: std.Io, topic: union(enum) { resource: cli_args.Resour
         .command => |definition| try definition.help(&writer.interface),
     }
     return writer.flush();
+}
+
+/// Names the variables that most likely pushed the environment past what a
+/// Message carries. The captured request stays recoverable.
+noinline fn reportEnvironmentTooLarge(environment: client.Environment) void {
+    const advice = " Unset or shorten them, then recover the saved request with rui request recover.\n";
+    var buffer: ["rui: ".len + client.Environment.too_large_bytes + advice.len]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    writer.writeAll("rui: ") catch unreachable;
+    environment.describeTooLarge(&writer) catch unreachable;
+    writer.writeAll(advice) catch unreachable;
+    stderr.diagnostic("{s}", .{writer.buffered()});
 }
 
 noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
@@ -1618,7 +1631,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
+        break :blk takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -1684,11 +1697,11 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(&step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, &step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, &step);
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
+    const reply = try takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
@@ -2048,7 +2061,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2060,12 +2073,12 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, reported: ?*?client.Step) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, environment: client.Environment, reported: ?*?client.Step) !void {
     const io = sender.io;
     var unreported: ?client.Step = null;
     const step = reported orelse &unreported;
@@ -2074,7 +2087,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer));
     };
     try writeMutationReply(io, reply, .json, replay);
 }
@@ -2093,7 +2106,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2741,7 +2754,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
+        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer).get();
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }

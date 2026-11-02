@@ -207,10 +207,13 @@ class Exchange(socketserver.BaseRequestHandler):
             assert part, "truncated request body"
             body += part
         route = head.split(b" ")[1].decode()
+        # A Message's client environment precedes its saved record bytes;
+        # the record is what callers compare.
+        record = body[int(fields.get(b"X-Rui-Environment-Bytes", b"0")):]
         if route in ("/v1/message", "/v1/control/permission-decision"):
-            self.server.mutations.append((route, body))
+            self.server.mutations.append((route, record))
         if route == self.server.route and self.server.before_forward is not None:
-            if not self.server.before_forward(body):
+            if not self.server.before_forward(record):
                 return  # Held full request was cancelled before Host admission.
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as backend:
             backend.settimeout(15)
@@ -223,7 +226,7 @@ class Exchange(socketserver.BaseRequestHandler):
                     break
                 response += part
         if route == self.server.route:
-            self.server.exchanges.append((body, response))
+            self.server.exchanges.append((record, response))
             if self.server.rewrite is not None:
                 response = self.server.rewrite(response)
             else:

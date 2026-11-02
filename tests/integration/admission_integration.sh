@@ -594,6 +594,7 @@ client.sendall(
      "Host: local\r\n"
      "Content-Type: application/json\r\n"
      f"Content-Length: {len(body) + 20}\r\n"
+     "X-Rui-Environment-Bytes: 0\r\n"
      "X-Rui-Wire-Version: 4\r\n\r\n").encode()
 )
 client.sendall(body)

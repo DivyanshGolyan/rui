@@ -97,14 +97,25 @@ pub const Left = struct {
 pub const Reply = struct {
     outcome: enum { accepted, failed, unconfirmed } = .failed,
     session: view.Reference = undefined,
-    /// The failure code, or the handle that recovers an unconfirmed request.
-    text: protocol.Bounded(protocol.max_code_bytes) = .{},
+    /// The failure code, why an environment was refused, or the handle
+    /// that recovers an unconfirmed request.
+    text: protocol.Bounded(@max(protocol.max_code_bytes, client.Environment.too_large_bytes)) = .{},
     /// The request's handle, for guidance after an accepted start.
     handle: protocol.Bounded(protocol.max_key_bytes) = .{},
 
     fn refused(code: []const u8) Reply {
         var reply: Reply = .{};
         reply.text.set(code[0..@min(code.len, protocol.max_code_bytes)]) catch {};
+        return reply;
+    }
+
+    /// Nothing was sent: the environment is over what a Message carries.
+    fn environmentTooLarge(environment: client.Environment) Reply {
+        var reply: Reply = .{};
+        var buffer: [client.Environment.too_large_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        environment.describeTooLarge(&writer) catch unreachable;
+        reply.text.set(writer.buffered()) catch unreachable;
         return reply;
     }
 
@@ -310,6 +321,11 @@ frame: std.ArrayList(u8) = .empty,
 pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
+/// The stop prompt the conversation shows.
+prompt: [view.max_prompt_bytes]u8 = undefined,
+/// The overview's own step or job failed while a conversation held the
+/// terminal: the failure is the overview's, not the Session's.
+lent_failed: bool = false,
 /// The Session the last accepted start made, for guidance if its
 /// conversation fails.
 started: ?view.Reference = null,
@@ -454,7 +470,7 @@ fn loop(self: *Self) !Ending {
 fn turn(self: *Self) !?Next {
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
-    try self.dispatch();
+    try self.dispatch(.all);
     // Frames count on the monotonic clock, so a wall-clock step cannot
     // stall or race the pulse; ticks keep the Host's wall clock.
     const awake_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds;
@@ -530,12 +546,15 @@ fn queue(self: *Self, job: Job) void {
     self.job_count += 1;
 }
 
-/// Starts the next job once the worker is free.
-fn dispatch(self: *Self) !void {
-    if (self.worker.thread != null or self.job_count == 0) return;
+/// Starts the next job, or the next stop, once the worker is free.
+fn dispatch(self: *Self, jobs: enum { all, stops }) !void {
+    if (self.worker.thread != null) return;
+    const at = for (self.jobs[0..self.job_count], 0..) |job, index| {
+        if (jobs == .all or job == .stop) break index;
+    } else return;
     self.job.deinit(self.init.gpa);
-    self.job = self.jobs[0];
-    std.mem.copyForwards(Job, self.jobs[0 .. self.job_count - 1], self.jobs[1..self.job_count]);
+    self.job = self.jobs[at];
+    std.mem.copyForwards(Job, self.jobs[at .. self.job_count - 1], self.jobs[at + 1 .. self.job_count]);
     self.job_count -= 1;
     if (self.job == .mark_read) {
         self.marking = self.marks;
@@ -873,7 +892,8 @@ fn converse(self: *Self, session: view.Reference) ?Left {
         left.ended = err;
         return left;
     };
-    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, self.unrecordedRead(session));
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine };
+    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, self.unrecordedRead(session), lender);
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
@@ -886,6 +906,44 @@ fn converse(self: *Self, session: view.Reference) ?Left {
         return null;
     };
     return .{ .session = session, .frontend = frontend, .files = files, .ended = ended };
+}
+
+/// An input in the opened Session's conversation, whose work shows as
+/// `kind`, stepped as the overview's own: a stop it asks for is sent at
+/// once.
+fn conversed(raw: *anyopaque, kind: view.Kind, ctrl_x: bool) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    errdefer self.lent_failed = true;
+    const next = try self.event(.{ .conversed = .{ .reference = self.opened, .work = kind, .stop = ctrl_x } });
+    std.debug.assert(next == null);
+    try self.dispatch(.stops);
+}
+
+/// While a conversation holds the terminal no tick runs, so no listing
+/// begins, and the worker starts only stops: a listing's next page or
+/// first lines wait for the overview. A finished job is answered here,
+/// a listing's included, so a stop never waits behind it.
+fn service(raw: *anyopaque) !bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    errdefer self.lent_failed = true;
+    var answered = false;
+    if (self.worker.thread != null) {
+        if (!self.worker.completed()) return false;
+        // Only a start's answer opens a Session, and none is in flight
+        // while a conversation is open.
+        const next = try self.complete();
+        std.debug.assert(next == null);
+        answered = true;
+    }
+    try self.dispatch(.stops);
+    return answered;
+}
+
+/// What the overview says under the opened Session's conversation.
+fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const said = view.conversation(&self.state, self.opened, kind, &self.prompt);
+    return .{ .text = said.text, .asking = said.asking, .stoppable = said.stoppable };
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
@@ -951,7 +1009,7 @@ fn leave(self: *Self, left: Left, restored: anyerror!void, sending: bool) !void 
         }
         marked catch |err| break :run err;
     };
-    return outcome catch |err| self.failed(err, left.session);
+    return outcome catch |err| if (self.lent_failed) err else self.failed(err, left.session);
 }
 
 fn markRead(self: *Self, requests: client.Requests, session: []const u8, position: u64, until: i128) !void {
@@ -1006,7 +1064,13 @@ fn startSession(self: *Self, requests: client.Requests, input: client.MessageInp
         return;
     };
     var buffer: client.ReplyBuffer = .{};
-    return reply.record(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
+    const environment: client.Environment = .{ .map = self.init.environ_map };
+    const sent = requests.sendCaptured(&captured, environment, &buffer);
+    if (sent == .failed and sent.failed.err == error.EnvironmentTooLarge) {
+        reply.* = .environmentTooLarge(environment);
+        return;
+    }
+    return reply.record(sent, captured.identity().key.slice());
 }
 
 fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStopInput, reply: *Reply) !void {
@@ -1017,7 +1081,7 @@ fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStop
     };
     defer captured.close(io);
     var buffer: client.ReplyBuffer = .{};
-    return reply.record(requests.sendCaptured(&captured, &buffer), captured.identity().key.slice());
+    return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
 }
 
 const test_now_s: u64 = 1_800_000_000;
@@ -1189,7 +1253,7 @@ const Rig = struct {
     fn settle(rig: *Rig) !?Ending {
         const overview = rig.overview;
         while (true) {
-            try overview.dispatch();
+            try overview.dispatch(.all);
             if (overview.worker.thread == null) return null;
             var fds = [_]std.posix.pollfd{.{ .fd = overview.done[0], .events = std.posix.POLL.IN, .revents = 0 }};
             if (try std.posix.poll(&fds, 10_000) == 0) return error.TestUnexpectedResult;
@@ -1405,6 +1469,16 @@ test "a captured request is unconfirmed until the Host answers it" {
     // Even a send that never connected leaves a saved request to recover.
     const unsent: Sent = .{ .failed = .{ .step = .connect, .err = error.FileNotFound } };
     try std.testing.expectEqualStrings("h1", recorded(unsent, "h1").start().unconfirmed);
+    // A refused environment sent nothing: the start failed, and says why.
+    var environ = std.process.Environ.Map.init(std.testing.allocator);
+    defer environ.deinit();
+    const large = try std.testing.allocator.alloc(u8, 70000);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    try environ.put("LARGE_VARIABLE", large);
+    const too_large = Reply.environmentTooLarge(.{ .map = &environ }).start().failed;
+    try std.testing.expect(std.mem.indexOf(u8, too_large, "nothing was sent") != null);
+    try std.testing.expect(std.mem.endsWith(u8, too_large, "Largest variables: LARGE_VARIABLE."));
     const uploaded: Sent = .{ .failed = .{ .step = .upload, .err = error.Cancelled } };
     try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").start().unconfirmed);
     try std.testing.expectEqualStrings("h1", recorded(uploaded, "h1").stop().unconfirmed);
@@ -1548,7 +1622,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try running.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try running.settle() == null);
     try std.testing.expect(try running.press("\x1b[H\x18\x18") == null);
-    try running.overview.dispatch();
+    try running.overview.dispatch(.all);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(running.overview.job));
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings(guidance, try finishedGuidance(running, &buffer));
@@ -1639,6 +1713,54 @@ test "quitting records the marks still waiting" {
     try std.testing.expectEqual(@as(u64, 12), Seen.now.marked[0].position);
 }
 
+test "while a conversation holds the terminal the worker sends only its stop, and a listing's failure stays the overview's" {
+    const Lent = struct {
+        fn answered(overview: *Self) !bool {
+            return service(overview);
+        }
+    };
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    // A listing is due as the conversation opens.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    overview.opened = "k7m2qx".*;
+    try conversed(overview, .working, true);
+    try std.testing.expect(conversationLine(overview, .working).asking);
+    try conversed(overview, .working, true);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
+    try std.testing.expect(!try service(overview));
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.hosts + Seen.now.lists);
+    try std.testing.expectEqual(@as(usize, 2), overview.job_count);
+    // Back on the overview, the listing goes on.
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.lists);
+
+    // A listing already under way when the terminal was lent still answers,
+    // so a stop never waits behind it; its canonical Store failure ends the
+    // overview, with no guidance to resume the Session.
+    var ops = fake_operations;
+    ops.list = struct {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            return readFailure("canonical_store_failure");
+        }
+    }.list;
+    const failing = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer failing.close();
+    try std.testing.expect(try failing.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try failing.overview.dispatch(.all);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), failing.overview, Lent.answered);
+    try failing.overview.dispatch(.all);
+    try std.testing.expectEqual(Job.list, std.meta.activeTag(failing.overview.job));
+    failing.overview.opened = "k7m2qx".*;
+    try std.testing.expectError(error.CanonicalStoreFailure, test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), failing.overview, Lent.answered));
+    var buffer: [1024]u8 = undefined;
+    const left: Left = .{ .session = "k7m2qx".*, .frontend = null, .files = null, .ended = error.CanonicalStoreFailure };
+    try std.testing.expectEqualStrings("", try finishedWith(failing, .{ .conversation = left }, error.CanonicalStoreFailure, &buffer));
+}
+
 test "a failed terminal restore still prints the departure guidance" {
     var ops = fake_operations;
     ops.start = struct {
@@ -1699,7 +1821,7 @@ test "leaving while a start is queued or running says what became of it" {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
-        try rig.overview.dispatch();
+        try rig.overview.dispatch(.all);
         try std.testing.expectEqualStrings("rui: Started n3w5es.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
     }

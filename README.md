@@ -47,6 +47,8 @@ To update, run the `curl` command again. Updates keep your saved work, sign-in a
 
 3. Type a request at the `›` prompt, such as `Investigate the failing test`.
 
+Bash runs in your terminal's environment, so the agent finds the tools your shell finds. A tool you install or a venv you activate reaches the agent with your next message. The environment stays in memory and is never saved.
+
 By default, Bash runs without asking. To approve each command, enter `/configure --permission-mode ask` before your first request. Rui then shows each command above an Allow once / Deny choice: ← and → pick one, and Enter confirms it.
 
 To leave, type `/exit` or press Ctrl+C. Work continues in the background. Run `rui` again to see every conversation and press Enter on one to return to it.
