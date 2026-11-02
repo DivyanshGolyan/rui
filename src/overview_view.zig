@@ -731,8 +731,12 @@ pub const State = struct {
         held.text.set(text[0..end]) catch unreachable;
     }
 
-    /// Records a read of `ref`'s work in `seen` and returns its news.
-    fn observe(self: *State, ref: Reference, work: session_work.Work) error{OutOfMemory}!?attention.Kind {
+    /// Records the open conversation's read in `seen` and returns its news.
+    /// The read it opens on is what the person opened.
+    fn observe(self: *State, read: Observed) error{OutOfMemory}!?attention.Kind {
+        const ref = read.reference;
+        const work = read.work;
+        if (read.opening and attention.Attention.of(work) != null) _ = attention.observe(&(try self.record(ref)).acknowledged, work);
         if (self.entryOf(ref)) |entry| return attention.observe(&entry.attention, work);
         var first: ?attention.Attention = null;
         const kind = attention.observe(&first, work) orelse return null;
@@ -745,12 +749,13 @@ pub const State = struct {
     /// in `arrivals` until `settleArrivals`, so a listing inserts all at
     /// once.
     fn readListed(self: *State, ref: Reference, work: session_work.Work, opening: bool) error{OutOfMemory}!?attention.Kind {
-        const now: attention.Reading = .of(work);
         if (self.entryOf(ref)) |entry| {
+            const now: attention.Reading = .of(work, entry.acknowledged);
             self.track(entry, attention.Status.next(entry.status, entry.listed, now, opening));
             entry.listed = now;
             return attention.observe(&entry.attention, work);
         }
+        const now: attention.Reading = .of(work, null);
         var arrival: Seen = .{ .key = referenceKey(ref), .listed = now, .status = attention.Status.next(null, null, now, opening) };
         const kind = attention.observe(&arrival.attention, work);
         arrival.unsent = arrival.status != null;
@@ -921,12 +926,14 @@ pub const Summary = struct {
 const Run = struct { start: usize = 0, len: usize = 0 };
 const Keyed = struct { key: u64, index: u32 };
 /// One Session's record: the latest news any read gave, which decides
-/// notifications; what the last listing read; and the program status the
+/// notifications; the latest state a conversation opened on, an outcome the
+/// person has seen; what the last listing read; and the program status the
 /// terminal should show, from listings alone, which read in order. A
 /// Session no longer listed has no program status.
 const Seen = struct {
     key: u64,
     attention: ?attention.Attention = null,
+    acknowledged: ?attention.Attention = null,
     listed: ?attention.Reading = null,
     status: ?attention.Status = null,
     unsent: bool = false,
@@ -1065,7 +1072,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
         },
         .leave => state.left = true,
-        .observed => |read| if (try state.observe(read.reference, read.work)) |kind| if (!read.opening) effects.add(.{ .notify = .{ .name = read.name, .kind = kind, .more = 0 } }),
+        .observed => |read| if (try state.observe(read)) |kind| if (!read.opening) effects.add(.{ .notify = .{ .name = read.name, .kind = kind, .more = 0 } }),
         .open => |ref| {
             state.selected = ref;
             effects.add(.{ .open = ref });

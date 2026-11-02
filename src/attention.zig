@@ -178,8 +178,13 @@ pub const Reading = struct {
     status: Status,
     attention: ?Attention,
 
-    pub fn of(work: session_work.Work) Reading {
-        return .{ .status = .of(work), .attention = .of(work) };
+    /// An outcome at or before `acknowledged`, the latest state a
+    /// conversation opened on, reads as rest: the person has seen it.
+    pub fn of(work: session_work.Work, acknowledged: ?Attention) Reading {
+        const status: Status = .of(work);
+        const now: ?Attention = .of(work);
+        const seen = if (now) |reached| if (acknowledged) |opened| !reached.after(opened) else false else false;
+        return .{ .status = if (seen and (status == .done or status == .failed)) .idle else status, .attention = now };
     }
 
     fn after(self: Reading, before: Reading) bool {
@@ -370,15 +375,15 @@ test "a notification is one sequence a hostile name cannot end or extend" {
 }
 
 test "a Session's program status follows its work, and a record begins only with news" {
-    const working: Reading = .of(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 });
-    const finished: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 });
-    const failed: Reading = .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 });
-    const waiting: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 });
-    const beside: Reading = .of(.{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 });
-    const stopped: Reading = .of(.{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 });
-    const idle: Reading = .of(.{ .state = .{ .idle = .{ .since = 1 } } });
-    const next_turn: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 });
-    const next_wait: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 5 });
+    const working: Reading = .of(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 }, null);
+    const finished: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }, null);
+    const failed: Reading = .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 }, null);
+    const waiting: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 }, null);
+    const beside: Reading = .of(.{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 }, null);
+    const stopped: Reading = .of(.{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 }, null);
+    const idle: Reading = .of(.{ .state = .{ .idle = .{ .since = 1 } } }, null);
+    const next_turn: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }, null);
+    const next_wait: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 5 }, null);
     // What the overview opens on: work under way or waiting has a record,
     // an outcome or rest has none.
     try std.testing.expectEqual(Status.working, Status.next(null, null, working, true).?);
@@ -402,6 +407,14 @@ test "a Session's program status follows its work, and a record begins only with
     try std.testing.expectEqual(Status.done, Status.next(.idle, finished, next_turn, false).?);
     try std.testing.expectEqual(Status.done, Status.next(null, finished, next_turn, false).?);
     try std.testing.expectEqual(Status.blocked, Status.next(.blocked, waiting, next_wait, false).?);
+    // An outcome the conversation opened on, before any listing read it,
+    // rests; a later Turn's outcome is news again.
+    const opened_on: Attention = .{ .kind = .finished, .turn = 1, .step = std.math.maxInt(u64) };
+    const seen_finish: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }, opened_on);
+    try std.testing.expectEqual(Status.idle, Status.next(.working, working, seen_finish, false).?);
+    try std.testing.expectEqual(Status.idle, Status.next(.idle, seen_finish, seen_finish, false).?);
+    try std.testing.expectEqual(Status.done, Status.next(.idle, seen_finish, .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }, opened_on), false).?);
+    try std.testing.expectEqual(Status.failed, Status.next(.idle, seen_finish, .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }, opened_on), false).?);
     // Opening the Session sees its outcome; work under way stays.
     try std.testing.expectEqual(Status.idle, Status.opened(.done).?);
     try std.testing.expectEqual(Status.idle, Status.opened(.failed).?);
