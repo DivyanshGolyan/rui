@@ -439,7 +439,7 @@ fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *Histo
     const instructions_id = try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
     const output_schema_id = try sqlite.readNullablePositiveI64(statement, 2);
     const tools = c.sqlite3_column_int(statement, 3);
-    if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
+    if (tools < 0 or tools > tool_catalog.all_tools_mask) return error.CorruptStore;
     out.tools_mask = @intCast(tools);
     out.baseline_instructions = try historicalContent(self, view, instructions_id);
     out.output_schema = if (output_schema_id) |content_id| try historicalContent(self, view, content_id) else null;
