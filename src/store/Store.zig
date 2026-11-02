@@ -438,6 +438,17 @@ pub const Store = struct {
         return access.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
     }
 
+    /// Records that a person has seen the Session's conversation through
+    /// `request.position`. It only advances, so a client that saw less, or a
+    /// repeated write, changes nothing. No Session list row shows it, so
+    /// it touches nothing in the change ring: a list watching the Session
+    /// does not read it again.
+    pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.read_through, reads_domain.markReadLocked(self, request));
+    }
+
     /// The Message with no Session sender next to `position` at `end`: one
     /// seek in the index of those Messages, then its content's metadata.
     pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
@@ -807,6 +818,7 @@ fn destroyRing(ring: *change_ring.Ring) void {
 pub const Ordinary = struct {
     pub const none = error{};
     const page = error{ SessionNotFound, InvalidCursor };
+    const read_through = error{ SessionNotFound, PositionNotReached };
     const content = error{ContentNotFound};
     const public_content = error{ ContentNotFound, RangeOutOfBounds };
     pub const action = error{ActionNotFound};
