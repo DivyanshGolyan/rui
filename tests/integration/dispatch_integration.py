@@ -4314,8 +4314,8 @@ def main(mode="all", correlation_case="all"):
             [
                 ResponseSpec(b"retry later", {}, 503),
                 ResponseSpec(b"sentinel retry later", {}, 503),
-                (ResponseSpec(b"retried", {}, 422, gate_timeout=30), recovery_retry_release),
-                (ResponseSpec(b"new work", {}, 422, gate_timeout=30), recovery_new_release),
+                (ResponseSpec(b"retried", {}, 422), recovery_retry_release),
+                (ResponseSpec(b"new work", {}, 422), recovery_new_release),
             ]
         )
         recovery_thread = threading.Thread(
@@ -4747,7 +4747,7 @@ def main(mode="all", correlation_case="all"):
         slow_response = ResponseSpec(
             b"x" * 2048, {}, 422, chunk_delay=0.015, pacing_end=pacing_end
         )
-        silent_response = ResponseSpec(b"unused", {}, gate_timeout=60)
+        silent_response = ResponseSpec(b"unused", {})
         slow_endpoint = SuccessEndpoint([], responses_by_input={
             "first": slow_response,
             "second": (silent_response, silent_release),

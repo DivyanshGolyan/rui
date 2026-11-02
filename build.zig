@@ -95,11 +95,16 @@ pub fn build(b: *std.Build) void {
     logic_test_step.dependOn(&run_logic_tests.step);
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
+    const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
     if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| {
         const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
+        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, h2), .filters = test_filters });
+        const run_pg_tests = ci.run(pg_tests);
+        run_pg_tests.has_side_effects = true;
+        pg_test_step.dependOn(&run_pg_tests.step);
     }
 
     // Test actors are never shipped and run briefly. On x86_64, Zig's own
@@ -407,6 +412,29 @@ pub fn build(b: *std.Build) void {
     const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
     preference_policy_step.dependOn(&preference_policy_integration.step);
 
+    const mysql_wire_tests = b.addTest(.{
+        .name = "rui-mysql-wire-test",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/mysql_wire_test.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    mysql_wire_tests.root_module.addImport("mysql_wire", b.createModule(.{
+        .root_source_file = b.path("src/store/wire/mysql.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
+    mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
+    mysql_wire_integration.addFileArg(ci.path(mysql_wire_tests));
+    const mysql_wire_integration_step = b.step(
+        "mysql-wire-integration",
+        "Run the MySQL wire client against a real MySQL 8.4 server in Docker",
+    );
+    mysql_wire_integration_step.dependOn(&mysql_wire_integration.step);
+
     const codex_h2_integration = b.addSystemCommand(&.{"python3"});
     codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
     codex_h2_integration.addFileArg(ci.path(release_safe));
@@ -496,6 +524,7 @@ pub fn build(b: *std.Build) void {
         "--ast-check",
     });
     check_step.dependOn(h2_test_step);
+    check_step.dependOn(pg_test_step);
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
@@ -553,6 +582,7 @@ pub fn build(b: *std.Build) void {
         process_integrations.step.dependOn(&run_tests.step);
         process_integrations.step.dependOn(&run_renderer_allocation.step);
         process_integrations.step.dependOn(h2_test_step);
+        process_integrations.step.dependOn(pg_test_step);
     }
     process_integrations.addFileInput(ci.path(release));
     full_check_step.dependOn(&process_integrations.step);
@@ -983,6 +1013,18 @@ fn addH2(
         module.linkSystemLibrary("pthread", .{});
         module.linkSystemLibrary("dl", .{});
     }
+    return module;
+}
+
+/// The Store's Postgres wire client, on h2's OpenSSL.
+fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h2: *std.Build.Module) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/store/wire/pg.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("h2", h2);
     return module;
 }
 

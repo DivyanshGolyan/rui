@@ -277,6 +277,31 @@ jobs:
           UNIT_ARTIFACT_ID: ${{ needs.linux_build_unit.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
+      - name: Start Postgres 15 with TLS for test-pg's live rounds
+        if: ${{ contains(matrix.targets, 'test-pg') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') }}
+        run: |
+          set -euo pipefail
+          certs="$RUNNER_TEMP/pg-certs"
+          mkdir -p "$certs"
+          openssl req -new -x509 -days 1 -nodes -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
+            -keyout "$certs/server.key" -out "$certs/server.crt" 2>/dev/null
+          # The image's postgres user (uid 999) must own a 0600 key.
+          sudo chown 999:999 "$certs/server.key" && sudo chmod 600 "$certs/server.key"
+          password=$(openssl rand -hex 16)
+          docker run -d --name rui-pg -p 127.0.0.1:5432:5432 -v "$certs:/certs:ro" \
+            -e POSTGRES_PASSWORD="$password" -e POSTGRES_INITDB_ARGS=--encoding=UTF8 \
+            postgres:15 -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+          for _ in $(seq 60); do
+            docker exec rui-pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec rui-pg pg_isready -h 127.0.0.1 -U postgres
+          {
+            echo "RUI_TEST_REQUIRE_ENGINES=postgres"
+            echo "RUI_TEST_PG_PORT=5432"
+            echo "RUI_TEST_PG_PASSWORD=$password"
+            echo "RUI_TEST_PG_CA_FILE=$certs/server.crt"
+          } >> "$GITHUB_ENV"
       - name: Run selected targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}

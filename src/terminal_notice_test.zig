@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "input-replay")) {
         // begin/next/finish do not draw through screen. Use the production
         // terminal owner, decoder and editor, without a frontend or Store.
-        var terminal = try Terminal.begin(undefined);
+        var terminal = try Terminal.begin(undefined, false);
         const result = replay(init.io, &terminal);
         // Match session_departure: unconfirmed terminal restoration outranks
         // an input error. Generic process-disposal precedence does not apply.

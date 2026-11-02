@@ -1707,6 +1707,17 @@ fn connectUntil(requests: Requests, path: []const u8, deadline: ?i128) !std.posi
     return socket;
 }
 
+/// The ways a request fails once nothing answers at the Store's socket: no
+/// socket file, a socket left behind with no listener, or a connection that
+/// closed before its reply ended. Only a Store with no owner shows the Host
+/// stopped; a busy Host can refuse a connect too.
+pub fn hostUnreachable(err: anyerror) bool {
+    return switch (err) {
+        error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse => true,
+        else => false,
+    };
+}
+
 fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, FileNotFound, NotDir, SymLinkLoop, ReadOnlyFileSystem, UnixConnectFailed } {
     return switch (code) {
         .ACCES => error.AccessDenied,
@@ -3941,6 +3952,39 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     const stopped = connectRequest(.{ .io = io, .cancellation = &token }, address, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s);
     if (stopped) |fd| closeTestDescriptor(fd) else |_| {}
     try std.testing.expectError(if (blocks) error.Cancelled else error.UnixConnectFailed, stopped);
+}
+
+test "a stopped Host's socket fails requests only in ways hostUnreachable names" {
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var address_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("socket", &address_buffer);
+    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
+    // No socket file, then one left behind with no listener, through both
+    // connect paths.
+    for (0..2) |stale| {
+        if (stale == 1) {
+            var listener = try address.listen(io, .{});
+            listener.deinit(io);
+        }
+        for ([_]?i128{ null, until }) |deadline| {
+            const fd = connectRequest(.{ .io = io }, address, deadline) catch |err| {
+                try std.testing.expect(hostUnreachable(err));
+                continue;
+            };
+            closeTestDescriptor(fd);
+            return error.TestUnexpectedResult;
+        }
+    }
+    // A listener that closes before replying ends the response early.
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.TestUnexpectedResult;
+    defer closeTestDescriptor(sockets[0]);
+    closeTestDescriptor(sockets[1]);
+    const head = readResponseHeadUntil(.{ .io = io }, sockets[0], ResponseTiming.mutation, until);
+    try std.testing.expect(hostUnreachable(if (head) |_| return error.TestUnexpectedResult else |err| err));
+    try std.testing.expect(!hostUnreachable(error.AccessDenied));
 }
 
 test "a refused environment's reason fits its bound with the longest escaped names" {
