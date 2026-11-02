@@ -123,10 +123,12 @@ pub const ContentField = struct {
     }
 };
 
+/// The catalog, in its one canonical order: `bash` runs locally as Actions;
+/// `web_search` is hosted, run by the provider inside a response.
 pub const ToolsField = struct {
     state: FieldState = .omitted,
-    count: u1 = 0,
-    values: [1]enum { bash } = undefined,
+    count: u2 = 0,
+    values: [2]enum { bash, web_search } = undefined,
 };
 
 pub const Configuration = struct {
@@ -900,6 +902,7 @@ pub const SessionRow = struct {
     provider: Provider = .codex,
     model: Bounded(max_model_bytes) = .{},
     bash: bool = false,
+    web_search: bool = false,
     permission_mode: PermissionMode = .ask,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
@@ -912,13 +915,13 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"reference\":",       Hole{ .string = max_session_bytes },        ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                    "\",\"model\":",           Hole{ .string = max_model_bytes },
-        ",\"tools\":",           Hole{ .text = "[\"bash\"]".len },           ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"label\":",         Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"",      Hole.decimal,
-        "\",\"revision\":\"",    Hole.decimal,                               "\",\"end\":\"",           Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },      ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",           Hole{ .json = PeerFacts },                  "}",
+        "{\"reference\":",       Hole{ .string = max_session_bytes },             ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                         "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",           Hole{ .text = "[\"bash\",\"web_search\"]".len }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"label\":",         Hole{ .optional_string = max_label_bytes },      ",\"created_at\":\"",      Hole.decimal,
+        "\",\"revision\":\"",    Hole.decimal,                                    "\",\"end\":\"",           Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },           ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",           Hole{ .json = PeerFacts },                       "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
@@ -932,12 +935,17 @@ pub const SessionRow = struct {
         try writeShape(out, json_shape, .{
             self.reference.slice(),                           self.workspace.slice(),
             self.provider,                                    self.model.slice(),
-            if (self.bash) "[\"bash\"]" else "[]",            self.permission_mode,
+            self.toolsJson(),                                 self.permission_mode,
             if (self.label) |*label| label.slice() else null, self.created_at,
             self.revision,                                    self.end,
             self.first_message,                               &self.work,
             &self.peers,
         });
+    }
+
+    fn toolsJson(self: *const SessionRow) []const u8 {
+        if (self.bash) return if (self.web_search) "[\"bash\",\"web_search\"]" else "[\"bash\"]";
+        return if (self.web_search) "[\"web_search\"]" else "[]";
     }
 };
 
@@ -1902,14 +1910,21 @@ const Parser = struct {
             try self.expectByte(',');
             try self.expectKey("value");
             try self.expectByte('[');
-            if (!try self.consumeIf(']')) {
+            // Each tool at most once, in catalog order, so one catalog has
+            // one spelling and one digest.
+            tools.count = 0;
+            if (!try self.consumeIf(']')) while (true) {
                 var value: Bounded(16) = .{};
                 try self.readSmallString(&value);
-                if (!value.eql("bash")) return error.UnknownTool;
-                tools.values[0] = .bash;
-                tools.count = 1;
-                try self.expectByte(']');
-            }
+                const Tool = @typeInfo(@FieldType(ToolsField, "values")).array.child;
+                const tool = std.meta.stringToEnum(Tool, value.slice()) orelse return error.UnknownTool;
+                if (tools.count != 0 and @backingInt(tool) <= @backingInt(tools.values[tools.count - 1])) return error.InvalidJsonShape;
+                tools.values[tools.count] = tool;
+                tools.count += 1;
+                if (try self.consumeIf(']')) break;
+                if (tools.count == tools.values.len) return error.InvalidJsonShape;
+                try self.expectByte(',');
+            };
         } else return error.InvalidFieldState;
         try self.expectByte('}');
     }
@@ -3213,15 +3228,19 @@ test "configuration provider envelope preserves exact spelling and omission" {
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
-test "configuration tools accept only an empty catalog or Bash" {
-    const cases = [_]struct { value: []const u8, count: u1 = 0, failure: ?anyerror = null }{
+test "configuration tools accept each catalog tool once, in catalog order" {
+    const cases = [_]struct { value: []const u8, count: u2 = 0, first: ?@typeInfo(@FieldType(ToolsField, "values")).array.child = null, failure: ?anyerror = null }{
         .{ .value = "[]" },
-        .{ .value = "[\"bash\"]", .count = 1 },
+        .{ .value = "[\"bash\"]", .count = 1, .first = .bash },
+        .{ .value = "[\"web_search\"]", .count = 1, .first = .web_search },
+        .{ .value = "[\"bash\",\"web_search\"]", .count = 2, .first = .bash },
         .{ .value = "[\"edit\"]", .failure = error.UnknownTool },
         .{ .value = "[\"Bash\"]", .failure = error.UnknownTool },
         .{ .value = "[\"none\"]", .failure = error.UnknownTool },
         .{ .value = "[\"bash\",\"bash\"]", .failure = error.InvalidJsonShape },
-        .{ .value = "[\"bash\",\"edit\"]", .failure = error.InvalidJsonShape },
+        .{ .value = "[\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
+        .{ .value = "[\"bash\",\"edit\"]", .failure = error.UnknownTool },
+        .{ .value = "[\"bash\",\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
     };
     for (cases) |case| {
         var buffer: [1024]u8 = undefined;
@@ -3243,7 +3262,7 @@ test "configuration tools accept only an empty catalog or Bash" {
         } else {
             const request = try parseForTest(&parser);
             try std.testing.expectEqual(case.count, request.configure.configuration.tools.count);
-            if (case.count == 1) try std.testing.expectEqual(.bash, request.configure.configuration.tools.values[0]);
+            if (case.first) |first| try std.testing.expectEqual(first, request.configure.configuration.tools.values[0]);
         }
     }
 }

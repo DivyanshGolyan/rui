@@ -20,9 +20,17 @@ pub const bash_definition: codec_abi.ToolDefinition = .{
         "\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}",
 };
 
-pub fn definition(tool: Tool) *const codec_abi.ToolDefinition {
+/// How the model is told about a tool: a function Rui runs, described in
+/// full, or a tool the provider hosts, which each codec names itself.
+pub const Offer = union(enum) {
+    function: *const codec_abi.ToolDefinition,
+    web_search,
+};
+
+pub fn offer(tool: Tool) Offer {
     return switch (tool) {
-        .bash => &bash_definition,
+        .bash => .{ .function = &bash_definition },
+        .web_search => .web_search,
     };
 }
 
@@ -40,8 +48,16 @@ pub const CallName = enum { bash, unknown };
 pub fn toolBit(tool: Tool) u8 {
     return switch (tool) {
         .bash => 1,
+        .web_search => 2,
     };
 }
+
+/// Every tool's bit: the largest valid tools_mask.
+pub const all_tools_mask: u8 = blk: {
+    var mask: u8 = 0;
+    for (std.enums.values(Tool)) |tool| mask |= toolBit(tool);
+    break :blk mask;
+};
 
 pub const CallFacts = struct {
     name: CallName,

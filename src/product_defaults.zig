@@ -15,7 +15,7 @@ pub const active_capacity: usize = 100;
 pub const intake_capacity: usize = 100;
 
 /// Tools for a fresh Session, in `--tools` syntax.
-pub const tools = "bash";
+pub const tools = "bash,web_search";
 
 /// Permission mode for a fresh Session.
 pub const permission_mode = "bypass";
@@ -44,7 +44,7 @@ test "approved product defaults" {
     const std = @import("std");
     try std.testing.expectEqual(@as(usize, 100), active_capacity);
     try std.testing.expectEqual(@as(usize, 100), intake_capacity);
-    try std.testing.expectEqualStrings("bash", tools);
+    try std.testing.expectEqualStrings("bash,web_search", tools);
     try std.testing.expectEqualStrings("bypass", permission_mode);
     try std.testing.expectEqualStrings("codex", provider);
     try std.testing.expectEqualStrings("gpt-6.1-sol", recommended_model);

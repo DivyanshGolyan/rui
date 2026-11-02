@@ -3477,7 +3477,7 @@ def main(mode="all", correlation_case="all"):
             "session", "inspect", "--store", store, "--session", main_session
         ))["session"]
         assert active_settings["model"] == "gpt-6-sol", active_settings
-        assert active_settings["tools"] == ["bash"], active_settings
+        assert active_settings["tools"] == ["bash", "web_search"], active_settings
         frozen_peers.call("message", lambda: message(state, store, "message-b", main_session, "later message"))
         assert len(endpoint.requests) == 1
         resources = frozen_peers.call("inspect", lambda: command(
@@ -3581,6 +3581,7 @@ def main(mode="all", correlation_case="all"):
                         "additionalProperties": False,
                     },
                 },
+                {"type": "web_search", "external_web_access": True},
             ],
             "text": {
                 "verbosity": "low",

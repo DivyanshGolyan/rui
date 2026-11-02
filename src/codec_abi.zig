@@ -34,8 +34,8 @@ pub const ObservedHeaders = struct {
 
 /// The neutral items of a request, in the order the Host yields them:
 /// settings, instructions, the history items, history_end,
-/// compaction_trigger (compaction requests only), tools_start, one tool per
-/// enabled tool, text_format, request_end.
+/// compaction_trigger (compaction requests only), tools_start, one tool or
+/// web_search per enabled tool, text_format, request_end.
 pub const ItemKind = enum(u8) {
     /// The frozen settings, the model included. Handle 0: that same model,
     /// which the codec writes by a content piece so the Host escapes it.
@@ -60,6 +60,9 @@ pub const ItemKind = enum(u8) {
     tools_start,
     /// Handles 0-2: name, description, parameter schema (JSON text).
     tool,
+    /// The provider's hosted web search, with live page access. No handles;
+    /// a codec whose provider hosts none declines it.
+    web_search,
     /// Handle 0, when present: the output schema (JSON text).
     text_format,
     request_end,
@@ -107,6 +110,7 @@ pub const Item = union(ItemKind) {
     compaction_trigger,
     tools_start,
     tool,
+    web_search,
     text_format,
     request_end,
 };

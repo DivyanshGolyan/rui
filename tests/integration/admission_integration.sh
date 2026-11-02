@@ -446,7 +446,7 @@ created=$($rui session configure --store "$store" --record "$records/rejected-cr
 contains "$created" '"status":"accepted"'
 rejected_session=$(printf '%s' "$created" | session_id)
 defaults=$($rui session inspect --store "$store" --session "$rejected_session")
-contains "$defaults" '"tools":["bash"]'
+contains "$defaults" '"tools":["bash","web_search"]'
 contains "$defaults" '"permission_mode":"bypass"'
 contains "$defaults" '"instructions":{"bytes":"0"'
 contains "$defaults" '"output_schema":null'

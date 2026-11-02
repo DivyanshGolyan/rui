@@ -202,7 +202,7 @@ def main():
             assert continued[0] == 200 and continued[1]["next"] is None and len(continued[1]["sessions"]) == 1, continued
             row = continued[1]["sessions"][0]
             assert {name: row[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
-                "reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"],
+                "reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash", "web_search"],
                 "permission_mode": "bypass"}, row
             # Configured and never messaged: idle since its creation, with no
             # Label, first Message or person's Message.

@@ -61,7 +61,7 @@ fn permissionModeCode(mode: []const u8) u8 {
 }
 
 /// A created Session's tools when configuration omits them.
-const default_tools_mask: u8 = blk: {
+pub const default_tools_mask: u8 = blk: {
     var mask: u8 = 0;
     var names = std.mem.splitScalar(u8, product_defaults.tools, ',');
     while (names.next()) |name| mask |= tool_catalog.toolBit(std.meta.stringToEnum(Tool, name).?);
