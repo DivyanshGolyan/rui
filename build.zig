@@ -527,7 +527,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(pg_test_step);
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
-    const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = b.addSystemCommand(&.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
@@ -541,7 +540,6 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
     fast_integrations.step.dependOn(&format.step);
-    fast_integrations.addFileInput(ci.path(release));
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
     fast_integrations.step.dependOn(&signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
@@ -584,7 +582,6 @@ pub fn build(b: *std.Build) void {
         process_integrations.step.dependOn(h2_test_step);
         process_integrations.step.dependOn(pg_test_step);
     }
-    process_integrations.addFileInput(ci.path(release));
     full_check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
@@ -677,7 +674,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const measure = addMeasurement(b, &.{"./configuration-admission"});
-    measure.addFileArg(ci.path(release));
+    measure.addFileArg(ci.path(release_safe));
     const measure_step = b.step(
         "measure-admission",
         "Measure macOS Host and direct-client memory for configuration admission",
@@ -685,7 +682,7 @@ pub fn build(b: *std.Build) void {
     measure_step.dependOn(&measure.step);
 
     const measure_messages = addMeasurement(b, &.{"./message-admission"});
-    measure_messages.addFileArg(ci.path(release));
+    measure_messages.addFileArg(ci.path(release_safe));
     const measure_messages_step = b.step(
         "measure-message-admission",
         "Measure macOS message admission and observation scaling",
@@ -693,7 +690,7 @@ pub fn build(b: *std.Build) void {
     measure_messages_step.dependOn(&measure_messages.step);
 
     const measure_dispatch = addMeasurement(b, &.{"./model-dispatch"});
-    measure_dispatch.addFileArg(ci.path(release));
+    measure_dispatch.addFileArg(ci.path(release_safe));
     const measure_dispatch_step = b.step(
         "measure-model-dispatch",
         "Measure macOS frozen-request transport, scratch, descriptors, and custody",
@@ -702,7 +699,7 @@ pub fn build(b: *std.Build) void {
 
     const measure_output = addMeasurement(b, &.{"./model-output"});
     measure_output.addPassthruArgs();
-    measure_output.addFileArg(ci.path(release));
+    measure_output.addFileArg(ci.path(release_safe));
     const measure_output_step = b.step(
         "measure-model-output",
         "Measure macOS model-output bytes, item counts, storage, and retained memory",
@@ -710,7 +707,7 @@ pub fn build(b: *std.Build) void {
     measure_output_step.dependOn(&measure_output.step);
 
     const measure_repeat_work = addMeasurement(b, &.{ "./model-output", "--repeat-work" });
-    measure_repeat_work.addFileArg(ci.path(release));
+    measure_repeat_work.addFileArg(ci.path(release_safe));
     const measure_repeat_work_step = b.step(
         "measure-repeat-work",
         "Measure 20 same-Host waves across 100 stable Sessions with growing history",
@@ -718,7 +715,7 @@ pub fn build(b: *std.Build) void {
     measure_repeat_work_step.dependOn(&measure_repeat_work.step);
 
     const measure_retry = addMeasurement(b, &.{"./model-retry"});
-    measure_retry.addFileArg(ci.path(release));
+    measure_retry.addFileArg(ci.path(release_safe));
     const measure_retry_step = b.step(
         "measure-model-retry",
         "Measure macOS retry discovery, launch separation, churn, and custody",
@@ -729,7 +726,7 @@ pub fn build(b: *std.Build) void {
     if (model_queue_output) |output| {
         measure_queue.addArgs(&.{ "-output", output });
     }
-    measure_queue.addFileArg(ci.path(release));
+    measure_queue.addFileArg(ci.path(release_safe));
     measure_queue.addFileArg(ci.path(sqlite_shell));
     const measure_queue_step = b.step(
         "measure-model-queue",
@@ -738,7 +735,7 @@ pub fn build(b: *std.Build) void {
     measure_queue_step.dependOn(&measure_queue.step);
 
     const measure_control = addMeasurement(b, &.{"./model-control"});
-    measure_control.addFileArg(ci.path(release));
+    measure_control.addFileArg(ci.path(release_safe));
     const measure_control_step = b.step(
         "measure-model-control",
         "Measure control headroom, acknowledgment latency, and cleanup resources",
@@ -747,7 +744,7 @@ pub fn build(b: *std.Build) void {
 
     const measure_call_classification = addMeasurement(b, &.{"./call-classification"});
     measure_call_classification.addPassthruArgs();
-    measure_call_classification.addFileArg(ci.path(release));
+    measure_call_classification.addFileArg(ci.path(release_safe));
     measure_call_classification.addFileArg(ci.path(sqlite_shell));
     const measure_call_classification_step = b.step(
         "measure-call-classification",
@@ -757,7 +754,7 @@ pub fn build(b: *std.Build) void {
 
     const measure_execution_service = addMeasurement(b, &.{"./execution-service"});
     measure_execution_service.addPassthruArgs();
-    measure_execution_service.addFileArg(ci.path(release));
+    measure_execution_service.addFileArg(ci.path(release_safe));
     const measure_execution_service_step = b.step(
         "measure-execution-service",
         "Measure production execution service across completions, history, replay fields, and owner populations",

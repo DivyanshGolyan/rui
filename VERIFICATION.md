@@ -135,7 +135,7 @@ Before resubmitting a qualification dispatch, Auto-land checks whether the faile
 
 ### Composed gates
 
-`check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables and, on x86-64 Linux, `stack-frames`.
+`check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke and, on x86-64 Linux, `stack-frames`.
 Required functional assertions stay required when their fixture changes.
 Native and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
 The Debug smoke covers streamed-capture failure and recovery, Store-lease exclusion, committed-but-lost Message replies, changed-source capture preservation and same-key configuration and Message replay after a Host crash.
