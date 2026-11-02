@@ -908,6 +908,37 @@ const TestingSteps = struct {
     }
 };
 
+test "creating a Session takes the same work however many Sessions exist" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const Creation = struct {
+        fn steps(store: *Store, key: []const u8) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
+            _ = try configureTestSession(store, key);
+            return counter.steps;
+        }
+    };
+    _ = try configureTestSession(&storage, "creation-steps-prepare");
+    const few = try Creation.steps(&storage, "creation-steps-few");
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(
+        storage.database,
+        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
+            "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+            "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+            "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+2,zeroblob(32),value+2 FROM sequence",
+    );
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    // Changing foreign_keys expires prepared statements: prepare them again.
+    _ = try configureTestSession(&storage, "creation-steps-prepare-again");
+    try std.testing.expectEqual(few, try Creation.steps(&storage, "creation-steps-many"));
+}
+
 test "a Workspace's changed page reads only its own Sessions, however many others changed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
