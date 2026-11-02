@@ -125,12 +125,10 @@ action_view: ?struct { io: std.Io, file: std.Io.File } = null,
 // and input row. Only this owner changes it.
 consent: ?ConsentPolicy.Pending = null,
 // The choice Enter may confirm: a frame delivered, then input serviced empty
-// with no key since. Only promptCompleted sets it, and only spendOffer, the
-// entry of every input, clears it. It stands for its decision while nothing
-// changed since and the latest frame shows that same decision, so a redraw
-// that changes nothing about the choice (the clock) keeps it. A change of
-// scope retires it, and render retires it at a frame showing another
-// decision or none.
+// with no key since. Only promptCompleted sets it. spendOffer, the entry of
+// every input, clears it, and so does render at a frame showing another
+// decision or none. It stands for its decision while the scope is unchanged,
+// so a redraw that changes nothing about the choice (the clock) keeps it.
 offer: ?Offer = null,
 // Counts inputs, so a ticket knows whether any arrived after its frame.
 inputs: u64 = 0,
@@ -373,8 +371,8 @@ pub const DecisionBlock = enum { not_ready, reading, command, layout };
 pub const ChoiceOutcome = union(enum) { picked, decision: ConsentPolicy.Decision, blocked: DecisionBlock };
 
 /// An arrow or Enter at the choice, with the offer `spendOffer` returned for
-/// this key. It acts only when that offer is the latest frame, unchanged
-/// since, and the decision it showed is the Action's current one. A live
+/// this key. It acts only when that offer still stands and the decision it
+/// showed is the Action's current one. A live
 /// probe of geometry and command comes first.
 pub fn choose(self: *Self, key: ChoiceKey, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ChoiceOutcome {
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
@@ -405,8 +403,9 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?Offer, size: std.posix.winsiz
 }
 
 /// Enter in the draft beside an Action, with the offer `spendOffer` returned
-/// for this key: the denial the draft is sent with, when that offer is the
-/// latest frame, unchanged since, and it showed this draft as the reason.
+/// for this key: the denial the draft is sent with, when that offer still
+/// stands and it showed this draft as the reason; any input since, a typed
+/// key included, spent it.
 /// A probe: nothing changes until `decide`.
 pub fn reasonOffered(self: *const Self, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
     const shown = self.standing(offer) orelse return null;

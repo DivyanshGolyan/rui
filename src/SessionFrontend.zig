@@ -1580,7 +1580,7 @@ fn reasonNotice(self: *const Self, letter: bool) []const u8 {
 }
 
 /// One input in the draft, with the offer this input spent. Beside an Action
-/// whose latest frame offered the draft as the reason, Enter sends it and
+/// whose standing offer showed the draft as the reason, Enter sends it and
 /// denies the Action.
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
