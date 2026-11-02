@@ -837,7 +837,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             self.menu = .{};
             return self.event(.{ .models = .{ .menu = menu } });
         },
-        .save => |binding| return self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(outcome) } }),
+        .save => |binding| return self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(outcome), .saved_effort = self.savedEffort() catch null } }),
         .command => |command| {
             const output = &self.output;
             const ran: view.Ran = .{
@@ -875,6 +875,14 @@ fn savedDefault(self: *const Self) ?view.Default {
     return .of(binding.provider.slice(), binding.model.slice());
 }
 
+/// The effort the saved defaults hold, as a start reads it: none when the
+/// launch named its Store, provider and model, so it reads no saved
+/// defaults, or has no home.
+fn savedEffort(self: *const Self) !?model_capability.ReasoningEffort {
+    if (!self.options.selectors.needsPreferences() or self.options.home.len == 0) return null;
+    return (try preferences.load(self.options.home)).reasoning_effort;
+}
+
 /// One captured `session start`: the composer's text and start settings
 /// over the defaults a fresh Session gets.
 fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageInput {
@@ -892,13 +900,11 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
         }
     };
     const label: client.OptionalPolicy = if (held.at(start, "label")) |value| .{ .present = true, .value = if (value.len == 0) null else value } else .{};
+    const effort = held.policy(held.at(start, "reasoning-effort"));
+    const start_effort: view.StartEffort = .{ .held = held.at(start, "reasoning-effort"), .model = start.binding().model };
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
-    const effort = held.policy(held.at(start, "reasoning-effort"));
-    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or !self.options.selectors.needsPreferences() or self.options.home.len == 0) null else if (start.binding().model) |model|
-        (try preferences.load(self.options.home)).startEffort(model)
-    else
-        null;
+    const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
     return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = .{
         .store = self.options.store,
         .session = .create,
@@ -1935,6 +1941,38 @@ test "a start with no saved binding names no model, so the Host refuses it" {
     try std.testing.expect(Seen.now.start.provider == null and Seen.now.start.model == null);
     try std.testing.expectEqualStrings(product_defaults.permission_mode, Seen.now.start.permission_mode.slice());
     try std.testing.expect(Seen.now.start.label == null);
+}
+
+test "the save's notice names the effort the next start applies, as the start sends it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-5.5" }, .reasoning_effort = .{ .set = .max } }, &.initFill(.configured));
+    // gpt-6-luna offers max and gpt-5.5 does not; Down reaches gpt-6-luna
+    // and Enter alone keeps gpt-5.5, each then picked with ChatGPT.
+    const Case = struct { explicit: bool = false, configure: ?[]const u8 = null, keys: []const u8, notice: []const u8, sent: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .keys = "\x1b[B\n\n", .notice = "New Sessions use gpt-6-luna · max · ChatGPT", .sent = "max" },
+        .{ .explicit = true, .keys = "\x1b[B\n\n", .notice = "New Sessions use gpt-6-luna · ChatGPT", .sent = null },
+        .{ .configure = "/configure --reasoning-effort low\n", .keys = "\x1b[B\n\n", .notice = "New Sessions use gpt-6-luna · ChatGPT", .sent = "low" },
+        .{ .keys = "\n\n", .notice = "New Sessions use gpt-5.5 · ChatGPT", .sent = null },
+    };
+    for (cases) |case| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5", .selectors = if (case.explicit) explicit_selectors else .{} }, file_saving_operations, &cancellation);
+        defer rig.close();
+        if (case.configure) |line| try std.testing.expect(try rig.press(line) == null);
+        try std.testing.expect(try rig.press("/model\n") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(try rig.press(case.keys) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.saves);
+        try std.testing.expectEqualStrings(case.notice, rig.overview.state.notice.?.text());
+        try std.testing.expect(try rig.press("hello\n") == null);
+        try std.testing.expect(try rig.settle() == null);
+        if (case.sent) |effort| try std.testing.expectEqualStrings(effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expect(Seen.now.start.reasoning_effort == null);
+    }
 }
 
 test "a start takes the saved effort only when the launch read saved defaults" {

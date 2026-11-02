@@ -1658,7 +1658,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
-        if (!input.reasoning_effort.present) if (snapshot.defaults.startEffort(binding.model.slice())) |effort| {
+        if (!input.reasoning_effort.present) if (model_capability.startEffort(snapshot.defaults.reasoning_effort, binding.model.slice())) |effort| {
             input.reasoning_effort = .{ .present = true, .value = @tagName(effort) };
         };
         if (!input.workspace.present) {
