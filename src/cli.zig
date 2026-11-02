@@ -172,8 +172,8 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
 /// this frame is as large as the largest client command's buffers.
 noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     switch (command) {
-        .session_start => try configure(init, .{ .io = init.io }, parsed, null, true),
-        .session_configure => try configure(init, .{ .io = init.io }, parsed, null, false),
+        .session_start => _ = try configure(init, .{ .io = init.io }, parsed, null, true),
+        .session_configure => _ = try configure(init, .{ .io = init.io }, parsed, null, false),
         .session_send => try message(init, parsed, null),
         .session_inspect => try inspect(init, parsed),
         .session_list => try sessions(init, parsed),
@@ -255,8 +255,9 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     if (parsed.get("model")) |model| edit.model = .{ .set = model };
     if (parsed.has("clear-model")) edit.model = .clear;
     if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
+    if (parsed.get("reasoning-effort")) |text| edit.reasoning_effort = try effortEdit(text);
     const readiness = localReadiness(init);
-    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null;
+    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null or edit.reasoning_effort != .keep;
     const values = (if (changed) preferences.update(home, edit, &readiness) else preferences.load(home)) catch |err| {
         const said = preferences.failure(err);
         if (said.reason) |reason| {
@@ -284,6 +285,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         .provider = if (values.provider.len != 0) values.provider.slice() else null,
         .model = if (values.model.len != 0) values.model.slice() else null,
         .notifications = values.notifications,
+        .reasoning_effort = values.reasoning_effort,
         .readiness = &readiness,
     });
     // Preferences are local hints, not Session settings or Host facts.
@@ -295,6 +297,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
+    try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.codex)) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
@@ -351,8 +354,19 @@ const DefaultsFacts = struct {
     provider: ?[]const u8,
     model: ?[]const u8,
     notifications: bool,
+    reasoning_effort: ?model_capability.ReasoningEffort,
     readiness: *const provider_selection.Readinesses,
 };
+
+/// A saved effort edit as `--reasoning-effort` and `/effort` spell it:
+/// `default` clears it.
+fn effortEdit(text: []const u8) !@FieldType(preferences.Edit, "reasoning_effort") {
+    if (std.mem.eql(u8, text, "default")) return .clear;
+    return .{ .set = std.meta.stringToEnum(model_capability.ReasoningEffort, text) orelse {
+        stderr.diagnostic("rui: --reasoning-effort is none, low, medium, high, xhigh, max or default; no preferences saved.\n", .{});
+        return error.InvalidArguments;
+    } };
+}
 
 // One complete JSON value: saved preferences, the prospective new-Session
 // binding and separately observed Host capabilities. No field is a Session fact.
@@ -366,6 +380,8 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
     try writer.print(",\"notifications\":{}", .{facts.notifications});
+    try writer.writeAll(",\"reasoning_effort\":");
+    try std.json.Stringify.value(if (facts.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
     try writer.writeAll(",\"local_credentials\":{");
     for (std.enums.values(protocol.Provider), 0..) |provider, index|
         try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
@@ -1584,7 +1600,9 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
     return error.InvalidModel;
 }
 
-fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !void {
+/// True when the Host accepted the configuration; a start reports through
+/// its message instead and is never true.
+fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !bool {
     const io = init.io;
     const interactive = live != null;
     const named = if (live) |address| address.session else parsed.get("session");
@@ -1618,13 +1636,18 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
-            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
+        // The saved effort is a default too, so only a fully explicit
+        // configuration skips the saved defaults.
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null or !input.reasoning_effort.present) blk: {
+            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider, --model and --reasoning-effort reads saved defaults");
             break :blk try preferences.load(home);
         } else .{} };
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
+        if (!input.reasoning_effort.present) if (snapshot.defaults.startEffort(binding.model.slice())) |effort| {
+            input.reasoning_effort = .{ .present = true, .value = @tagName(effort) };
+        };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1634,7 +1657,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (input.tools == null) input.tools = product_defaults.tools;
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
-    if (start) return message(init, parsed, input);
+    if (start) {
+        try message(init, parsed, input);
+        return false;
+    }
     var step: ?client.Step = .store;
     errdefer reportFailureStep(step);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1666,6 +1692,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
         stderr.diagnostic("rui: Configuration {s}; use rui request inspect {s} to inspect the same saved admission.\n", .{ if (admitted.?) "accepted; do not resubmit it" else "rejected", saved.key.slice() });
     };
+    return reply.isAccepted();
 }
 
 fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) void {
@@ -1945,7 +1972,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
         },
         .setup => {
-            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off]; no changes saved. See rui session configure --help for model IDs.\n";
+            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
             var setup_args: [8][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
@@ -1974,7 +2001,10 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             var arguments: [20][]const u8 = undefined;
             const spelled = liveArguments(command.name, argument, &arguments) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-            return liveConfigure(init, requests_context, live, spelled, typed_usage);
+            const accepted = try liveConfigure(init, requests_context, live, spelled, typed_usage);
+            // The effort a person chooses for this Session is also the one
+            // they want next time; /configure stays this Session's alone.
+            if (accepted and command.name == .effort and spelled.len == 2) try saveEffortDefault(init, spelled[1]);
         },
         // The Session frontend runs every other command itself.
         else => return error.UnknownArgument,
@@ -2052,19 +2082,53 @@ test "the CLI refuses a line the table does not admit, which the frontend never 
 }
 
 /// The live /configure: its checks and its messages, whichever command
-/// spelled the arguments, and the usage of the one typed.
-fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !void {
+/// spelled the arguments, and the usage of the one typed. True when the
+/// Host accepted it.
+fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !bool {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch
-        return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-    if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
-        return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
-    configure(init, requests_context, &parsed, live, false) catch |err| {
-        if (err == error.InvalidModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
+    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch {
+        try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+        return false;
+    };
+    if (parsed.help or parsed.seen == 0) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
+        return false;
+    }
+    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
+        return false;
+    };
+    return configure(init, requests_context, &parsed, live, false) catch |err| {
+        if (err == error.InvalidModel or err == error.InvalidLabel) return false; // The pre-capture diagnostic already gives the repair.
         stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
         if (err == error.CanonicalStoreFailure) return err;
+        return false;
     };
+}
+
+/// After this Session took `/effort LEVEL`, saves LEVEL as the effort new
+/// Sessions start at, as `rui defaults configure --reasoning-effort` does.
+fn saveEffortDefault(init: std.process.Init, level: []const u8) !void {
+    const edit: preferences.Edit = .{ .reasoning_effort = if (std.mem.eql(u8, level, "default")) .clear else .{
+        .set = std.meta.stringToEnum(model_capability.ReasoningEffort, level) orelse return,
+    } };
+    const home = init.environ_map.get("HOME") orelse {
+        stderr.diagnostic("rui: /effort changed this Session only; saving it for new Sessions needs an absolute HOME.\n", .{});
+        return;
+    };
+    // An effort names no sign-in, so no readiness decides anything.
+    const readiness: preferences.Readinesses = .initFill(.configured);
+    _ = preferences.update(home, edit, &readiness) catch |err| {
+        const said = preferences.failure(err);
+        if (said.saved) {
+            stderr.diagnostic("rui: /effort saved for new Sessions; {s}.\n", .{said.reason.?});
+        } else stderr.diagnostic("rui: /effort changed this Session only; not saved for new Sessions ({s}).\n", .{said.reason orelse @errorName(err)});
+        return;
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (edit.reasoning_effort == .clear)
+        "Rui: New Sessions start at their model's default effort.\n"
+    else
+        "Rui: New Sessions start at this effort when their model offers it.\n");
 }
 
 // Decode command arguments into the editor's borrowed line. Removing quotes
