@@ -1365,7 +1365,7 @@ const Rig = struct {
         for (0..100) |_| {
             _ = try service(overview);
             const queued = for (overview.jobs[0..overview.job_count]) |job| {
-                if (job != .start) break true;
+                if (job != .start and job != .mark_read) break true;
             } else false;
             if (overview.worker.thread == null and !queued) return;
             if (overview.worker.thread != null) try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), overview, Worker.completed);
@@ -1812,6 +1812,20 @@ test "a canonical Store failure recording a mark ends the overview; a refusal do
     Seen.now.mark_failure = error.CanonicalStoreFailure;
     rig.overview.noteSeen(testReference("k7m2qx"), 13);
     try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
+}
+
+test "a mark waits while a conversation holds the terminal, and goes once the overview is back" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.noteSeen(testReference("b4n8wd"), 5);
+    overview.opened = "k7m2qx".*;
+    try rig.lend();
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.marks);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.marks);
+    try std.testing.expectEqualStrings("b4n8wd", &Seen.now.marked[0].session);
 }
 
 test "quitting records the marks still waiting" {
