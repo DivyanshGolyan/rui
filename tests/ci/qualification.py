@@ -85,7 +85,7 @@ def qualification(suite, platform):
         targets.extend(NATIVE)
         if platform == "linux":
             # check-full replaces check here, so the Linux-only frame gate runs beside it.
-            targets.extend(("login-signal-integration", "stack-frames"))
+            targets.extend(("login-signal-integration", "mysql-wire-integration", "stack-frames"))
     return shards(targets, platform, limit=None)
 
 

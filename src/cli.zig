@@ -254,8 +254,9 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     if (parsed.get("provider")) |name| edit.provider = .{ .set = name };
     if (parsed.get("model")) |model| edit.model = .{ .set = model };
     if (parsed.has("clear-model")) edit.model = .clear;
+    if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
     const readiness = localReadiness(init);
-    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep;
+    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null;
     const values = (if (changed) preferences.update(home, edit, &readiness) else preferences.load(home)) catch |err| {
         if (err == error.PreferenceDirectorySyncFailed) {
             stderr.diagnostic("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
@@ -291,6 +292,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         .available_store = if (available_store) |*paths| paths.store.slice() else null,
         .provider = if (values.provider.len != 0) values.provider.slice() else null,
         .model = if (values.model.len != 0) values.model.slice() else null,
+        .notifications = values.notifications,
         .readiness = &readiness,
     });
     // Preferences are local hints, not Session settings or Host facts.
@@ -301,6 +303,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     if (available_store == null) try std.Io.File.stdout().writeStreamingAll(init.io, "Store unavailable: destination cannot be selected; no alternate Store selected.\n");
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.codex)) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
@@ -356,6 +359,7 @@ const DefaultsFacts = struct {
     available_store: ?[]const u8,
     provider: ?[]const u8,
     model: ?[]const u8,
+    notifications: bool,
     readiness: *const provider_selection.Readinesses,
 };
 
@@ -370,6 +374,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try std.json.Stringify.value(facts.provider, .{}, writer);
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
+    try writer.print(",\"notifications\":{}", .{facts.notifications});
     try writer.writeAll(",\"local_credentials\":{");
     for (std.enums.values(protocol.Provider), 0..) |provider, index|
         try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
@@ -1940,8 +1945,8 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
         },
         .setup => {
-            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model]; no changes saved. See rui session configure --help for model IDs.\n";
-            var setup_args: [6][]const u8 = undefined;
+            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off]; no changes saved. See rui session configure --help for model IDs.\n";
+            var setup_args: [8][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
