@@ -27,6 +27,7 @@ const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
+const preferences = @import("preferences.zig");
 const Self = @This();
 
 pub const Options = struct {
@@ -287,8 +288,9 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     Signals.wake = self.signalled[1];
     Signals.install(true);
     defer Signals.install(false);
-    var terminal = SessionTerminal.begin(screen) catch |err| return self.failed(err, options.open);
-    terminal.notices = .of(init.environ_map, options.home);
+    const notices: SessionTerminal.Notices = .of(init.environ_map, options.home);
+    var terminal = SessionTerminal.begin(screen, !notices.multiplexed) catch |err| return self.failed(err, options.open);
+    terminal.notices = notices;
     self.terminal = &terminal;
     const ended = self.loop();
     return self.finish(ended);
@@ -466,7 +468,24 @@ fn event(self: *Self, value: view.Event) !?Next {
         .notify => |alert| self.terminal.notify(alert.name, alert.kind, alert.more),
         .exit => return .leave,
     };
+    self.sendStatuses();
     return next;
+}
+
+/// Hands the terminal the program status records the core holds unsent, as
+/// many as its next frame takes. With notifications off it clears those it
+/// set, and the core holds every record again for when they are back on.
+fn sendStatuses(self: *Self) void {
+    const terminal = self.terminal;
+    if (terminal.program_status != .supported or !self.state.statusesWaiting()) return;
+    if (!terminal.notificationsOn()) {
+        if (terminal.clearStatuses()) self.state.resendStatuses();
+        return;
+    }
+    while (self.state.waitingStatus()) |record| {
+        if (!terminal.reportStatus(&record.reference, record.name, record.status)) return;
+        self.state.statusSent(record.reference);
+    }
 }
 
 fn composerDraft(self: *const Self) view.Draft {
@@ -625,7 +644,6 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
                 .color_report => |report| if (report.kind == .bg) {
                     self.caps.background = report.value;
                 },
-                .cap_da1 => self.asking = false,
                 .key_press => {
                     if (try self.look()) |next| return next;
                     if (try self.compose(decoded)) |next| return next;
@@ -639,6 +657,15 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
                 },
                 .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
                 .focus => |focused| self.terminal.focused = focused,
+                .program_status => {
+                    _ = self.terminal.answered(.program_status);
+                    self.sendStatuses();
+                },
+                // Every terminal answers the background question's request,
+                // after the probe's.
+                .device_attributes => if (!self.terminal.answered(.device_attributes)) {
+                    self.asking = false;
+                } else self.sendStatuses(),
             },
             else => if (try self.compose(decoded)) |next| return next,
         };
@@ -706,8 +733,9 @@ fn draw(self: *Self, frame: u64) !?Next {
     self.draft_anchor = screen.draft_anchor;
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
-    // A waiting notification goes first, through the frame's pumped write.
-    bytes.writer.writeAll(self.terminal.takeNotification()) catch return error.OutOfMemory;
+    // Waiting reports and a notification go first, through the frame's
+    // pumped write.
+    self.terminal.writeWaiting(&bytes.writer) catch return error.OutOfMemory;
     screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
     self.frame = bytes.toArrayList();
     // The terminal already shows it; keep the new screen, whose pulse is
@@ -1628,6 +1656,110 @@ test "a finish the conversation notified is no news to the listing that reads it
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(overview.state.find("k7m2qx".*).?.state == .finished);
     try std.testing.expectEqualStrings("", rig.terminal.takeNotification());
+}
+
+test "a terminal that answers the program status probe gets each Session's record, and no notification" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    const Listing = struct {
+        var finished = false;
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, page);
+            if (finished) page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 };
+            return null;
+        }
+    };
+    Listing.finished = false;
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    rig.terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    rig.terminal.program_status = .asking;
+    // The probe's answer and the device attributes behind it are reports:
+    // the composer takes none of their bytes, nor the key after them.
+    try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22cx\x1b[O") == null);
+    try std.testing.expectEqualStrings("x", overview.composerDraft().bytes);
+    try std.testing.expect(try rig.press("\x7f") == null);
+    // The overview opens on k7m2qx working: its record, named by its first
+    // line once read, while away. No notification.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.draw(0) == null);
+    var written = rig.drawn(&buffer);
+    const working = "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
+    try std.testing.expect(std.mem.indexOf(u8, written, working) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x1b[?2026h").? > std.mem.indexOf(u8, written, working).?);
+    // Its finish replaces the record and writes no OSC 9, away as it is.
+    Listing.finished = true;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    written = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]9;") == null);
+    // The conversation reading it first gives no OSC 9 either.
+    overview.opened = "k7m2qx".*;
+    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, "Fix the flaky test", false);
+    try std.testing.expectEqualStrings("", rig.terminal.takeNotification());
+    // Opening the Session shows the person its outcome.
+    try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
+    try std.testing.expect(try overview.draw(0) == null);
+    written = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
+    // Turned off, Rui clears its records; turned on, it sets them again.
+    _ = try preferences.update(home, .{ .notifications = false }, &preferences.Readinesses.initFill(.missing));
+    Listing.finished = false;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    written = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=clear:id=rui\x1b\\\x1b[?2026h"));
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 180_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    written = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;") == null);
+    _ = try preferences.update(home, .{ .notifications = true }, &preferences.Readinesses.initFill(.missing));
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 240_000 }) == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    written = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.startsWith(u8, written, working));
+}
+
+test "a terminal that answers device attributes before the probe keeps the notification" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    rig.terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    rig.terminal.program_status = .asking;
+    // A late answer to the probe changes nothing.
+    try std.testing.expect(try rig.press("\x1b[?62;22c\x1b]7501;?\x1b\\\x1b[O") == null);
+    try std.testing.expectEqualStrings("", overview.composerDraft().bytes);
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    overview.opened = "k7m2qx".*;
+    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, "Fix the flaky test", false);
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.draw(0) == null);
+    const written = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]9;Rui: Fix the flaky test finished\x07\x1b[?2026h"));
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;") == null);
+    // The background question's device attributes answer still ends its
+    // wait.
+    overview.asking = true;
+    try std.testing.expect(try rig.press("\x1b[?62;22c") == null);
+    try std.testing.expect(!overview.asking);
 }
 
 test "a stop answered under a conversation says so there, and goes before a listing" {

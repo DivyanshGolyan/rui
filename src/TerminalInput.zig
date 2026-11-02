@@ -30,6 +30,11 @@ pub const Report = union(enum) {
     alternate_scroll_reset,
     /// Focus reporting (mode 1004): whether the terminal now has focus.
     focus: bool,
+    /// The terminal answered the program status probe (OSC 7501).
+    program_status,
+    /// The terminal answered a device attributes request (DA1), as every
+    /// terminal does: behind the probe, it says whether an answer came first.
+    device_attributes,
 };
 
 /// One decoded unit. Terminal replies are reports, never editor input.
@@ -223,6 +228,8 @@ fn decode(self: *Self, line_end: bool) Decoded {
         if (result.n == self.used) self.used = 0 else self.consumed = result.n;
         switch (event) {
             .focus_in, .focus_out => return .{ .report = .{ .focus = event == .focus_in } },
+            .cap_program_status => return .{ .report = .program_status },
+            .cap_da1 => return .{ .report = .device_attributes },
             .paste_start => self.paste = true,
             .paste_end => self.paste = false,
             else => {},
@@ -312,6 +319,19 @@ test "focus changes are reports, never keys, and keep the key after them" {
     try std.testing.expectEqual(Report{ .focus = true }, input.feed('I', 0).report);
     try std.testing.expectEqualStrings("x", testEvent(input.feed('x', 0)).?.key_press.text.?);
     try std.testing.expectEqual(Pending.none, input.pending());
+}
+
+test "program status and device attribute answers are reports, never keys, and keep the key after them" {
+    var input: Self = .{};
+    for ([_]struct { bytes: []const u8, report: Report }{
+        .{ .bytes = "\x1b]7501;?\x1b\\", .report = .program_status },
+        .{ .bytes = "\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x07", .report = .program_status },
+        .{ .bytes = "\x1b[?62;22c", .report = .device_attributes },
+    }) |case| {
+        for (case.bytes[0 .. case.bytes.len - 1]) |byte| try std.testing.expect(input.feed(byte, 0) == .none);
+        try std.testing.expectEqual(case.report, input.feed(case.bytes[case.bytes.len - 1], 0).report);
+        try std.testing.expect(testEvent(input.feed('x', 0)).?.key_press.matchExact('x', .{}));
+    }
 }
 
 test "fragmented X10 mouse reports are consumed whole, never as typed text" {

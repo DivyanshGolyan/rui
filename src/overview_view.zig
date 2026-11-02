@@ -607,8 +607,13 @@ pub const State = struct {
     token: ?Token = null,
     /// What wanted the person when a read, by the listing or the open
     /// conversation, last showed it, by Session reference key: one record
-    /// both read against, so neither gives news the other gave.
+    /// both read against, so neither gives news the other gave. Beside it,
+    /// the program status record the terminal should show.
     seen: Vec(Seen) = .{},
+    /// Entries of `seen` whose program status record the shell has not sent.
+    unsent: usize = 0,
+    /// Sessions the listing in progress brings to `seen`.
+    arrivals: Vec(Seen) = .{},
     /// A list request is in flight.
     listing: bool = false,
     /// Rows the listing in progress has read.
@@ -635,7 +640,7 @@ pub const State = struct {
 
     pub fn deinit(self: *State) void {
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
-        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.seen }) |vec| vec.deinit(self.gpa);
+        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.seen, &self.arrivals }) |vec| vec.deinit(self.gpa);
     }
 
     /// The row of `reference`, if listed.
@@ -723,7 +728,81 @@ pub const State = struct {
 
     /// Records a read of `ref`'s work in `seen` and returns its news.
     fn observe(self: *State, ref: Reference, work: session_work.Work) error{OutOfMemory}!?attention.Kind {
+        if (self.entryOf(ref)) |entry| return attention.observe(&entry.attention, work);
+        var first: ?attention.Attention = null;
+        const kind = attention.observe(&first, work) orelse return null;
+        (try self.record(ref)).attention = first;
+        return kind;
+    }
+
+    /// Records a listing's read of `ref`'s work, its news and its program
+    /// status record, and returns its news. A Session new to `seen` waits
+    /// in `arrivals` until `settleArrivals`, so a listing inserts all at
+    /// once.
+    fn readListed(self: *State, ref: Reference, work: session_work.Work, opening: bool) error{OutOfMemory}!?attention.Kind {
+        const now = attention.Status.of(work);
+        if (self.entryOf(ref)) |entry| {
+            const kind = attention.observe(&entry.attention, work);
+            self.track(entry, attention.Status.next(entry.status, entry.listed, now, opening, kind != null));
+            entry.listed = now;
+            return kind;
+        }
+        var arrival: Seen = .{ .key = referenceKey(ref), .listed = now };
+        const kind = attention.observe(&arrival.attention, work);
+        arrival.status = attention.Status.next(null, null, now, opening, kind != null);
+        arrival.unsent = arrival.status != null;
+        try self.arrivals.append(self.gpa, arrival);
+        return kind;
+    }
+
+    /// Merges a listing's `arrivals` into `seen`, keeping it in key order.
+    fn settleArrivals(self: *State) error{OutOfMemory}!void {
+        const arrivals = self.arrivals.items;
+        if (arrivals.len == 0) return;
+        defer self.arrivals.items.len = 0;
+        std.mem.sortUnstable(Seen, arrivals, {}, struct {
+            fn less(_: void, a: Seen, b: Seen) bool {
+                return a.key < b.key;
+            }
+        }.less);
+        const old = self.seen.items.len;
+        try self.seen.ensure(self.gpa, old + arrivals.len);
+        for (arrivals) |arrival| self.unsent += @intFromBool(arrival.unsent);
+        self.seen.items.len = old + arrivals.len;
+        const seen = self.seen.items;
+        var from = old;
+        var next = arrivals.len;
+        var to = seen.len;
+        while (next != 0) {
+            to -= 1;
+            if (from != 0 and seen[from - 1].key > arrivals[next - 1].key) {
+                from -= 1;
+                seen[to] = seen[from];
+            } else {
+                next -= 1;
+                seen[to] = arrivals[next];
+            }
+        }
+    }
+
+    /// `ref`'s entry in `seen`, added empty if it has none.
+    fn record(self: *State, ref: Reference) error{OutOfMemory}!*Seen {
+        if (self.entryOf(ref)) |entry| return entry;
         const key = referenceKey(ref);
+        const at = self.seenAt(key);
+        try self.seen.ensure(self.gpa, self.seen.items.len + 1);
+        self.seen.insertAssumeCapacity(at, .{ .key = key });
+        return &self.seen.items[at];
+    }
+
+    /// `ref`'s entry in `seen`, if it has one.
+    fn entryOf(self: *State, ref: Reference) ?*Seen {
+        const key = referenceKey(ref);
+        const at = self.seenAt(key);
+        return if (at < self.seen.items.len and self.seen.items[at].key == key) &self.seen.items[at] else null;
+    }
+
+    fn seenAt(self: *const State, key: u64) usize {
         const seen = self.seen.items;
         var low: usize = 0;
         var high = seen.len;
@@ -731,12 +810,53 @@ pub const State = struct {
             const middle = low + (high - low) / 2;
             if (seen[middle].key < key) low = middle + 1 else high = middle;
         }
-        if (low < seen.len and seen[low].key == key) return attention.observe(&seen[low].attention, work);
-        var first: ?attention.Attention = null;
-        const kind = attention.observe(&first, work) orelse return null;
-        try self.seen.ensure(self.gpa, seen.len + 1);
-        self.seen.insertAssumeCapacity(low, .{ .key = key, .attention = first });
-        return kind;
+        return low;
+    }
+
+    /// Sets the program status record `entry`'s Session should have on the
+    /// terminal.
+    fn track(self: *State, entry: *Seen, status: ?attention.Status) void {
+        if (entry.status == status) return;
+        entry.status = status;
+        self.unsend(entry);
+    }
+
+    fn unsend(self: *State, entry: *Seen) void {
+        if (entry.unsent) return;
+        entry.unsent = true;
+        self.unsent += 1;
+    }
+
+    /// Some Session's program status record has changed since the shell
+    /// last sent it.
+    pub fn statusesWaiting(self: *const State) bool {
+        return self.unsent != 0;
+    }
+
+    /// The first record the shell has not sent, which borrows the state
+    /// until the next `step`.
+    pub fn waitingStatus(self: *const State) ?StatusRecord {
+        if (self.unsent == 0) return null;
+        for (self.seen.items) |*entry| if (entry.unsent) {
+            var reference: Reference = undefined;
+            std.mem.writeInt(u48, &reference, @intCast(entry.key), .big);
+            const row = self.find(reference);
+            return .{ .reference = reference, .name = if (row) |found| title(self, found).text else "", .status = entry.status };
+        };
+        unreachable;
+    }
+
+    /// The terminal holds `ref`'s record as it now stands.
+    pub fn statusSent(self: *State, ref: Reference) void {
+        const entry = self.entryOf(ref).?;
+        std.debug.assert(entry.unsent);
+        entry.unsent = false;
+        self.unsent -= 1;
+    }
+
+    /// The terminal dropped every record: each one held is unsent again.
+    pub fn resendStatuses(self: *State) void {
+        for (self.seen.items) |*entry| if (entry.status != null) self.unsend(entry);
     }
 
     /// Interns a Workspace: Sessions share few, and a row keeps an index.
@@ -797,7 +917,20 @@ pub const Summary = struct {
 
 const Run = struct { start: usize = 0, len: usize = 0 };
 const Keyed = struct { key: u64, index: u32 };
-const Seen = struct { key: u64, attention: ?attention.Attention };
+/// One Session's record: the latest news any read gave; what the last
+/// listing read; and the program status the terminal should show, from
+/// listings alone, which read in order. A Session no longer listed has no
+/// program status.
+const Seen = struct {
+    key: u64,
+    attention: ?attention.Attention = null,
+    listed: ?attention.Status = null,
+    status: ?attention.Status = null,
+    unsent: bool = false,
+};
+
+/// A program status record for the shell to send: `status`, or a clear.
+pub const StatusRecord = struct { reference: Reference, name: []const u8, status: ?attention.Status };
 const SortKey = struct { key: u128, index: u32 };
 
 /// A growable array of the state's allocator. Cores name no `std` list.
@@ -948,6 +1081,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             if (state.summary.finished_since + state.summary.failed_since != 0) countSinceLooked(state);
         },
     }
+    // Opening a Session shows the person its outcome.
+    for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.track(entry, attention.Status.opened(entry.status));
     return effects;
 }
 
@@ -1032,8 +1167,10 @@ const Newsworthy = struct { reference: Reference, kind: attention.Kind, more: us
 fn newsworthy(state: *State) error{OutOfMemory}!?Newsworthy {
     const opening = state.token == null;
     var found: ?Newsworthy = null;
+    // Left by a listing that failed to settle them.
+    state.arrivals.items.len = 0;
     for (state.pending.items) |*incoming| {
-        const kind = try state.observe(incoming.reference, incoming.work()) orelse continue;
+        const kind = try state.readListed(incoming.reference, incoming.work(), opening) orelse continue;
         if (opening) continue;
         if (found) |*held| {
             held.more += 1;
@@ -1043,6 +1180,7 @@ fn newsworthy(state: *State) error{OutOfMemory}!?Newsworthy {
             }
         } else found = .{ .reference = incoming.reference, .kind = kind, .more = 0 };
     }
+    try state.settleArrivals();
     return found;
 }
 
@@ -1070,7 +1208,14 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         .full => {
             std.mem.swap(Vec(Row), &state.rows, &state.pending);
             try reindex(state);
-            for (state.pending.items) |*old| if (lookup(state.by_reference.items, old.reference)) |at| carry(&state.rows.items[at], old);
+            for (state.pending.items) |*old| {
+                if (lookup(state.by_reference.items, old.reference)) |at| {
+                    carry(&state.rows.items[at], old);
+                } else if (state.entryOf(old.reference)) |entry| {
+                    state.track(entry, null);
+                    entry.listed = null;
+                }
+            }
         },
     }
     state.pending.items.len = 0;
@@ -1226,6 +1371,8 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     };
     try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
     row.line = .{ .read = @intCast(state.lines.items.len - 1) };
+    // The line may name the Session now, so its record says so.
+    if (row.label == null) if (state.entryOf(row.reference)) |entry| if (entry.status != null) state.unsend(entry);
 }
 
 /// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
@@ -3687,6 +3834,71 @@ test "a listing notifies once of each Session that newly finished, failed or nee
     // The next Action to wait, once the first is decided, is a new wait.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(8), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 1 })}));
     try expectEffects(&.{.{ .notify = .{ .name = "Find why store tests fail", .kind = .approval, .more = 0 } }}, try refresh(&state, .changed, testToken(9), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Find why store tests fail", .first_action = 2 })}));
+}
+
+/// Takes every program status record waiting for the shell, as sent.
+fn sentRecords(state: *State, into: []StatusRecord) []StatusRecord {
+    var count: usize = 0;
+    while (state.waitingStatus()) |record| : (count += 1) {
+        into[count] = record;
+        state.statusSent(record.reference);
+    }
+    return into[0..count];
+}
+
+fn expectRecords(expected: []const StatusRecord, actual: []const StatusRecord) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |want, got| {
+        try std.testing.expectEqualStrings(&want.reference, &got.reference);
+        try std.testing.expectEqualStrings(want.name, got.name);
+        try std.testing.expectEqual(want.status, got.status);
+    }
+}
+
+test "listings give each Session one program status record that follows its changes, and clear it once unlisted" {
+    const listed = [_]Listed{
+        session("m2j7fs", .{ .finished = ago(0) }, .{ .label = "Old finish", .turn = 1 }),
+        session("b4n8wd", .{ .working = ago(0) }, .{ .label = "Busy", .turn = 1 }),
+        session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Waits", .turn = 1, .first_action = 3 }),
+        session("p3c6tz", .{ .idle = ago(0) }, .{ .label = "Resting" }),
+    };
+    var state = try opened(&listed);
+    defer state.deinit();
+    var records: [8]StatusRecord = undefined;
+    // What the overview opened on: work under way and waiting, in key order.
+    try expectRecords(&.{
+        .{ .reference = "a1b2c3".*, .name = "Waits", .status = .blocked },
+        .{ .reference = "b4n8wd".*, .name = "Busy", .status = .working },
+    }, sentRecords(&state, &records));
+    // Unchanged, nothing waits, not even the old finish.
+    _ = try refresh(&state, .full, testToken(2), &listed);
+    try std.testing.expect(!state.statusesWaiting());
+    // b4n8wd finishes, a new Session fails, and a1b2c3 is listed no more.
+    _ = try refresh(&state, .full, testToken(3), &.{
+        listed[0],
+        session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 1 }),
+        listed[3],
+        session("z9y8x7", .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } }, .{ .label = "New", .turn = 1 }),
+    });
+    try expectRecords(&.{
+        .{ .reference = "a1b2c3".*, .name = "", .status = null },
+        .{ .reference = "b4n8wd".*, .name = "Busy", .status = .done },
+        .{ .reference = "z9y8x7".*, .name = "New", .status = .failed },
+    }, sentRecords(&state, &records));
+    // Opening b4n8wd sees its finish; listing it again keeps that.
+    _ = try step(&state, .{ .open = "b4n8wd".* });
+    try expectRecords(&.{.{ .reference = "b4n8wd".*, .name = "Busy", .status = .idle }}, sentRecords(&state, &records));
+    _ = try refresh(&state, .changed, testToken(4), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 1 })});
+    try std.testing.expect(!state.statusesWaiting());
+    // Its next Turn's finish is a record again; after the terminal dropped
+    // every record, each held one waits again.
+    _ = try refresh(&state, .changed, testToken(5), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 2 })});
+    try expectRecords(&.{.{ .reference = "b4n8wd".*, .name = "Busy", .status = .done }}, sentRecords(&state, &records));
+    state.resendStatuses();
+    try expectRecords(&.{
+        .{ .reference = "b4n8wd".*, .name = "Busy", .status = .done },
+        .{ .reference = "z9y8x7".*, .name = "New", .status = .failed },
+    }, sentRecords(&state, &records));
 }
 
 test "the listing and the open conversation read one record, so each news comes once, whichever reads it first" {

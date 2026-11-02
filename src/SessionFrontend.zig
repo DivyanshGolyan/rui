@@ -1193,6 +1193,9 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
             .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
             .focus => |focused| self.terminal.focused = focused,
+            // The overview sends the records once a listing steps it.
+            .program_status => _ = self.terminal.answered(.program_status),
+            .device_attributes => _ = self.terminal.answered(.device_attributes),
         },
         else => {
             self.notice = null;

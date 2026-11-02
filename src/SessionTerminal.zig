@@ -33,6 +33,16 @@ notices: ?Notices = null,
 /// waits joins it, so a frame's notification counts every Session's news.
 notification: ?attention.Notice = null,
 notification_bytes: [attention.max_bytes]u8 = undefined,
+/// Whether the terminal takes program status reports (OSC 7501), which
+/// replace notifications where it does: asked at entry, outside a
+/// multiplexer, with a device attributes request behind the probe.
+program_status: ProgramStatus = .unsupported,
+/// Program status reports the next frame writes first, as it writes a
+/// notification.
+status_bytes: [4096]u8 = undefined,
+status_len: usize = 0,
+/// Rui set records on the terminal since it last cleared them.
+statuses_set: bool = false,
 /// `wanted` once the terminal reported mode 1007 reset, `on` once Rui
 /// enabled it: never inside an open clipboard sequence.
 alternate_scroll: enum { off, wanted, on } = .off,
@@ -45,7 +55,24 @@ clipboard_sequence: enum { closed, sending, abandoned } = .closed,
 writing: bool = false,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
-pub fn begin(screen: *Screen) !Self {
+pub const ProgramStatus = enum {
+    /// The probe is out and nothing has answered it.
+    asking,
+    /// The probe was answered; the device attributes answer behind it is
+    /// still to come.
+    answered,
+    supported,
+    unsupported,
+};
+
+/// The probe and the device attributes request every terminal answers:
+/// an answer to the request with none to the probe before it means no
+/// program status.
+const status_probe = "\x1b]7501;?\x1b\\\x1b[c";
+
+/// `probe` asks whether the terminal takes program status reports; a
+/// multiplexer would answer for itself, so inside one Rui does not ask.
+pub fn begin(screen: *Screen, probe: bool) !Self {
     const original = try Editor.getAttributes();
     var mode = original;
     mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
@@ -69,10 +96,13 @@ pub fn begin(screen: *Screen) !Self {
     if (std.c.fcntl(output, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
     try Editor.setAttributes(.FLUSH, mode);
     var self: Self = .{ .original = original, .flags = flags, .output = output, .screen = screen };
-    // Query width and alternate-scroll modes without changing them, and ask
-    // for focus reports. Opening never waits for a reply; terminals ignore
+    // Query width and alternate-scroll modes without changing them, ask for
+    // focus reports, and probe for program status. Opening never waits for a
+    // reply; terminals ignore
     // what they do not support.
-    const enter = "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?2027$p\x1b[?1007$p";
+    const modes = "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?2027$p\x1b[?1007$p";
+    const enter = if (probe) modes ++ status_probe else modes;
+    if (probe) self.program_status = .asking;
     if (std.c.write(output, enter.ptr, enter.len) != @as(isize, @intCast(enter.len))) {
         owned = false;
         try self.finish();
@@ -96,6 +126,9 @@ pub fn finish(self: *Self) !void {
     self.release_deadline_ms = monotonicMs() + release_wait_ms;
     const ops: NativeOutput = .{ .fd = self.output };
     const abandoned = self.clipboard_sequence == .closed or writeWithin(ops, "\x18", self.release_deadline_ms);
+    // A terminal that keeps records past exit would show Sessions no Rui
+    // watches; one it fails to take stays until the terminal drops it.
+    if (self.statuses_set) _ = writeWithin(ops, attention.clear_statuses, self.release_deadline_ms);
     // The UI owns emitted style, even if a renderer's next window was cancelled.
     // Attempt controls independently within one shared wait.
     const synchronized = writeWithin(ops, "\x1b[?2026l", self.release_deadline_ms);
@@ -541,6 +574,8 @@ test "a clipboard copy interrupted while the terminal is full ends with CAN befo
 
 pub const Notices = struct {
     signal: attention.Signal,
+    /// Inside tmux or screen, which answer a probe for themselves.
+    multiplexed: bool = false,
     /// Where the preference that turns notifications off lives. It is read
     /// at each notification, so /setup's change applies at once.
     home: []const u8,
@@ -550,21 +585,69 @@ pub const Notices = struct {
     /// From the environment the terminal runs in.
     pub fn of(environ: *const std.process.Environ.Map, home: []const u8) Notices {
         const tmux = environ.get("TMUX") != null;
-        const multiplexed = tmux or environ.get("STY") != null;
-        return .{ .signal = attention.signal(environ.get("TERM") orelse "", environ.get("TERM_PROGRAM") orelse "", multiplexed), .home = home, .tmux = tmux };
+        const inside = tmux or environ.get("STY") != null;
+        const term = environ.get("TERM") orelse "";
+        return .{
+            .signal = attention.signal(term, environ.get("TERM_PROGRAM") orelse "", inside),
+            .multiplexed = attention.multiplexed(term, inside),
+            .home = home,
+            .tmux = tmux,
+        };
     }
 };
 
 /// Holds, for the next frame, a notification of `name`'s news and `more`
 /// other Sessions' while the terminal is out of focus and notifications are
-/// on. Unreadable preferences leave notifications on, the default.
+/// on. A terminal that takes program status shows the news from its records
+/// instead, so nothing comes twice.
 pub fn notify(self: *Self, name: []const u8, kind: attention.Kind, more: usize) void {
-    if (self.focused) return;
-    const notices = self.notices orelse return;
-    const saved = preferences.load(notices.home) catch preferences.Values{};
-    if (!saved.notifications) return;
+    if (self.focused or self.program_status == .supported) return;
+    if (!self.notificationsOn()) return;
     const notice: attention.Notice = .of(name, kind, more);
     if (self.notification) |*held| held.join(notice) else self.notification = notice;
+}
+
+/// Whether the person has notifications on. It is read each time, so
+/// /setup's change applies at once; unreadable preferences leave them on,
+/// the default.
+pub fn notificationsOn(self: *const Self) bool {
+    const notices = self.notices orelse return false;
+    const saved = preferences.load(notices.home) catch preferences.Values{};
+    return saved.notifications;
+}
+
+/// The terminal answered the probe or the device attributes request behind
+/// it. False for an answer that is not the probe's, as one to a later
+/// device attributes request.
+pub fn answered(self: *Self, report: enum { program_status, device_attributes }) bool {
+    self.program_status = switch (self.program_status) {
+        .asking => if (report == .program_status) .answered else .unsupported,
+        .answered => if (report == .program_status) return true else .supported,
+        .supported, .unsupported => return false,
+    };
+    return true;
+}
+
+/// Holds, for the next frame, a program status report of `session`'s
+/// record: `status`, or a clear when null. False when the frame holds no
+/// more; the caller offers it again after that frame.
+pub fn reportStatus(self: *Self, session: []const u8, name: []const u8, status: ?attention.Status) bool {
+    std.debug.assert(self.program_status == .supported);
+    var out = std.Io.Writer.fixed(self.status_bytes[self.status_len..]);
+    attention.writeStatus(&out, session, name, status) catch return false;
+    self.status_len += out.buffered().len;
+    self.statuses_set = true;
+    return true;
+}
+
+/// Holds, for the next frame, a clear of every record Rui set, in place of
+/// any report still waiting. False when none was set.
+pub fn clearStatuses(self: *Self) bool {
+    if (!self.statuses_set) return false;
+    @memcpy(self.status_bytes[0..attention.clear_statuses.len], attention.clear_statuses);
+    self.status_len = attention.clear_statuses.len;
+    self.statuses_set = false;
+    return true;
 }
 
 /// The waiting notification, which the caller writes as the first bytes of
@@ -575,9 +658,20 @@ pub fn takeNotification(self: *Self) []const u8 {
     const notice = self.notification orelse return "";
     self.notification = null;
     const notices = self.notices orelse return "";
+    // Held before the probe was answered.
+    if (self.program_status == .supported) return "";
     var out = std.Io.Writer.fixed(&self.notification_bytes);
     attention.write(&out, notices.signal, notice.name.slice(), notice.kind, notice.more) catch unreachable;
     return out.buffered();
+}
+
+/// Writes, as a frame's first bytes, the waiting program status reports and
+/// notification, and lets them go: a frame that fails drops them.
+pub fn writeWaiting(self: *Self, out: *std.Io.Writer) std.Io.Writer.Error!void {
+    const statuses = self.status_bytes[0..self.status_len];
+    self.status_len = 0;
+    try out.writeAll(statuses);
+    try out.writeAll(self.takeNotification());
 }
 
 pub fn notificationWaiting(self: *const Self) bool {
@@ -617,10 +711,8 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, footer: Screen.Foot
         }
     };
     var buffer: [4096]u8 = undefined;
-    comptime std.debug.assert(attention.max_bytes <= buffer.len);
     var output: Output = .{ .terminal = self, .writer = .{ .vtable = &.{ .drain = Output.drain }, .buffer = &buffer } };
-    // The empty buffer holds it whole; the frame's flush writes it first.
-    output.writer.writeAll(self.takeNotification()) catch unreachable;
+    self.writeWaiting(&output.writer) catch |err| return output.failure orelse err;
     const size = self.geometry();
     const delivered = self.screen.render(&output.writer, size, bytes, cursor, footer, live) catch |err| return output.failure orelse err;
     self.size = size;
@@ -658,4 +750,67 @@ test "a notification waits for the next frame, only while focus is away and the 
     terminal.notify("k7m2qx", .failed, 0);
     terminal.notify("b4n8wd", .failed, 0);
     try std.testing.expectEqualStrings("\x1b]9;Rui: k7m2qx failed, and 1 more\x07", terminal.takeNotification());
+    // A terminal that takes program status shows news from its records, so
+    // no notification goes, not even one held before its answer.
+    terminal.notify("k7m2qx", .failed, 0);
+    terminal.program_status = .supported;
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
+    terminal.notify("k7m2qx", .failed, 0);
+    try std.testing.expectEqualStrings("", terminal.takeNotification());
+}
+
+test "leaving clears the program status records Rui set, and only then" {
+    for ([_]bool{ false, true }) |reported| {
+        var pipe: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&pipe) != 0) return error.TestUnexpectedResult;
+        defer _ = std.c.close(pipe[0]);
+        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+        try std.testing.expect(std.c.fcntl(pipe[1], std.c.F.SETFL, nonblock) == 0);
+        const input = std.c.fcntl(0, std.c.F.GETFL);
+        var terminal: Self = .{ .original = Editor.getAttributes() catch undefined, .flags = .{ input, nonblock }, .screen = undefined, .output = pipe[1] };
+        terminal.program_status = .supported;
+        if (reported) {
+            try std.testing.expect(terminal.reportStatus("k7m2qx", "Fix the build", .done));
+            var frame: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&frame);
+            try terminal.writeWaiting(&out);
+            try std.testing.expectEqualStrings("\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBidWlsZA==\x1b\\", out.buffered());
+        }
+        terminal.finish() catch {};
+        var shown: [1024]u8 = undefined;
+        const left = shown[0..@intCast(@max(std.c.read(pipe[0], &shown, shown.len), 0))];
+        if (reported)
+            try std.testing.expect(std.mem.startsWith(u8, left, "\x1b]7501;state=clear:id=rui\x1b\\\x1b[?2026l"))
+        else
+            try std.testing.expect(std.mem.startsWith(u8, left, "\x1b[?2026l"));
+    }
+}
+
+test "only the probe's own answers decide program status, and a multiplexer is never probed" {
+    var terminal: Self = .{ .original = undefined, .flags = undefined, .output = -1, .screen = undefined };
+    // A terminal that never answers, or answers a later request: unsupported.
+    try std.testing.expect(!terminal.answered(.device_attributes));
+    try std.testing.expect(!terminal.answered(.program_status));
+    try std.testing.expectEqual(ProgramStatus.unsupported, terminal.program_status);
+    terminal.program_status = .asking;
+    try std.testing.expect(terminal.answered(.program_status));
+    try std.testing.expect(terminal.answered(.device_attributes));
+    try std.testing.expectEqual(ProgramStatus.supported, terminal.program_status);
+    try std.testing.expect(!terminal.answered(.device_attributes));
+    terminal.program_status = .asking;
+    try std.testing.expect(terminal.answered(.device_attributes));
+    try std.testing.expect(!terminal.answered(.program_status));
+    try std.testing.expectEqual(ProgramStatus.unsupported, terminal.program_status);
+    for ([_]struct { name: []const u8, value: []const u8, multiplexed: bool }{
+        .{ .name = "TERM", .value = "xterm-ghostty", .multiplexed = false },
+        .{ .name = "TERM", .value = "tmux-256color", .multiplexed = true },
+        .{ .name = "TERM", .value = "screen", .multiplexed = true },
+        .{ .name = "TMUX", .value = "/tmp/tmux-0/default,1,0", .multiplexed = true },
+        .{ .name = "STY", .value = "1.pts-0.host", .multiplexed = true },
+    }) |case| {
+        var environ: std.process.Environ.Map = .init(std.testing.allocator);
+        defer environ.deinit();
+        try environ.put(case.name, case.value);
+        try std.testing.expectEqual(case.multiplexed, Notices.of(&environ, "/home").multiplexed);
+    }
 }

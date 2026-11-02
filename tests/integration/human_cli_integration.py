@@ -1420,6 +1420,7 @@ def notification_cases():
         "Focused finish": fixture.sse_answer("notify-2", "notify-reason-2", "notify-message-2", "Second done.")[0],
         "Muted finish": fixture.sse_answer("notify-3", "notify-reason-3", "notify-message-3", "Third done.")[0],
         "Other lane finish": fixture.sse_answer("notify-4", "notify-reason-4", "notify-message-4", "Fourth done.")[0],
+        "Status finish": fixture.sse_answer("notify-5", "notify-reason-5", "notify-message-5", "Fifth done.")[0],
         "Propose a notified Action": fixture.sse_tool_calls("notify-action", [
             ("bash", "notify-action-call", json.dumps({"cmd": "true", "description": "Do nothing", "timeout_ms": None}))]),
     })
@@ -1488,8 +1489,29 @@ def notification_cases():
         output, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
         assert b"\x1b[?1004l" in output, output[-256:]
+        # A terminal that answers the program status probe before the device
+        # attributes request behind it gets one record per Session in place
+        # of notifications, and leaving clears Rui's records.
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        raw_output(master, b"\x1b[?1004h\x1b[?2027$p\x1b[?1007$p\x1b]7501;?\x1b\\\x1b[c")
+        os.write(master, b"\x1b]7501;?\x1b\\\x1b[?62;22c")
+        def record(state, label, kind=b""):
+            return (b"\x1b]7501;state=" + state + b":id=rui/" + lanes[label].encode() + b":app=rui" + kind
+                + b":msg=" + base64.b64encode(label.encode()) + b"\x1b\\")
+        # Its Action still waits, so the Session it opens on is blocked.
+        raw = raw_output(master, record(b"blocked", "notify lane", b":kind=permission"))
+        os.write(master, b"\x1b[O")
+        admit(home, "session", "send", "--to", lanes["muted lane"], input="Status finish", cwd=workspace)
+        raw += raw_output(master, record(b"done", "muted lane"), timeout=20)
+        raw += quiet_output(master, 2)
+        assert b"\x1b]9;" not in raw, raw
+        assert raw.count(b"state=done") == 1, raw
+        os.write(master, b"\x03")
+        output, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
+        assert b"\x1b]7501;state=clear:id=rui\x1b\\" in output, output[-256:]
         completed = True
-        print("Notifications: overview finish once while away, none in focus or when off, conversation approval, another Session's finish under a conversation once, focus reporting restored", flush=True)
+        print("Notifications: overview finish once while away, none in focus or when off, conversation approval, another Session's finish under a conversation once, focus reporting restored; a terminal taking program status gets records instead, cleared on leaving", flush=True)
     finally:
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),

@@ -61,11 +61,17 @@ pub fn observe(seen: *?Attention, work: session_work.Work) ?Kind {
 /// bell, which most terminals and multiplexers turn into an urgency hint.
 pub const Signal = enum { osc9, osc777, bell };
 
+/// Rui runs inside tmux or screen: `inside` when the environment names one
+/// (`TMUX`, `STY`), or when `term` does.
+pub fn multiplexed(term: []const u8, inside: bool) bool {
+    return inside or std.mem.startsWith(u8, term, "tmux") or std.mem.startsWith(u8, term, "screen");
+}
+
 /// The signal for the terminal the environment names. tmux and screen drop
 /// an OSC they do not know unless passthrough is configured, but pass a bell
 /// on, so inside one Rui rings.
-pub fn signal(term: []const u8, program: []const u8, multiplexed: bool) Signal {
-    if (multiplexed or std.mem.startsWith(u8, term, "tmux") or std.mem.startsWith(u8, term, "screen")) return .bell;
+pub fn signal(term: []const u8, program: []const u8, inside: bool) Signal {
+    if (multiplexed(term, inside)) return .bell;
     for ([_][]const u8{ "iTerm.app", "WezTerm", "ghostty" }) |name| if (std.mem.eql(u8, program, name)) return .osc9;
     for ([_][]const u8{ "xterm-kitty", "xterm-ghostty", "wezterm" }) |name| if (std.mem.eql(u8, term, name)) return .osc9;
     if (std.mem.startsWith(u8, term, "foot")) return .osc777;
@@ -118,6 +124,109 @@ pub fn write(out: *std.Io.Writer, how: Signal, name: []const u8, kind: Kind, mor
     });
     if (more != 0) try out.print(", and {d} more", .{more});
     try out.writeByte(0x07);
+}
+
+/// What a Session is doing, as a terminal that takes program status reports
+/// (OSC 7501) shows it beside its other programs: one record per Session,
+/// which the terminal presents as it chooses, focused or not.
+pub const Status = enum {
+    idle,
+    working,
+    /// Finished, with a result the person has not opened since.
+    done,
+    /// An Action waits for the person's decision.
+    blocked,
+    failed,
+
+    /// A stop is the person's own doing, so the Session rests.
+    pub fn of(work: session_work.Work) Status {
+        return switch (work.state) {
+            .idle, .stopped => .idle,
+            .pending, .working, .retrying, .stopping => .working,
+            .bash => |bash| if (bash.approvals != 0) .blocked else .working,
+            .approval => .blocked,
+            .finished => .done,
+            .failed => .failed,
+        };
+    }
+
+    /// The record a Session has once a listing reads it `now`, from the
+    /// record it `held` and what the listing before read (`was`, null when
+    /// none listed it). A record follows each change; `fresh` news, a later
+    /// finish, failure or wait in the same status, is one. The listing the
+    /// overview opens on changes nothing: it gives a record only to work
+    /// under way or waiting. A Session at rest gets none until it does
+    /// something.
+    pub fn next(held: ?Status, was: ?Status, now: Status, opening: bool, fresh: bool) ?Status {
+        const changed = if (was) |before| before != now or fresh else !opening;
+        if (!changed) return if (was == null and (now == .working or now == .blocked)) now else held;
+        if (held == null and now == .idle) return null;
+        return now;
+    }
+
+    /// The record once the person opens the Session: an outcome is seen.
+    pub fn opened(held: ?Status) ?Status {
+        const status = held orelse return null;
+        return if (status == .done or status == .failed) .idle else status;
+    }
+};
+
+/// Rui's records are this id's children, so clearing it clears Rui's own
+/// and no other program's.
+const status_root = "rui";
+/// Bytes `writeStatus` may need: the fixed keys, the id, and the name with
+/// every byte replaced, in base64.
+pub const max_status_bytes = 64 + status_root.len + 1 + max_id_segment + std.base64.standard.Encoder.calcSize(max_name_bytes * 3);
+const max_id_segment = 32;
+
+/// Writes one complete OSC 7501 report of `session`'s record: `status`, or
+/// a clear when null. The id keeps to the protocol's characters, so a
+/// terminal never discards it, and the name travels in base64 without the
+/// control characters a terminal would discard it for.
+pub fn writeStatus(out: *std.Io.Writer, session: []const u8, name: []const u8, status: ?Status) !void {
+    try out.print("\x1b]7501;state={s}:id=" ++ status_root ++ "/", .{if (status) |known| switch (known) {
+        .failed => "error",
+        else => @tagName(known),
+    } else "clear"});
+    for (session[0..@min(session.len, max_id_segment)]) |byte| try out.writeByte(switch (byte) {
+        'A'...'Z', 'a'...'z', '0'...'9', '_', '.', '+', '-' => byte,
+        else => '_',
+    });
+    if (status) |known| {
+        try out.writeAll(":app=rui");
+        if (known == .blocked) try out.writeAll(":kind=permission");
+        var text: [max_name_bytes * 3]u8 = undefined;
+        const line = printable(&text, session_line.cut(max_name_bytes, name).slice());
+        if (line.len != 0) {
+            try out.writeAll(":msg=");
+            try std.base64.standard.Encoder.encodeWriter(out, line);
+        }
+    }
+    try out.writeAll("\x1b\\");
+}
+
+/// Clears every record Rui set.
+pub const clear_statuses = "\x1b]7501;state=clear:id=" ++ status_root ++ "\x1b\\";
+
+/// `bytes` as valid UTF-8 without control characters: an invalid byte
+/// becomes U+FFFD, a control character is left out.
+fn printable(buffer: []u8, bytes: []const u8) []const u8 {
+    var len: usize = 0;
+    var at: usize = 0;
+    while (at < bytes.len) {
+        var scalar: []const u8 = "\u{fffd}";
+        var step: usize = 1;
+        if (std.unicode.utf8ByteSequenceLength(bytes[at])) |needed| {
+            if (at + needed <= bytes.len) if (std.unicode.utf8Decode(bytes[at..][0..needed])) |code| {
+                step = needed;
+                scalar = if (code < 0x20 or (code >= 0x7f and code <= 0x9f)) "" else bytes[at..][0..needed];
+            } else |_| {};
+        } else |_| {}
+        at += step;
+        @memcpy(buffer[len..][0..scalar.len], scalar);
+        len += scalar.len;
+    }
+    return buffer[0..len];
 }
 
 const Work = session_work.Work;
@@ -240,4 +349,69 @@ test "a notification is one sequence a hostile name cannot end or extend" {
     const written = out.buffered();
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "\x07"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "\x1b"));
+}
+
+test "a Session's program status follows its work, and a record begins only with news" {
+    const working: Work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 };
+    const finished: Work = .{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 };
+    const failed: Work = .{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 };
+    const waiting: Work = .{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 };
+    const beside: Work = .{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 };
+    const stopped: Work = .{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 };
+    const idle: Work = .{ .state = .{ .idle = .{ .since = 1 } } };
+    // What the overview opens on: work under way or waiting has a record,
+    // an outcome or rest has none.
+    try std.testing.expectEqual(Status.working, Status.next(null, null, Status.of(working), true, false).?);
+    try std.testing.expectEqual(Status.blocked, Status.next(null, null, Status.of(waiting), true, true).?);
+    try std.testing.expectEqual(Status.blocked, Status.next(null, null, Status.of(beside), true, true).?);
+    for ([_]Work{ finished, failed, stopped, idle }) |work| try std.testing.expectEqual(@as(?Status, null), Status.next(null, null, Status.of(work), true, Status.of(work) != .idle));
+    // An outcome read again by a later listing is still no record.
+    try std.testing.expectEqual(@as(?Status, null), Status.next(null, .done, .done, false, false));
+    // A Session first listed later is news, unless it rests.
+    try std.testing.expectEqual(Status.done, Status.next(null, null, Status.of(finished), false, true).?);
+    try std.testing.expectEqual(Status.failed, Status.next(null, null, Status.of(failed), false, true).?);
+    try std.testing.expectEqual(@as(?Status, null), Status.next(null, null, Status.of(idle), false, false));
+    // A record follows every change, back to rest after a stop, and a later
+    // Turn's finish in the same status.
+    try std.testing.expectEqual(Status.done, Status.next(.working, .working, .done, false, true).?);
+    try std.testing.expectEqual(Status.idle, Status.next(.working, .working, Status.of(stopped), false, false).?);
+    try std.testing.expectEqual(Status.working, Status.next(null, .done, .working, false, false).?);
+    try std.testing.expectEqual(@as(?Status, null), Status.next(null, .done, .idle, false, false));
+    try std.testing.expectEqual(Status.idle, Status.next(.idle, .done, .done, false, false).?);
+    try std.testing.expectEqual(Status.done, Status.next(.idle, .done, .done, false, true).?);
+    // Opening the Session sees its outcome; work under way stays.
+    try std.testing.expectEqual(Status.idle, Status.opened(.done).?);
+    try std.testing.expectEqual(Status.idle, Status.opened(.failed).?);
+    try std.testing.expectEqual(Status.blocked, Status.opened(.blocked).?);
+    try std.testing.expectEqual(@as(?Status, null), Status.opened(null));
+}
+
+test "a program status report is one sequence the terminal accepts, whatever the name" {
+    var buffer: [max_status_bytes]u8 = undefined;
+    const cases = .{
+        // base64("Fix the build") and base64("k7m2qx").
+        .{ "k7m2qx", "Fix the build", Status.done, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBidWlsZA==\x1b\\" },
+        .{ "k7m2qx", "k7m2qx", Status.blocked, "\x1b]7501;state=blocked:id=rui/k7m2qx:app=rui:kind=permission:msg=azdtMnF4\x1b\\" },
+        .{ "k7m2qx", "", Status.failed, "\x1b]7501;state=error:id=rui/k7m2qx:app=rui\x1b\\" },
+        .{ "k7m2qx", "x", null, "\x1b]7501;state=clear:id=rui/k7m2qx\x1b\\" },
+        // A control character is left out, an invalid byte replaced, and an
+        // id byte outside the protocol's characters becomes `_`.
+        .{ "a/b c", "a\x1b\\b\x07\xffc", Status.working, "\x1b]7501;state=working:id=rui/a_b_c:app=rui:msg=YVxi77+9Yw==\x1b\\" },
+    };
+    inline for (cases) |case| {
+        var out = std.Io.Writer.fixed(&buffer);
+        try writeStatus(&out, case[0], case[1], case[2]);
+        try std.testing.expectEqualStrings(case[3], out.buffered());
+    }
+    // The longest name, every byte replaced, and the longest id still fit:
+    // one sequence of the protocol's characters, under its 4096 bytes.
+    const name: [256]u8 = @splat(0xff);
+    const session: [64]u8 = @splat('k');
+    var out = std.Io.Writer.fixed(&buffer);
+    try writeStatus(&out, &session, &name, .blocked);
+    const written = out.buffered();
+    try std.testing.expect(written.len <= 4096);
+    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=blocked:id=rui/" ++ session[0..32] ++ ":"));
+    try std.testing.expect(std.mem.endsWith(u8, written, "\x1b\\"));
+    for (written[1 .. written.len - 2]) |byte| try std.testing.expect(byte >= 0x20 and byte < 0x7f);
 }
