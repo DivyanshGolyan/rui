@@ -155,15 +155,12 @@ test "Store allocates six character IDs atomically retries collisions and replay
     try std.testing.expect(replay.replayed and replay.created);
     try std.testing.expectEqualStrings(b.session.slice(), replay.session.slice());
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
-    // The schema refuses a noncanonical reference even when a writer binds one.
-    var copy_buffer: [1024]u8 = undefined;
-    const copy = try std.fmt.bufPrintSentinel(&copy_buffer, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode," ++
-        "output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec," ++
-        "workspace_digest,created_at,created_seq,workspace_key) SELECT ?1,workspace,model,instructions_content_id,tools_mask,permission_mode," ++
-        "output_schema_content_id,1,1,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at," ++
-        "(SELECT max(created_seq)+1 FROM session),workspace_key FROM session WHERE session_ref='{s}'", .{a.session.slice()}, 0);
-    for ([_][]const u8{ "short", "1234567", "K7m2qx", "k7m2qi", "k7m\x00qx" }) |invalid| {
-        try std.testing.expectError(error.StatementFailed, execSessionSql(storage.database, copy, invalid));
+    // The schema refuses a noncanonical reference that the production
+    // insert binds; "short" and "1234567" are not a SessionHead's 6 bytes.
+    const current = (try store_core.readSessionForTesting(&storage, a.session.slice())).?;
+    try insertSessionForTesting(&storage, &current, "k7m2qz");
+    for ([_]*const [protocol.session_id_bytes]u8{ "K7m2qx", "k7m2qi", "k7m\x00qx" }) |invalid| {
+        try std.testing.expectError(error.StatementFailed, insertSessionForTesting(&storage, &current, invalid));
     }
     var unknown = try completeConfiguration("unknown-update", "k7m2qx", workspace, "model-c");
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, storage.configure(&unknown, .{}).rejected.code);
@@ -342,6 +339,21 @@ fn querySessionU64(database: *c.sqlite3, sql: [:0]const u8, session: []const u8)
     const value = c.sqlite3_column_int64(statement, 0);
     if (value < 0) return error.CorruptStore;
     return @intCast(value);
+}
+
+/// Runs the production INSERT of a created Session under `ref`, then rolls
+/// it back, so a test sees what the schema accepts without keeping it.
+fn insertSessionForTesting(storage: *Store, current: *const configuration_domain.CurrentConfiguration, ref: *const [protocol.session_id_bytes]u8) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{}) = .open(&entry);
+    defer a.deinit();
+    const head: rsql.SessionHead = .{ .ref = ref.*, .workspace_key = .of(current.workspace_key), .next_position = .of(1) };
+    const digest = store_core.workspaceDigest(current.workspace.slice());
+    configuration_domain.insertSession(&a, head, current, &digest, 1_000_000);
+    const ran = a.run();
+    try a.abandon(.{});
+    return ran;
 }
 
 fn execSessionSql(database: *c.sqlite3, sql: [:0]const u8, session: []const u8) !void {
@@ -1038,7 +1050,7 @@ const TestingStatementFault = struct {
     }
 };
 
-test "a failed Workspace-key read fails and fences the entry point that touched its Session" {
+test "a statement that fails after an entry point touched its Session fails and fences it" {
     const Route = enum { configure, message };
     for (std.enums.values(Route)) |route| {
         var tmp = std.testing.tmpDir(.{});
@@ -1047,9 +1059,11 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
-        // A configure reads the key with the Session's saved configuration.
+        // A configure reads the Workspace key in its first round, before it
+        // touches anything, so its arm faults the UPDATE that follows the
+        // touch. A message reads the key after the touch, as on main.
         var fault: TestingStatementFault = .{ .sql = switch (route) {
-            .configure => configuration_domain.saved_session_sql,
+            .configure => configuration_domain.update_session_sql,
             .message => store_core.session_workspace_key_sql,
         } };
         switch (route) {
@@ -1226,6 +1240,33 @@ test "a content sink opens only the row its Access last took, once its insert ra
     try sink.write("sink", 0);
     sink.close();
     try a.abandon(.{});
+}
+
+test "abandoning an Access that has ended runs nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    for ([_]bool{ false, true }) |committed| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.write, error{}) = .open(&entry);
+        defer a.deinit();
+        const id = try a.identity(.content_id);
+        const digest = protocol.contentDigest("ended");
+        a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 5 });
+        if (committed) try a.commit() else {
+            try a.run();
+            try a.abandon(.{});
+        }
+        var statements: TestingStatements = .{};
+        statements.begin(storage.database);
+        try a.abandon(.{});
+        statements.end(storage.database);
+        try std.testing.expectEqual(@as(u64, 0), statements.count);
+    }
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "the tables that carry Sessions are exactly the ones the touch oracle watches" {
@@ -7106,7 +7147,7 @@ test "initial Message atomically allocates its Session and replays its original 
         const replay = storage.submitMessageWithModel(&message, null, .{}).accepted;
         try std.testing.expect(replay.replayed);
         try std.testing.expectEqual(first.admission_id, replay.admission_id);
-        try std.testing.expectEqualDeep(first.session, replay.session);
+        try std.testing.expectEqualStrings(first.session.slice(), replay.session.slice());
         try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM message_admission"));
         var failed = message;
         try failed.key.set("failed-start-commit");

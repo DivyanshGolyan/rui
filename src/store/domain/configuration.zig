@@ -341,9 +341,6 @@ const saved_session = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The statement whose round reads the Session's Workspace key.
-pub const saved_session_sql = saved_session.sql;
-
 /// Where a new Session would go: the key of another Session's same
 /// Workspace, when there is one, and whether its new reference is taken.
 const creation_facts = rsql.Read(.{
@@ -382,6 +379,30 @@ const insert_session = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
+/// Queues inserting the created Session `head` with the settings `next`.
+/// `configure` calls it, and a test drives it with references the schema
+/// refuses.
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64) void {
+    a.write(insert_session, .{
+        .session = head,
+        .workspace = next.workspace.slice(),
+        .model = next.model.slice(),
+        .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
+        .tools_mask = next.tools_mask,
+        .permission_mode = next.permission_mode,
+        .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
+        .provider = next.provider,
+        .compaction_trigger = next.compaction_trigger,
+        .output_reservation = next.output_reservation,
+        .reasoning_effort = next.reasoning_effort,
+        .label = if (next.label) |*label| label.slice() else null,
+        .codec = @tagName(next.provider.codec()),
+        .digest = workspace_digest,
+        .created_seq = created_seq,
+        .workspace_key = head.workspace_key.get(),
+    });
+}
+
 const update_session = rsql.Write(.{
     .sql = "UPDATE session SET model=?2,instructions_content_id=?3,tools_mask=?4,permission_mode=?5,output_schema_content_id=?6,revision=?7,provider=?8," ++
         "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12 WHERE session_ref=@session(?1)",
@@ -402,6 +423,10 @@ const update_session = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
 });
 
+/// The UPDATE a configure of an existing Session runs once it has touched
+/// that Session, which a test faults.
+pub const update_session_sql = update_session.sql;
+
 /// The one writer of session_revision: it copies the Session row as
 /// written under `command_key`, which an earlier write of the round saved.
 const insert_revision = rsql.Write(.{
@@ -415,7 +440,9 @@ const insert_revision = rsql.Write(.{
 
 /// Queues reading `session_ref`'s saved configuration into `current` in
 /// place; `found` says whether it exists. A missing one leaves `current`
-/// as the caller declared it: `.{}`, the defaults a creation starts from.
+/// as the caller declared it, which `configure` declares with
+/// `CurrentConfiguration`'s field defaults: the settings a creation
+/// starts from.
 /// `checkSaved` follows the round.
 pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfiguration, found: *bool) void {
     a.readInto(saved_session, .{ .session = session_ref }, current, found);
@@ -578,24 +605,7 @@ pub fn applyConfiguration(
             .workspace_key = if (reads.creation.workspace_key) |key| key else .of(created_seq),
             .next_position = .of(1),
         };
-        a.write(insert_session, .{
-            .session = head,
-            .workspace = next.workspace.slice(),
-            .model = next.model.slice(),
-            .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
-            .tools_mask = next.tools_mask,
-            .permission_mode = next.permission_mode,
-            .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
-            .provider = next.provider,
-            .compaction_trigger = next.compaction_trigger,
-            .output_reservation = next.output_reservation,
-            .reasoning_effort = next.reasoning_effort,
-            .label = if (next.label) |*label| label.slice() else null,
-            .codec = @tagName(next.provider.codec()),
-            .digest = &reads.workspace_digest,
-            .created_seq = created_seq,
-            .workspace_key = head.workspace_key.get(),
-        });
+        insertSession(a, head, next, &reads.workspace_digest, created_seq);
         try target.set(&reads.reference);
     } else {
         head = .{ .ref = session[0..protocol.session_id_bytes].*, .workspace_key = .of(next.workspace_key), .next_position = .of(next.next_position) };

@@ -877,19 +877,14 @@ fn kindCode(kind: protocol.CommandKind) u8 {
 /// The answer a `lookupCommand` round found, or null.
 fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?ExistingCommand {
     const row = if (saved.*) |*row| row else return null;
-    // Copied by length, as an answer's value is compared whole.
-    var target: protocol.Bounded(protocol.max_session_bytes) = .{};
-    target.set(row.target.slice()) catch unreachable;
-    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-    code.set(row.code.slice()) catch unreachable;
     return .{
         .kind = for (std.enums.values(protocol.CommandKind)) |candidate| {
             if (kindCode(candidate) == row.kind) break candidate;
         } else return error.CorruptStore,
-        .target = target,
+        .target = row.target,
         .digest = row.input_digest,
         .accepted = row.accepted,
-        .code = code,
+        .code = row.code,
         .revision = row.revision,
         .created = row.created,
         .primary_content_id = if (row.primary_content_id) |id| @intCast(id.get()) else null,

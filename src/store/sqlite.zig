@@ -44,12 +44,6 @@ pub fn pragmaInt(database: *c.sqlite3, sql: [:0]const u8) !u32 {
     return @intCast(value);
 }
 
-/// SQLite binds the text without copying it, so it borrows the caller's
-/// Label, never a by-value copy that ends with this call.
-pub fn bindOptionalLabel(statement: *c.sqlite3_stmt, index: c_int, label: *const ?protocol.Bounded(protocol.max_label_bytes)) !void {
-    if (label.*) |*value| try bindText(statement, index, value.slice()) else try bindNullableI64(statement, index, null);
-}
-
 pub fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bounded(protocol.max_label_bytes) {
     if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
     var label: protocol.Bounded(protocol.max_label_bytes) = .{};

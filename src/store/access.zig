@@ -188,7 +188,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// a Row over 1 KiB is never copied, and a Row's pointer fields
         /// (`rsql.fillsInPlace`) fill what they point to; `found` says
         /// whether there was one. A missing row leaves `row` as it was.
-        /// Both are defined once the round runs.
+        /// Both are defined once the round runs. Two reads need it:
+        /// `saved_session`, whose 4.6 KB Row `configure` fills in the
+        /// caller's Session, and `bash_input`, whose Row points into the
+        /// caller's `BashExecutionInput`, so neither is copied.
         pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *bool) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
             a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, null);
@@ -287,7 +290,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// with nothing queued: so its row is the one this Access inserted
         /// and a round has run, or none. Any other id is
         /// `ContentNotInserted`. It writes into the open transaction, so
-        /// the bytes commit with the row.
+        /// the bytes commit with the row. `importSealed` needs it: it
+        /// streams a sealed file into the payload while hashing it, so the
+        /// file is never held in memory whole.
         pub fn contentSink(a: *Self, content_id: u64) Error!ContentSink {
             comptime std.debug.assert(mode != .read and mode != .single);
             if (a.failure) |err| return err;
@@ -327,9 +332,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Ends a write Access without committing: drops what it queued
         /// and rolls back the transaction it opened, as the Entry would,
         /// `faults` included. A transition that finds no work calls it,
-        /// and `end` calls it on every error.
+        /// and `end` calls it on every error. Once the Access has ended,
+        /// committed or abandoned, it does nothing, so a replay that
+        /// abandoned and then failed is not rolled back twice.
         pub fn abandon(a: *Self, faults: store_core.Faults) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
+            if (a.ended) return;
             a.resetQueued();
             a.claimed = 0;
             a.ended = true;
@@ -444,7 +452,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                                 destination.* = null;
                                 return;
                             }
-                            // At most 1 KiB (`rsql.Read`), so the copy is small.
+                            // At most 1 KiB, holding no pointer (`Access.read`), so the copy is small.
                             var row: S.Row = undefined;
                             try sqlite.decodeRow(S.Row, statement, &row);
                             destination.* = row;
