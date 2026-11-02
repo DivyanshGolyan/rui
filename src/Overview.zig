@@ -12,7 +12,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
-const preferences = @import("preferences.zig");
 const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");

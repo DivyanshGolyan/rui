@@ -15,6 +15,7 @@ Enter these at the `›` prompt.
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
+| `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
 ## Approve Bash commands
@@ -47,7 +48,7 @@ Rui calls a saved conversation a **Session**. Bare `rui` opens the overview of e
 | --- | --- |
 | Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. While a start waits for its answer, all four select. |
 | Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds. |
-| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. On a blank composer, opens the selected Session. |
+| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. `/model` lists the models your sign-ins offer, your default first; ↑ and ↓ move, and Enter picks one as the default for new Sessions. When both ChatGPT and an API key offer it, Enter shows a Use ChatGPT / API key choice, where ← and → move and Enter picks. Esc steps back. On a blank composer, opens the selected Session. |
 | Esc, Ctrl-G | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. A start already sent keeps its own text and settings. In a conversation's latest view, returns to the overview. |
 | Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |
 | Ctrl-D | Leaves, when the composer is empty or a start waits for its answer. |
