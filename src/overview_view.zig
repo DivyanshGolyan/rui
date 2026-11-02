@@ -609,10 +609,14 @@ pub const State = struct {
     /// What wanted the person when a read, by the listing or the open
     /// conversation, last showed it, by Session reference key: one record
     /// both read against, so neither gives news the other gave. Beside it,
-    /// the program status record the terminal should show.
+    /// the program status record the terminal should show and the one it
+    /// holds.
     seen: Vec(Seen) = .{},
-    /// Entries of `seen` whose program status record the shell has not sent.
-    unsent: usize = 0,
+    /// Entries of `seen` whose record the terminal does not hold as wanted.
+    unsettled: usize = 0,
+    /// Counts changes to any wanted record, so the shell knows reports it
+    /// built still stand.
+    status_changes: u64 = 0,
     /// Sessions the listing in progress brings to `seen`.
     arrivals: Vec(Seen) = .{},
     /// A list request is in flight.
@@ -751,14 +755,16 @@ pub const State = struct {
     fn readListed(self: *State, ref: Reference, work: session_work.Work, opening: bool) error{OutOfMemory}!?attention.Kind {
         if (self.entryOf(ref)) |entry| {
             const now: attention.Reading = .of(work, entry.acknowledged);
-            self.track(entry, attention.Status.next(entry.status, entry.listed, now, opening));
+            const status = attention.Status.next(entry.status, entry.listed, now, opening);
+            // A later finish or wait in the same status is a record again.
+            const later = status == entry.status and if (entry.listed) |was| now.after(was) else false;
+            self.want(entry, status, later);
             entry.listed = now;
             return attention.observe(&entry.attention, work);
         }
         const now: attention.Reading = .of(work, null);
         var arrival: Seen = .{ .key = referenceKey(ref), .listed = now, .status = attention.Status.next(null, null, now, opening) };
         const kind = attention.observe(&arrival.attention, work);
-        arrival.unsent = arrival.status != null;
         try self.arrivals.append(self.gpa, arrival);
         return kind;
     }
@@ -775,7 +781,8 @@ pub const State = struct {
         }.less);
         const old = self.seen.items.len;
         try self.seen.ensure(self.gpa, old + arrivals.len);
-        for (arrivals) |arrival| self.unsent += @intFromBool(arrival.unsent);
+        for (arrivals) |arrival| self.unsettled += @intFromBool(!arrival.settled());
+        self.status_changes +%= 1;
         self.seen.items.len = old + arrivals.len;
         const seen = self.seen.items;
         var from = old;
@@ -822,49 +829,79 @@ pub const State = struct {
     }
 
     /// Sets the program status record `entry`'s Session should have on the
-    /// terminal.
-    fn track(self: *State, entry: *Seen, status: ?attention.Status) void {
-        if (entry.status == status) return;
+    /// terminal: `status`, a new record when `again` even in the same one.
+    fn want(self: *State, entry: *Seen, status: ?attention.Status, again: bool) void {
+        if (entry.status == status and !again) return;
+        const was = entry.settled();
         entry.status = status;
-        self.unsend(entry);
+        entry.version +%= 1;
+        self.status_changes +%= 1;
+        // A new version matches no report the terminal took.
+        const now = status == null and entry.delivered == .none;
+        if (was and !now) self.unsettled += 1;
+        if (!was and now) self.unsettled -= 1;
     }
 
-    fn unsend(self: *State, entry: *Seen) void {
-        if (entry.unsent) return;
-        entry.unsent = true;
-        self.unsent += 1;
+    /// Every Session's record is on the terminal as wanted.
+    pub fn statusesSettled(self: *const State) bool {
+        return self.unsettled == 0;
     }
 
-    /// Some Session's program status record has changed since the shell
-    /// last sent it.
-    pub fn statusesWaiting(self: *const State) bool {
-        return self.unsent != 0;
+    /// The records the terminal does not hold as wanted, in key order. They
+    /// borrow the state until the next `step`.
+    pub fn unsettledStatuses(self: *const State) Unsettled {
+        return .{ .state = self, .left = self.unsettled };
     }
 
-    /// The first record the shell has not sent, which borrows the state
-    /// until the next `step`.
-    pub fn waitingStatus(self: *const State) ?StatusRecord {
-        if (self.unsent == 0) return null;
-        for (self.seen.items) |*entry| if (entry.unsent) {
-            var reference: Reference = undefined;
-            std.mem.writeInt(u48, &reference, @intCast(entry.key), .big);
-            const row = self.find(reference);
-            return .{ .reference = reference, .name = if (row) |found| title(self, found).text else "", .status = entry.status };
-        };
-        unreachable;
+    pub const Unsettled = struct {
+        state: *const State,
+        at: usize = 0,
+        left: usize,
+
+        pub fn next(self: *Unsettled) ?StatusRecord {
+            if (self.left == 0) return null;
+            const seen = self.state.seen.items;
+            while (self.at < seen.len) {
+                const entry = &seen[self.at];
+                self.at += 1;
+                if (entry.settled()) continue;
+                self.left -= 1;
+                var reference: Reference = undefined;
+                std.mem.writeInt(u48, &reference, @intCast(entry.key), .big);
+                const row = self.state.find(reference);
+                return .{ .reference = reference, .name = if (row) |found| title(self.state, found).text else "", .status = entry.status, .version = entry.version };
+            }
+            unreachable;
+        }
+    };
+
+    /// The terminal took `record` whole.
+    pub fn statusTaken(self: *State, taken: StatusRecord.Taken) void {
+        const entry = self.entryOf(taken.reference) orelse return;
+        const was = entry.settled();
+        entry.delivered = taken.delivered;
+        const now = entry.settled();
+        if (was and !now) self.unsettled += 1;
+        if (!was and now) self.unsettled -= 1;
     }
 
-    /// The terminal holds `ref`'s record as it now stands.
-    pub fn statusSent(self: *State, ref: Reference) void {
-        const entry = self.entryOf(ref).?;
-        std.debug.assert(entry.unsent);
-        entry.unsent = false;
-        self.unsent -= 1;
+    /// A clear of every record may reach the terminal from now on, whole or
+    /// not: what it holds of each Session that had one is unknown.
+    pub fn statusesClearing(self: *State) void {
+        self.recount(.unknown);
     }
 
-    /// The terminal dropped every record: each one held is unsent again.
-    pub fn resendStatuses(self: *State) void {
-        for (self.seen.items) |*entry| if (entry.status != null) self.unsend(entry);
+    /// The terminal took a clear of every record whole.
+    pub fn statusesCleared(self: *State) void {
+        self.recount(.none);
+    }
+
+    fn recount(self: *State, cleared: Delivered) void {
+        self.unsettled = 0;
+        for (self.seen.items) |*entry| {
+            if (entry.delivered != .none) entry.delivered = cleared;
+            self.unsettled += @intFromBool(!entry.settled());
+        }
     }
 
     /// Interns a Workspace: Sessions share few, and a row keeps an index.
@@ -928,19 +965,49 @@ const Keyed = struct { key: u64, index: u32 };
 /// One Session's record: the latest news any read gave, which decides
 /// notifications; the latest state a conversation opened on, an outcome the
 /// person has seen; what the last listing read; and the program status the
-/// terminal should show, from listings alone, which read in order. A
-/// Session no longer listed has no program status.
+/// terminal should show, from listings alone, which read in order, beside
+/// the one it holds. A Session no longer listed has no program status.
 const Seen = struct {
     key: u64,
     attention: ?attention.Attention = null,
     acknowledged: ?attention.Attention = null,
     listed: ?attention.Reading = null,
     status: ?attention.Status = null,
-    unsent: bool = false,
+    /// Names each record wanted: a new status, a later outcome or wait in
+    /// the same one, or a new title. It wraps; sixteen bits keep `Seen` at
+    /// two cache lines, which the 10,000-row listing benchmark feels, and a
+    /// Session would need 65,536 changes between two frames to repeat one.
+    version: u16 = 0,
+    /// What the terminal holds of this Session's record.
+    delivered: Delivered = .none,
+
+    fn settled(self: *const Seen) bool {
+        return switch (self.delivered) {
+            .none => self.status == null,
+            .unknown => false,
+            .version => |version| self.status != null and version == self.version,
+        };
+    }
 };
 
+/// What the terminal holds of a Session's record: none, the `version` of a
+/// report it took whole, or a record a clear of them all may have removed.
+const Delivered = union(enum) { none, unknown, version: u16 };
+
 /// A program status record for the shell to send: `status`, or a clear.
-pub const StatusRecord = struct { reference: Reference, name: []const u8, status: ?attention.Status };
+pub const StatusRecord = struct {
+    reference: Reference,
+    name: []const u8,
+    status: ?attention.Status,
+    version: u16 = 0,
+
+    /// What the terminal holds once it takes this report whole.
+    pub const Taken = struct { reference: Reference, delivered: Delivered };
+
+    pub fn taken(self: StatusRecord) Taken {
+        return .{ .reference = self.reference, .delivered = if (self.status != null) .{ .version = self.version } else .none };
+    }
+};
 const SortKey = struct { key: u128, index: u32 };
 
 /// A growable array of the state's allocator. Cores name no `std` list.
@@ -1092,7 +1159,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
     }
     // Opening a Session shows the person its outcome.
-    for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.track(entry, attention.Status.opened(entry.status));
+    for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
     return effects;
 }
 
@@ -1222,7 +1289,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
                 if (lookup(state.by_reference.items, old.reference)) |at| {
                     carry(state, &state.rows.items[at], old);
                 } else if (state.entryOf(old.reference)) |entry| {
-                    state.track(entry, null);
+                    state.want(entry, null, false);
                     entry.listed = null;
                 }
             }
@@ -1246,10 +1313,10 @@ fn carry(state: *State, incoming: *Row, old: *const Row) void {
 }
 
 /// The terminal's record names a Session by its row's title, so a row
-/// whose title is no longer `was` has its record sent again.
+/// whose title is no longer `was` wants a new record.
 fn retitle(state: *State, row: *const Row, was: []const u8) void {
     if (std.mem.eql(u8, title(state, row).text, was)) return;
-    if (state.entryOf(row.reference)) |entry| if (entry.status != null) state.unsend(entry);
+    if (state.entryOf(row.reference)) |entry| state.want(entry, entry.status, true);
 }
 
 /// The same mark keeps the second it last changed, so a state change under
@@ -3856,12 +3923,12 @@ test "a listing notifies once of each Session that newly finished, failed or nee
 }
 
 /// Takes every program status record waiting for the shell, as sent.
+/// Takes every record the terminal does not hold as wanted, as delivered.
 fn sentRecords(state: *State, into: []StatusRecord) []StatusRecord {
     var count: usize = 0;
-    while (state.waitingStatus()) |record| : (count += 1) {
-        into[count] = record;
-        state.statusSent(record.reference);
-    }
+    var unsettled = state.unsettledStatuses();
+    while (unsettled.next()) |record| : (count += 1) into[count] = record;
+    for (into[0..count]) |record| state.statusTaken(record.taken());
     return into[0..count];
 }
 
@@ -3891,7 +3958,7 @@ test "listings give each Session one program status record that follows its chan
     }, sentRecords(&state, &records));
     // Unchanged, nothing waits, not even the old finish.
     _ = try refresh(&state, .full, testToken(2), &listed);
-    try std.testing.expect(!state.statusesWaiting());
+    try std.testing.expect(state.statusesSettled());
     // b4n8wd finishes, a new Session fails, and a1b2c3 is listed no more.
     _ = try refresh(&state, .full, testToken(3), &.{
         listed[0],
@@ -3908,16 +3975,34 @@ test "listings give each Session one program status record that follows its chan
     _ = try step(&state, .{ .open = "b4n8wd".* });
     try expectRecords(&.{.{ .reference = "b4n8wd".*, .name = "Busy", .status = .idle }}, sentRecords(&state, &records));
     _ = try refresh(&state, .changed, testToken(4), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 1 })});
-    try std.testing.expect(!state.statusesWaiting());
-    // Its next Turn's finish is a record again; after the terminal dropped
-    // every record, each held one waits again.
+    try std.testing.expect(state.statusesSettled());
+    // Its next Turn's finish is a record again, and the Turn after it,
+    // though no listing read it working between; after the terminal
+    // cleared every record, each held one waits again.
     _ = try refresh(&state, .changed, testToken(5), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 2 })});
     try expectRecords(&.{.{ .reference = "b4n8wd".*, .name = "Busy", .status = .done }}, sentRecords(&state, &records));
-    state.resendStatuses();
+    _ = try refresh(&state, .changed, testToken(6), &.{session("b4n8wd", .{ .finished = ago(0) }, .{ .label = "Busy", .turn = 3 })});
+    try expectRecords(&.{.{ .reference = "b4n8wd".*, .name = "Busy", .status = .done }}, sentRecords(&state, &records));
+    state.statusesCleared();
     try expectRecords(&.{
         .{ .reference = "b4n8wd".*, .name = "Busy", .status = .done },
         .{ .reference = "z9y8x7".*, .name = "New", .status = .failed },
     }, sentRecords(&state, &records));
+}
+
+test "a later wait is a blocked record again, though no listing read the Session at work between" {
+    const waiting = session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Waits", .turn = 1, .first_action = 3 });
+    var state = try opened(&.{waiting});
+    defer state.deinit();
+    var records: [8]StatusRecord = undefined;
+    const blocked: StatusRecord = .{ .reference = "a1b2c3".*, .name = "Waits", .status = .blocked };
+    try expectRecords(&.{blocked}, sentRecords(&state, &records));
+    _ = try refresh(&state, .full, testToken(2), &.{waiting});
+    try std.testing.expect(state.statusesSettled());
+    _ = try refresh(&state, .full, testToken(3), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Waits", .turn = 1, .first_action = 4 })});
+    try expectRecords(&.{blocked}, sentRecords(&state, &records));
+    _ = try refresh(&state, .full, testToken(4), &.{session("a1b2c3", .{ .approval = ago(0) }, .{ .label = "Waits", .turn = 2, .first_action = 9 })});
+    try expectRecords(&.{blocked}, sentRecords(&state, &records));
 }
 
 test "the listing and the open conversation read one record, so each news comes once, whichever reads it first" {

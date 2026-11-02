@@ -187,7 +187,8 @@ pub const Reading = struct {
         return .{ .status = if (seen and (status == .done or status == .failed)) .idle else status, .attention = now };
     }
 
-    fn after(self: Reading, before: Reading) bool {
+    /// A later finish, failure or wait than `before` read.
+    pub fn after(self: Reading, before: Reading) bool {
         const now = self.attention orelse return false;
         const held = before.attention orelse return true;
         return now.after(held);

@@ -279,6 +279,24 @@ screen_ready: bool = false,
 /// The terminal has not yet answered the DA1 that follows the background
 /// question.
 asking: bool = false,
+/// The program status reports waiting on the terminal.
+sending: Sending = .{},
+
+/// Program status reports handed to the terminal, by its number for them,
+/// and what each leaves it holding once a frame writes them whole. They
+/// stand while neither the preference nor, with notifications on, any
+/// wanted record changed.
+const Sending = struct {
+    batch: ?u64 = null,
+    clears: bool = false,
+    on: bool = true,
+    changes: u64 = 0,
+    taken: [max_reports]view.StatusRecord.Taken = undefined,
+    len: usize = 0,
+
+    /// The fewest bytes a report takes is a clear's.
+    const max_reports = @sizeOf(@FieldType(SessionTerminal, "status_bytes")) / ("\x1b]7501;state=clear:id=rui/".len + @sizeOf(view.Reference) + "\x1b\\".len);
+};
 
 /// Opens the overview and returns once the person leaves it, or a signal
 /// stops it. Every way out restores the terminal and then prints the
@@ -483,26 +501,37 @@ fn event(self: *Self, value: view.Event) !?Next {
     return next;
 }
 
-/// Hands the terminal the program status records the core holds unsent, as
-/// many as its next frame takes. With notifications off it clears those it
-/// set, whether or not any record changed since, and the core holds every
-/// record again for when they are back on. After a frame cut short it
-/// clears them all and sets each again.
+/// Brings the terminal's program status records to what the core wants:
+/// a report for each Session whose record the terminal does not hold as
+/// wanted, as many as a frame takes, or with notifications off one clear of
+/// every record Rui may have set. The core learns what the terminal holds
+/// only from a frame that wrote the reports whole, so reports a cut frame
+/// may have dropped wait for the next frame.
 fn sendStatuses(self: *Self) void {
     const terminal = self.terminal;
     if (terminal.program_status != .supported) return;
-    if (terminal.statuses_cut) {
-        terminal.statuses_cut = false;
-        if (terminal.clearStatuses()) self.state.resendStatuses();
-    }
-    if (!terminal.statuses_set and !self.state.statusesWaiting()) return;
-    if (!terminal.notificationsOn()) {
-        if (terminal.clearStatuses()) self.state.resendStatuses();
+    const sending = &self.sending;
+    if (sending.batch) |batch| if (terminal.statusesTaken(batch)) {
+        if (sending.clears) self.state.statusesCleared() else for (sending.taken[0..sending.len]) |taken| self.state.statusTaken(taken);
+        sending.* = .{};
+    };
+    if (sending.batch == null and self.state.statusesSettled() and !terminal.statuses_shown) return;
+    const on = terminal.notificationsOn();
+    // Off, the records wanted do not matter.
+    if (sending.batch != null and sending.on == on and (!on or sending.changes == self.state.status_changes)) return;
+    sending.* = .{ .batch = terminal.beginStatuses(), .on = on, .changes = self.state.status_changes };
+    if (!on) {
+        if (!terminal.statuses_shown) return;
+        terminal.clearStatuses();
+        sending.clears = true;
+        self.state.statusesClearing();
         return;
     }
-    while (self.state.waitingStatus()) |record| {
-        if (!terminal.reportStatus(&record.reference, record.name, record.status)) return;
-        self.state.statusSent(record.reference);
+    var unsettled = self.state.unsettledStatuses();
+    while (unsettled.next()) |record| {
+        if (sending.len == sending.taken.len or !terminal.reportStatus(&record.reference, record.name, record.status)) return;
+        sending.taken[sending.len] = record.taken();
+        sending.len += 1;
     }
 }
 
@@ -773,6 +802,7 @@ fn draw(self: *Self, frame: u64) !?Next {
         screen.deinit();
         return next;
     };
+    self.terminal.wrote();
     self.shown = screen;
     return null;
 }
@@ -1887,9 +1917,108 @@ test "records a frame cut short may not have written are set again" {
     try std.testing.expect(try overview.draw(0) == null);
     const written = rig.drawn(&buffer);
     const other = if (std.mem.eql(u8, &next.open, "k7m2qx")) "b4n8wd" else "k7m2qx";
-    var done: [64]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, written, try std.fmt.bufPrint(&done, "\x1b]7501;state=done:id=rui/{s}:", .{other})) != null);
-    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=clear:id=rui\x1b\\"));
+    var record: [64]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, written, try std.fmt.bufPrint(&record, "\x1b]7501;state=done:id=rui/{s}:", .{other})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, try std.fmt.bufPrint(&record, "\x1b]7501;state=idle:id=rui/{s}:", .{&next.open})) != null);
+}
+
+test "each later finish, and each later wait, is a record again though no listing read the Session at work between" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    const Listing = struct {
+        var read: ?protocol.SessionWork = null;
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, page);
+            if (read) |listed| page.rows[0].work = listed;
+            return null;
+        }
+    };
+    Listing.read = null;
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    rig.terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    rig.terminal.program_status = .asking;
+    try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
+    var buffer: [64 * 1024]u8 = undefined;
+    const done = "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
+    const blocked = "\x1b]7501;state=blocked:id=rui/k7m2qx:app=rui:kind=permission:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
+    const finished = struct {
+        fn of(id: u64) protocol.SessionWork {
+            return .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = id, .operation = id };
+        }
+    }.of;
+    const waiting = struct {
+        fn of(id: u64, action: u64) protocol.SessionWork {
+            return .{ .state = .{ .approval = .{ .since = test_now_s } }, .turn = id, .operation = id, .first_action = action };
+        }
+    }.of;
+    for ([_]struct { work: ?protocol.SessionWork, record: ?[]const u8 }{
+        .{ .work = null, .record = "\x1b]7501;state=working:id=rui/k7m2qx:" },
+        .{ .work = finished(1), .record = done },
+        // Turn 2 began and finished between listings.
+        .{ .work = finished(2), .record = done },
+        .{ .work = finished(2), .record = null },
+        .{ .work = waiting(3, 7), .record = blocked },
+        // Action 7 was decided and Action 8 waits.
+        .{ .work = waiting(3, 8), .record = blocked },
+        .{ .work = waiting(3, 8), .record = null },
+        .{ .work = waiting(4, 2), .record = blocked },
+    }, 0..) |listing, at| {
+        Listing.read = listing.work;
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + at * 60_000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(try overview.draw(0) == null);
+        const written = rig.drawn(&buffer);
+        if (listing.record) |record|
+            try std.testing.expect(std.mem.startsWith(u8, written, record))
+        else
+            try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;") == null);
+    }
+}
+
+test "a clear a frame cut short may not have written goes with the next frame" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    rig.terminal.notices = .{ .signal = .osc9, .home = home, .tmux = false };
+    rig.terminal.program_status = .asking;
+    try std.testing.expect(try rig.press("\x1b]7501;?\x1b\\\x1b[?62;22c\x1b[O") == null);
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "\x1b]7501;state=working:id=rui/k7m2qx:") != null);
+    // Turned off; the terminal takes no output, and Enter cuts the frame
+    // that carries the clear.
+    _ = try preferences.update(home, .{ .notifications = false }, &preferences.Readinesses.initFill(.missing));
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 1_000 }) == null);
+    const filler: [4096]u8 = @splat('x');
+    while (std.c.write(rig.output[1], &filler, filler.len) > 0) {}
+    while (std.c.write(rig.output[1], &filler, 1) > 0) {}
+    try std.testing.expect(std.c.write(rig.keys[1], "\r", 1) == 1);
+    const next = (try overview.draw(0)).?;
+    while (rig.drawn(&buffer).len != 0) {}
+    try std.testing.expect(overview.proceed(next) == null);
+    // Output resumes, and the clear goes.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2_000 }) == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.startsWith(u8, rig.drawn(&buffer), "\x1b]7501;state=clear:id=rui\x1b\\"));
+    // Nothing more goes while they stay off.
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "\x1b]7501;") == null);
 }
 
 test "a later Turn's finish the conversation read first is still a record when the next listing shows it" {
