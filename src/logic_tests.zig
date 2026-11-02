@@ -26,6 +26,7 @@ const cores = .{
     .{ "keymap.zig", @import("keymap.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_list.zig", @import("model_list.zig") },
+    .{ "model_picker.zig", @import("model_picker.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },

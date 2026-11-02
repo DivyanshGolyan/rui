@@ -12,9 +12,11 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
+const preferences = @import("preferences.zig");
 const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const model_list = @import("model_list.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
@@ -73,12 +75,16 @@ pub const Operations = struct {
     /// ends the overview after a canonical Store failure.
     start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
+    /// The Host's model lists, parsed into the arena.
+    models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror!protocol_reply.ModelList,
+    /// Saves the person's default for new Sessions.
+    save_default: *const fn (*Self, view.Default) anyerror!void,
     /// Lends the terminal to the Session's conversation. Null once the
     /// person returned to the overview.
     converse: *const fn (*Self, view.Reference) ?Left,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .converse = converse };
+pub const client_operations: Operations = .{ .host = hostFacts, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .models = listModels, .save_default = saveDefault, .converse = converse };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -183,6 +189,8 @@ const Job = union(enum) {
     /// read on the worker's thread.
     start: view.OwnedStart,
     stop: view.Reference,
+    models,
+    save: view.Default,
 
     /// A job owns its inputs until it is replaced or the overview ends,
     /// whether or not it ran.
@@ -191,9 +199,10 @@ const Job = union(enum) {
     }
 };
 
-/// One host read and list page, at most one first-line batch, and the
-/// requests the core's ledger allows can wait at once.
-const max_jobs = 3 + view.max_requests;
+/// One host read and list page, at most one first-line batch, one
+/// model-list read, one save and the requests the core's ledger allows can
+/// wait at once.
+const max_jobs = 5 + view.max_requests;
 
 /// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
@@ -252,6 +261,9 @@ host: ?view.Host = null,
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
 reply: Reply = .{},
+/// The latest model lists, in `model_arena` until the core has read them.
+models: protocol_reply.ModelList = .{ .providers = &.{} },
+model_arena: std.heap.ArenaAllocator = undefined,
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 
@@ -350,7 +362,9 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = .{ .buffer = &self.draft };
-    try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at });
+    self.model_arena = .init(init.gpa);
+    errdefer self.model_arena.deinit();
+    try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     errdefer self.closePipes();
     for ([_]*[2]c_int{ &self.done, &self.signalled }) |pipe| try openPipe(pipe);
@@ -385,6 +399,7 @@ fn destroy(self: *Self) void {
     self.forget();
     self.frame.deinit(self.init.gpa);
     self.state.deinit();
+    self.model_arena.deinit();
     self.init.gpa.destroy(self);
 }
 
@@ -471,6 +486,8 @@ fn event(self: *Self, value: view.Event) !?Next {
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
+        .list_models => self.queue(.models),
+        .save_default => |binding| self.queue(.{ .save = binding }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = .{ .buffer = &self.draft },
         .exit => return .leave,
@@ -531,6 +548,8 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
         },
         .start => |*start| try self.ops.start(self, requests, self.startInput(start), &self.reply),
         .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        .models => self.models = try self.ops.models(self, requests, self.model_arena.allocator()),
+        .save => |binding| try self.ops.save_default(self, binding),
     }
 }
 
@@ -566,6 +585,18 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .start = self.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
+        .models => {
+            defer {
+                self.models = .{ .providers = &.{} };
+                _ = self.model_arena.reset(.retain_capacity);
+            }
+            outcome catch return self.event(.{ .models = null });
+            return self.event(.{ .models = self.models.providers });
+        },
+        .save => {
+            outcome catch |err| return self.event(.{ .saved = @errorName(err) });
+            return self.event(.{ .saved = null });
+        },
     }
     return null;
 }
@@ -592,8 +623,8 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) client.MessageIn
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = held.at(start, "workspace") orelse self.options.workspace },
-        .provider = held.given(held.at(start, "provider") orelse self.options.provider),
-        .model = held.given(held.at(start, "model") orelse self.options.model),
+        .provider = held.given(held.at(start, "provider") orelse if (start.default_provider) |provider| @tagName(provider) else null),
+        .model = held.given(held.at(start, "model") orelse start.defaultModel()),
         .tools = held.at(start, "tools") orelse product_defaults.tools,
         .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
         .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
@@ -601,6 +632,17 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) client.MessageIn
         .reasoning_effort = held.policy(held.at(start, "reasoning-effort")),
         .label = label,
     } };
+}
+
+fn listModels(self: *Self, requests: client.Requests, arena: std.mem.Allocator) !protocol_reply.ModelList {
+    return requests.modelList(self.options.store, arena);
+}
+
+/// Saves the pick as `rui defaults configure --provider --model` would.
+fn saveDefault(self: *Self, binding: view.Default) !void {
+    // Both are named, so no sign-in's readiness decides anything.
+    const readiness: preferences.Readinesses = .initFill(.configured);
+    _ = try preferences.update(self.options.home, .{ .provider = .{ .set = @tagName(binding.provider) }, .model = .{ .set = binding.model.slice() } }, &readiness);
 }
 
 /// Reads up to `bytes` of what the terminal holds, waiting `wait`
@@ -689,6 +731,18 @@ fn askBackground(self: *Self) !?Next {
 /// binds still act, and nothing edits the text a failed start leaves to
 /// retry.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
+    // The sign-in choice holds the input row, as an Action's choice does in
+    // a conversation: arrows move it and Enter picks; typing goes to the
+    // draft, which leaves the picker.
+    if (self.state.choosingSignIn()) switch (TerminalEditor.select(view.keys, decoded)) {
+        .none => return null,
+        .action => |action| return self.event(.{ .composed = .{ .outcome = .{ .action = action }, .draft = self.composerDraft() } }),
+        .left => return self.event(.{ .sign_in = .left }),
+        .right => return self.event(.{ .sign_in = .right }),
+        .enter => return self.event(.{ .composed = .{ .outcome = .submit, .draft = self.composerDraft() } }),
+        .refused => return self.event(.{ .composed = .{ .outcome = .{ .refused = .unbound }, .draft = self.composerDraft() } }),
+        .text => {},
+    };
     const outcome: keymap.Outcome(view.Action) = if (self.state.starting())
         if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none
     else
@@ -985,6 +1039,8 @@ const Seen = struct {
     stopped: view.Reference = @splat(0),
     conversations: usize = 0,
     conversed: view.Reference = @splat(0),
+    model_lists: usize = 0,
+    saved: ?struct { provider: view.Provider, model: protocol.Bounded(64) } = null,
     /// How many Sessions the fake listing returns, from `listed_references`.
     listed: usize = 1,
 
@@ -1056,6 +1112,23 @@ const fake_operations: Operations = .{
             reply.* = .{ .outcome = .accepted };
         }
     }.stop,
+    .models = struct {
+        fn models(_: *Self, _: client.Requests, arena: std.mem.Allocator) !protocol_reply.ModelList {
+            Seen.now.model_lists += 1;
+            const ids = [_][]const u8{ "gpt-5.5", "gpt-6-luna", "whisper-1" };
+            const offered = try arena.alloc(model_list.Offered, ids.len);
+            for (offered, ids) |*model, id| model.* = .{ .id = try arena.dupe(u8, id), .known = !std.mem.eql(u8, id, "whisper-1") };
+            const providers = try arena.alloc(model_list.Provided, 2);
+            providers[0] = .{ .provider = .codex, .source = .table, .models = offered[0..2] };
+            providers[1] = .{ .provider = .openai, .source = .live, .models = offered };
+            return .{ .providers = providers };
+        }
+    }.models,
+    .save_default = struct {
+        fn save(_: *Self, binding: view.Default) !void {
+            Seen.now.saved = .{ .provider = binding.provider, .model = Seen.bounded(binding.model.slice()) };
+        }
+    }.save,
     .converse = struct {
         fn converse(_: *Self, session: view.Reference) ?Left {
             Seen.now.conversations += 1;
@@ -1187,6 +1260,30 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
     const ending = (try rig.press("\x04")).?;
     try std.testing.expect(ending == .overview);
+}
+
+test "/model reads the lists on the worker, the sign-in choice takes the arrows, and the pick is saved and starts the next Session" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
+    // Down to gpt-6-luna, which both sign-ins offer: Enter shows the choice
+    // at the default's sign-in, Right moves it, and Enter picks.
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expect(overview.state.choosingSignIn());
+    try std.testing.expect(try rig.press("\x1b[C\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(view.Provider.openai, Seen.now.saved.?.provider);
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
+    try std.testing.expect(overview.state.picker == null);
+    // The next Session takes the pick.
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("openai", Seen.now.start.provider.?.slice());
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
 }
 
 test "a start with no saved binding names no model, so the Host refuses it" {

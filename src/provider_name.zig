@@ -12,6 +12,14 @@ pub const Provider = enum {
             .codex, .openai => .@"openai-responses/1",
         };
     }
+
+    /// What a person signed in with, as the terminal names this provider.
+    pub fn signIn(self: Provider) []const u8 {
+        return switch (self) {
+            .codex => "ChatGPT",
+            .openai => "API key",
+        };
+    }
 };
 
 /// A provider grammar and its version, as a Session pins it. A version's

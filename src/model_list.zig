@@ -133,7 +133,22 @@ pub const List = union(Source) {
     live: Ids,
 };
 
-/// One provider's list as the reply carries it.
+/// One provider's list as a client reads the reply.
+pub const Provided = struct {
+    provider: provider_name.Provider,
+    source: Source,
+    models: []const Offered,
+};
+
+/// One model in a provider's list.
+pub const Offered = struct {
+    id: []const u8,
+    /// Whether Rui's table knows the model; otherwise it runs with default
+    /// limits.
+    known: bool,
+};
+
+/// One provider's list as the Host writes it.
 pub const Entry = struct {
     provider: provider_name.Provider,
     list: List,

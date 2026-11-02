@@ -440,16 +440,7 @@ pub fn validHostUnavailable(body: []const u8) bool {
 
 /// A `model_list` reply: each served provider's models.
 pub const ModelList = struct {
-    providers: []const struct {
-        provider: protocol.Provider,
-        source: model_list.Source,
-        models: []const struct {
-            id: []const u8,
-            /// Whether Rui's table knows the model; otherwise it runs with
-            /// default limits.
-            known: bool,
-        },
-    },
+    providers: []const model_list.Provided,
 };
 
 /// Parsed into `arena`, which owns the result.

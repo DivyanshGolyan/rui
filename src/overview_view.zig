@@ -20,6 +20,9 @@ const draft_layout = @import("draft_layout.zig");
 const failure_class = @import("failure_class.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
+const model_list = @import("model_list.zig");
+const model_picker = @import("model_picker.zig");
+const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
@@ -308,7 +311,16 @@ pub const Event = union(enum) {
     /// The person pressed a key, at this Unix millisecond.
     looked: u64,
     conversed: Conversed,
+    /// The Host's model lists, borrowed until the step returns; null when
+    /// it gave none.
+    models: ?[]const model_list.Provided,
+    /// The picked default was saved, or why it was not.
+    saved: ?[]const u8,
+    /// An arrow at the sign-in choice.
+    sign_in: Side,
 };
+
+pub const Side = enum { left, right };
 
 /// An input in the open conversation of `reference`, whose work it shows as
 /// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
@@ -333,10 +345,42 @@ pub const Effect = union(enum) {
     start: StartRequest,
     open: Reference,
     stop: Reference,
+    /// Read the Host's model lists.
+    list_models,
+    /// Save the person's default for new Sessions, as `rui defaults
+    /// configure --provider --model` does.
+    save_default: Default,
     /// Empty the line editor.
     clear_draft,
     exit,
 };
+
+pub const Provider = provider_name.Provider;
+
+/// The provider and model new Sessions get.
+pub const Default = struct {
+    provider: Provider,
+    model: Bounded(model_capability.max_model_bytes),
+
+    pub fn of(provider: ?[]const u8, model: ?[]const u8) ?Default {
+        var binding: Default = .{ .provider = std.meta.stringToEnum(Provider, provider orelse return null) orelse return null, .model = .{} };
+        binding.model.set(model orelse return null) catch return null;
+        return binding;
+    }
+};
+
+/// The model picker /model opens: the models, then, for a model more than
+/// one sign-in offers, the sign-in choice on the input row.
+pub const Picker = struct {
+    /// The highlighted entry of `State.menu`.
+    at: usize = 0,
+    /// The highlighted sign-in, once Enter took a model more than one
+    /// sign-in offers.
+    sign_in: ?Provider = null,
+};
+
+/// The most model rows the picker shows at once.
+pub const max_picker_rows = 8;
 
 /// Each event brings at most two effects today; the shell runs them in order.
 pub const Effects = struct {
@@ -413,12 +457,16 @@ pub const StartSettings = struct {
 pub const StartRequest = struct {
     settings: *const StartSettings,
     text: []const u8,
+    /// The binding for what the settings leave out.
+    default: ?*const Default = null,
 
     pub fn own(self: StartRequest, gpa: Allocator) error{OutOfMemory}!OwnedStart {
-        const bytes = try gpa.alloc(u8, self.text.len + self.settings.used);
+        const model = if (self.default) |binding| binding.model.slice() else "";
+        const bytes = try gpa.alloc(u8, self.text.len + self.settings.used + model.len);
         @memcpy(bytes[0..self.text.len], self.text);
-        @memcpy(bytes[self.text.len..], self.settings.bytes[0..self.settings.used]);
-        return .{ .bytes = bytes, .text_len = self.text.len, .held = self.settings.held };
+        @memcpy(bytes[self.text.len..][0..self.settings.used], self.settings.bytes[0..self.settings.used]);
+        @memcpy(bytes[self.text.len + self.settings.used ..], model);
+        return .{ .bytes = bytes, .text_len = self.text.len, .held = self.settings.held, .default_provider = if (self.default) |binding| binding.provider else null, .default_model_len = model.len };
     }
 };
 
@@ -428,9 +476,17 @@ pub const OwnedStart = struct {
     bytes: []u8,
     text_len: usize,
     held: [start_options.len]?StartSettings.Range,
+    default_provider: ?Provider = null,
+    default_model_len: usize = 0,
 
     pub fn text(self: *const OwnedStart) []const u8 {
         return self.bytes[0..self.text_len];
+    }
+
+    /// The default's model, when there is a default.
+    pub fn defaultModel(self: *const OwnedStart) ?[]const u8 {
+        if (self.default_provider == null) return null;
+        return self.bytes[self.bytes.len - self.default_model_len ..];
     }
 
     pub fn get(self: *const OwnedStart, option: usize) ?[]const u8 {
@@ -573,6 +629,19 @@ pub const State = struct {
     /// The last Host start host-info gave, kept while the Host gives none.
     started_at: ?u64 = null,
 
+    /// What new Sessions get: the saved default, which a pick replaces.
+    default: ?Default = null,
+    picker: ?Picker = null,
+    /// The latest model lists, kept so /model shows them at once while it
+    /// reads them again. `menu_arena` owns them.
+    menu: model_picker.Menu = .{},
+    menu_arena: std.heap.ArenaAllocator = undefined,
+    models: enum { unread, read, unanswered } = .unread,
+    /// A model-list read is in flight.
+    asking_models: bool = false,
+    /// The pick being saved.
+    saving: ?Default = null,
+
     /// The token of the last completed listing.
     token: ?Token = null,
     /// A list request is in flight.
@@ -590,16 +659,23 @@ pub const State = struct {
         cwd: []const u8,
         home: []const u8,
         login_at: ?u64 = null,
+        default: ?Default = null,
     };
 
     /// The caller owns `home` for the state's lifetime.
     pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
-        self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at };
+        self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default, .menu_arena = .init(gpa) };
         errdefer self.deinit();
         self.cwd = try self.intern(options.cwd);
     }
 
+    /// The input row is the sign-in choice.
+    pub fn choosingSignIn(self: *const State) bool {
+        return if (self.picker) |picker| picker.sign_in != null else false;
+    }
+
     pub fn deinit(self: *State) void {
+        self.menu_arena.deinit();
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
         inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys }) |vec| vec.deinit(self.gpa);
     }
@@ -866,7 +942,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .failed => |code| {
                     state.answer(at, .failed, code);
-                    state.say(.attention, "! Not started: {s}", .{code});
+                    // The Host serves no sign-in for the start's provider.
+                    const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) startProvider(state) else null;
+                    if (missing) |provider| {
+                        state.say(.attention, "! {s} sign-in missing · rui auth login {s}", .{ provider.signIn(), @tagName(provider) });
+                    } else state.say(.attention, "! Not started: {s}", .{code});
                 },
                 .unconfirmed => |handle| {
                     // The saved request holds the text; recovery, not a
@@ -897,8 +977,70 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             // A later look can only lower the counts, so none stay none.
             if (state.summary.finished_since + state.summary.failed_since != 0) countSinceLooked(state);
         },
+        .models => |lists| try readModels(state, lists),
+        .saved => |failure| {
+            const picked = state.saving.?;
+            state.saving = null;
+            if (failure) |why| {
+                state.say(.attention, "! Default not saved: {s}", .{why});
+            } else {
+                state.default = picked;
+                state.say(.quiet, "New Sessions use {s} · {s}", .{ picked.model.slice(), picked.provider.signIn() });
+            }
+        },
+        .sign_in => |side| if (state.picker) |*picker| if (picker.sign_in) |current| {
+            picker.sign_in = nextSignIn(state.menu.entries[picker.at].providers, current, side);
+        },
     }
     return effects;
+}
+
+/// The provider a start names: its held setting, else the default's.
+fn startProvider(state: *const State) ?Provider {
+    if (state.settings.get(startOption("provider").?)) |name| return std.meta.stringToEnum(Provider, name);
+    return if (state.default) |binding| binding.provider else null;
+}
+
+/// Takes a model-list answer, keeping the picker on the model it showed.
+fn readModels(state: *State, lists: ?[]const model_list.Provided) error{OutOfMemory}!void {
+    state.asking_models = false;
+    const read = lists orelse {
+        state.models = .unanswered;
+        return;
+    };
+    var kept: [model_capability.max_model_bytes]u8 = undefined;
+    const shown: ?[]const u8 = if (state.picker) |picker| if (picker.at < state.menu.entries.len) blk: {
+        const id = state.menu.entries[picker.at].id;
+        @memcpy(kept[0..id.len], id);
+        break :blk kept[0..id.len];
+    } else null else null;
+    state.menu = .{};
+    _ = state.menu_arena.reset(.retain_capacity);
+    state.menu = try model_picker.build(state.menu_arena.allocator(), read, if (state.default) |*binding| binding.model.slice() else null);
+    state.models = .read;
+    const picker = if (state.picker) |*open| open else return;
+    const at = if (shown) |id| state.menu.find(id) else null;
+    picker.at = at orelse 0;
+    // A sign-in choice stands only while its model and sign-in are offered.
+    if (picker.sign_in) |provider| if (at == null or !state.menu.entries[picker.at].providers.contains(provider)) {
+        picker.sign_in = null;
+    };
+}
+
+/// The sign-in beside `current` that `providers` holds, in provider order.
+fn nextSignIn(providers: model_picker.Providers, current: Provider, side: Side) Provider {
+    const order = std.enums.values(Provider);
+    var at = std.mem.indexOfScalar(Provider, order, current).?;
+    while (true) {
+        switch (side) {
+            .left => at = std.math.sub(usize, at, 1) catch return current,
+            .right => {
+                at += 1;
+                if (at == order.len) return current;
+            },
+        }
+        if (providers.contains(order[at])) return order[at];
+    }
 }
 
 /// What the shell prints once the terminal is restored: one line for each
@@ -941,7 +1083,15 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         state.listing = true;
         state.next_list_ms = now_ms + list_interval_ms;
         effects.add(.{ .list = state.token });
+        // A list still loading is read again with the next listing.
+        if (state.picker != null and state.menu.loading()) askModels(state, effects);
     }
+}
+
+fn askModels(state: *State, effects: *Effects) void {
+    if (state.asking_models) return;
+    state.asking_models = true;
+    effects.add(.list_models);
 }
 
 fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!void {
@@ -1155,10 +1305,18 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
     state.notice = null;
     const prompt = state.prompt;
     state.prompt = null;
+    // Typing leaves the picker for the draft.
+    if (value.draft.bytes.len != 0) state.picker = null;
     switch (value.outcome) {
         .action => |pressed| switch (pressed) {
-            .previous, .next, .first, .last => move(state, pressed),
-            .clear => if (prompt != null) {} else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
+            .previous, .next, .first, .last => if (state.picker) |*picker| {
+                if (picker.sign_in == null) pickerMove(state, picker, pressed);
+            } else move(state, pressed),
+            // Esc steps back: from the sign-in choice to the models, then
+            // out of the picker.
+            .clear => if (prompt != null) {} else if (state.picker) |*picker| {
+                if (picker.sign_in != null) picker.sign_in = null else state.picker = null;
+            } else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
@@ -1168,7 +1326,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             },
         },
         .none, .append, .redraw => {},
-        .submit => enter(state, value.draft.bytes, effects),
+        .submit => if (state.picker != null) pick(state, effects) else enter(state, value.draft.bytes, effects),
         .refused => |why| {
             if (why.endsLine()) effects.add(.clear_draft);
             switch (why) {
@@ -1235,12 +1393,55 @@ fn enter(state: *State, text: []const u8, effects: *Effects) void {
     // As in a conversation, `//` starts text with one slash.
     if (text[0] != '/' or std.mem.startsWith(u8, text, "//")) {
         if (!state.request(.start, null)) return;
-        return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text } });
+        return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .default = if (state.default) |*binding| binding else null } });
     }
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     if (std.mem.eql(u8, name, "/exit")) return effects.add(.exit);
-    if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown; try /configure or /exit", .{});
+    if (std.mem.eql(u8, name, "/model")) {
+        if (std.mem.trim(u8, text[name.len..], " ").len != 0) return state.say(.attention, "! /model takes nothing; it lists the models", .{});
+        effects.add(.clear_draft);
+        state.picker = .{};
+        return askModels(state, effects);
+    }
+    if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown; try /model or /configure", .{});
     if (configure(state, text[name.len..])) effects.add(.clear_draft);
+}
+
+fn pickerMove(state: *const State, picker: *Picker, action: Action) void {
+    const count = state.menu.entries.len;
+    if (count == 0) return;
+    picker.at = switch (action) {
+        .first => 0,
+        .last => count - 1,
+        .next => @min(picker.at + 1, count - 1),
+        .previous => picker.at -| 1,
+        else => unreachable,
+    };
+}
+
+/// Enter in the picker. A model one sign-in offers is the whole pick; one
+/// that more offer turns the input row into the sign-in choice, at the
+/// default's sign-in. As `rui defaults configure` does, only a model Rui
+/// lists becomes the default.
+fn pick(state: *State, effects: *Effects) void {
+    const picker = &state.picker.?;
+    if (picker.at >= state.menu.entries.len) return;
+    const entry = state.menu.entries[picker.at];
+    const provider = picker.sign_in orelse choice: {
+        if (!entry.known) return state.say(.attention, "! Rui does not list {s} yet; pick a listed model", .{entry.id});
+        var offering = entry.providers.iterator();
+        const first = offering.next().?;
+        if (offering.next() == null) break :choice first;
+        const preferred = if (state.default) |binding| binding.provider else first;
+        picker.sign_in = if (entry.providers.contains(preferred)) preferred else first;
+        return;
+    };
+    if (state.saving != null) return state.say(.attention, "! Saving the last pick; try again shortly.", .{});
+    var binding: Default = .{ .provider = provider, .model = .{} };
+    binding.model.set(entry.id) catch unreachable;
+    state.saving = binding;
+    state.picker = null;
+    effects.add(.{ .save_default = binding });
 }
 
 const configure_usage = blk: {
@@ -1708,9 +1909,9 @@ pub const Screen = struct {
     }
 };
 
-const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, ellipsis: []const u8, arrows: []const u8, up: []const u8, down: []const u8, newline: []const u8 };
-const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.unicode).dot, .rule = "─", .ellipsis = work_line.glyphs.get(.unicode).ellipsis, .arrows = "↑↓", .up = "↑", .down = "↓", .newline = "↵" };
-const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .up = "^", .down = "v", .newline = "|" };
+const Glyphs = struct { prompt: []const u8, dot: []const u8, rule: []const u8, ellipsis: []const u8, arrows: []const u8, sides: []const u8, up: []const u8, down: []const u8, newline: []const u8 };
+const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.unicode).dot, .rule = "─", .ellipsis = work_line.glyphs.get(.unicode).ellipsis, .arrows = "↑↓", .sides = "←→", .up = "↑", .down = "↓", .newline = "↵" };
+const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .sides = "<>", .up = "^", .down = "v", .newline = "|" };
 
 /// Draws the overview. `frame` picks each pulsing mark's glyph.
 pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
@@ -1763,8 +1964,12 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, width: u16, hei
         try composer(&painter, state, draft, &layout, lines[bottom + 1 .. height - 1]);
         lines[height - 1] = try hints(&painter, state, draft);
         screen.draft_anchor = layout.lines[0].start;
-        if (!state.starting()) screen.cursor = .{ .row = @intCast(bottom + 1 + layout.shape.caret_line - layout.view.first), .column = @intCast(@min(width - 1, 3 + layout.shape.caret_column)) };
+        if (!state.starting() and !state.choosingSignIn()) screen.cursor = .{ .row = @intCast(bottom + 1 + layout.shape.caret_line - layout.view.first), .column = @intCast(@min(width - 1, 3 + layout.shape.caret_column)) };
     }
+    // The picker takes the rows right above the input; the list keeps the rest.
+    if (state.picker) |*picker| if (row + 1 < bottom) {
+        bottom -= @intCast(try pickerLines(&painter, state, picker, lines[row + 1 .. bottom]));
+    };
     if (row + 1 < bottom) try list(&painter, state, lines[row + 1 .. bottom]);
     screen.pulses = painter.pulsed;
     return screen;
@@ -2195,6 +2400,10 @@ const DraftPieces = struct {
 fn composer(painter: *Painter, state: *const State, draft: Draft, layout: *const ComposerLayout, rows: [][]const Span) error{OutOfMemory}!void {
     std.debug.assert(rows.len == layout.view.rows);
     const room = painter.width -| 4;
+    if (state.picker) |picker| if (picker.sign_in) |highlight| {
+        rows[0] = try signInChoice(painter, state.menu.entries[picker.at].providers, highlight);
+        return;
+    };
     if (draft.bytes.len == 0) {
         painter.begin(false);
         _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
@@ -2220,6 +2429,12 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
         _ = try painter.put(1, text, room, .{ .colour = .attention });
     } else if (state.notice) |*notice| {
         _ = try painter.put(1, notice.text(), room, .{ .colour = notice.colour });
+    } else if (state.picker) |picker| {
+        const text = if (picker.sign_in != null)
+            try std.fmt.allocPrint(painter.arena, "{s} choose {s} enter pick {s} esc models", .{ painter.glyphs.sides, dot, dot })
+        else
+            try std.fmt.allocPrint(painter.arena, "{s} choose {s} enter pick {s} esc close", .{ painter.glyphs.arrows, dot, dot });
+        _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.starting()) {
         _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "Starting{s}", .{painter.glyphs.ellipsis}), room, .{ .colour = .quiet });
     } else if (!state.settings.empty()) {
@@ -2259,6 +2474,129 @@ pub fn writeSettings(settings: *const StartSettings, writer: *std.Io.Writer) std
         }
         try writer.writeByte('"');
     }
+}
+
+/// The picker's lines at the end of `lines`, as many as it needs; returns
+/// how many. At the sign-in choice only the chosen model shows. Otherwise
+/// the models show from the highlighted one's window, the models Rui does
+/// not list under "Other models", then a line for each sign-in the Host
+/// does not serve and each list that is loading or unavailable.
+fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, lines: [][]const Span) error{OutOfMemory}!usize {
+    const menu = &state.menu;
+    var notes: [2 + 2 * std.enums.values(Provider).len][]const u8 = undefined;
+    var note_count: usize = 0;
+    if (picker.sign_in != null) {
+        painter.begin(false);
+        _ = try painter.put(4, menu.entries[picker.at].id, painter.width -| 5, .{ .colour = .strong });
+        lines[lines.len - 1] = try painter.finish();
+        return 1;
+    }
+    // With nothing served, the sign-in lines below stand in for models.
+    if (menu.entries.len == 0 and state.models != .read) {
+        notes[note_count] = if (state.models == .unread) try std.fmt.allocPrint(painter.arena, "Loading models{s}", .{painter.glyphs.ellipsis}) else "Models unavailable: the Host did not answer";
+        note_count += 1;
+    }
+    if (state.models != .unread) for (std.enums.values(Provider)) |provider| {
+        const name = provider.signIn();
+        const source = menu.sources.get(provider) orelse {
+            if (state.models == .read) {
+                notes[note_count] = try std.fmt.allocPrint(painter.arena, "{s}: run rui auth login {s} in your shell", .{ name, @tagName(provider) });
+                note_count += 1;
+            }
+            continue;
+        };
+        const said: ?[]const u8 = switch (source) {
+            .pending => try std.fmt.allocPrint(painter.arena, "{s}: loading its models{s}", .{ name, painter.glyphs.ellipsis }),
+            .table_fallback => try std.fmt.allocPrint(painter.arena, "{s}: its live list is unavailable", .{name}),
+            .table, .live => null,
+        };
+        if (said) |text| {
+            notes[note_count] = text;
+            note_count += 1;
+        }
+    };
+    // Model rows: each entry, and the "Other models" heading before the
+    // first one Rui does not list.
+    const others = menu.others();
+    const items = menu.entries.len + @intFromBool(others < menu.entries.len);
+    const room = lines.len -| note_count;
+    var shown = @min(items, max_picker_rows, room);
+    const more = shown < items;
+    if (more) shown -|= 1;
+    const highlighted = picker.at + @intFromBool(picker.at >= others);
+    const first = @min((highlighted + 1) -| shown, items - shown);
+    const used = shown + @intFromBool(more) + note_count;
+    const start = lines.len - @min(used, lines.len);
+    var line = start;
+    const tag_column = tagColumn(painter, menu.entries);
+    var listed: usize = 0;
+    for (first..first + shown) |item| {
+        if (item == others) {
+            lines[line] = try otherHeading(painter);
+        } else {
+            lines[line] = try modelLine(painter, state, item - @intFromBool(item > others), tag_column);
+            listed += 1;
+        }
+        line += 1;
+    }
+    if (more and line < lines.len) {
+        painter.begin(false);
+        const text = try std.fmt.allocPrint(painter.arena, "{d} more", .{menu.entries.len - listed});
+        _ = try painter.put(4, text, painter.width -| 5, .{ .colour = .quiet });
+        lines[line] = try painter.finish();
+        line += 1;
+    }
+    for (notes[0..note_count]) |text| {
+        if (line == lines.len) break;
+        painter.begin(false);
+        _ = try painter.put(4, text, painter.width -| 5, .{ .colour = .quiet });
+        lines[line] = try painter.finish();
+        line += 1;
+    }
+    return lines.len - start;
+}
+
+/// Where the picker's tags start, after the widest ID, within reason.
+fn tagColumn(painter: *const Painter, entries: []const model_picker.Entry) usize {
+    var widest: usize = 0;
+    for (entries) |entry| widest = @max(widest, painter.measure(entry.id));
+    return 4 + @min(widest, 24) + 4;
+}
+
+fn otherHeading(painter: *Painter) error{OutOfMemory}![]const Span {
+    painter.begin(false);
+    _ = try painter.put(2, "Other models", painter.width -| 3, .{ .colour = .ink, .bold = true });
+    return painter.finish();
+}
+
+fn modelLine(painter: *Painter, state: *const State, at: usize, tag_column: usize) error{OutOfMemory}![]const Span {
+    const entry = state.menu.entries[at];
+    const highlighted = state.picker.?.at == at;
+    painter.begin(highlighted);
+    if (highlighted) _ = try painter.put(2, painter.glyphs.prompt, 1, .{ .colour = .strong });
+    const is_default = if (state.default) |*binding| std.mem.eql(u8, binding.model.slice(), entry.id) else false;
+    const tag: []const u8 = if (!entry.known) "default limits" else if (is_default) "default" else "";
+    const tag_cells = painter.measure(tag);
+    const fits = tag.len != 0 and tag_column + tag_cells + 1 <= painter.width;
+    const id_room = (if (fits) tag_column -| 2 else painter.width -| 1) -| 4;
+    _ = try painter.put(4, entry.id, id_room, .{ .colour = if (highlighted) .strong else if (entry.known) .ink else .normal });
+    if (fits) _ = try painter.put(tag_column, tag, tag_cells, .{ .colour = .quiet });
+    return painter.finish();
+}
+
+/// The input row at the sign-in choice: `Use`, then each sign-in that
+/// offers the model, the highlighted one marked and on the selection
+/// ground, as an Action's Allow once / Deny choice is drawn.
+fn signInChoice(painter: *Painter, providers: model_picker.Providers, highlight: Provider) error{OutOfMemory}![]const Span {
+    painter.begin(false);
+    _ = try painter.put(3, "Use", 3, .{ .colour = .quiet });
+    var column: usize = 8;
+    for (std.enums.values(Provider)) |provider| if (providers.contains(provider)) {
+        const chosen = provider == highlight;
+        const text = if (chosen) try std.fmt.allocPrint(painter.arena, "{s} {s} ", .{ painter.glyphs.prompt, provider.signIn() }) else try std.fmt.allocPrint(painter.arena, "  {s} ", .{provider.signIn()});
+        column += try painter.put(column, text, painter.width -| column -| 1, .{ .colour = if (chosen) .strong else .normal, .background = if (chosen) .selection else .ground }) + 2;
+    };
+    return painter.finish();
 }
 
 /// The list region: group headings, rows and "more" lines, scrolled so the
@@ -2371,7 +2709,8 @@ const Columns = struct {
 
 fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) error{OutOfMemory}![]const Span {
     const row = &state.rows.items[state.order.items[at]];
-    const selected = if (state.selected) |*ref| std.mem.eql(u8, ref, &row.reference) else false;
+    // While the picker is open its highlight is the only one.
+    const selected = state.picker == null and if (state.selected) |*ref| std.mem.eql(u8, ref, &row.reference) else false;
     painter.begin(selected);
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
@@ -2592,7 +2931,11 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
             },
             .open => |ref| try std.testing.expectEqualStrings(&ref, &got.open),
             .stop => |ref| try std.testing.expectEqualStrings(&ref, &got.stop),
-            .clear_draft, .exit => {},
+            .save_default => |binding| {
+                try std.testing.expectEqual(binding.provider, got.save_default.provider);
+                try std.testing.expectEqualStrings(binding.model.slice(), got.save_default.model.slice());
+            },
+            .list_models, .clear_draft, .exit => {},
         }
     }
 }
@@ -3156,7 +3499,7 @@ test "the composer starts text with one slash from //, as a conversation does" {
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
     try expectEffects(&.{}, try submit(&state, draft));
-    try expectNotice(&state, "! Unknown; try /configure or /exit");
+    try expectNotice(&state, "! Unknown; try /model or /configure");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
@@ -3211,7 +3554,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
         .{ "/configure --label \"open", configure_usage },
         // The Host would admit it; its Turns would fail at the provider.
         .{ "/configure --model gpt-5", "! Unsupported; session configure -h" },
-        .{ "/status", "! Unknown; try /configure or /exit" },
+        .{ "/status", "! Unknown; try /model or /configure" },
     }) |case| {
         draft = try typeText(&state, case[0]);
         try expectEffects(&.{}, try submit(&state, draft));
@@ -4949,4 +5292,184 @@ test "the Host-stopped band comes first, over the provider bands and the faded r
     try expectScreenLine(&state, 3, " Host not responding. Last update 3m ago.");
     try expectStyle(&state, 3, 1, .{ .colour = .failure });
     try expectStyle(&state, 9, 4, .{ .colour = .quiet });
+}
+
+fn offeredModels(comptime ids: []const []const u8) []const model_list.Offered {
+    return comptime blk: {
+        var models: [ids.len]model_list.Offered = undefined;
+        for (ids, &models) |id, *model| model.* = .{ .id = id, .known = model_capability.supportsModel(id) };
+        const final = models;
+        break :blk &final;
+    };
+}
+
+const chatgpt_models = offeredModels(&.{ "gpt-6-luna", "gpt-6.1-sol", "gpt-5.5" });
+
+fn pickerState(default: ?Default) !State {
+    var state = try opened(&fresh);
+    state.default = default;
+    return state;
+}
+
+/// Types /model and answers its model-list read with `lists`.
+fn openPicker(state: *State, lists: []const model_list.Provided) !void {
+    const draft = try typeText(state, "/model");
+    try expectEffects(&.{ .clear_draft, .list_models }, try submit(state, draft));
+    try expectEffects(&.{}, try step(state, .{ .models = lists }));
+}
+
+fn pickerScreen(state: *const State) ![]u8 {
+    return screenText(state, 60, 24, .{ .unicode = true });
+}
+
+test "/model lists the models, default first, and a model one sign-in offers is the whole pick" {
+    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+    defer state.deinit();
+    try openPicker(&state, &.{.{ .provider = .codex, .source = .table, .models = chatgpt_models }});
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[0].id);
+    const screen = try pickerScreen(&state);
+    defer std.testing.allocator.free(screen);
+    // The default leads, and the sign-in the Host does not serve says how to add it.
+    try std.testing.expect(std.mem.indexOf(u8, screen, "› gpt-6.1-sol") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "rui auth login openai") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "rui auth login codex") == null);
+    // Down then Enter saves gpt-6-luna with ChatGPT, the only sign-in.
+    var draft = try typeText(&state, "");
+    try expectEffects(&.{}, try press(&state, draft, .next));
+    var picked: Default = Default.of("codex", "gpt-6-luna").?;
+    try expectEffects(&.{.{ .save_default = picked }}, try submit(&state, draft));
+    try std.testing.expect(state.picker == null);
+    // Only a saved pick becomes the default.
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.default.?.model.slice());
+    try expectEffects(&.{}, try step(&state, .{ .saved = null }));
+    try std.testing.expectEqualStrings("gpt-6-luna", state.default.?.model.slice());
+    try std.testing.expectEqual(Provider.codex, state.default.?.provider);
+    // A failed save keeps the old default.
+    try openPicker(&state, &.{.{ .provider = .codex, .source = .table, .models = chatgpt_models }});
+    draft = try typeText(&state, "");
+    try expectEffects(&.{}, try press(&state, draft, .last));
+    picked = Default.of("codex", "gpt-5.5").?;
+    try expectEffects(&.{.{ .save_default = picked }}, try submit(&state, draft));
+    try expectEffects(&.{}, try step(&state, .{ .saved = "AccessDenied" }));
+    try std.testing.expectEqualStrings("gpt-6-luna", state.default.?.model.slice());
+    try std.testing.expect(state.notice.?.colour == .attention);
+}
+
+test "with both sign-ins, Enter turns the input row into the sign-in choice at the default's sign-in; Esc steps back" {
+    var state = try pickerState(Default.of("openai", "gpt-6-luna"));
+    defer state.deinit();
+    const both = [_]model_list.Provided{
+        .{ .provider = .codex, .source = .table, .models = chatgpt_models },
+        .{ .provider = .openai, .source = .live, .models = offeredModels(&.{ "gpt-6-luna", "gpt-5.5" }) },
+    };
+    try openPicker(&state, &both);
+    const draft = try typeText(&state, "");
+    try expectEffects(&.{}, try submit(&state, draft));
+    try std.testing.expect(state.choosingSignIn());
+    try std.testing.expectEqual(@as(?Provider, .openai), state.picker.?.sign_in);
+    {
+        const screen = try pickerScreen(&state);
+        defer std.testing.allocator.free(screen);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "Use    ChatGPT   › API key") != null);
+    }
+    // Left moves to ChatGPT and stops there.
+    try expectEffects(&.{}, try step(&state, .{ .sign_in = .left }));
+    try expectEffects(&.{}, try step(&state, .{ .sign_in = .left }));
+    try std.testing.expectEqual(@as(?Provider, .codex), state.picker.?.sign_in);
+    // Esc goes back to the models, then closes the picker.
+    try expectEffects(&.{}, try press(&state, draft, .clear));
+    try std.testing.expect(state.picker != null and !state.choosingSignIn());
+    try expectEffects(&.{}, try press(&state, draft, .clear));
+    try std.testing.expect(state.picker == null);
+    // gpt-6.1-sol only ChatGPT offers: Enter saves it without a choice.
+    try openPicker(&state, &both);
+    try expectEffects(&.{}, try press(&state, draft, .next));
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[state.picker.?.at].id);
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6.1-sol").? }}, try submit(&state, draft));
+    // Typing leaves the picker for the draft.
+    try openPicker(&state, &both);
+    _ = try typeText(&state, "h");
+    try std.testing.expect(state.picker == null);
+}
+
+test "models Rui does not list show under Other models and are not saved; a loading list is read again with the next listing" {
+    var state = try pickerState(Default.of("openai", "gpt-6-luna"));
+    defer state.deinit();
+    const loading = [_]model_list.Provided{.{ .provider = .openai, .source = .pending, .models = chatgpt_models }};
+    try openPicker(&state, &loading);
+    {
+        const screen = try pickerScreen(&state);
+        defer std.testing.allocator.free(screen);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "loading") != null);
+    }
+    // The next listing asks for the lists again, once.
+    const asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, asked);
+    const live = [_]model_list.Provided{.{ .provider = .openai, .source = .live, .models = offeredModels(&.{ "whisper-1", "gpt-6-luna", "dall-e-3" }) }};
+    try expectEffects(&.{}, try step(&state, .{ .models = &live }));
+    {
+        const screen = try pickerScreen(&state);
+        defer std.testing.allocator.free(screen);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "loading") == null);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "Other models") != null);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "default limits") != null);
+    }
+    const draft = try typeText(&state, "");
+    try expectEffects(&.{}, try press(&state, draft, .next));
+    try std.testing.expectEqualStrings("dall-e-3", state.menu.entries[state.picker.?.at].id);
+    try expectEffects(&.{}, try submit(&state, draft));
+    try std.testing.expect(state.picker != null and state.saving == null);
+    try std.testing.expect(state.notice.?.colour == .attention);
+    // A fallback list says the live one is unavailable.
+    const fallback = [_]model_list.Provided{.{ .provider = .openai, .source = .table_fallback, .models = chatgpt_models }};
+    try expectEffects(&.{}, try step(&state, .{ .tick = state.now_ms + 2 * list_interval_ms }));
+    try expectEffects(&.{}, try step(&state, .{ .models = &fallback }));
+    const screen = try pickerScreen(&state);
+    defer std.testing.allocator.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "unavailable") != null);
+}
+
+test "a long list shows a window around the highlight and counts the rest" {
+    var state = try pickerState(null);
+    defer state.deinit();
+    const table = comptime blk: {
+        var ids: [model_capability.models.len + 4][]const u8 = undefined;
+        for (model_capability.models, ids[0..model_capability.models.len]) |row, *id| id.* = row.id;
+        ids[model_capability.models.len..].* = .{ "o1", "o2", "o3", "o4" };
+        const final = ids;
+        break :blk offeredModels(&final);
+    };
+    try openPicker(&state, &.{.{ .provider = .codex, .source = .live, .models = table }});
+    const draft = try typeText(&state, "");
+    try expectEffects(&.{}, try press(&state, draft, .last));
+    const screen = try pickerScreen(&state);
+    defer std.testing.allocator.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "› o4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, model_capability.models[0].id) == null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, " more") != null);
+}
+
+test "with no sign-in served, the picker shows each login line instead of models" {
+    var state = try pickerState(null);
+    defer state.deinit();
+    try openPicker(&state, &.{});
+    const screen = try pickerScreen(&state);
+    defer std.testing.allocator.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "rui auth login codex") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "rui auth login openai") != null);
+    const draft = try typeText(&state, "");
+    try expectEffects(&.{}, try submit(&state, draft));
+    try std.testing.expect(state.saving == null);
+}
+
+test "a start the Host refuses for want of its sign-in names the sign-in and its login" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    const draft = try typeText(&state, "Try");
+    _ = try submit(&state, draft);
+    try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
+    const said = state.notice.?.text();
+    try std.testing.expect(std.mem.indexOf(u8, said, "ChatGPT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, said, "rui auth login codex") != null);
+    try std.testing.expect(std.mem.indexOf(u8, said, "model_capability_unavailable") == null);
 }

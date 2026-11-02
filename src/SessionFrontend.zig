@@ -189,6 +189,7 @@ const notice_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
     "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
     short_result_bytes + 2 * "! ".len,
+    protocol.max_model_bytes + " · API key".len + model_tail.len,
 );
 
 /// Fills the reader's job in place; the caller may add to it before launch.
@@ -470,6 +471,8 @@ const Slash = union(enum) {
     inspection: Inspection,
     /// /effort alone: this model's efforts, from the Session line's facts.
     efforts,
+    /// The Session's model and sign-in, which never change.
+    model,
     discard,
     recover: []const u8,
     wait,
@@ -499,6 +502,7 @@ fn parse(text: []const u8) Slash {
         .discard => .discard,
         .wait => .wait,
         .login => .login,
+        .model => .model,
     };
 }
 
@@ -530,6 +534,7 @@ fn slashCommand(self: *Self, text: []const u8) void {
         .wait => self.notice = "Work continues while you compose.",
         .login => self.notice = "Login uses rui auth login codex in your shell.",
         .efforts => self.notice = self.efforts(),
+        .model => self.notice = self.modelFacts(),
         .misused => |name| {
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
             writer.print("! Usage: {s}", .{slash_commands.usage.get(name)}) catch unreachable;
@@ -552,6 +557,19 @@ fn efforts(self: *Self) []const u8 {
     };
     if (!listed) return "Rui lists no efforts for this model.";
     writer.writeAll(" · /effort LEVEL switches") catch unreachable;
+    return writer.buffered();
+}
+
+const model_tail = " · another model needs a new Session: /model in the overview";
+
+/// The Session's model and sign-in. A Session keeps both for life, so a
+/// different model starts a new Session from the overview's /model.
+fn modelFacts(self: *Self) []const u8 {
+    if (self.line.read == null) return "The model shows once the Session is read.";
+    var writer = std.Io.Writer.fixed(&self.notice_buffer);
+    writer.writeAll(self.line.model.slice()) catch unreachable;
+    if (self.line.provider) |provider| writer.print(" · {s}", .{provider.signIn()}) catch unreachable;
+    writer.writeAll(model_tail) catch unreachable;
     return writer.buffered();
 }
 
@@ -579,6 +597,8 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/effort high", "" },
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
         .{ "/wait", "Work continues while you compose." },
+        .{ "/model", "The model shows once the Session is read." },
+        .{ "/model gpt-5.5", "! Usage: /model" },
         .{ "/configure --permission-mode ask", "" },
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
         .{ "/inspect-action", "" },
@@ -598,6 +618,22 @@ test "frontend answers local and unknown commands in place and keeps Host comman
             try std.testing.expect(self.notice == null);
             try std.testing.expectEqualStrings(case[0], self.input.takeCommand().?);
         }
+    }
+}
+
+test "frontend /model shows the Session's model and sign-in and offers no pick" {
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
+    self.input.init();
+    for ([_]protocol.Provider{ .codex, .openai }) |provider| {
+        self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
+        try self.line.model.set("gpt-6-luna");
+        self.notice = null;
+        self.slashCommand("/model");
+        const said = self.notice.?;
+        try std.testing.expect(std.mem.startsWith(u8, said, "gpt-6-luna · "));
+        try std.testing.expect(std.mem.indexOf(u8, said, provider.signIn()) != null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+        try std.testing.expectEqualStrings("gpt-6-luna", self.line.model.slice());
     }
 }
 
