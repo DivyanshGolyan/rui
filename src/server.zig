@@ -3133,7 +3133,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .content = content,
             .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
             .admitted_at = if (kind == .user) max else null,
-            .sender = if (kind == .user) .{ .session = session } else null,
+            .sender = if (kind == .user) .{ .session = session, .label = description } else null,
         };
         var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
         try response.render(renderConversationPage, .{&page});
@@ -3157,7 +3157,8 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
-    const peer: protocol.Peer = .{ .session = session };
+    // A label is a description's size, so the worst one doubles as both.
+    const peer: protocol.Peer = .{ .session = session, .label = description };
     const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{

@@ -597,15 +597,22 @@ pub const ToolPresentation = struct {
     }
 };
 
-/// A peer Session named on a Message, in the same Store.
+/// A peer Session named on a Message, in the same Store, with its label as
+/// the Store holds it when read: empty when the Session has none.
 pub const Peer = struct {
     session: Bounded(max_session_bytes),
+    label: Bounded(max_label_bytes) = .{},
 
-    pub const json_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, "}" };
+    pub const json_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, ",\"label\":", Hole{ .optional_string = max_label_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: Peer, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{self.session.slice()});
+        try writeShape(out, json_shape, .{ self.session.slice(), if (self.label.len == 0) null else self.label.slice() });
+    }
+
+    /// What a reader calls it: its label, or its ID when it has none.
+    pub fn name(self: *const Peer) []const u8 {
+        return if (self.label.len == 0) self.session.slice() else self.label.slice();
     }
 };
 

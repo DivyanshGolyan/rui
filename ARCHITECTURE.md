@@ -2844,7 +2844,10 @@ Only after trying those alternatives may genuine row pressure shorten the bounde
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 
-Peer Messages show as one upright, dim line each, never with `›`: `← k7m2qx · first line` for a Message from a peer, `→ k7m2qx · first line` for one this Session sent, and `! → k7m2qx — Failed` for a send its target refused.
+Peer Messages show as one upright, dim line each, never with `›`: `← Received message from NAME · first line` for a Message from a peer, `→ Messaged NAME · first line` for one this Session sent, and `! Messaged NAME — Failed` for a send its target refused.
+NAME is the peer's label as the Store holds it when the page is read, so a rename shows on every row; a peer without one shows its ID (`k7m2qx`).
+The Store looks the label up once per peer row; it is not copied into the Message.
+Peer rows group with tool rows: one after a tool row or another peer row follows it with no blank line, and a failed send stands apart as a failed tool row does.
 The line keeps one row and ends in `…` when it does not fit.
 A Message with more than its line shows (a later non-blank line, or a first line past 200 bytes) ends in `…` too, and Ctrl-O opens it like a collapsed user block.
 Its admission time goes in the right margin as on a user block; below 60 columns it does not show.

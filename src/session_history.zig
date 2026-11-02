@@ -24,18 +24,18 @@ pub const Prepared = struct {
             const index = self.page.count - 1 - reverse;
             const item = self.page.items[index];
             if (item.content.bytes > item_bytes) {
-                compact = false;
                 var buffer: [192]u8 = undefined;
                 if (item.sender) |sender| {
                     // Its first line is not staged, so the line shows `…`
                     // alone and Ctrl-O opens it.
                     var line: View.PeerLine(@TypeOf(sink)) = undefined;
-                    try line.init(sink, .inbound, sender, item.content.bytes);
+                    try line.init(sink, .inbound, sender, item.content.bytes, &compact);
                     line.received = item.content.bytes;
                     line.phase = .more;
                     if (try line.finish(item.admitted_at.?)) try View.noteCollapsed(sink, collapsed(item));
                     continue;
                 }
+                compact = false;
                 if (item.kind == .user) {
                     // Its line count is unknown without reading it.
                     try View.userPrefix(sink, colour, item.admitted_at.?);
@@ -71,7 +71,7 @@ pub const Prepared = struct {
                 try View.toolResult(item.presentation.?, staged, sink, colour, &compact);
                 continue;
             }
-            compact = false;
+            if (item.sender == null) compact = false;
             switch (item.kind) {
                 .hosted_call => try View.toolHeading(item.presentation.?, sink, colour, true),
                 .tool_result => {
@@ -85,7 +85,7 @@ pub const Prepared = struct {
                 },
                 .user => if (item.sender) |sender| {
                     var line: View.PeerLine(@TypeOf(sink)) = undefined;
-                    try line.init(sink, .inbound, sender, item.content.bytes);
+                    try line.init(sink, .inbound, sender, item.content.bytes, &compact);
                     try staged.read(&line);
                     if (try line.finish(item.admitted_at.?)) try View.noteCollapsed(sink, collapsed(item));
                     continue;
@@ -227,7 +227,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     const clock = View.clock(1_800_000_000, &time).?;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n› \x1b[8m{s}\x1b[0m\x1b[2;8m┄\x1b[0m\n  \x1b[2;8mRaw export: rui session read-conversation{s} --position 2 --ordinal 0\x1b[0m\n" ++
         "\nRui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n" ++
-        "\n\x1b[2;8m← k7m2qx · …\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
+        "\n\x1b[2;8m← Received message from k7m2qx · …\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
 }
 
 test "history body limit preserves contextual tool outcomes" {

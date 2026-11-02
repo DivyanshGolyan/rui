@@ -1712,10 +1712,13 @@ pub const JsonFirstMessage = struct {
 
 pub const JsonPeer = struct {
     session: JsonString(protocol.max_session_bytes),
+    label: ?JsonString(protocol.max_label_bytes) = null,
 
     fn peer(self: *const JsonPeer) !protocol.Peer {
         if (!protocol.validSessionId(self.session.slice())) return error.InvalidResponse;
-        return .{ .session = self.session.value };
+        const label = if (self.label) |label| label.value else protocol.Bounded(protocol.max_label_bytes){};
+        if (self.label != null and !protocol.validLabel(label.slice())) return error.InvalidResponse;
+        return .{ .session = self.session.value, .label = label };
     }
 };
 
@@ -1963,6 +1966,20 @@ test "an activity row carries its time, and a Message's rows carry its admission
         if (case.failure) |failure| {
             try std.testing.expectError(failure, ActivityPage.parse(writer.buffered(), .{}));
         } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
+    }
+    // A peer's label crosses with it, and an unnamed peer stays unnamed.
+    for ([_][]const u8{ "Review the WAL", "" }) |label| {
+        var named = sent;
+        try named.target.label.set(label);
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 1792925000, .value = .{ .sent = named } };
+        try facts.work.workspace.set("/w");
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        const target = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value.sent.target;
+        try std.testing.expectEqualStrings(label, target.label.slice());
+        try std.testing.expectEqualStrings(if (label.len == 0) "k7m2qx" else label, target.name());
     }
     // A row without its time is refused.
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
