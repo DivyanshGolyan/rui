@@ -68,21 +68,7 @@ pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
     try sink.feed(Mark.reset);
 }
 
-/// A peer label is its complete routing identity, never a second abbreviation.
-pub fn peerRef(peer: protocol.Peer, buffer: *[4 * protocol.max_session_bytes + 8]u8) []const u8 {
-    const session = peer.session;
-    @memcpy(buffer[0..session.len], session.slice());
-    return buffer[0..session.len];
-}
-
-test "a peer reference is the complete six character routing ID" {
-    var buffer: [4 * protocol.max_session_bytes + 8]u8 = undefined;
-    var exact: protocol.Peer = .{ .session = .{} };
-    try exact.session.set("k7m2qx");
-    try std.testing.expectEqualStrings("k7m2qx", peerRef(exact, &buffer));
-}
-
-test "peer Messages render as one dim line each, with time in the margin and `…` when they continue" {
+test "peer Messages render as one dim line each, named, grouped with tool rows, with time in the margin and `…` when they continue" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,
@@ -105,7 +91,7 @@ test "peer Messages render as one dim line each, with time in the margin and `�
     }
     try std.testing.expectEqual(@as(c_int, 0), setenv("TZ", "UTC0", 1));
     tzset();
-    var peer: protocol.Peer = .{ .session = .{} };
+    var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const S = Mark.summary;
     const N = Mark.sidenote;
@@ -115,25 +101,26 @@ test "peer Messages render as one dim line each, with time in the margin and `�
     // do, but a later non-blank one ends the line in `…`. A line ending in
     // `…` is a collapsed block (`true`), whose Message Ctrl-O opens.
     inline for (.{
-        .{ .inbound, "\n  \nPlease review\t \nsecond line", "\n" ++ S ++ "← 9f8e7d · Please review…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .outbound, "first\n\n \t\n  \nsecond", "\n" ++ S ++ "→ 9f8e7d · first…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .outbound, "done", "\n" ++ S ++ "→ 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
-        .{ .inbound, "done\n \n\t\r\n\n", "\n" ++ S ++ "← 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
-        .{ .inbound, " \n", "\n" ++ S ++ "← 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .inbound, "\n  \nPlease review\t \nsecond line", "\n" ++ S ++ "← Received message from 9f8e7d · Please review…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .outbound, "first\n\n \t\n  \nsecond", "\n" ++ S ++ "→ Messaged 9f8e7d · first…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .outbound, "done", "\n" ++ S ++ "→ Messaged 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .inbound, "done\n \n\t\r\n\n", "\n" ++ S ++ "← Received message from 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .inbound, " \n", "\n" ++ S ++ "← Received message from 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", false },
         // Peer text cannot draw controls or styles.
-        .{ .outbound, "\x1b[2mx", "\n" ++ S ++ "→ 9f8e7d · \\x1b[2mx" ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .outbound, "\x1b[2mx", "\n" ++ S ++ "→ Messaged 9f8e7d · \\x1b[2mx" ++ N ++ "08:00" ++ R ++ "\n", false },
         // A whole preview needs no `…`; one byte more does.
-        .{ .inbound, &preview, "\n" ++ S ++ "← 9f8e7d · " ++ preview ++ N ++ "08:00" ++ R ++ "\n", false },
-        .{ .inbound, preview ++ "y", "\n" ++ S ++ "← 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .inbound, preview ++ "\ny", "\n" ++ S ++ "← 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .inbound, &preview, "\n" ++ S ++ "← Received message from 9f8e7d · " ++ preview ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .inbound, preview ++ "y", "\n" ++ S ++ "← Received message from 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .inbound, preview ++ "\ny", "\n" ++ S ++ "← Received message from 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
         // A line already ending in `…` looks continued, so it opens too.
-        .{ .outbound, "wait…", "\n" ++ S ++ "→ 9f8e7d · wait…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .outbound, "wait…\nmore", "\n" ++ S ++ "→ 9f8e7d · wait……" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .outbound, "wait…", "\n" ++ S ++ "→ Messaged 9f8e7d · wait…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .outbound, "wait…\nmore", "\n" ++ S ++ "→ Messaged 9f8e7d · wait……" ++ N ++ "08:00" ++ R ++ "\n", true },
     }) |case| {
         for (0..case[1].len + 1) |split| {
             var sink: Sink = .{};
             var line: PeerLine(*Sink) = undefined;
-            try line.init(&sink, case[0], peer, case[1].len);
+            var compact = false;
+            try line.init(&sink, case[0], peer, case[1].len, &compact);
             try line.feed(case[1][0..split]);
             try line.feed(case[1][split..]);
             try std.testing.expectEqual(case[3], try line.finish(1_800_000_000));
@@ -144,21 +131,45 @@ test "peer Messages render as one dim line each, with time in the margin and `�
     var sink: Sink = .{};
     var line: PeerLine(*Sink) = undefined;
     const long = comptime repeat("é", 500);
-    try line.init(&sink, .inbound, peer, long.len);
+    var compact = false;
+    try line.init(&sink, .inbound, peer, long.len, &compact);
     try line.feed(long);
     try std.testing.expect(try line.finish(1_800_000_000));
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← 9f8e7d · " ++ comptime repeat("é", 100) ++ "…" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from 9f8e7d · " ++ comptime repeat("é", 100) ++ "…" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
     // Unread bytes are more than the line shows; without a time the margin
     // stays empty.
     sink = .{};
-    try line.init(&sink, .inbound, peer, 9000);
+    compact = false;
+    try line.init(&sink, .inbound, peer, 9000, &compact);
     line.received = 9000;
     line.phase = .more;
     try std.testing.expect(try line.finish(std.math.maxInt(u64)));
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← 9f8e7d · …" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from 9f8e7d · …" ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
-    try sendFailed(&failed, peer);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "! → 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
+    try sendFailed(&failed, peer, &compact);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "! Messaged 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
+    try std.testing.expect(!compact);
+    // A named peer shows by its name, escaped as a label is, and rows in a
+    // row share one group with no blank line between them.
+    var named = peer;
+    try named.label.set("Review the WAL");
+    var group: Sink = .{};
+    compact = false;
+    try line.init(&group, .outbound, named, 2, &compact);
+    try line.feed("hi");
+    _ = try line.finish(1_800_000_000);
+    try line.init(&group, .inbound, named, 2, &compact);
+    try line.feed("ok");
+    _ = try line.finish(1_800_000_000);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged Review the WAL · hi" ++ N ++ "08:00" ++ R ++ "\n" ++
+        S ++ "← Received message from Review the WAL · ok" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
+    // A name ending in `…` over a blank Message ends the line in `…`, which
+    // the viewport counts as a collapsed block, so the row opens as one.
+    try named.label.set("Plan…");
+    var dotted: Sink = .{};
+    try line.init(&dotted, .inbound, named, 2, &compact);
+    try line.feed(" \n");
+    try std.testing.expect(try line.finish(1_800_000_000));
 }
 
 /// A line's end before trailing blanks.
@@ -168,10 +179,12 @@ fn trimmed(bytes: []const u8) []const u8 {
     return bytes[0..end];
 }
 
-/// One peer Message as one upright dim line, never `›`: `← ref · first line`
-/// from a peer, `→ ref · first line` sent to one. Its admission time goes in
-/// the right margin. A Message with more than its preview shows ends in `…`.
-/// Initialize in final storage, feed the Message's exact bytes, then finish.
+/// One peer Message as one upright dim line, never `›`, in the tool rows'
+/// group: `← Received message from NAME · first line` from a peer,
+/// `→ Messaged NAME · first line` sent to one, NAME being its label or, with
+/// none, its ID. Its admission time goes in the right margin. A Message with
+/// more than its preview shows ends in `…`. Initialize in final storage, feed
+/// the Message's exact bytes, then finish.
 pub fn PeerLine(comptime Sink: type) type {
     return struct {
         const Self = @This();
@@ -184,13 +197,20 @@ pub fn PeerLine(comptime Sink: type) type {
         // later non-blank byte. A caller that reads no bytes sets `more`.
         phase: enum { leading, first, after, more } = .leading,
         longer: bool = false,
+        // A name ending in `…` ends a line with no text after it, which
+        // then reads as continued and opens as one.
+        named_ellipsis: bool = false,
 
-        pub fn init(self: *Self, sink: Sink, direction: enum { inbound, outbound }, peer: protocol.Peer, length: u64) !void {
+        /// `compact` is the tool rows' grouping: a row after another one
+        /// joins it without a blank line.
+        pub fn init(self: *Self, sink: Sink, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, length: u64, compact: *bool) !void {
             self.* = .{ .sink = sink, .length = length };
-            var buffer: [4 * protocol.max_session_bytes + 8]u8 = undefined;
-            try sink.feed("\n" ++ Mark.summary);
-            try sink.feed(if (direction == .inbound) "← " else "→ ");
-            try sink.feed(peerRef(peer, &buffer));
+            if (!compact.*) try sink.feed("\n");
+            compact.* = true;
+            try sink.feed(Mark.summary);
+            try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
+            try peerName(sink, peer);
+            self.named_ellipsis = std.mem.endsWith(u8, peer.name(), "…");
         }
 
         pub fn feed(self: *Self, bytes: []const u8) anyerror!void {
@@ -239,17 +259,25 @@ pub fn PeerLine(comptime Sink: type) type {
                 try self.sink.feed(time);
             }
             try self.sink.feed(Mark.reset ++ "\n");
-            return continues or std.mem.endsWith(u8, kept, "…");
+            return continues or std.mem.endsWith(u8, kept, "…") or (kept.len == 0 and self.named_ellipsis);
         }
     };
 }
 
-/// A send this Session made that its target refused.
-pub fn sendFailed(sink: anytype, target: protocol.Peer) !void {
-    var buffer: [4 * protocol.max_session_bytes + 8]u8 = undefined;
-    try sink.feed("\n" ++ Mark.summary ++ "! → ");
-    try sink.feed(peerRef(target, &buffer));
+/// A send this Session made that its target refused: set apart, as a failed
+/// tool row is.
+pub fn sendFailed(sink: anytype, target: protocol.NamedPeer, compact: *bool) !void {
+    compact.* = false;
+    try sink.feed("\n" ++ Mark.summary ++ "! Messaged ");
+    try peerName(sink, target);
     try sink.feed(" — Failed" ++ Mark.reset ++ "\n");
+}
+
+/// A peer's label, escaped as any label is, or its ID when it has none.
+fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
+    var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
+    try escaped.feed(peer.name());
+    try escaped.finish();
 }
 
 /// Size as a reader says it: thousands of bytes, one decimal below 9.95,
@@ -1096,16 +1124,20 @@ test "a queued Message is labelled only while work under way holds it" {
 
 /// One Message in full, labelled unless applied: live, in the opening and in
 /// a transcript's listing alike.
-pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
-    if (messageLabel(value.state, labels)) |text| try print(sink, "\n{s}", .{text});
+pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool) !void {
+    if (messageLabel(value.state, labels)) |text| {
+        compact.* = false;
+        try print(sink, "\n{s}", .{text});
+    }
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     if (value.sender) |sender| {
         var line: PeerLine(@TypeOf(sink)) = undefined;
-        try line.init(sink, .inbound, sender, value.content.length);
+        try line.init(sink, .inbound, sender, value.content.length, compact);
         try content(requests, store, session, item, value.content, &line);
         if (try line.finish(value.admitted_at)) try noteCollapsed(sink, block);
         return;
     }
+    compact.* = false;
     try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
@@ -1514,15 +1546,13 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     drawn = .{ .admission = value.admission, .position = item.position };
                     sink.drew(drawn.admission);
                 }
-                compact_tools.* = false;
-                try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour);
+                try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour, compact_tools);
             },
             .user => |value| {
                 // Live, another Session's Message showed as its Admission,
                 // and one shown while it waited never shows again.
                 if (!historical and (value.sender != null or value.admission <= drawn.admission)) continue;
-                compact_tools.* = false;
-                try message(requests, store, session, item, value, .none, sink, colour);
+                try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
             },
             .assistant => |reference| {
                 compact_tools.* = false;
@@ -1575,16 +1605,14 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sink.feed("\n! Session stopped.\n");
             },
             .sent => |sent| {
-                compact_tools.* = false;
                 var line: PeerLine(@TypeOf(sink)) = undefined;
-                try line.init(sink, .outbound, sent.target, sent.content.length);
+                try line.init(sink, .outbound, sent.target, sent.content.length, compact_tools);
                 try content(requests, store, session, item, sent.content, &line);
                 // Conversation pages hold no sent Message, so no row exports it.
                 if (try line.finish(sent.admitted_at)) try noteCollapsed(sink, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = sent.content, .row = false });
             },
             .send_failed => |failed| {
-                compact_tools.* = false;
-                try sendFailed(sink, failed.target);
+                try sendFailed(sink, failed.target, compact_tools);
             },
         }
     }
@@ -1613,7 +1641,8 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             if (first) sink.excluding(item.position);
             first = false;
             value.state = .excluded;
-            try message(requests, store, session, item, value, .lasting(false), sink, colour);
+            var compact = false;
+            try message(requests, store, session, item, value, .lasting(false), sink, colour, &compact);
         }
         cursor = page.continuation() orelse return;
     }
