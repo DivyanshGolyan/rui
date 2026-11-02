@@ -110,6 +110,7 @@ fn run(init: std.process.Init) !void {
         // Pre-admission refusals have one diagnostic, with no recovery handle.
         // A saved rejection or conflict already named its replay.
         if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted) return err;
+        if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
         stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
@@ -126,6 +127,18 @@ noinline fn printHelp(io: std.Io, topic: union(enum) { resource: cli_args.Resour
         .command => |definition| try definition.help(&writer.interface),
     }
     return writer.flush();
+}
+
+/// Names the variables that most likely pushed the environment past what a
+/// Message carries. The captured request stays recoverable.
+noinline fn reportEnvironmentTooLarge(environment: client.Environment) void {
+    const advice = " Unset or shorten them, then recover the saved request with rui request recover.\n";
+    var buffer: ["rui: ".len + client.Environment.too_large_bytes + advice.len]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    writer.writeAll("rui: ") catch unreachable;
+    environment.describeTooLarge(&writer) catch unreachable;
+    writer.writeAll(advice) catch unreachable;
+    stderr.diagnostic("{s}", .{writer.buffered()});
 }
 
 noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
@@ -1631,7 +1644,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
+        break :blk takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -1697,11 +1710,11 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(&step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, &step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, &step);
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(&step, sender.sendCaptured(&captured, &reply_buffer));
+    const reply = try takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
@@ -1782,7 +1795,12 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
         else => |mode| @tagName(mode),
     });
     {
-        const origin = if (work.settings.compaction_trigger_override != null) "Session override" else "model default";
+        const origin = if (work.settings.compaction_trigger_override != null)
+            "Session override"
+        else if (model_capability.supportsModel(work.settings.model.slice()))
+            "model default"
+        else
+            "assumed for a model Rui does not list";
         var buffer: [160]u8 = undefined;
         const policy = policy: {
             const tokens = work.settings.compaction_trigger orelse
@@ -2061,7 +2079,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2073,12 +2091,12 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, reported: ?*?client.Step) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, environment: client.Environment, reported: ?*?client.Step) !void {
     const io = sender.io;
     var unreported: ?client.Step = null;
     const step = reported orelse &unreported;
@@ -2087,7 +2105,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, &reply_buffer));
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer));
     };
     try writeMutationReply(io, reply, .json, replay);
 }
@@ -2106,7 +2124,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2518,7 +2536,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
-    const wire = "{\"version\":\"2\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
+    const wire = "{\"version\":\"4\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
     var reply = protocol_reply.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     try reply.context.store.set("/store");
@@ -2535,8 +2553,8 @@ test "mutation presentation renders owned diagnostics and context with bounded w
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
-    const accepted_wire = "{\"version\":\"2\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
-    const failed_wire = "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
+    const accepted_wire = "{\"version\":\"4\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const failed_wire = "{\"version\":\"4\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
     const context = "{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"key/µ\\\"\\n\\u001b\",\"kind\":\"configure\"}";
     const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true}}";
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
@@ -2579,7 +2597,7 @@ test "mutation presentation complete modes preserve escaped original context" {
 }
 
 test "mutation presentation wrong binding keeps caller context even interactively" {
-    const wire = "{\"version\":\"2\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
+    const wire = "{\"version\":\"4\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
     var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
     try reply.context.store.set("/original-store");
     try reply.context.key.set("original-key");
@@ -2754,7 +2772,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, &buffer).get();
+        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer).get();
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }

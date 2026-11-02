@@ -2,6 +2,8 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const environment_rule = @import("environment.zig");
+const TerminalText = @import("TerminalText.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
 const test_poll = @import("test_poll");
 /// Reply grammar; public for callers built against this module alone.
@@ -87,11 +89,17 @@ pub const Requests = struct {
         if (self.cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
     }
 
-    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, reply_buffer: *ReplyBuffer) Stepped(MutationSendError, protocol_reply.MutationReply) {
+    /// A Message carries `environment` ahead of the record's bytes, which
+    /// are sent unchanged; other mutations carry none. An environment over
+    /// `protocol.max_environment_bytes` fails before connecting, and the
+    /// record stays recoverable.
+    pub fn sendCaptured(self: Requests, captured: *CapturedRecord, environment: Environment, reply_buffer: *ReplyBuffer) Stepped(MutationSendError, protocol_reply.MutationReply) {
         reply_buffer.len = 0;
         self.check() catch |err| return .fail(null, err);
+        const carried: ?Environment = if (captured.target == .message) environment else null;
+        if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
-        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, reply_buffer, null)) {
+        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
         };
@@ -109,7 +117,7 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key });
-        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, reply_buffer, null).get();
+        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, null).get();
         if (reply.status != 200) return .{ .failure = try protocol_reply.decodeReadFailure(reply, false) };
         return .{ .observation = try protocol_reply.CommandObservation.parse(reply, key) };
     }
@@ -519,7 +527,7 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     const paths = try platform.resolveClientPaths(io, input.store);
     var body: protocol.RequestBuffer = .{};
     try body.appendShape(protocol.host_stop_request, .{paths.store.slice()});
-    const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, reply_buffer, null).get();
+    const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, null, reply_buffer, null).get();
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
     else
@@ -579,7 +587,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     var reply_buffer: ReplyBuffer = .{};
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     const until = @min(probe_end, deadline orelse probe_end);
-    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, &reply_buffer, until).get() catch |err| return switch (err) {
+    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get() catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
@@ -1457,7 +1465,87 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
 }
 
 pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponseRequest);
-pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{Cancelled};
+pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge };
+
+/// The client environment a Message carries for its Session's Bash: the
+/// process's variables in order as `NAME=VALUE\0` entries. Names starting
+/// with `RUI_` stay behind, because Rui sets its own; so does an entry the
+/// Host could not read back (an empty name or one holding '=' or NUL).
+pub const Environment = struct {
+    map: *const std.process.Environ.Map,
+
+    /// No variables.
+    pub const empty: Environment = .{ .map = &empty_map };
+    const empty_map: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = undefined };
+
+    /// Bytes of the entries.
+    pub fn bytes(self: Environment) u64 {
+        var total: u64 = 0;
+        for (self.map.keys(), self.map.values()) |name, value| {
+            if (environment_rule.forwards(name, value)) total += environment_rule.entryBytes(name, value);
+        }
+        return total;
+    }
+
+    /// The three largest forwarded entries' names, largest first.
+    pub fn largest(self: Environment) [3]?[]const u8 {
+        var names: [3]?[]const u8 = @splat(null);
+        var sizes: [3]usize = @splat(0);
+        for (self.map.keys(), self.map.values()) |name, value| {
+            if (!environment_rule.forwards(name, value)) continue;
+            var size = environment_rule.entryBytes(name, value);
+            var held: ?[]const u8 = name;
+            for (&names, &sizes) |*slot_name, *slot_size| {
+                if (held == null or size <= slot_size.*) continue;
+                std.mem.swap(?[]const u8, slot_name, &held);
+                std.mem.swap(usize, slot_size, &size);
+            }
+        }
+        return names;
+    }
+
+    /// How much of each largest variable's name `describeTooLarge` shows.
+    const shown_name_bytes = 32;
+    const too_large_head = "this shell's environment is {d} bytes, over the {d} a Message carries for Bash; nothing was sent. Largest variables:";
+    /// The most bytes `describeTooLarge` writes.
+    pub const too_large_bytes = too_large_head.len + 2 * 20 + 3 * (", ".len + TerminalText.max_bytes_per_byte * shown_name_bytes) + ".".len;
+
+    /// Why a Message refused this environment before sending it: its size,
+    /// the limit and its three largest variables, escaped for one terminal
+    /// line. Every caller that sends Messages reports it with these words.
+    pub fn describeTooLarge(self: Environment, writer: *std.Io.Writer) !void {
+        try writer.print(too_large_head, .{ self.bytes(), protocol.max_environment_bytes });
+        for (self.largest(), 0..) |name, index| if (name) |value| {
+            try writer.writeAll(if (index == 0) " " else ", ");
+            var text: TerminalText = .{ .mode = .line };
+            try text.feed(writer, value[0..@min(value.len, shown_name_bytes)]);
+            try text.finish(writer);
+        };
+        try writer.writeAll(".");
+    }
+
+    /// Writes the entries through `buffer`, flushing it as it fills.
+    fn upload(self: Environment, requests: Requests, fd: std.posix.fd_t, buffer: []u8, until: ?i128) !void {
+        var used: usize = 0;
+        for (self.map.keys(), self.map.values()) |name, value| {
+            if (!environment_rule.forwards(name, value)) continue;
+            for ([_][]const u8{ name, "=", value, "\x00" }) |piece| {
+                var rest = piece;
+                while (rest.len != 0) {
+                    const take = @min(rest.len, buffer.len - used);
+                    @memcpy(buffer[used..][0..take], rest[0..take]);
+                    used += take;
+                    rest = rest[take..];
+                    if (used == buffer.len) {
+                        try writeAllRequest(requests, fd, buffer, until);
+                        used = 0;
+                    }
+                }
+            }
+        }
+        try writeAllRequest(requests, fd, buffer[0..used], until);
+    }
+};
 
 fn sendSource(
     requests: Requests,
@@ -1468,13 +1556,14 @@ fn sendSource(
     file: ?*std.Io.File,
     bytes: ?[]const u8,
     instance: ?*const protocol.InstanceId,
+    environment: ?Environment,
     reply_buffer: *ReplyBuffer,
     until: ?i128,
 ) Stepped(SendError, protocol_reply.CommandReply) {
     const address = std.Io.net.UnixAddress.init(paths.socket.slice()) catch |err| return .fail(.endpoint, err);
     const fd = connectRequest(requests, address, until) catch |err| return .fail(.connect, err);
     defer closeSocket(requests.io, fd);
-    uploadRequest(requests, fd, route, timing, length, file, bytes, instance, until) catch |err| return .fail(.upload, err);
+    uploadRequest(requests, fd, route, timing, length, file, bytes, instance, environment, until) catch |err| return .fail(.upload, err);
     const reply = readCommandResponseRequest(requests, fd, reply_buffer, timing, until) catch |err| return .fail(.admission_response, err);
     return .{ .done = reply };
 }
@@ -1488,10 +1577,15 @@ fn uploadRequest(
     file: ?*std.Io.File,
     bytes: ?[]const u8,
     instance: ?*const protocol.InstanceId,
+    environment: ?Environment,
     until: ?i128,
 ) !void {
     var header_buffer: [512]u8 = undefined;
-    var used = (try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n", .{ route, length })).len;
+    const environment_bytes = if (environment) |value| value.bytes() else 0;
+    var used = (try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n", .{ route, environment_bytes + length })).len;
+    if (environment != null) {
+        used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Environment-Bytes: {d}\r\n", .{environment_bytes})).len;
+    }
     if (instance) |id| {
         used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Host-Instance: {s}\r\n", .{std.fmt.bytesToHex(id.*, .lower)})).len;
     }
@@ -1501,8 +1595,9 @@ fn uploadRequest(
     }
     used += (try std.fmt.bufPrint(header_buffer[used..], "\r\n", .{})).len;
     try writeAllRequest(requests, fd, header_buffer[0..used], until);
-    const source = file orelse return writeAllRequest(requests, fd, bytes.?, until);
     var buffer: [protocol.content_window_bytes]u8 = undefined;
+    if (environment) |value| try value.upload(requests, fd, &buffer, until);
+    const source = file orelse return writeAllRequest(requests, fd, bytes.?, until);
     var sent: u64 = 0;
     while (sent < length) {
         try requests.check();
@@ -1877,7 +1972,7 @@ const empty_test_response =
     "Content-Type: application/json\r\n" ++
     "Content-Length: 0\r\n" ++
     "Connection: close\r\n" ++
-    "X-Rui-Wire-Version: 2\r\n\r\n";
+    "X-Rui-Wire-Version: 4\r\n\r\n";
 
 fn socketPair() ![2]std.posix.fd_t {
     var sockets: [2]std.posix.fd_t = undefined;
@@ -1919,7 +2014,7 @@ test "Host-info first byte is bounded independently of normal processing waits" 
 }
 
 test "response deadlines include partial header and body" {
-    const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\nab";
+    const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\nab";
     const body_start = std.mem.indexOf(u8, response, "\r\n\r\n").? + 4;
     for ([_]bool{ false, true }) |mutation| {
         for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
@@ -1950,7 +2045,7 @@ test "mutation response progress renews inactivity through header and body" {
     const Producer = struct {
         fn run(fd: std.posix.fd_t) void {
             defer closeTestDescriptor(fd);
-            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\n") catch return;
+            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n") catch return;
             std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
             writeAll(fd, "\r\n{") catch return;
             // Still exceeds five seconds overall, without a second long gap.
@@ -2016,7 +2111,7 @@ test "response closure and truncation stay explicit" {
         defer closeTestDescriptor(sockets[0]);
         try writeAll(
             sockets[1],
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\nx",
         );
         closeTestDescriptor(sockets[1]);
         var buffer: ReplyBuffer = .{};
@@ -2039,23 +2134,23 @@ test "response framing rejects ambiguous or malformed fields before interpreting
         defer closeTestDescriptor(sockets[0]);
         defer closeTestDescriptor(sockets[1]);
         var response: [512]u8 = undefined;
-        const bytes = try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 2\r\n{s}\r\n", .{fields});
+        const bytes = try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n{s}\r\n", .{fields});
         try writeAll(sockets[1], bytes);
         try std.testing.expectError(error.InvalidResponse, readResponseHead(sockets[0]));
     }
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
-    try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 00\r\nX-Rui-Wire-Version: 2\r\nX-Extra: one\r\nx-extra: two\r\n\r\n");
+    try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 00\r\nX-Rui-Wire-Version: 4\r\nX-Extra: one\r\nx-extra: two\r\n\r\n");
     try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
 test "client activity peer boundary rejects noncanonical IDs and owns canonical labels" {
     for ([_][]const u8{ "k7m2qx", "09azvw", "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }, 0..) |session, index| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"2\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
+        try body.append("{\"version\":\"4\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -2133,7 +2228,7 @@ test "client recovery rejects noncanonical Session references without retransmis
             // Empty Configure is creation intent, not an invalid reference.
             if (kind != .configure or session.len != 0) {
                 var body: protocol.RequestBuffer = .{};
-                try body.appendFmt("{{\"version\":\"2\",\"kind\":\"{s}\",\"store\":", .{@tagName(kind)});
+                try body.appendFmt("{{\"version\":\"4\",\"kind\":\"{s}\",\"store\":", .{@tagName(kind)});
                 try body.appendJsonString(root);
                 try body.append(",\"key\":\"" ++ handle ++ "\",");
                 try body.append(if (kind == .model_interruption) "\"target\":{\"session\":" else "\"session\":");
@@ -2252,7 +2347,7 @@ fn testResend(io: std.Io, saved: SavedRecord) !protocol_reply.MutationReply {
     var record = try openCaptured(io, saved);
     defer record.close(io);
     var reply: ReplyBuffer = .{};
-    return (Requests{ .io = io }).sendCaptured(&record, &reply).get();
+    return (Requests{ .io = io }).sendCaptured(&record, .empty, &reply).get();
 }
 
 test "retry and generated recovery select captured mutations by kind" {
@@ -2317,7 +2412,7 @@ test "a peer capture preserves the full sender including self and leaves foreign
     var captured = try captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = own, .sender_handle = "0123456789abcdef0123456789abcdef" }, .{ .explicit = .{ .record = path, .key = "k" } }).get();
     defer captured.close(io);
     var expected_buffer: [1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"{0s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":{{\"store\":\"{0s}\",\"session\":\"k7m2qx\"}},\"sender_handle\":\"0123456789abcdef0123456789abcdef\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"4\",\"kind\":\"message\",\"store\":\"{0s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":{{\"store\":\"{0s}\",\"session\":\"k7m2qx\"}},\"sender_handle\":\"0123456789abcdef0123456789abcdef\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
     var bytes: [1024]u8 = undefined;
     try std.testing.expectEqualStrings(expected, bytes[0..try captured.file.readPositionalAll(io, &bytes, 0)]);
     const remote_path = try std.fmt.bufPrint(&path_buffer, "{s}/remote.json", .{root});
@@ -2353,7 +2448,7 @@ test "capture returns original identity before send and preserves empty explicit
         try std.testing.expectEqualStrings("k7m2qx", saved.session.slice());
         try std.testing.expectEqual(protocol.CommandKind.message, saved.kind);
         var reply: ReplyBuffer = .{};
-        try std.testing.expectError(error.FileNotFound, (Requests{ .io = io }).sendCaptured(&generated, &reply).get());
+        try std.testing.expectError(error.FileNotFound, (Requests{ .io = io }).sendCaptured(&generated, .empty, &reply).get());
         try std.testing.expectEqualStrings(saved.key.slice(), generated.identity().key.slice());
         try std.testing.expectEqualStrings(root, generated.identity().store.slice());
     }
@@ -2418,12 +2513,12 @@ test "capture and send name the step a failure stopped in" {
     var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "x" }, .{ .generated = root }).get();
     defer captured.close(io);
     var reply: ReplyBuffer = .{};
-    const failure = (Requests{ .io = io }).sendCaptured(&captured, &reply).failed;
+    const failure = (Requests{ .io = io }).sendCaptured(&captured, .empty, &reply).failed;
     try std.testing.expectEqual(@as(?Step, .connect), failure.step);
     try std.testing.expect(!failure.step.?.mayHaveReachedHost());
     // A cancellation before the send begins names no step.
     const stop: Cancellation = .{ .stopped = .init(true) };
-    const cancelled = (Requests{ .io = io, .cancellation = &stop }).sendCaptured(&captured, &reply).failed;
+    const cancelled = (Requests{ .io = io, .cancellation = &stop }).sendCaptured(&captured, .empty, &reply).failed;
     try std.testing.expectEqual(@as(?Step, null), cancelled.step);
     try std.testing.expectEqual(error.Cancelled, cancelled.err);
 }
@@ -2489,7 +2584,7 @@ test "capture retransmits complete original bytes after a lost reply" {
     var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } }).get();
     defer captured.close(io);
     var expected_buffer: [text.len + 1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"4\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
     var vtable = io.vtable.*;
     vtable.netConnectUnix = Peer.connect;
     const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
@@ -2499,7 +2594,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         Peer.failure = null;
         const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
-        const sent = (Requests{ .io = connected_io }).sendCaptured(&captured, &buffer);
+        const sent = (Requests{ .io = connected_io }).sendCaptured(&captured, .empty, &buffer);
         const result = sent.get();
         peer.join();
         if (Peer.failure) |err| return err;
@@ -2514,6 +2609,126 @@ test "capture retransmits complete original bytes after a lost reply" {
         }
         try std.testing.expectEqualStrings("owned-key", captured.identity().key.slice());
     }
+}
+
+test "a Message uploads its environment ahead of the unchanged record and other mutations carry none" {
+    const Peer = struct {
+        var client_fd: std.posix.fd_t = undefined;
+        var connects: usize = 0;
+        var head: [512]u8 = undefined;
+        var head_len: usize = 0;
+        var body: [8192]u8 = undefined;
+        var body_len: usize = 0;
+        var failure: ?anyerror = null;
+        fn connect(_: ?*anyopaque, _: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
+            connects += 1;
+            return client_fd;
+        }
+        fn serve(fd: std.posix.fd_t) void {
+            exchange(fd) catch |err| {
+                failure = err;
+            };
+        }
+        // Records the whole request before it replies.
+        fn exchange(fd: std.posix.fd_t) !void {
+            defer closeTestDescriptor(fd);
+            head_len = 0;
+            while (!std.mem.endsWith(u8, head[0..head_len], "\r\n\r\n")) {
+                if (head_len == head.len) return error.TestRequestHeadTooLarge;
+                if (std.posix.system.read(fd, head[head_len..].ptr, 1) != 1) return error.TestRequestTruncated;
+                head_len += 1;
+            }
+            const marker = "Content-Length: ";
+            const start = (std.mem.indexOf(u8, head[0..head_len], marker) orelse return error.TestMissingLength) + marker.len;
+            const length = try std.fmt.parseInt(usize, head[start..std.mem.indexOfScalarPos(u8, head[0..head_len], start, '\r').?], 10);
+            if (length > body.len) return error.TestRequestTooLarge;
+            body_len = 0;
+            while (body_len < length) {
+                const n = std.posix.system.read(fd, body[body_len..length].ptr, length - body_len);
+                if (n <= 0) return error.TestRequestTruncated;
+                body_len += @intCast(n);
+            }
+            try writeAll(fd, empty_test_response);
+        }
+        fn send(io: std.Io, captured: *CapturedRecord, environment: Environment) !Stepped(MutationSendError, protocol_reply.MutationReply) {
+            const sockets = try socketPair();
+            client_fd = sockets[0];
+            failure = null;
+            const peer = try std.Thread.spawn(.{}, serve, .{sockets[1]});
+            var buffer: ReplyBuffer = .{};
+            const sent = (Requests{ .io = io }).sendCaptured(captured, environment, &buffer);
+            peer.join();
+            if (failure) |err| return err;
+            return sent;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/message", .{root});
+    var vtable = io.vtable.*;
+    vtable.netConnectUnix = Peer.connect;
+    const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+
+    var map = std.process.Environ.Map.init(std.testing.allocator);
+    defer map.deinit();
+    try map.put("CLIENT_MARK", "distinctive-7f3a\xe9");
+    try map.put("RUI_STORE", "/elsewhere");
+    try map.put("B", "x=y");
+    const environment: Environment = .{ .map = &map };
+    const entries = "CLIENT_MARK=distinctive-7f3a\xe9\x00B=x=y\x00";
+    try std.testing.expectEqual(@as(u64, entries.len), environment.bytes());
+
+    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "run it" }, .{ .explicit = .{ .record = path, .key = "environment-key" } }).get();
+    defer captured.close(io);
+    const record = try tmp.dir.readFileAlloc(io, "message", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(record);
+    _ = (try Peer.send(connected_io, &captured, environment)).get() catch {};
+    var expected_head: [128]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, Peer.head[0..Peer.head_len], try std.fmt.bufPrint(&expected_head, "Content-Length: {d}\r\n", .{entries.len + record.len})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, Peer.head[0..Peer.head_len], try std.fmt.bufPrint(&expected_head, "X-Rui-Environment-Bytes: {d}\r\n", .{entries.len})) != null);
+    try std.testing.expectEqualStrings(entries, Peer.body[0..entries.len]);
+    try std.testing.expectEqualSlices(u8, record, Peer.body[entries.len..Peer.body_len]);
+    // The environment never enters the saved request.
+    const saved = try tmp.dir.readFileAlloc(io, "message", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(saved);
+    try std.testing.expectEqualSlices(u8, record, saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "distinctive-7f3a") == null);
+
+    // Over the bound, the send fails before it connects and the record stays.
+    const large = try std.testing.allocator.alloc(u8, protocol.max_environment_bytes);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'v');
+    try map.put("LARGE", large);
+    try map.put("MIDDLE", large[0..300]);
+    try map.put("SMALL", large[0..200]);
+    const connects = Peer.connects;
+    var buffer: ReplyBuffer = .{};
+    const refused = (Requests{ .io = connected_io }).sendCaptured(&captured, environment, &buffer).failed;
+    try std.testing.expectEqual(error.EnvironmentTooLarge, refused.err);
+    try std.testing.expectEqual(@as(?Step, null), refused.step);
+    try std.testing.expectEqual(connects, Peer.connects);
+    const largest = environment.largest();
+    try std.testing.expectEqualStrings("LARGE", largest[0].?);
+    try std.testing.expectEqualStrings("MIDDLE", largest[1].?);
+    try std.testing.expectEqualStrings("SMALL", largest[2].?);
+    var described: [Environment.too_large_bytes]u8 = undefined;
+    var described_writer = std.Io.Writer.fixed(&described);
+    try environment.describeTooLarge(&described_writer);
+    try std.testing.expect(std.mem.endsWith(u8, described_writer.buffered(), "Largest variables: LARGE, MIDDLE, SMALL."));
+    try std.testing.expect(std.mem.indexOf(u8, described_writer.buffered(), "over the 65536 a Message carries") != null);
+
+    // Another mutation's route carries no environment, whatever its size.
+    var stop = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, .{ .generated = root });
+    defer stop.close(io);
+    _ = (try Peer.send(connected_io, &stop, environment)).get() catch {};
+    try std.testing.expect(std.mem.startsWith(u8, Peer.head[0..Peer.head_len], "POST /v1/control/session-stop HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, Peer.head[0..Peer.head_len], "X-Rui-Environment") == null);
+    try std.testing.expectEqual(@as(u64, Peer.body_len), stop.length);
 }
 
 test "capture publication transfers original inode across pathname replacement" {
@@ -2542,7 +2757,7 @@ test "capture publication transfers original inode across pathname replacement" 
     var captured = try captureMessage(replaced_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } }).get();
     defer captured.close(io);
     var expected_buffer: [2048]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"4\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
     var bytes: [2048]u8 = undefined;
     const count = try captured.file.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings(expected, bytes[0..count]);
@@ -2627,12 +2842,12 @@ test "capture recovery closes rejected records and retains only its reader lifet
     for ([_][]const u8{
         "not json",
         // Control records are recoverable, but never with another kind's payload.
-        "{\"version\":\"2\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
-        "{\"version\":\"2\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"x\",\"operation\":\"2\"}}",
-        "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"k7m2qx\",\"text\":{}}",
-        "{\"version\":\"2\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
-        "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
-        "{\"version\":\"2\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":[97]}}",
+        "{\"version\":\"4\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"4\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"x\",\"operation\":\"2\"}}",
+        "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"4\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
+        "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":[97]}}",
     }) |bytes| {
         const file = try tmp.dir.createFile(io, filename, .{});
         try file.writeStreamingAll(io, bytes);
@@ -2656,7 +2871,7 @@ test "capture recovery closes rejected records and retains only its reader lifet
         replacement.close(io);
         var bytes: [2048]u8 = undefined;
         const n = try recovered.file.readPositionalAll(io, &bytes, 0);
-        try std.testing.expect(std.mem.startsWith(u8, bytes[0..n], "{\"version\":\"2\",\"kind\":\"configure\""));
+        try std.testing.expect(std.mem.startsWith(u8, bytes[0..n], "{\"version\":\"4\",\"kind\":\"configure\""));
     }
     try std.testing.expectEqual(Probe.opened, Probe.closed);
     try std.testing.expect(std.c.fcntl(descriptor, std.c.F.GETFD) < 0);
@@ -2867,7 +3082,7 @@ test "command reply borrows the caller buffer" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 2\r\n\r\n{\"status\":\"error\"}",
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 4\r\n\r\n{\"status\":\"error\"}",
     );
     var buffer: ReplyBuffer = .{};
     const reply = try readCommandResponse(descriptors[0], &buffer);
@@ -2956,7 +3171,7 @@ test "Session list client renders each cursor's request exactly, within the boun
         var body: protocol.RequestBuffer = .{};
         try appendListSessions(&body, "/store", null, case[0]);
         var expected: [512]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"2\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ case[0].after, case[0].ceiling, case[1] }), body.slice());
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"4\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ case[0].after, case[0].ceiling, case[1] }), body.slice());
     }
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
@@ -3058,7 +3273,7 @@ test "response parsing rejects truncated head and command body" {
         defer closeTestDescriptor(descriptors[0]);
         try writeTestResponse(
             descriptors[1],
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 2\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 4\r\n\r\n{}",
         );
         var buffer: ReplyBuffer = .{};
         try std.testing.expectError(error.TruncatedResponse, readCommandResponse(descriptors[0], &buffer));
@@ -3082,7 +3297,7 @@ fn writeLargeTestResponse(context: *LargeResponseContext) void {
     var header_buffer: [256]u8 = undefined;
     const header = std.fmt.bufPrint(
         &header_buffer,
-        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 2\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 4\r\n\r\n",
         .{ context.content_type, context.length },
     ) catch |err| {
         context.failure = err;
@@ -3256,7 +3471,7 @@ test "a first-line read returns the Host's refusal" {
     {
         defer closeTestDescriptor(descriptors[1]);
         var head: [256]u8 = undefined;
-        try writeAll(descriptors[1], try std.fmt.bufPrint(&head, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 2\r\n\r\n", .{body.len}));
+        try writeAll(descriptors[1], try std.fmt.bufPrint(&head, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 4\r\n\r\n", .{body.len}));
         try writeAll(descriptors[1], body.slice());
     }
     var buffer: [4096]u8 = undefined;
@@ -3270,7 +3485,7 @@ test "read result returns bounded command errors without touching destination" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 2\r\n\r\n{\"status\":\"error\"}",
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 4\r\n\r\n{\"status\":\"error\"}",
     );
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3293,7 +3508,7 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 2\r\n\r\nab",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 4\r\n\r\nab",
     );
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3309,7 +3524,7 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
 }
 
 test "result body publishes nothing unless EOF follows the advertised bytes" {
-    inline for (.{ "Content-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\nabX", "Content-Length: 0\r\nX-Rui-Wire-Version: 2\r\n\r\nX" }) |tail| {
+    inline for (.{ "Content-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\nabX", "Content-Length: 0\r\nX-Rui-Wire-Version: 4\r\n\r\nX" }) |tail| {
         const descriptors = try testPipe();
         defer closeTestDescriptor(descriptors[0]);
         try writeTestResponse(descriptors[1], "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n" ++ tail);
@@ -3330,7 +3545,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     var captured: CapturedRecord = .{ .file = .{ .handle = -1, .flags = .{ .nonblocking = false } }, .length = 0, .saved = .{ .kind = .configure }, .target = .configure, .replay = .generated };
     try captured.saved.store.set("/never-open");
     var buffer: ReplyBuffer = .{};
-    try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, &buffer).get());
+    try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, .empty, &buffer).get());
     try std.testing.expectEqual(@as(std.posix.fd_t, -1), captured.file.handle);
     const file = captured.file;
     const address = try protocol_reply.MessageAddress.init("/never-open", "k7m2qx", "k");
@@ -3356,7 +3571,7 @@ test "transport cancellation returns before silent peer release and retains pinn
         done: std.atomic.Value(bool) = .init(false),
         fn run(self: *@This()) void {
             var reply: ReplyBuffer = .{};
-            _ = self.requests.sendCaptured(self.captured, &reply).get() catch |err| {
+            _ = self.requests.sendCaptured(self.captured, .empty, &reply).get() catch |err| {
                 self.failure = err;
             };
             self.done.store(true, .release);
@@ -3563,7 +3778,7 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         const length: u64 = if (kind == .list) 3 else 1;
         const content_type = if (kind == .result) "text/plain; charset=utf-8" else "application/json";
         var response: [256]u8 = undefined;
-        try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 2\r\n\r\na", .{ content_type, length }));
+        try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 4\r\n\r\na", .{ content_type, length }));
         // An answer's final window is delivered only after its EOF.
         if (kind == .result) try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(peer.socket.handle, std.c.SHUT.WR));
         try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(1)), &worker.sink.entered, test_poll.isSet);
@@ -3690,4 +3905,23 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     const stopped = connectRequest(.{ .io = io, .cancellation = &token }, address, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s);
     if (stopped) |fd| closeTestDescriptor(fd) else |_| {}
     try std.testing.expectError(if (blocks) error.Cancelled else error.UnixConnectFailed, stopped);
+}
+
+test "a refused environment's reason fits its bound with the longest escaped names" {
+    var map = std.process.Environ.Map.init(std.testing.allocator);
+    defer map.deinit();
+    const value = try std.testing.allocator.alloc(u8, protocol.max_environment_bytes);
+    defer std.testing.allocator.free(value);
+    @memset(value, 'v');
+    // Names of control bytes escape to the most bytes each.
+    const names = [_][]const u8{ &@as([40]u8, @splat(1)), &@as([40]u8, @splat(2)), &@as([40]u8, @splat(3)), "SMALLEST" };
+    for (names, 0..) |name, index| try map.put(name, value[0 .. value.len - index]);
+    const environment: Environment = .{ .map = &map };
+    var buffer: [Environment.too_large_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try environment.describeTooLarge(&writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOfAny(u8, text, "\x01\x02\x03") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "SMALLEST") == null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "\\x03."));
 }

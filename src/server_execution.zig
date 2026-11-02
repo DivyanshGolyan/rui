@@ -23,6 +23,8 @@ const signal_stack = @import("signal_stack.zig");
 const tools = @import("tools.zig");
 const test_poll = @import("test_poll");
 const bash_service = @import("testing/bash_service.zig");
+const environment = @import("environment.zig");
+const SessionEnvironments = @import("SessionEnvironments.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
 const pages = @import("os/pages.zig");
@@ -1161,6 +1163,14 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     }
+    // The Session's client environment, copied outside the Store lock and
+    // `launch_mutex`; none falls back to the Host facts.
+    const base = launchBase(host.environments, prepared.session.slice(), prepared.allocator) catch {
+        settleActionFailure(host, token, action_binding, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
+        discardBashResources(host, slot, prepared.takeCleanup());
+        return;
+    };
+    defer if (base) |bytes| prepared.allocator.free(bytes);
     host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }) catch |err| {
         fenceDispatch(host, "Bash launch authority", err);
         discardBashResources(host, slot, prepared.takeCleanup());
@@ -1172,6 +1182,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     host.store.withActionDispatchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
+        .base = base,
         .work = work,
         .refused = &refused,
     }, struct {
@@ -1180,7 +1191,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.refused) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
@@ -2556,7 +2567,7 @@ test "cleanup publication follows complete execution retirement" {
         .clock = .awake,
     });
     var refused: bash.ArgumentSizes = .{};
-    var launched = try prepared.launch(bash.default_facts, &refused);
+    var launched = try prepared.launch(bash.default_facts, null, &refused);
     slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
@@ -2883,7 +2894,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 .digest = protocol.contentDigest("hello"),
             };
             defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-            try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
             if (kind != .message) {
                 try std.testing.expectError(
                     error.InjectedAttemptCommitFailure,
@@ -3104,7 +3115,7 @@ test "preparing slots belong to their live preparations" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding_a = try admitted.permit.consume();
 
@@ -3425,7 +3436,7 @@ test "an encode failure settles unanswered and releases request scratch" {
         .digest = protocol.contentDigest("hello"),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
 
     var records: [1]execution.CustodyRecord = @splat(.{});
@@ -3603,4 +3614,39 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "suppressed-bash", .{}));
         }
     }
+}
+
+/// The environment a Session's Bash starts from: its client environment,
+/// owned by the caller, or null for the Host facts when the register holds
+/// none, as after a restart or once the register replaced it.
+fn launchBase(environments: ?*SessionEnvironments, session: []const u8, allocator: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
+    const table = environments orelse return null;
+    return table.copy(session, allocator);
+}
+
+test "a Session the register does not hold launches with the system PATH and the Host's HOME" {
+    // A restarted Host's register is empty; one that replaced the Session
+    // holds others.
+    var environments: SessionEnvironments = undefined;
+    try environments.init(std.testing.io, std.testing.allocator);
+    defer environments.deinit();
+    var offer: SessionEnvironments.Offer = try .init(std.testing.allocator, "PATH=/client/bin\x00HOME=/client\x00".len);
+    defer offer.deinit(std.testing.allocator);
+    @memcpy(offer.room(), "PATH=/client/bin\x00HOME=/client\x00");
+    environments.offer("n3w5es", .{ .origin = .person, .admission = 1 }, &offer);
+    const facts: environment.HostFacts = .{ .executable_dir = "/opt/rui/bin", .system_path = "/usr/bin:/bin", .home = "/home/host" };
+    const identity: environment.Identity = .{ .address = "k7m2qx", .store = "/store", .sender_handle = "" };
+    for ([_]?*SessionEnvironments{ null, &environments }) |table| {
+        const base = try launchBase(table, "k7m2qx", std.testing.allocator);
+        try std.testing.expectEqual(null, base);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const block = try environment.childBlock(arena.allocator(), base, facts, identity);
+        try std.testing.expectEqualStrings("PATH=/opt/rui/bin:/usr/bin:/bin", std.mem.span(block[0].?));
+        try std.testing.expectEqualStrings("HOME=/home/host", std.mem.span(block[1].?));
+    }
+    // The Session it holds starts from its client environment.
+    const held = (try launchBase(&environments, "n3w5es", std.testing.allocator)).?;
+    defer std.testing.allocator.free(held);
+    try std.testing.expectEqualStrings("PATH=/client/bin\x00HOME=/client\x00", held);
 }

@@ -623,8 +623,8 @@ def prove_accept_pressure(state):
             expected = injected or errno.EMFILE
             wait_for(lambda: any(code == expected for code, _ in accept_records(log)), "accept resource exhaustion", timeout=10)
             # Existing accepted peers still progress during pressure.
-            body = json.dumps({"version": "2", "kind": "host_info", "store": str(store)}).encode()
-            held.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 2\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+            body = json.dumps({"version": "4", "kind": "host_info", "store": str(store)}).encode()
+            held.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
             head, response = control.read_http_response(held)
             assert head.startswith(b"HTTP/1.1 200 "), (label, head, diagnostics.tail())
             identity = json.loads(response)["instance"]
@@ -633,11 +633,11 @@ def prove_accept_pressure(state):
                 attempts = [at for code, at in accept_records(log) if code == expected]
                 assert all(b - a >= 50_000_000 for a, b in zip(attempts, attempts[1:])), (label, attempts)
                 if label == "shutdown-mfile":
-                    stop_body = json.dumps({"version": "2", "kind": "host_stop", "store": str(store)}).encode()
-                    stopping.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 2\r\nX-Rui-Host-Instance: {identity}\r\nContent-Length: {len(stop_body)}\r\n\r\n".encode() + stop_body)
+                    stop_body = json.dumps({"version": "4", "kind": "host_stop", "store": str(store)}).encode()
+                    stopping.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nX-Rui-Host-Instance: {identity}\r\nContent-Length: {len(stop_body)}\r\n\r\n".encode() + stop_body)
                     head, response = control.read_http_response(stopping)
                     assert head.startswith(b"HTTP/1.1 200 "), head
-                    assert json.loads(response) == {"version": "2", "type": "host_stop_reply", "status": "acknowledged"}, response
+                    assert json.loads(response) == {"version": "4", "type": "host_stop_reply", "status": "acknowledged"}, response
                     # Keep acquisition pressure armed through physical shutdown.
                     for peer in connections:
                         peer.close()
@@ -652,7 +652,7 @@ def prove_accept_pressure(state):
                     peer.close()
             if injected is not None:
                 pending.sendall(b"POST /v1/host-info HTTP/1.1\r\n" +
-                    f"Content-Type: application/json\r\nX-Rui-Wire-Version: 2\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+                    f"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
                 head, response = control.read_http_response(pending)
                 assert head.startswith(b"HTTP/1.1 200 ") and json.loads(response)["instance"] == identity
             endpoint.release.set()

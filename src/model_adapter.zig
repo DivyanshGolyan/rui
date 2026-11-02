@@ -1891,7 +1891,7 @@ test "real preparation consumes the configured allowance across multiple advance
         .digest = protocol.contentDigest(text),
     };
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, .{}) == .accepted);
+    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -2040,7 +2040,7 @@ const PreparationTestSetup = struct {
             .digest = protocol.contentDigest(text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(self.storage.submitMessageWithModel(&command, .{}) == .accepted);
+        try std.testing.expect(self.storage.submitMessageWithModel(&command, null, .{}) == .accepted);
     }
 };
 
@@ -2452,7 +2452,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
             try ingress.feed(bytes);
             const request = try ingress.finish();
             defer request.removeTemporaryContent(std.testing.io) catch unreachable;
-            const reply = storage.submitMessageWithModel(&request.message, .{});
+            const reply = storage.submitMessageWithModel(&request.message, null, .{});
             try std.testing.expect(reply == .accepted);
             try std.testing.expect(!reply.accepted.replayed);
             admitted = true;
@@ -2480,7 +2480,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     var body_buffer: [2048]u8 = undefined;
     const body = try std.fmt.bufPrint(
         &body_buffer,
-        "{{\"version\":\"2\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"scratch-report\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"worker report\\n雪\\u0000done\\n\"}}}}",
+        "{{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"scratch-report\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"worker report\\n雪\\u0000done\\n\"}}}}",
         .{session.slice()},
     );
     var used: std.atomic.Value(u64) = .init(0);

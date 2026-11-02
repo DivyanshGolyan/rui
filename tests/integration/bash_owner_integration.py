@@ -323,7 +323,7 @@ def main():
         # Result despite optional full-output retention failure. No spillover
         # pathname is needed to address or complete this content.
         session = second_session
-        page_request = {"version": "2", "kind": "conversation_page",
+        page_request = {"version": "4", "kind": "conversation_page",
                         "store": str(retention_store), "session": session, "end": "0",
                         "before_position": "0", "before_ordinal": "0"}
         head, body = raw_request(fields["socket"], "/v1/conversation-page",
@@ -334,7 +334,7 @@ def main():
         # The truncated result spans several content windows; read them all.
         content = b""
         while True:
-            content_request = {"version": "2", "kind": "conversation_content",
+            content_request = {"version": "4", "kind": "conversation_content",
                                "store": str(retention_store), "session": session,
                                "position": result_item["position"], "ordinal": result_item["ordinal"],
                                "start": str(len(content))}

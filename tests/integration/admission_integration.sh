@@ -37,7 +37,7 @@ binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
 fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
 configuration = {name: {'state': 'value', 'value': values[name]} if name in values else {'state': 'omitted'} for name in fields}
-body = json.dumps({'version': '2', 'kind': 'configure', 'store': store,
+body = json.dumps({'version': '4', 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
 with pathlib.Path(record).open('xb') as captured:
     captured.write(body)
@@ -51,7 +51,7 @@ with socket.socket(socket.AF_UNIX) as client:
     client.settimeout(15)
     client.connect(socket_path)
     client.sendall(('POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\n'
-        f'Content-Length: {len(body)}\r\nX-Rui-Wire-Version: 2\r\n'
+        f'Content-Length: {len(body)}\r\nX-Rui-Wire-Version: 4\r\n'
         'X-Rui-Test-Drop-Reply: after-commit\r\n\r\n').encode() + body)
     assert not client.recv(16384), 'lost rejection unexpectedly delivered a reply'
 PYWIRE
@@ -278,7 +278,7 @@ from host_process import is_peer_disconnect, preserve_failure_metadata, stop_pro
 rui, socket_path, store, workspace, state = sys.argv[1:]
 state = pathlib.Path(state)
 body = json.dumps({
-    "version": "2",
+    "version": "4",
     "kind": "configure",
     "store": os.path.realpath(store),
     "key": "draining-request",
@@ -301,7 +301,7 @@ header = (
     "Host: local\r\n"
     "Content-Type: application/json\r\n"
     f"Content-Length: {len(body)}\r\n"
-    "X-Rui-Wire-Version: 2\r\n\r\n"
+    "X-Rui-Wire-Version: 4\r\n\r\n"
 ).encode()
 response = bytearray()
 try:
@@ -381,7 +381,7 @@ try:
 
     # Prove the usable-looking partial key reached ingress after retirement;
     # absence after restart alone would also pass if this request were refused.
-    body = json.dumps({"version":"2","kind":"configure","store":str(store),"key":"partial-key"}, separators=(",", ":")).encode()
+    body = json.dumps({"version":"4","kind":"configure","store":str(store),"key":"partial-key"}, separators=(",", ":")).encode()
     # A closed object is already invalid without the required Session fields.
     # Leave the next field unfinished so the streaming parser must await input.
     body = body[:-1] + b","
@@ -390,7 +390,7 @@ try:
         try:
             client.settimeout(3)
             client.connect(socket_path)
-            client.sendall(("POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 2\r\n\r\n" % (len(body) + 50)).encode() + body)
+            client.sendall(("POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 4\r\n\r\n" % (len(body) + 50)).encode() + body)
             return client
         except BaseException:
             client.close()
@@ -578,7 +578,7 @@ python3 - "$socket" "$store" "$main_session" <<'PY'
 import json, socket, sys
 socket_path, store, session = sys.argv[1:]
 body = json.dumps({
-    "version": "2",
+    "version": "4",
     "kind": "message",
     "store": store,
     "key": "partial-message-key",
@@ -594,7 +594,8 @@ client.sendall(
      "Host: local\r\n"
      "Content-Type: application/json\r\n"
      f"Content-Length: {len(body) + 20}\r\n"
-     "X-Rui-Wire-Version: 2\r\n\r\n").encode()
+     "X-Rui-Environment-Bytes: 0\r\n"
+     "X-Rui-Wire-Version: 4\r\n\r\n").encode()
 )
 client.sendall(body)
 client.close()
@@ -791,12 +792,12 @@ python3 - "$ready" "$store" "$host_pid" <<'PYCRASH'
 import json, os, signal, socket, sys, time
 ready, store, pid = sys.argv[1:]
 fields = dict(part.split("=", 1) for part in open(ready).read().split()[1:])
-request = {"version":"2", "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
+request = {"version":"4", "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
 prefix = json.dumps(request)[:-2] + ',"instructions":{"state":"value","value":"'
 with socket.socket(socket.AF_UNIX) as connection:
     connection.connect(fields["socket"])
     body = prefix.encode() + b'x' * 32768
-    connection.sendall(b'POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nX-Rui-Wire-Version: 2\r\n\r\n' + body)
+    connection.sendall(b'POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nX-Rui-Wire-Version: 4\r\n\r\n' + body)
     path = os.path.join(store, 'scratch', 'request-0-1.tmp')
     deadline = time.monotonic() + 5
     while not os.path.exists(path):

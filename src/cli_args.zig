@@ -76,8 +76,8 @@ pub const compaction_policy =
     \\--output-reservation TOKENS|default sets nonnegative extra compaction headroom, not a guaranteed output budget.
     \\Omission preserves an existing Session's setting; default resets it to model policy.
     \\Changes apply to new model requests. Requests already accepted keep their original settings, even when retried.
-    \\Unknown models have no automatic threshold.
-;
+    \\
+++ std.fmt.comptimePrint("A model Rui does not list is assumed to have a {d}-token context.", .{product_defaults.unlisted_context_window});
 
 /// Shared by `session configure`, `session start` and the interactive /configure.
 pub const label_help =

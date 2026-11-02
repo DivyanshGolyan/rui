@@ -27,7 +27,7 @@ def open_pty(columns=COLUMNS, rows=ROWS):
 
 
 @contextmanager
-def terminal_process(args, *, env):
+def terminal_process(args, *, env, cwd=None):
     """Borrow (process, master) until scope exit; collect and assert inside it.
 
     The caller owns response boundaries and explicit exit assertions. This owner
@@ -37,7 +37,7 @@ def terminal_process(args, *, env):
     master, slave = open_pty()
     process = None
     try:
-        process = subprocess.Popen(args, env=env, stdin=slave, stdout=slave, stderr=slave)
+        process = subprocess.Popen(args, env=env, cwd=cwd, stdin=slave, stdout=slave, stderr=slave)
         yield process, master
     finally:
         dispose_all(lambda: stop_process(process, timeout=5) if process is not None else None,

@@ -22,6 +22,7 @@ test {
     _ = @import("server.zig");
     _ = @import("server_execution.zig");
     _ = @import("server_host.zig");
+    _ = @import("SessionEnvironments.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
     _ = @import("bash.zig");

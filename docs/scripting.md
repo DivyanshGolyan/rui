@@ -77,7 +77,9 @@ If a command loses its reply or exits nonzero, Rui may still have accepted the w
 
 ## Agents calling Rui
 
-Agents use the same commands from their Bash tool. Bash runs the `rui` installation that runs the Host, then the system's own command directories (on macOS, those listed in `/etc/paths` and `/etc/paths.d`, such as Homebrew's). It gets the Host's `HOME` but none of the Host's other environment, such as credentials.
+Agents use the same commands from their Bash tool. Bash runs in the environment of the terminal that last sent the Session a Message, so a tool you install or a venv you activate is found by the agent's next command after your next Message. The `rui` installation that runs the Host comes first on `PATH`. A Message from another agent never replaces your environment, but fills a Session no person has sent to. Rui keeps the environment only in the Host's memory, never in the Store or request records, and never passes on variables whose names start with `RUI_`. A recovered request carries the environment of the terminal that recovers it.
+
+An environment over 64 KiB is refused before anything is sent, naming its largest variables; recover the request from a shell with a smaller one. After a Host restart, or when the Host has dropped a long-unused Session's environment, Bash gets the system's own command directories (on macOS, those listed in `/etc/paths` and `/etc/paths.d`, such as Homebrew's) and the Host's `HOME` until a Message arrives. Bash never gets the Host's own environment, such as credentials.
 
 Each model request tells the agent its own bare ID. Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority. To get an answer from another Session, an agent puts its own ID in the Message. The other Session replies with an ordinary `session send --to ID`.
 
