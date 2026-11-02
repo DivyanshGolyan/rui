@@ -24,7 +24,7 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
-const slash_commands = @import("slash_commands.zig");
+const slash_commands = @import("slash_commands.zig").conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");

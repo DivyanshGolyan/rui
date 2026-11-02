@@ -2808,13 +2808,14 @@ The Session screen stays in place and no command reads terminal input.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-One table, `slash_commands.zig`, holds each command's name, argument shape and one-line description; the draft's parser, the command runner, the list and `/help`'s command lines read it, and `/wait` and `/login` stay out of the list and `/help`.
+`slash_commands.zig` holds one table per screen of each command's name, argument shape and one-line description; the draft's parser, the command runner, the list and `/help`'s command lines read it, and `/wait` and `/login` stay out of the list and `/help`.
 The list shows while the draft is one line that starts with one `/` and holds no space yet: a row for each command the word starts, in the rows right above the input that a growing draft would take, under the rule, so the input never moves; at most a third of the screen, less the input's own row.
 When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the first match.
 It goes on the first space, on Enter and when nothing matches.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes; otherwise they do what they always did.
 Tab adds the matching names' common start, and a space after a whole name that takes an argument; in any other draft, or over a partial character or a rejected draft, Tab does what it always did.
 The arrows keep scrolling the conversation.
+The overview lists, completes and closes its own commands, `/configure`, `/exit` and `/model`, the same way, in rows the Sessions above can spare, because the agreed design has the two screens behave the same (Divyansh, 2026-10-31); the line under its input says what Enter and Esc do to the draft.
 `/effort` alone shows `Efforts: low · [medium] · high · xhigh · /effort LEVEL switches`, the efforts the Session's model supports with the one in force bracketed, from the Session line's facts.
 `/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
