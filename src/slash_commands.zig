@@ -146,12 +146,39 @@ pub const conversation = Commands(ConversationName, .{
 /// Session's settings.
 const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false, true);
 
-/// The overview's commands.
-pub const overview = Commands(enum { configure, exit, model }, .{
+/// The overview's commands. /rename and /setup run as a conversation runs
+/// them; /rename names the selected Session.
+pub const overview = Commands(enum { configure, exit, help, model, rename, setup }, .{
     .configure = .{ .argument = .{ .options = start_options }, .description = "hold settings for the next Session" },
     .exit = .{ .description = "leave; Host work continues" },
+    .help = conversation.table.get(.help),
     .model = .{ .description = "choose the model new Sessions use" },
+    .rename = .{ .argument = conversation.table.get(.rename).argument, .description = "name the selected Session" },
+    .setup = conversation.table.get(.setup),
 });
+
+/// What both screens say for a line that names no command: the name typed,
+/// when it is short printable ASCII, and where the commands are.
+pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) []const u8 {
+    const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+    var shown = name.len <= max_unknown_name;
+    for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
+    return std.fmt.bufPrint(buffer, "! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
+}
+
+const max_unknown_name = 32;
+pub const unknown_bytes = "! Unknown command  · /help".len + max_unknown_name;
+
+/// Writes one line a command printed as a notice says it: the CLI's
+/// `Rui: ` dropped, and its `rui: ` diagnostics marked `!`.
+pub fn writeResult(writer: *std.Io.Writer, line: []const u8) std.Io.Writer.Error!void {
+    if (std.mem.startsWith(u8, line, "Rui: ")) return writer.writeAll(line[5..]);
+    if (std.mem.startsWith(u8, line, "rui: ")) return writer.print("! {s}", .{line[5..]});
+    return writer.writeAll(line);
+}
+
+/// What a command that printed nothing says.
+pub const no_output = "Command finished with no output.";
 
 /// How many commands a list of `rows` rows names when `total` match: all
 /// that fit; when more match, the last row counts the rest instead, unless
@@ -556,7 +583,10 @@ test "/configure lists its options, then an option's fixed values" {
 }
 
 test "the list order is the names' order and every listed usage fits before the descriptions" {
-    for (std.enums.values(conversation.Name)[1..], 0..) |name, index| try std.testing.expect(std.mem.order(u8, @tagName(std.enums.values(conversation.Name)[index]), @tagName(name)) == .lt);
+    inline for (.{ conversation, overview }) |screen| {
+        const names = std.enums.values(screen.Name);
+        for (names[1..], 0..) |name, index| try std.testing.expect(std.mem.order(u8, @tagName(names[index]), @tagName(name)) == .lt);
+    }
     try std.testing.expectEqualStrings("/copy [code|file]", conversation.usage.get(.copy));
     try std.testing.expectEqualStrings("/rename NAME", conversation.usage.get(.rename));
     try std.testing.expectEqualStrings("/effort LEVEL", conversation.usage.get(.effort));
@@ -569,4 +599,25 @@ test "/copy takes each Copy's name but the answer's, which it copies alone" {
         const parsed = conversation.parse(try std.fmt.bufPrint(&text, "/copy {s}", .{@tagName(copy)}));
         if (copy == .answer) try std.testing.expectEqual(conversation.Name.copy, parsed.misused) else try std.testing.expectEqualStrings(@tagName(copy), parsed.command.argument);
     }
+}
+
+test "both screens' shared commands take the same arguments and say the same things" {
+    inline for (.{ "help", "rename", "setup" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
+    for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5", "/help", "/help me" }) |text| {
+        errdefer std.debug.print("line={s}\n", .{text});
+        try std.testing.expectEqualStrings(@tagName(conversation.parse(text)), @tagName(overview.parse(text)));
+    }
+    // /setup's list offers the same options on both screens.
+    const options = overview.suggest("/setup ", .{}).?;
+    try std.testing.expectEqual(setup_options.entries.len, options.count);
+    for (setup_options.entries, options.shown()) |entry, shown| try std.testing.expectEqualStrings(entry.word, shown.word);
+}
+
+test "an unknown command names itself when it is short printable ASCII" {
+    var buffer: [unknown_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("! Unknown command /foo · /help", unknown(&buffer, "/foo bar"));
+    try std.testing.expectEqualStrings("! Unknown command · /help", unknown(&buffer, "/\x1b[2J"));
+    const long = "/" ++ @as([max_unknown_name]u8, @splat('x'));
+    try std.testing.expectEqualStrings("! Unknown command · /help", unknown(&buffer, long));
+    try std.testing.expectEqualStrings("! Unknown command " ++ long[0..max_unknown_name] ++ " · /help", unknown(&buffer, long[0..max_unknown_name]));
 }

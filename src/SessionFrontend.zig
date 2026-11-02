@@ -578,13 +578,7 @@ fn modelFacts(self: *Self) []const u8 {
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
-    // Name the command only when it is short printable ASCII.
-    const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
-    var shown = name.len <= 32;
-    for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
-    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    writer.print("! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
-    self.notice = writer.buffered();
+    self.notice = slash_commands_shared.unknown(self.notice_buffer[0..slash_commands_shared.unknown_bytes], text);
 }
 
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
@@ -2052,7 +2046,7 @@ fn showInspection(self: *Self) !void {
     self.inspection.status_page = false;
     const size = (try self.files.inspection.stat(self.init.io)).size;
     if (size == 0) {
-        self.notice = "Command finished with no output.";
+        self.notice = slash_commands_shared.no_output;
         return;
     }
     // A short command result is a notice, not a page. Inside the Session the
@@ -2066,7 +2060,7 @@ fn showInspection(self: *Self) !void {
             var lines = std.mem.splitScalar(u8, text, '\n');
             while (lines.next()) |line| {
                 if (writer.buffered().len != 0) try writer.writeAll("\n");
-                if (std.mem.startsWith(u8, line, "Rui: ")) try writer.writeAll(line[5..]) else if (std.mem.startsWith(u8, line, "rui: ")) try writer.print("! {s}", .{line[5..]}) else try writer.writeAll(line);
+                try slash_commands_shared.writeResult(&writer, line);
             }
             self.notice = writer.buffered();
             return;

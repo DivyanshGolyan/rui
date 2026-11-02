@@ -2828,7 +2828,16 @@ Enter in a shown list takes the highlighted row: a command with nothing more to 
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/configure`, `/exit` and `/model`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there Esc and Ctrl-G clear the draft and the list with it, as its hint says.
+The overview lists its own commands, `/configure`, `/exit`, `/help`, `/model`, `/rename` and `/setup`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there Esc and Ctrl-G clear the draft and the list with it, as its hint says.
+Both screens share `/help`, `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME · /help` (Divyansh, 2026-11-02: "Same commands both screens").
+The overview's `/help` replaces the Sessions' rows with a panel headed `Help`, `Esc returns` at its right: the overview's keys, then its commands as its table lists them.
+A screen too small for the whole panel says `! Screen too small for /help` instead, as `/model` does; one that shrinks under it shows the lines that fit and counts the rest.
+Esc or Ctrl-G closes the panel and keeps the draft; a key that acts on a Session (one that selects, Ctrl-X, Enter on an empty draft) closes it first and acts where the Sessions show.
+The overview's `/rename NAME` names the selected Session and `/setup [OPTIONS]` saves defaults with no Session, each through the same CLI owner a conversation's runs, on the overview's worker with stdout and stderr in an unlinked scratch file; without a selected Session `/rename` says `Select a Session first.`
+One command runs at a time, and Enter on an empty draft waits for it too, since a conversation's commands write to the same stdout and stderr; either says `! Wait for /NAME to finish.`
+A result of one line is a notice, worded as a conversation words it; longer output takes the Sessions' rows under the command's name until Esc, cut at 8 KiB with a line that says so; empty output says `Command finished with no output.`
+After `/rename` the next listing, which shows the new label, goes at once.
+A command that could not start says `! /NAME not run: ERROR`; one that fails while it runs ends the overview, as a conversation ends, and the way out prints its output, as it does for output that came after the person left; one still queued then says `rui: /NAME did not run.`
 `/effort` needs a level: alone it states its usage, and the list offers the levels.
 `/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
