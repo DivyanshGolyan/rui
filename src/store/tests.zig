@@ -1794,6 +1794,53 @@ test "Full preserves rejected model interruption targets as canonical u64 text" 
     try std.testing.expect((try storage.inspectSessionForTesting(session.slice())).found);
 }
 
+test "a configure whose instructions and output schema are the same new bytes imports one row and verifies both files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    const rows = "SELECT count(*) FROM content";
+
+    const create_bytes = "{\"title\":\"same-create\"}";
+    var create = try completeConfiguration("same-create", "", workspace, "model-a");
+    create.configuration.instructions = try testingBytesContent(&tmp, "same-create-instructions", create_bytes);
+    create.configuration.output_schema = try testingBytesContent(&tmp, "same-create-schema", create_bytes);
+    defer create.removeTemporaryContent(std.testing.io) catch unreachable;
+    const before_create = try queryU64(storage.database, rows);
+    const created = storage.configure(&create, .{});
+    try std.testing.expect(created == .accepted);
+    try std.testing.expectEqual(before_create + 1, try queryU64(storage.database, rows));
+    const session = created.accepted.session;
+    const after_create = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+    try std.testing.expectEqual(after_create.instructions_id.?, after_create.output_schema_id.?);
+
+    const update_bytes = "{\"title\":\"same-update\"}";
+    var update = try completeConfiguration("same-update", session.slice(), workspace, "model-a");
+    update.configuration.instructions = try testingBytesContent(&tmp, "same-update-instructions", update_bytes);
+    update.configuration.output_schema = try testingBytesContent(&tmp, "same-update-schema", update_bytes);
+    defer update.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expectEqual(before_create + 2, try queryU64(storage.database, rows));
+    const after_update = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+    try std.testing.expectEqual(after_update.instructions_id.?, after_update.output_schema_id.?);
+    try std.testing.expect(after_update.instructions_id.? != after_create.instructions_id.?);
+
+    // The schema's file claims the instructions' identity but holds other
+    // bytes of the same length: sharing the row still verifies its file.
+    const claimed = "{\"title\":\"same-claim\"}";
+    var forged = try completeConfiguration("same-forged", session.slice(), workspace, "model-a");
+    forged.configuration.instructions = try testingBytesContent(&tmp, "same-forged-instructions", claimed);
+    forged.configuration.output_schema = try testingBytesContent(&tmp, "same-forged-schema", "{\"title\":\"same-other\"}");
+    forged.configuration.output_schema.digest = forged.configuration.instructions.digest;
+    defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&forged, .{}) != .accepted);
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE command_key='same-forged'"));
+    try std.testing.expectEqual(before_create + 2, try queryU64(storage.database, rows));
+}
+
 test "Full revisions own repeated content once and render semantic settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
