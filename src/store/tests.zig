@@ -88,6 +88,10 @@ const workspace_key_sql = sqlite.workspace_key_sql;
 
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
+test {
+    _ = @import("rsql.zig");
+}
+
 /// Tests read a view's settings by value; the Host fills them in place.
 fn testSettings(view: *HistoricalView) !HistoricalSettings {
     var settings: HistoricalSettings = undefined;
@@ -2461,6 +2465,7 @@ test "Store entry points lock and fence only through canonical access" {
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("rsql.zig"),
         @embedFile("schema.zig"),
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
