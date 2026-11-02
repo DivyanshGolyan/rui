@@ -57,7 +57,7 @@ const Look = struct { mark: []const u8, tone: Tone = .normal, words: []const u8,
 /// `words` when it has one, and `retrying` says a rate limit by its cause.
 const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .idle = null,
-    .pending = .{ .mark = "•", .words = "Starting", .clock = .elapsed },
+    .pending = .{ .mark = "•", .words = "Queued", .clock = .elapsed },
     .working = .{ .mark = "•", .words = "Waiting", .clock = .elapsed },
     .retrying = .{ .mark = "!", .tone = .attention, .words = "Provider error", .clock = .retry },
     .bash = .{ .mark = "•", .words = "Running a command", .clock = .elapsed },
@@ -232,7 +232,7 @@ test "every work state has the approved words on both screens, and ended work ha
     const retry: WorkState = .{ .retrying = .{ .since = test_now_s - 4, .due_at_ms = test_now_ms + 17_200, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     const cases = [_]struct { state: WorkState, conversation: []const u8, row: []const u8, ascii: []const u8, tone: Tone = .normal }{
         .{ .state = .{ .idle = .{ .since = 1 } }, .conversation = "", .row = "", .ascii = "" },
-        .{ .state = .{ .pending = .{ .since = test_now_s - 3 } }, .conversation = "• Starting · 3s", .row = "Starting", .ascii = "Starting" },
+        .{ .state = .{ .pending = .{ .since = test_now_s - 3 } }, .conversation = "• Queued · 3s", .row = "Queued", .ascii = "Queued" },
         .{ .state = .{ .working = .{ .since = test_now_s - 12 } }, .conversation = "• Waiting · 12s", .row = "Waiting", .ascii = "Waiting" },
         .{ .state = retry, .conversation = "! Rate limited · retry 2 in 18s", .row = "Rate limited · retry 2 in 18s", .ascii = "Rate limited - retry 2 in 18s", .tone = .attention },
         .{ .state = .{ .retrying = .{ .since = test_now_s, .due_at_ms = test_now_ms + 1, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_503"), .attempt = 1 } }, .conversation = "! Provider error · retry 1 in 1s", .row = "Provider error · retry 1 in 1s", .ascii = "Provider error - retry 1 in 1s", .tone = .attention },
@@ -261,9 +261,9 @@ test "every work state has the approved words on both screens, and ended work ha
     try std.testing.expectEqual(stopping.tone, host_stopping.tone);
     try std.testing.expectEqual(Clock.ellipsis, host_stopping.clock);
     // A due retry says what it became: eligible work starting again.
-    try std.testing.expectEqualStrings("• Starting · 0s", try conversation(retry, retry.retrying.due_at_ms));
+    try std.testing.expectEqualStrings("• Queued · 0s", try conversation(retry, retry.retrying.due_at_ms));
     // Its time is from the due second: due 17.2 s ahead, read 23.199 s ahead.
-    try std.testing.expectEqualStrings("• Starting · 6s", try conversation(retry, retry.retrying.due_at_ms + 5_999));
+    try std.testing.expectEqualStrings("• Queued · 6s", try conversation(retry, retry.retrying.due_at_ms + 5_999));
     // A clock behind the state's own second shows none elapsed.
     try std.testing.expectEqualStrings("• Waiting · 0s", try conversation(.{ .working = .{ .since = test_now_s + 3 } }, test_now_ms));
 }
