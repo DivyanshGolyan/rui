@@ -15,6 +15,8 @@ const client = @import("client.zig");
 const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const model_list = @import("model_list.zig");
+const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
@@ -77,6 +79,10 @@ pub const Operations = struct {
     /// ends the overview after a canonical Store failure.
     start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
+    /// The Host's `model_list` reply, owned by the allocator.
+    models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
+    /// Saves the person's default for new Sessions.
+    save_default: *const fn (*Self, view.Default) anyerror!void,
     /// Records how far the person saw a Session, giving up at the awake
     /// clock's `until`.
     mark_read: *const fn (*Self, client.Requests, []const u8, u64, i128) anyerror!void,
@@ -85,7 +91,7 @@ pub const Operations = struct {
     converse: *const fn (*Self, view.Reference) ?Left,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .mark_read = markRead, .converse = converse };
+pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .models = listModels, .save_default = saveDefault, .mark_read = markRead, .converse = converse };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -190,6 +196,8 @@ const Job = union(enum) {
     /// read on the worker's thread.
     start: view.OwnedStart,
     stop: view.Reference,
+    models,
+    save: view.Default,
     /// Sends a position the Host lacks.
     mark_read: Reads.Mark,
 
@@ -200,9 +208,10 @@ const Job = union(enum) {
     }
 };
 
-/// One host read and list page, at most one first-line batch, and the
-/// requests the core's ledger allows can wait at once.
-const max_jobs = 3 + view.max_requests;
+/// One host read and list page, at most one first-line batch, one
+/// model-list read, one save and the requests the core's ledger allows can
+/// wait at once.
+const max_jobs = 5 + view.max_requests;
 
 /// How far the person has read each Session, as far as this overview
 /// knows, and how far of that the Host was sent. A position only rises, and
@@ -314,6 +323,8 @@ host: ?view.Host = null,
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
 reply: Reply = .{},
+/// The menu a model-list read built, until the core takes it.
+menu: model_picker.Menu = .{},
 /// How far the person has read each Session, sent to the Host behind.
 reads: Reads = .{},
 /// Unlinked scratch for list pages.
@@ -434,7 +445,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = .{ .buffer = &self.draft };
-    try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at });
+    try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     errdefer self.closePipes();
     for ([_]*[2]c_int{ &self.done, &self.signalled }) |pipe| try openPipe(pipe);
@@ -469,6 +480,7 @@ fn destroy(self: *Self) void {
     self.forget();
     self.frame.deinit(self.init.gpa);
     self.state.deinit();
+    self.menu.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
 }
 
@@ -481,6 +493,7 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Runs until the person leaves the overview or a conversation, or a signal
 /// stops it. The terminal is still begun when it returns.
 fn loop(self: *Self) !Ending {
+    if (try self.resize()) |value| if (self.proceed(value)) |ending| return ending;
     if (self.options.open) |reference| if (try self.event(.{ .open = reference })) |value| if (self.proceed(value)) |ending| return ending;
     // After the open: keys typed during the wait act on the overview.
     var next = try self.askBackground();
@@ -555,6 +568,8 @@ fn event(self: *Self, value: view.Event) !?Next {
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
+        .list_models => self.queue(.models),
+        .save_default => |binding| self.queue(.{ .save = binding }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = .{ .buffer = &self.draft },
         .notify => |alert| self.terminal.notify(alert.name, alert.kind, alert.more),
@@ -602,6 +617,14 @@ fn composerDraft(self: *const Self) view.Draft {
     return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor };
 }
 
+/// Takes the queued job at `index` out of the queue.
+fn take(self: *Self, index: usize) Job {
+    const job = self.jobs[index];
+    std.mem.copyForwards(Job, self.jobs[index .. self.job_count - 1], self.jobs[index + 1 .. self.job_count]);
+    self.job_count -= 1;
+    return job;
+}
+
 fn queue(self: *Self, job: Job) void {
     std.debug.assert(self.job_count < max_jobs);
     self.jobs[self.job_count] = job;
@@ -622,12 +645,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
             if (job != .start) break index;
         } else null,
     };
-    const next: Job = if (at) |index| next: {
-        const job = self.jobs[index];
-        std.mem.copyForwards(Job, self.jobs[index .. self.job_count - 1], self.jobs[index + 1 .. self.job_count]);
-        self.job_count -= 1;
-        break :next job;
-    } else .{ .mark_read = self.reads.unsent() orelse return };
+    const next: Job = if (at) |index| self.take(index) else .{ .mark_read = self.reads.unsent() orelse return };
     self.job.deinit(self.init.gpa);
     self.job = next;
     try self.worker.start(self.init.io, self, work);
@@ -641,7 +659,12 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
         const byte = [1]u8{0};
         _ = std.c.write(self.done[1], &byte, 1);
     }
-    const requests = task.requests();
+    return self.runJob(task.requests());
+}
+
+/// Runs `job`, on the worker's thread or, for a save on the way out, the
+/// loop's.
+fn runJob(self: *Self, requests: client.Requests) !void {
     switch (self.job) {
         .host => self.host = self.ops.host(self),
         .list => if (try self.ops.list(self, requests, self.traversal.cursor, &self.page)) |failure| return failure.err(),
@@ -663,6 +686,13 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
         },
         .start => |*start| try self.ops.start(self, requests, self.startInput(start), &self.reply),
         .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        .models => {
+            const gpa = self.init.gpa;
+            const body = try self.ops.models(self, requests, gpa);
+            defer gpa.free(body);
+            self.menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body));
+        },
+        .save => |binding| try self.ops.save_default(self, binding),
         .mark_read => |*mark| try self.sendMark(requests, mark, requests.markReadDeadline()),
     }
 }
@@ -676,6 +706,21 @@ fn sendMark(self: *Self, requests: client.Requests, mark: *const Reads.Mark, unt
         error.CanonicalStoreFailure => return err,
         else => {},
     };
+}
+
+/// On the way out, runs each save the core asked for that the worker never
+/// started, as the worker would, each answer stepping the core: a save is a
+/// local file write that outlives the overview, and the departure says how
+/// it ended. No other queued job runs.
+fn flushSaves(self: *Self) !void {
+    const requests: client.Requests = .{ .io = self.init.io };
+    while (for (self.jobs[0..self.job_count], 0..) |job, index| {
+        if (job == .save) break index;
+    } else null) |index| {
+        self.job.deinit(self.init.gpa);
+        self.job = self.take(index);
+        _ = try self.deliver(self.runJob(requests));
+    }
 }
 
 /// On the way out, sends every position the Host lacks, all within one
@@ -721,6 +766,20 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .start = self.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
+        .models => {
+            outcome catch |err| return self.event(.{
+                .models = switch (err) {
+                    error.InvalidModelList, error.InvalidResponse, error.ResponseTooLarge => .invalid,
+                    // Any other failure leaves the person nothing to do but
+                    // try /model again, as when the Host is gone.
+                    else => .unanswered,
+                },
+            });
+            const menu = self.menu;
+            self.menu = .{};
+            return self.event(.{ .models = .{ .menu = menu } });
+        },
+        .save => |binding| return self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(outcome) } }),
         // A send the overview cancelled may not have gone out.
         .mark_read => |mark| if (!self.worker.cancellation.stopped.load(.acquire)) self.reads.sent(mark),
     }
@@ -749,8 +808,8 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) client.MessageIn
         .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = held.at(start, "workspace") orelse self.options.workspace },
-        .provider = held.given(held.at(start, "provider") orelse self.options.provider),
-        .model = held.given(held.at(start, "model") orelse self.options.model),
+        .provider = held.given(start.binding().provider),
+        .model = held.given(start.binding().model),
         .tools = held.at(start, "tools") orelse product_defaults.tools,
         .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
         .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
@@ -758,6 +817,26 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) client.MessageIn
         .reasoning_effort = held.policy(held.at(start, "reasoning-effort")),
         .label = label,
     } };
+}
+
+fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![]u8 {
+    return requests.modelList(self.options.store, gpa);
+}
+
+/// How a save ended, in the words `/setup` uses for the same failure.
+fn savedAs(outcome: anyerror!void) view.Saved {
+    outcome catch |err| {
+        const said = preferences.failure(err);
+        return if (said.saved) .unconfirmed else .{ .failed = said.reason };
+    };
+    return .done;
+}
+
+/// Saves the pick as `rui defaults configure --provider --model` would.
+fn saveDefault(self: *Self, binding: view.Default) !void {
+    // Both are named, so no sign-in's readiness decides anything.
+    const readiness: preferences.Readinesses = .initFill(.configured);
+    _ = try preferences.update(self.options.home, .{ .provider = .{ .set = @tagName(binding.provider) }, .model = .{ .set = binding.model.slice() } }, &readiness);
 }
 
 /// Reads up to `bytes` of what the terminal holds, waiting `wait`
@@ -849,25 +928,41 @@ fn askBackground(self: *Self) !?Next {
     return null;
 }
 
-/// Every input takes one route: the composer, with the overview's one key
-/// table, then one core step, whether or not the draft changed. While a
-/// start waits for its answer the composer is frozen: the keys the table
-/// binds still act, and nothing edits the text a failed start leaves to
-/// retry.
+/// Every input takes one route, the one the core's input mode names, then
+/// one core step, whether or not anything changed.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
-    const outcome: keymap.Outcome(view.Action) = if (self.state.starting())
-        if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none
-    else
-        self.composer.apply(view.keys, decoded);
-    return self.event(.{ .composed = .{ .outcome = outcome, .draft = self.composerDraft() } });
+    const input = route(self.state.inputMode(), &self.composer, decoded);
+    return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
+}
+
+/// One input through `mode`'s route, with the overview's one key table.
+/// The composer edits. Frozen while a start waits, the keys the table binds
+/// still act, and nothing edits the text a failed start leaves to retry.
+/// At the sign-in choice, as at an Action's choice in a conversation, the
+/// arrows and Enter are the choice's; typing and a paste go to the
+/// composer, which takes a paste from its start to its end.
+fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput.Decoded) view.Input {
+    return switch (mode) {
+        .compose => .{ .composer = composer.apply(view.keys, decoded) },
+        .frozen => .{ .composer = if (TerminalEditor.frozenAction(view.keys, decoded)) |action| .{ .action = action } else .none },
+        .choice => switch (TerminalEditor.select(view.keys, decoded)) {
+            .none => .{ .choice = .none },
+            .action => |action| .{ .choice = .{ .action = action } },
+            .left => .{ .choice = .left },
+            .right => .{ .choice = .right },
+            .enter => .{ .choice = .enter },
+            .refused => .{ .choice = .refused },
+            .text => .{ .composer = composer.apply(view.keys, decoded) },
+        },
+    };
 }
 
 /// Draws the core's screen at `frame`, writing only what the terminal does
 /// not already show. The shown screen says whether it changes with the
 /// next frame.
 fn draw(self: *Self, frame: u64) !?Next {
-    const size = self.terminal.geometry();
-    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), size.col, size.row, self.caps, frame);
+    if (try self.resize()) |next| return next;
+    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
     errdefer screen.deinit();
     self.draft_anchor = screen.draft_anchor;
     self.frame.clearRetainingCapacity();
@@ -897,6 +992,14 @@ fn draw(self: *Self, frame: u64) !?Next {
     self.terminal.wrote();
     self.shown = screen;
     return null;
+}
+
+/// Steps the terminal's size when it changed, so the frame drawn next and
+/// the keys read until the one after act on one layout.
+fn resize(self: *Self) !?Next {
+    const size = self.terminal.geometry();
+    if (size.col == self.state.size.width and size.row == self.state.size.height) return null;
+    return self.event(.{ .resized = .{ .width = size.col, .height = size.row } });
 }
 
 fn forget(self: *Self) void {
@@ -1021,16 +1124,17 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
-/// `complete` as the loop does, then writes the ledger's guidance before
-/// anything that can return. The departure is whole before the restore
-/// result is read. A conversation's own guidance and the Detached notice
-/// follow.
+/// `complete` as the loop does, runs the saves the core asked for, then
+/// writes the ledger's guidance before anything that can return. The
+/// departure is whole before the restore result is read. A conversation's
+/// own guidance and the Detached notice follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
-    const answered: anyerror!?Next = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
+    const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
+    const saved = self.flushSaves();
     // A ledger entry prints well under 512 bytes.
-    var bytes: [view.max_requests * 512]u8 = undefined;
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes]u8 = undefined;
     var guidance = std.Io.Writer.fixed(&bytes);
     view.writeDeparture(&self.state, &guidance) catch unreachable;
     _ = stderr.write(guidance.buffered());
@@ -1040,11 +1144,15 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             const marked = self.flushMarks();
             try restored;
             _ = try answered;
+            try saved;
             try marked;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
             if (answered) |_| {} else |err| left.ended = err;
+            saved catch |err| {
+                left.ended = err;
+            };
             return self.leave(left.*, restored);
         },
     }
@@ -1196,6 +1304,9 @@ const Seen = struct {
     stopped: view.Reference = @splat(0),
     conversations: usize = 0,
     conversed: view.Reference = @splat(0),
+    model_lists: usize = 0,
+    saved: ?struct { provider: view.Provider, model: protocol.Bounded(64) } = null,
+    saves: usize = 0,
     /// How many Sessions the fake listing returns, from `listed_references`.
     listed: usize = 1,
     /// Each mark the worker sent, in order.
@@ -1279,6 +1390,26 @@ const fake_operations: Operations = .{
             reply.* = .{ .outcome = .accepted };
         }
     }.stop,
+    .models = struct {
+        fn models(_: *Self, _: client.Requests, gpa: std.mem.Allocator) ![]u8 {
+            Seen.now.model_lists += 1;
+            var reply: std.Io.Writer.Allocating = .init(gpa);
+            errdefer reply.deinit();
+            try reply.writer.writeAll(protocol.model_list_reply.head);
+            try model_list.writeProviders(&reply.writer, &.{
+                .{ .provider = .codex, .list = .table },
+                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
+            });
+            try reply.writer.writeAll(protocol.model_list_reply.tail);
+            return reply.toOwnedSlice();
+        }
+    }.models,
+    .save_default = struct {
+        fn save(_: *Self, binding: view.Default) !void {
+            Seen.now.saved = .{ .provider = binding.provider, .model = Seen.bounded(binding.model.slice()) };
+            Seen.now.saves += 1;
+        }
+    }.save,
     .mark_read = struct {
         fn markRead(_: *Self, requests: client.Requests, session: []const u8, position: u64, _: i128) !void {
             if (Seen.now.mark_failure) |err| return err;
@@ -1331,6 +1462,8 @@ const Rig = struct {
         rig.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = rig.screen, .input = rig.keys[0], .output = rig.output[1] };
         rig.overview = try create(rig.init, options, undefined, ops, interrupted);
         rig.overview.terminal = &rig.terminal;
+        // As the loop does before it reads a key.
+        _ = try rig.overview.resize();
         return rig;
     }
 
@@ -1441,6 +1574,207 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.conversed);
     const ending = (try rig.press("\x04")).?;
     try std.testing.expect(ending == .overview);
+}
+
+test "/model reads the lists on the worker, the sign-in choice takes the arrows, and the pick is saved and starts the next Session" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
+    // Down to gpt-6-luna, which both sign-ins offer: Enter shows the choice
+    // at the default's sign-in, Right moves it, and Enter picks.
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expect(overview.state.inputMode() == .choice);
+    try std.testing.expect(try rig.press("\x1b[C\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(view.Provider.openai, Seen.now.saved.?.provider);
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
+    try std.testing.expect(overview.state.picker == null);
+    // The next Session takes the pick.
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("openai", Seen.now.start.provider.?.slice());
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
+}
+
+test "any key at the sign-in choice cancels a stop prompt, arrows and ignored keys alike" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    // A working Session, which Ctrl-X asks to stop.
+    overview.state.selected = shownRow(rig, 2);
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expect(overview.state.inputMode() == .choice);
+    try std.testing.expect(try rig.press("\x18") == null);
+    try std.testing.expect(overview.state.prompt != null);
+    // Arrows, and keys the choice ignores: Backspace, Delete, Tab.
+    for ([_][]const u8{ "\x1b[D", "\x1b[C", "\x7f", "\x1b[3~", "\t" }) |arrow| {
+        try std.testing.expect(try rig.press(arrow) == null);
+        try std.testing.expect(overview.state.prompt == null);
+        // Ctrl-X asks again rather than stopping.
+        try std.testing.expect(try rig.press("\x18") == null);
+        try std.testing.expect(overview.state.prompt != null);
+    }
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
+}
+
+test "a save still queued as the overview ends runs, and the way out names it" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // Down to gpt-6-luna, which both sign-ins offer: Enter opens the choice, Enter picks.
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
+    try std.testing.expectEqual(Job.save, std.meta.activeTag(rig.overview.jobs[rig.overview.job_count - 1]));
+    var buffer: [1024]u8 = undefined;
+    const guidance = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-6-luna") != null);
+}
+
+/// Fake operations whose saves write the preferences file under the
+/// overview's home, counted in `Seen.now.saves`.
+const file_saving_operations: Operations = blk: {
+    var ops = fake_operations;
+    ops.save_default = struct {
+        fn save(self: *Self, binding: view.Default) !void {
+            Seen.now.saves += 1;
+            try saveDefault(self, binding);
+        }
+    }.save;
+    break :blk ops;
+};
+
+/// Pins `provider` and `model` in the preferences file under `home`, as
+/// /setup or another terminal would.
+fn pin(home: []const u8, provider: []const u8, model: []const u8) !void {
+    const readiness: preferences.Readinesses = .initFill(.configured);
+    _ = try preferences.update(home, .{ .provider = .{ .set = provider }, .model = .{ .set = model } }, &readiness);
+}
+
+test "an overview left without a pick writes no default, pinned or not" {
+    for ([_]bool{ false, true }) |pinned| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        if (pinned) try pin(home, "openai", "gpt-6-luna");
+        var cancellation: client.Cancellation = .{};
+        // Without a pin, the overview opens on the built-in default.
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = if (pinned) "openai" else "codex", .model = if (pinned) "gpt-6-luna" else "gpt-5.5" }, file_saving_operations, &cancellation);
+        defer rig.close();
+        var buffer: [1024]u8 = undefined;
+        const guidance = try finishedGuidance(rig, &buffer);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
+        try std.testing.expect(std.mem.indexOf(u8, guidance, "New Sessions use") == null);
+        const values = try preferences.load(home);
+        try std.testing.expectEqualStrings(if (pinned) "openai" else "", values.provider.slice());
+        try std.testing.expectEqualStrings(if (pinned) "gpt-6-luna" else "", values.model.slice());
+    }
+}
+
+test "a default saved elsewhere while the overview is open outlasts its exit without a pick" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    try pin(home, "codex", "gpt-5.5");
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.settle() == null);
+    try pin(home, "openai", "gpt-6-luna");
+    var buffer: [1024]u8 = undefined;
+    _ = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
+    const values = try preferences.load(home);
+    try std.testing.expectEqualStrings("openai", values.provider.slice());
+    try std.testing.expectEqualStrings("gpt-6-luna", values.model.slice());
+}
+
+test "a pick made while a save runs is written before the departure, which names only it" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // Down to gpt-6-luna; Enter opens the sign-in choice, Enter picks ChatGPT.
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
+    // Its save starts, and nothing answers it before the next pick.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.worker.thread != null and overview.job == .save);
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .table }}) } }) == null);
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", overview.state.default.?.model.slice());
+    var buffer: [1024]u8 = undefined;
+    const guidance = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.saves);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", Seen.now.saved.?.model.slice());
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "New Sessions use gpt-6.1-sol") != null);
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-6-luna") == null);
+}
+
+test "a pick after /configure --model starts the pick, not the held model" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6.1-sol" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/configure --model gpt-5.5\n") == null);
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // The held model leads; Down to gpt-6-luna, Enter shows the sign-in
+    // choice at ChatGPT, and Enter picks.
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("codex", Seen.now.start.provider.?.slice());
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
+}
+
+test "a paste the composer rejects at the sign-in choice leaves the choice, and typing after it starts a Session" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // Down to gpt-6-luna, which both sign-ins offer: Enter shows the choice.
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expect(rig.overview.state.inputMode() == .choice);
+    // A standalone combining mark, which the composer cannot add alone.
+    try std.testing.expect(try rig.press("\x1b[200~\xcc\x81\x1b[201~") == null);
+    try std.testing.expect(rig.overview.state.picker == null);
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+    try std.testing.expectEqualStrings("hello", Seen.now.start.text.slice());
+    try std.testing.expect(Seen.now.saved == null);
+}
+
+test "a model list the Host cannot answer and one Rui cannot read reach the core apart" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/model\n") == null);
+    overview.job = .models;
+    try std.testing.expect(try overview.deliver(error.ConnectionRefused) == null);
+    try std.testing.expect(overview.state.menu_read == .unanswered);
+    try std.testing.expect(try overview.deliver(error.InvalidModelList) == null);
+    try std.testing.expect(overview.state.menu_read == .invalid);
 }
 
 test "a start with no saved binding names no model, so the Host refuses it" {
@@ -2875,10 +3209,10 @@ test "every key does what the overview's table says, through the editor, in ever
         }
         try std.testing.expect(ending == null);
         switch (action) {
-            .previous, .next, .first, .last => {
+            .previous, .next, .select_previous, .select_next, .first, .last => {
                 const row: usize = switch (action) {
-                    .previous => 1,
-                    .next => 3,
+                    .previous, .select_previous => 1,
+                    .next, .select_next => 3,
                     .first => 0,
                     .last => listed_references.len - 1,
                     else => unreachable,

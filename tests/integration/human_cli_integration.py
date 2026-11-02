@@ -292,11 +292,12 @@ def help_case():
 
 
 def compiled_model_cases():
-    """One release list owns admission, help and the stale-pin notice."""
+    """One release list owns help; any ID with valid syntax is admitted, an unlisted one with default limits."""
     import host_launch_integration as launch
     models = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra",
               "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
+    unlisted_note = "it uses default limits"
     root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-compiled-models.")))
     home, store = root / "home", root / "host-store"
     home.mkdir(mode=0o700)
@@ -310,65 +311,64 @@ def compiled_model_cases():
         help_without_home = subprocess.run([str(fixture.RUI), "session", "configure", "--help"],
             env=no_home, capture_output=True, text=True, timeout=10)
         assert help_without_home.returncode == 0 and listing in help_without_home.stdout and not help_without_home.stderr
+        # An ID without valid syntax is refused before capture.
         for named in ((), ("--session", "k7m2qx")):
-            for model in ("retired-model", "gpt-6-so", "gpt-6-sol-extra", "GPT-6-SOL", "codex-auto-review", "bad\x1b[31m"):
+            for model in ("bad\x1b[31m", "two words", "x" * 257):
                 record = root / "must-not-exist.json"
                 result = subprocess.run([str(fixture.RUI), "session", "configure",
                     "--store", str(root / "absent-store"), *named, "--provider", "codex", "--model", model,
                     "--record", str(record), "--key", "invalid-model", "--instructions", "-"],
                     env=env, capture_output=True, text=True, timeout=10)
                 assert result.returncode != 0 and not result.stdout, result
-                assert listing in result.stderr and "unsupported model" in result.stderr, result.stderr
+                assert listing in result.stderr and "invalid model" in result.stderr, result.stderr
                 assert "syntax and recovery:" not in result.stderr, result.stderr
-                assert result.stderr.endswith("error: UnsupportedModel (exit status 1)\n"), result.stderr
-                assert model.replace("\x1b", "\\x1b") in result.stderr, result.stderr
+                assert result.stderr.endswith("error: InvalidModel (exit status 1)\n"), result.stderr
                 assert "\x1b" not in result.stderr, result.stderr
                 assert not record.exists() and not (root / "absent-store").exists()
                 assert list(home.iterdir()) == [], "invalid model created capture or preference state"
-        rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "retired-model"],
+        rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "two words"],
             env=env, capture_output=True, text=True, timeout=10)
         assert rejected_default.returncode != 0 and listing in rejected_default.stderr and not list(home.iterdir())
-        assert "syntax and recovery:" not in rejected_default.stderr, rejected_default.stderr
-        assert rejected_default.stderr.endswith("error: UnsupportedModel (exit status 1)\n"), rejected_default.stderr
-        defaults(home, "--provider", "codex", "--model", models[0])
+        assert rejected_default.stderr.endswith("error: InvalidModel (exit status 1)\n"), rejected_default.stderr
+        # An unlisted ID with valid syntax is saved, with one line on its limits.
+        for model in ("retired-model", "GPT-6-SOL"):
+            accepted = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", model],
+                env=env, capture_output=True, text=True, timeout=10)
+            assert accepted.returncode == 0, accepted
+            assert accepted.stderr.count(unlisted_note) == 1 and model in accepted.stderr, accepted.stderr
+            assert json.loads(accepted.stdout)["next_session"]["model"] == model, accepted.stdout
         saved = home / ".config/rui/preferences"
-        saved.write_bytes(saved.read_bytes().replace(b"model=gpt-6-luna", b"model=retired-model"))
+        assert saved.read_text().endswith("model=GPT-6-SOL\n")
+        saved.write_bytes(saved.read_bytes().replace(b"model=GPT-6-SOL", b"model=retired-model"))
         original = saved.read_bytes()
-        result = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(root / "absent-store")],
-            env=env, capture_output=True, text=True, timeout=10)
-        assert result.returncode != 0 and "retired-model" in result.stderr and listing in result.stderr, result
-        assert "syntax and recovery:" not in result.stderr, result.stderr
-        assert result.stderr.endswith("error: UnsupportedModel (exit status 1)\n"), result.stderr
-        assert saved.read_bytes() == original and not (home / ".config/rui/requests").exists()
+        # Bare rui with the saved unlisted pin goes on to sign-in, not a refusal.
         with terminal_process([str(fixture.RUI), "--store", str(root / "absent-store")], env=env) as (entered, master):
-            diagnostic = read_terminal(master, "See rui session configure --help.")
-            assert "retired-model" in diagnostic and listing.strip() in diagnostic, diagnostic
-            assert "Choose Codex login" not in diagnostic, diagnostic
-            assert entered.wait(timeout=5) != 0
-        assert saved.read_bytes() == original and not (root / "absent-store").exists()
-        assert not (home / ".config/rui/requests").exists()
+            shown = read_terminal(master, "Choose Codex login")
+            assert "invalid model" not in shown and listing.strip() not in shown, shown
+        assert saved.read_bytes() == original
+        # The Host starts quietly with an unlisted pin, and leaves it as it is.
         started = launch.run_start(store, env)
         assert started.returncode == 0, started.stderr
-        assert started.stderr.count("saved new-Session default model") == 1, started.stderr
-        assert "retired-model" in started.stderr and listing in started.stderr, started.stderr
-        assert "rui defaults configure --model ID" in started.stderr and "--clear-model" in started.stderr, started.stderr
-        assert saved.read_bytes() == original, "startup substituted or rewrote a stale pin"
+        assert "retired-model" not in started.stderr, started.stderr
+        assert saved.read_bytes() == original, "startup substituted or rewrote the pin"
         attached = launch.run_start(store, env)
         assert attached.returncode == 0 and not attached.stderr, attached
         sessions = []
-        for index, model in enumerate(models):
-            admitted = admit(home, "session", "configure", "--store", store,
-                "--workspace", root, "--provider", "codex", "--model", model)
-            assert admitted["admission"]["answer"]["status"] == "accepted", admitted
-            session = admitted["admission"]["answer"]["session"]
-            sessions.append(session)
-            current = fixture.command("session", "inspect", "--store", store, "--session", session)
+        for index, model in enumerate(models + ("retired-model",)):
+            admitted = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
+                "--workspace", str(root), "--provider", "codex", "--model", model], env=env, capture_output=True, text=True, timeout=10)
+            assert admitted.returncode == 0, admitted
+            assert (unlisted_note in admitted.stderr) == (model not in models), admitted.stderr
+            answer = json.loads(admitted.stdout)["answer"]
+            assert answer["status"] == "accepted", admitted.stdout
+            sessions.append(answer["session"])
+            current = fixture.command("session", "inspect", "--store", store, "--session", answer["session"])
             assert current["session"]["model"] == model, current
         captures = home / ".config/rui/requests"
         before = {path.name: path.read_bytes() for path in captures.glob("*.json")}
         original_session = fixture.command("session", "inspect", "--store", store, "--session", sessions[0])["session"]
         rejected = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
-            "--session", sessions[0], "--model", "gpt-6-lun"], env=env, capture_output=True, text=True, timeout=10)
+            "--session", sessions[0], "--model", "gpt 6"], env=env, capture_output=True, text=True, timeout=10)
         assert rejected.returncode != 0 and listing in rejected.stderr, rejected
         assert {path.name: path.read_bytes() for path in captures.glob("*.json")} == before
         assert fixture.command("session", "inspect", "--store", store, "--session", sessions[0])["session"] == original_session
@@ -382,7 +382,7 @@ def compiled_model_cases():
             assert saved.read_bytes() == retained
             launch.forced_crash_cleanup(store)
         completed = True
-        print("compiled models: shared help/error/notice membership, pre-capture rejection, all accepted IDs and retained defaults passed")
+        print("compiled models: shared help, invalid-ID refusal before capture, unlisted IDs admitted with default limits, and retained defaults passed")
     finally:
         dispose_all(lambda: launch.forced_crash_cleanup(store),
             lambda: shutil.rmtree(root) if completed else retain_failure_state("compiled model CLI failure state", root))
@@ -6360,7 +6360,8 @@ def main(selected="all"):
         defaults(preferences_home, "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
         prospective = defaults(preferences_home)["next_session"]
-        assert prospective == {"status": "unsupported_model"}, prospective
+        # A model Rui does not list is still the next Session's, with default limits.
+        assert prospective["status"] == "selected" and prospective["model"] == "old-model", prospective
         assert defaults(preferences_home)["model"] == "old-model", "inspection rewrote the stale pin"
         defaults(preferences_home, "--model", "gpt-6-luna")
         saved.rename(saved.parent / "preferences.backup")
@@ -6818,9 +6819,9 @@ def main(selected="all"):
             cleared_preferences = interactive_saved.read_bytes()
             for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingArguments"),
                                    ("/setup --model gpt-6-luna --clear-model", "ConflictingArguments"),
-                                   ('/setup --model ""', 'unsupported model ""')):
+                                   ('/setup --model ""', 'invalid model ""')):
                 rejected = terminal_step(master, command, error, composer=True)
-                if 'unsupported model' in error:
+                if 'invalid model' in error:
                     assert "Supported model IDs:" in rejected and "See rui session configure --help." in rejected, rejected
                     assert "active Session unchanged" not in rejected, rejected
                 assert interactive_saved.read_bytes() == cleared_preferences

@@ -2135,9 +2135,10 @@ Renaming introduces no new runtime entity or authority, deeper command hierarchy
 
 Fresh `session configure` without a Session selector captures creation intent and concrete resolved Workspace/provider/model/defaults before transmission; the Store allocates the ID at commit and the accepted reply returns it.
 Fully explicit settings bypass unused preferences.
-The CLI checks every supplied or resolved model against the [release-supported list](#supported-model-ids) before capture, input reads or Session mutation.
-A rejected model diagnostic names the ID and lists the supported IDs.
-Addressed configuration preserves the exact canonical ID and sparse update inputs; an unknown ID rejects without creating a Session, even with a complete configuration.
+The CLI checks every supplied model's syntax before capture, input reads or Session mutation.
+A refused model diagnostic names the ID and lists the [IDs Rui lists](#supported-model-ids).
+A typed ID with valid syntax that Rui does not list is admitted with one line, `Rui does not list ID; it uses default limits`, and runs with [default limits](#choosing-and-validating-compacted-context).
+Addressed configuration preserves the exact canonical ID and sparse update inputs.
 It does not probe existence, inherit the configuring agent's settings or apply creation defaults to an existing peer.
 `session send` requires an already configured Session.
 A later send failure does not undo accepted configuration.
@@ -2283,9 +2284,11 @@ The change second sets each pulse's phase, so marks that changed apart pulse apa
 Only a Unicode, colour screen pulses, and a row faded while the Host does not answer holds still.
 The core ticks as each pulse ends, the overview wakes for frames only while a pulsing mark is on screen, and each frame writes only the cells that changed.
 Enter on a row opens that Session's conversation; Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-Every input takes one route: the shell's line editor applies it with the overview's one key table (`keys` in `src/overview_view.zig`), and the core steps with the outcome and the draft as it then stands.
-No key is caught ahead of the editor.
+Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
+In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
 While a start awaits its answer the composer is frozen: the table's keys still act, nothing edits, and a failed start keeps its text.
+At the model picker's sign-in choice the arrows and Enter are the choice's own and the table's keys keep their meaning, while typing and a paste go to the line editor, which takes a paste from its start to its end.
+The core holds the terminal's size, which the shell steps before each frame, and one pure `layout` divides the screen into the top, the list, the picker and the input; `render` draws from it, and the core acts on the picker only while it shows it.
 Enter's start effect borrows only until the next step; the shell copies its text and held settings into one allocation its job owns, so Esc may clear the draft and the settings while the start runs.
 The rules table says which work states Ctrl-X may stop: pending, working, retrying, Bash and approval.
 Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
@@ -2331,6 +2334,23 @@ Bare `rui` accepts no initial Message operand.
 Terminal input goes through the overview composer, which is a conversation's line editor: it edits, rejects and ends lines as a draft does.
 The overview keeps Esc, Ctrl-C and Ctrl-X, and the arrows, Home and End select rows while the composer is empty; Up and Down past a draft's lines select rows too.
 Before Enter, its `/configure` edits only the start settings of the Session that Enter will start.
+Its `/model` opens the model picker right above the input: every model the Host's [`/v1/model-list`](#public-session-activity) offers for a served sign-in, the next Session's model first (the saved default, unless `/configure` holds a model), then the models Rui's table knows in its order, then the others by name under "Other models", tagged "default limits".
+The overview's worker reads the list and builds the menu, so the screen never waits, and the menu is freed when the picker closes.
+A list still loading says so and is read again with the next listing, a fallback list says the live one is unavailable, and each sign-in the Host does not serve shows one line naming its login command.
+A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
+On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
+When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
+The sign-ins are named "ChatGPT" (`codex`) and "API key" (`openai`).
+Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.
+Esc steps back from the choice to the models, then closes the picker, and typing or a paste leaves it for the draft.
+Every pick saves the person's default, the one `/setup` and `rui defaults configure --provider --model` write, through the worker, and later starts use it (Divyansh, 2026-11-02, picker plan "Answered" 2 and 3).
+A pick clears the provider and model `/configure` held, since it is the newer choice; one core function, `nextBinding`, names what the next start uses, and the start, the picker's `default` tag and the `New Sessions use` line all read it.
+An overview left without a pick writes nothing, and a failed save is not retried; picking again saves again.
+An Other model is picked like any other and runs with default limits.
+A save that fails says why in `/setup`'s words; one whose directory sync failed still changes the default and says its durability is unconfirmed.
+A save queued or running as the overview ends finishes first: on the way out the shell runs each save the core asked for through the worker's own job path, and the departure text reports one that ended after the person left.
+The Session rows keep their highlight while the picker is open, so Ctrl-X acts on a row the person can see.
+A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
 Scripts use `session start` with stdin.
 A first word naming a former top-level command (for example `configure`, `message` or `recover`) is refused with its resource-first replacement before capture, Host contact or terminal entry.
 
@@ -2347,11 +2367,11 @@ Non-interactive fresh configuration resolves defaults without interactive choice
 An unavailable saved provider stays selected for repair, never falls back.
 Within the selected provider an explicit valid model wins over its saved pin, then its recommended exact model.
 Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes, including `=`.
-Syntax validation remains separate from Rui's [release-supported list](#supported-model-ids), account entitlement and live qualification.
-The CLI checks release support before new-Session creation or an explicit default-model save.
+Syntax validation is the only model check: an ID Rui's [list](#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
+A bad ID fails at the provider's first request, whose remedy is `/model` in the overview.
 Old pins remain readable and clearable, never substituted.
 The built-in providers are Codex and OpenAI; they share one catalog and the recommended model `gpt-6.1-sol`.
-`rui defaults inspect` shows the prospective choice or unsupported-model status, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
+`rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
 The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
 Conversation `/login` does not invoke this chooser.
@@ -2577,8 +2597,8 @@ Full's existing streaming consumer and inventory remain unchanged.
 
 #### Supported model IDs
 
-`model_capability.models` is the single compiled-in table of model IDs this Rui release accepts through CLI configuration, one row per ID with every per-model fact Rui uses.
-`rui session configure --help`, unsupported-model errors and the Host-start stale-default notice render that same table, and the help's effort exceptions derive from it.
+`model_capability.models` is the single compiled-in table of model IDs this Rui release knows, one row per ID with every per-model fact Rui uses.
+`rui session configure --help` and invalid-model errors render that same table, and the help's effort exceptions derive from it.
 Adding support requires one table-row release change.
 `product_defaults.recommended_model` must name a row; the build checks this.
 IDs are exact and case-sensitive, without aliases, prefix matching or inferred providers.
@@ -2586,12 +2606,9 @@ The list comes from pinned public Codex source metadata, not a live availability
 Inclusion claims neither account entitlement nor cross-model continuation qualification.
 Session binding and normal provider rejection remain unchanged.
 
-Only the Host that acquires the Store lease checks its saved future-Session model default at startup.
-If the pin is outside the list, it emits one bounded advisory naming the pin and supported IDs, with `rui defaults configure --model ID` and `--clear-model` repair instructions.
-Detached `host start` forwards that startup notice; attaching to an already-running Host does not repeat it.
-Startup leaves the pin and existing Sessions unchanged.
+The Host does not check the saved future-Session model default at startup: any pin with valid syntax starts Sessions, and one outside the table runs with default limits.
 Missing or unreadable future defaults do not prevent a Host from serving existing saved work.
-An invalid saved pin rejects fresh CLI creation before capture rather than falling back to the recommendation.
+A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
 The only live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); there is no model-list command, other network discovery or cache across Host runs, and help and CLI configuration read the compiled table.
 Help needs no Host or credentials.
@@ -2799,6 +2816,7 @@ Esc or Ctrl-G, when the latest frame showed the list, closes only the list until
 Tab adds the matching names' common start, and a space after a whole name that takes an argument; in any other draft, or over a partial character or a rejected draft, Tab does what it always did.
 The arrows keep scrolling the conversation.
 `/effort` alone shows `Efforts: low · [medium] · high · xhigh · /effort LEVEL switches`, the efforts the Session's model supports with the one in force bracketed, from the Session line's facts.
+`/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
 They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.
 

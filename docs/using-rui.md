@@ -16,6 +16,7 @@ Enter these at the `›` prompt.
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
+| `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
 ## Approve Bash commands
@@ -72,8 +73,8 @@ Ctrl-X stops the selected Session, and Ctrl-D leaves.
 | Key in the overview | What it does |
 | --- | --- |
 | Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. While a start waits for its answer, all four select. |
-| Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds. |
-| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. On a blank composer, opens the selected Session. |
+| Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds and while `/model` is open. |
+| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. `/model` lists the models your sign-ins offer, your default first; ↑ and ↓ move, and Enter picks one as the default for new Sessions. When both ChatGPT and an API key offer it, Enter shows a Use ChatGPT / API key choice, where ← and → move and Enter picks. Esc steps back. A pick replaces a model `/configure` held. On a screen too short for the list, `/model` says so instead. On a blank composer, opens the selected Session. |
 | Esc, Ctrl-G | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. A start already sent keeps its own text and settings. In a conversation's latest view, returns to the overview. |
 | Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |
 | Ctrl-D | Leaves, when the composer is empty or a start waits for its answer. |
@@ -111,21 +112,20 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 ## Models
 
-To list this release's supported model IDs, run `rui session configure --help`.
+To list the model IDs this release knows, run `rui session configure --help`.
 The list is compiled into Rui and needs no Host or credentials.
 It does not mean that your account can use every listed model.
 
+Rui also takes a model it does not list, such as one your provider's model list offers.
+It says `Rui does not list ID; it uses default limits`, and runs that model with a 128,000-token context.
+If the provider does not know the ID, the Session's first request fails and says to pick another with `/model` in the overview.
+
 Without `--model`, a new Session uses your saved default.
 With no saved default, it uses `gpt-6.1-sol`.
+To pick the default from a list, type `/model` in the overview.
 
-If Host startup warns that a saved model default is unsupported, pick a listed ID:
-
-```sh
-rui defaults configure --model ID
-```
-
-To remove the saved default instead, run `rui defaults configure --clear-model`.
-Rui keeps the old default until you change it.
+To change the saved default from the shell, run `rui defaults configure --model ID`.
+To remove it, run `rui defaults configure --clear-model`.
 
 ## Notifications
 
