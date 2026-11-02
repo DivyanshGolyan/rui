@@ -10,12 +10,11 @@ from pathlib import Path
 import re
 import unittest
 
-from release_numbers import bump_error, git, main_base, released_tag
+from release_numbers import bump_error, digest_rows, drifted_row_fix, git, main_base, released_tag
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "src/store/schema.zig"
 VERSION = re.compile(r"^pub const schema_version: u32 = (\d+);$", re.MULTILINE)
-ROW = re.compile(r"\.\{ \.schema_version = (\d+), \.digest = (0x[0-9a-f]+) \}")
 TAG = re.compile(r"v0\.(\d+)\.\d+")
 
 
@@ -24,10 +23,6 @@ def schema_version(source):
     if match is None:
         raise AssertionError(f"{SCHEMA} declares no schema_version")
     return int(match[1])
-
-
-def rows(source):
-    return {int(version): digest for version, digest in ROW.findall(source)}
 
 
 def edited_released_rows(candidate, released_rows, released):
@@ -39,7 +34,13 @@ def edited_released_rows(candidate, released_rows, released):
 class StoreSchemaVersionTest(unittest.TestCase):
     def test_reads_the_owner(self):
         source = (ROOT / SCHEMA).read_text()
-        self.assertEqual(max(rows(source)), schema_version(source), "the last row is the current version")
+        self.assertEqual(max(digest_rows(source)), schema_version(source), "the last row is the current version")
+
+    def test_a_drifted_released_row_names_its_repair(self):
+        self.assertEqual(drifted_row_fix(48, 0xaa, 0xbb),
+                         "schema 48 shipped with digest 0x00000000000000aa, but this revision's row 48 holds "
+                         "0x00000000000000bb: restore row 48 to 0x00000000000000aa, set schema_version to 49 "
+                         "and append .{ .schema_version = 49, .digest = 0x00000000000000bb }")
 
     def test_released_rows_rule(self):
         released = {45: "0xa", 46: "0xb"}
@@ -61,10 +62,14 @@ class StoreSchemaVersionTest(unittest.TestCase):
         base = schema_version(git(ROOT, "show", f"{base_commit}:{SCHEMA}"))
         error = bump_error("schema_version", schema_version(source), base, released)
         if error:
-            self.fail(f"{error} (release {tag}, main at {base_commit[:12]}): update that row's digest in place")
+            self.fail(f"{error} (release {tag}, main at {base_commit[:12]}); an unreleased number's row "
+                      "takes a changed digest in place")
         if git(ROOT, "ls-tree", "--name-only", tag, "--", SCHEMA):
-            edited = edited_released_rows(rows(source), rows(git(ROOT, "show", f"{tag}:{SCHEMA}")), released)
-            self.assertEqual(edited, [], f"bootstrap_digests rows {edited} shipped by {tag} must stay as released")
+            shipped, rows = digest_rows(git(ROOT, "show", f"{tag}:{SCHEMA}")), digest_rows(source)
+            edited = edited_released_rows(rows, shipped, released)
+            fixes = [drifted_row_fix(version, shipped[version], rows[version]) for version in edited if version in rows]
+            self.assertEqual(edited, [], f"bootstrap_digests rows {edited} shipped by {tag} must stay as released. "
+                             + " ".join(fixes))
 
 
 if __name__ == "__main__":

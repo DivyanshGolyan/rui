@@ -69,7 +69,7 @@ pub inline fn oneOf(comptime column: []const u8, comptime set: anytype) []const 
 pub const accepted_resolutions = [_]turn_policy.Resolution{ .answer, .compacted, .tool_proposals };
 comptime {
     if (!std.mem.eql(turn_policy.Resolution, &accepted_resolutions, &turn_policy.accepted))
-        @compileError("turn_policy.accepted changed: change accepted_resolutions under a new schema_version");
+        @compileError("turn_policy.accepted changed: change accepted_resolutions and bootstrap_digests' last row");
 }
 
 pub inline fn resolutionIs(comptime column: []const u8, comptime resolution: turn_policy.Resolution) []const u8 {
@@ -659,7 +659,7 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
 }
 
 /// FNV-1a over every statement `bootstrap` executes, in order, so changing
-/// any of them without a new schema_version fails the build. FNV-1a, not
+/// any of them without changing bootstrap_digests fails the build. FNV-1a, not
 /// SHA-256: it is a fixed algorithm, and SHA-256 costs seconds of every
 /// compile.
 pub fn digest() u64 {
