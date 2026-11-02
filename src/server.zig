@@ -832,6 +832,7 @@ pub fn serve(
         3, // Two controls and concurrent discovery.
         served.any(),
         served.chatgpt() != null,
+        served.listedKey() != null,
         os.tag,
     );
     if (descriptor_observation.soft_limit) |limit| {
@@ -847,7 +848,7 @@ pub fn serve(
                 .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
-                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} model_list={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
                 .{
                     active_capacity,
                     descriptor_requirement.total,
@@ -857,6 +858,7 @@ pub fn serve(
                     descriptor_requirement.clients,
                     descriptor_requirement.execution,
                     descriptor_requirement.authentication,
+                    descriptor_requirement.model_list,
                     descriptor_requirement.self_wake,
                 },
             );
@@ -870,6 +872,7 @@ pub fn serve(
         3,
         served.any(),
         served.chatgpt() != null,
+        served.listedKey() != null,
         os.tag,
     );
     var descriptor_limit_buffer: [32]u8 = undefined;
@@ -1005,6 +1008,9 @@ pub fn serve(
     try intake.init(&host);
     defer intake.deinit();
     host.intake_wake = intake.wake[1];
+    // A list that cannot be fetched leaves the table standing in.
+    const model_list_thread = host.model_lists.start(&host) catch null;
+    defer host.model_lists.stop(&host, model_list_thread);
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
         // Stop admitting new connections before releasing any Host-owned
@@ -1231,6 +1237,7 @@ const Route = enum {
     activity_page,
     activity_content,
     person_message,
+    model_list,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -1549,7 +1556,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, protocol.max_person_message_response_bytes, renderPersonMessage, .{&found});
         },
+        // Host memory only: never SQLite or the network.
+        .model_list => try fd.json(200, protocol.model_list_reply.max_bytes, renderModelList, .{host}),
     }
+}
+
+fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
+    out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
+    host.model_lists.render(host, out.writer) catch return error.BufferTooLarge;
+    out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
 /// One `T` on the heap whose bytes stay unwritten until its initializer or
@@ -1670,6 +1685,8 @@ const HeaderReader = struct {
             .activity_content
         else if (std.mem.eql(u8, path, "/v1/person-message"))
             .person_message
+        else if (std.mem.eql(u8, path, "/v1/model-list"))
+            .model_list
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else

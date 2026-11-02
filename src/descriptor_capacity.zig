@@ -17,6 +17,7 @@ pub const Requirement = struct {
     clients: usize,
     execution: usize,
     authentication: usize,
+    model_list: usize,
     self_wake: usize,
     total: usize,
 };
@@ -38,6 +39,7 @@ pub fn calculate(
     control_exchanges: usize,
     provider_configured: bool,
     authentication_configured: bool,
+    model_list_configured: bool,
     os_tag: std.Target.Os.Tag,
 ) !Requirement {
     // StoreLease owns its directory and lock (2). SQLite DELETE mode can
@@ -99,6 +101,16 @@ pub fn calculate(
         else => return error.UnsupportedDescriptorPlatform,
     };
 
+    // The startup model list fetch, while it runs: its private h2 Client's
+    // waker, one connection socket and up to two trust-loading handles.
+    const model_list: usize = if (!model_list_configured)
+        0
+    else switch (os_tag) {
+        .linux => 4,
+        .macos => 5,
+        else => return error.UnsupportedDescriptorPlatform,
+    };
+
     // The intake owner retains both ends of one nonblocking wake socket pair.
     // Workers and the execution fence notify without opening new connections.
     const self_wake: usize = 2;
@@ -106,6 +118,7 @@ pub fn calculate(
     total = try add(total, clients);
     total = try add(total, execution);
     total = try add(total, authentication);
+    total = try add(total, model_list);
     total = try add(total, self_wake);
     return .{
         .inherited = inherited,
@@ -113,6 +126,7 @@ pub fn calculate(
         .clients = clients,
         .execution = execution,
         .authentication = authentication,
+        .model_list = model_list,
         .self_wake = self_wake,
         .total = total,
     };
@@ -169,7 +183,7 @@ fn multiply(left: usize, right: usize) !usize {
 }
 
 test "requirement uses simultaneous owner populations rather than summing exclusive maxima" {
-    const linux = try calculate(3, 2, 10, 2, true, false, .linux);
+    const linux = try calculate(3, 2, 10, 2, true, false, false, .linux);
     try std.testing.expectEqual(@as(usize, 3), linux.inherited);
     try std.testing.expectEqual(@as(usize, 8), linux.fixed_host);
     try std.testing.expectEqual(@as(usize, 42), linux.clients);
@@ -178,22 +192,27 @@ test "requirement uses simultaneous owner populations rather than summing exclus
     try std.testing.expectEqual(@as(usize, 2), linux.self_wake);
     try std.testing.expectEqual(@as(usize, 70), linux.total);
 
-    const managed = try calculate(3, 2, 10, 2, true, true, .linux);
+    const managed = try calculate(3, 2, 10, 2, true, true, false, .linux);
     try std.testing.expectEqual(@as(usize, 6), managed.authentication);
     try std.testing.expectEqual(@as(usize, 76), managed.total);
 
-    const without_transport = try calculate(3, 2, 10, 2, false, false, .linux);
+    const without_transport = try calculate(3, 2, 10, 2, false, false, false, .linux);
     try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
     try std.testing.expectEqual(@as(usize, 69), without_transport.total);
 
-    const macos = try calculate(3, 2, 10, 2, true, true, .macos);
+    const macos = try calculate(3, 2, 10, 2, true, true, false, .macos);
     try std.testing.expectEqual(@as(usize, 9), macos.fixed_host);
     try std.testing.expectEqual(@as(usize, 7), macos.authentication);
     try std.testing.expectEqual(@as(usize, 78), macos.total);
+
+    const listed = try calculate(3, 2, 10, 2, true, false, true, .linux);
+    try std.testing.expectEqual(@as(usize, 4), listed.model_list);
+    try std.testing.expectEqual(@as(usize, 74), listed.total);
+    try std.testing.expectEqual(@as(usize, 5), (try calculate(3, 2, 10, 2, true, false, true, .macos)).model_list);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {
-    const requirement = try calculate(3, 0, 10, 2, false, true, .linux);
+    const requirement = try calculate(3, 0, 10, 2, false, true, false, .linux);
     try std.testing.expectEqual(@as(usize, 0), requirement.execution);
     try std.testing.expectEqual(@as(usize, 0), requirement.authentication);
     try std.testing.expectEqual(@as(usize, 54), requirement.total);
@@ -213,7 +232,7 @@ test "execution population compares exclusive steady and shared transition overl
 test "requirement arithmetic rejects overflow" {
     try std.testing.expectError(
         error.DescriptorRequirementOverflow,
-        calculate(3, std.math.maxInt(usize), 10, 2, true, true, .linux),
+        calculate(3, std.math.maxInt(usize), 10, 2, true, true, false, .linux),
     );
 }
 

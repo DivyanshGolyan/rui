@@ -328,6 +328,10 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
     std.debug.assert(record.state == .idle);
     if (@backingInt(request.endpoint) >= self.endpoint_count) return error.InvalidRequest;
     if (request.fields.len > h2.max_fields) return error.InvalidRequest;
+    if (request.method == .get and switch (request.body) {
+        .file => |file| file.length != 0,
+        .bytes => |bytes| bytes.len != 0,
+    }) return error.InvalidRequest;
     // The record keeps a buffer sink's capacity in 32 bits.
     if (request.sink == .buffer and request.sink.buffer.len > std.math.maxInt(u32)) return error.InvalidRequest;
     // The cap is on the block a copy of every field would take, so it
@@ -352,6 +356,7 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
     } else block.ptr;
     record.fields_len = @intCast(block_len);
     record.endpoint = @backingInt(request.endpoint);
+    record.flags.get = request.method == .get;
     switch (request.body) {
         .file => |file| {
             record.body_source = @intCast(file.handle);

@@ -41,6 +41,14 @@ pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8) ![]const u8
     return under;
 }
 
+/// The model list beside a Responses endpoint (`BASE/models` for
+/// `BASE/responses`), which its key may also reach, or null when the
+/// endpoint is not one.
+pub fn modelsUrl(allocator: std.mem.Allocator, responses: []const u8) !?[]const u8 {
+    const base = std.mem.cutSuffix(u8, responses, "/responses") orelse return null;
+    return try std.fmt.allocPrint(allocator, "{s}/models", .{base});
+}
+
 /// The credential a provider's requests carry.
 pub const Credential = union(enum) {
     /// A development endpoint, which takes no credential.
@@ -99,6 +107,14 @@ pub const Providers = struct {
         return out;
     }
 
+    /// The OpenAI key whose model list the Host fetches at start: served,
+    /// with a Responses endpoint the list sits beside. ChatGPT has none.
+    pub fn listedKey(self: *const Providers) ?*const Served {
+        const served = self.get(.openai) orelse return null;
+        if (served.credential != .key_file or !std.mem.endsWith(u8, served.endpoint, "/responses")) return null;
+        return served;
+    }
+
     /// Whether a Session of `provider` can be admitted here.
     pub fn serves(self: *const Providers, provider: Provider) bool {
         return self.get(provider) != null;
@@ -137,4 +153,12 @@ test "a base URL names the https Responses endpoint under it, or nothing" {
     }) |bad| try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, bad));
     const long = "https://h/" ++ @as([provider_transport.max_endpoint_bytes]u8, @splat('a'));
     try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, long));
+}
+
+test "the model list sits beside the Responses endpoint" {
+    const allocator = std.testing.allocator;
+    const models = (try modelsUrl(allocator, endpoint(.openai))).?;
+    defer allocator.free(models);
+    try std.testing.expectEqualStrings("https://api.openai.com/v1/models", models);
+    try std.testing.expectEqual(@as(?[]const u8, null), try modelsUrl(allocator, "https://host/v1/chat"));
 }

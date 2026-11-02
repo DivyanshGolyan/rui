@@ -251,7 +251,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                             return SimpleNamespace(returncode=1, stdout="", stderr=(
                                 "descriptor capacity insufficient: active_capacity=1 "
                                 f"required={required} soft_limit={limit} inherited={inherited} fixed_host={fixed} "
-                                f"clients=403 execution=10 authentication={authentication} self_wake=2"))
+                                f"clients=403 execution=10 authentication={authentication} model_list=0 self_wake=2"))
                         clock[0] += 5.2 if late == "read" else 4.95
                         key = args[-1]
                         text = "managed-federal" if key == "federal" else f"managed-{key[-1]}"
@@ -304,14 +304,14 @@ class ManagedDescriptorTests(unittest.TestCase):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=(
                     "rui: descriptor capacity insufficient: active_capacity=1 "
                     f"required={required} soft_limit=73 inherited={inherited} "
-                    "fixed_host=9 clients=403 execution=10 authentication=7 self_wake=2\n"))
+                    "fixed_host=9 clients=403 execution=10 authentication=7 model_list=0 self_wake=2\n"))
                 with os_semantics.simulate("darwin"):
                     self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 73), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
         correct = ("rui: descriptor capacity insufficient: active_capacity=1 "
                    "required=435 soft_limit=74 inherited=4 fixed_host=9 clients=403 "
-                   "execution=10 authentication=7 self_wake=2\n")
+                   "execution=10 authentication=7 model_list=0 self_wake=2\n")
         for before, after in (("required=435", "required=434"), ("authentication=7", "authentication=6"),
                               ("inherited=4", "inherited=5"), ("soft_limit=74", "soft_limit=73")):
             with self.subTest(before=before):
@@ -570,15 +570,18 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         calls = []
         primary = AssertionError("original OpenAI base URL body failure")
         secondary = RuntimeError("endpoint shutdown failure")
-        headers = {b":path": b"/custom/v1/responses", b":authority": b"localhost:1",
-                   b"authorization": ("Bearer " + codex_h2.codex.OPENAI_KEY).encode()}
+        bearer = ("Bearer " + codex_h2.codex.OPENAI_KEY).encode()
+        requests = [{b":method": b"GET", b":path": b"/custom/v1/models", b":authority": b"localhost:1", b"authorization": bearer},
+                    {b":method": b"POST", b":path": b"/custom/v1/responses", b":authority": b"localhost:1", b"authorization": bearer}]
+        listed = {"providers": [{"provider": "openai", "source": "live", "models": [
+            {"id": "gpt-6-sol", "listed": True}, {"id": "custom-model", "listed": False}]}]}
 
         def shutdown():
             calls.append("shutdown")
             if fail_shutdown:
                 raise secondary
 
-        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=[headers],
+        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=requests,
                                    serve_forever=lambda: None, shutdown=shutdown,
                                    server_close=lambda: calls.append("close"))
         thread = SimpleNamespace(start=lambda: None, is_alive=lambda: False,
@@ -587,7 +590,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         def start(*args, **kwargs):
             if fail_start:
                 raise primary
-            return SimpleNamespace(pid=1), {}
+            return SimpleNamespace(pid=1), {"socket": "/fixture/socket"}
 
         def message(*args):
             if fail_body:
@@ -608,6 +611,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     (codex_h2.h2_fixture, "Endpoint", lambda *a, **k: endpoint),
                     (codex_h2.threading, "Thread", lambda **kwargs: thread),
                     (codex_h2, "start_ready_process", start),
+                    (codex_h2.h2_fixture, "closed_host_request", lambda *a: listed),
                     (codex_h2.fixture, "command", lambda *a: {"answer": {"status": "accepted", "session": "s"}}),
                     (codex_h2.fixture, "message", message),
                     (codex_h2.fixture, "wait_for_result_release", lambda *a: (
