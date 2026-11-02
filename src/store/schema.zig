@@ -22,7 +22,7 @@ pub const schema_version: u32 = 46;
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
-    .{ .schema_version = 46, .digest = 0xa90c6603196840b4 },
+    .{ .schema_version = 46, .digest = 0x07b5f8ede42e5bb7 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -658,8 +658,15 @@ pub fn digest() u64 {
 const identity_sql = std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id});
 const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
-/// a wire bump is no schema change.
-const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2)";
+/// a wire bump is no schema change. The format and the schema digest are
+/// checked on open before any write; the digest is bound too, since it
+/// covers this text.
+const store_meta_sql = std.fmt.comptimePrint(
+    "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','{d}'),('schema_digest',?3)",
+    .{schema_version},
+);
+/// `digest()` as store_meta holds it.
+pub const digest_text = std.fmt.comptimePrint("{x:0>16}", .{digest()});
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
 fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8 {
@@ -762,6 +769,7 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     defer _ = c.sqlite3_finalize(statement);
     try sqlite.bindText(statement, 1, protocol.wire_version);
     try sqlite.bindText(statement, 2, selector);
+    try sqlite.bindText(statement, 3, digest_text);
     try sqlite.expectDone(statement);
     try sqlite.exec(database, "COMMIT");
 }
@@ -792,6 +800,8 @@ pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             return error.WrongStoreSchema;
         }
     }
+    if (!try metaEquals(database, "format", std.fmt.comptimePrint("{d}", .{schema_version}))) return error.WrongStoreVersion;
+    if (!try metaEquals(database, "schema_digest", digest_text)) return error.WrongStoreSchema;
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
         defer _ = c.sqlite3_finalize(statement);
@@ -808,4 +818,14 @@ pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) return error.WrongStoreIdentity;
     }
+}
+
+/// Whether store_meta holds exactly `expected` under `key`.
+fn metaEquals(database: *c.sqlite3, comptime key: []const u8, expected: []const u8) !bool {
+    const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='" ++ key ++ "'");
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+    if (c.sqlite3_column_type(statement, 0) != c.SQLITE_TEXT) return false;
+    const text = c.sqlite3_column_text(statement, 0) orelse return error.OutOfMemory;
+    return std.mem.eql(u8, text[0..@intCast(c.sqlite3_column_bytes(statement, 0))], expected);
 }

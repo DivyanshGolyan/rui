@@ -7463,6 +7463,46 @@ test "fresh Store uses current schema and rejects the prior version" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database}), .{}));
 }
 
+test "existing Store rejects a format or schema digest that store_meta does not hold" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    try std.testing.expectEqual(@as(u64, schema_version), try queryU64(storage.database, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+    try storage.close();
+    const Case = struct { sql: [:0]const u8, refusal: anyerror };
+    const cases = [_]Case{
+        .{ .sql = "UPDATE store_meta SET meta_value='45' WHERE meta_key='format'", .refusal = error.WrongStoreVersion },
+        .{ .sql = "DELETE FROM store_meta WHERE meta_key='format'", .refusal = error.WrongStoreVersion },
+        .{ .sql = "UPDATE store_meta SET meta_value='0000000000000000' WHERE meta_key='schema_digest'", .refusal = error.WrongStoreSchema },
+        .{ .sql = "DELETE FROM store_meta WHERE meta_key='schema_digest'", .refusal = error.WrongStoreSchema },
+    };
+    for (cases) |case| {
+        var raw: ?*c.sqlite3 = null;
+        var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
+        try sqlite.exec(raw.?, case.sql);
+        _ = c.sqlite3_close(raw);
+        const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+        defer std.testing.allocator.free(before);
+        var refused: Store = undefined;
+        try std.testing.expectError(case.refusal, refused.open(std.testing.io, database, root));
+        const after = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+        defer std.testing.allocator.free(after);
+        try std.testing.expectEqualSlices(u8, before, after);
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
+        try sqlite.exec(raw.?, "DELETE FROM store_meta WHERE meta_key IN ('format','schema_digest')");
+        try sqlite.exec(raw.?, std.fmt.comptimePrint("INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('schema_digest','{s}')", .{ schema_version, store_schema.digest_text }));
+        _ = c.sqlite3_close(raw);
+    }
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+}
+
 test "a Workspace is matched by its digest and then its text" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
