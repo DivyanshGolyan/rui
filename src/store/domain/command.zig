@@ -24,7 +24,6 @@ const MessageCommitted = Store.MessageCommitted;
 const MessageObservation = reads_domain.MessageObservation;
 const MessageProgress = reads_domain.MessageProgress;
 const TurnOutcome = turn_domain.TurnOutcome;
-const operation_resolved_at_sql = model_settlement_domain.operation_resolved_at_sql;
 
 pub const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
@@ -264,139 +263,228 @@ fn messageSenderMatchesLocked(self: *Store, command: *const protocol.MessageComm
     return sender.eql(claimed.session.slice());
 }
 
-pub fn stopSessionLocked(
-    self: *Store,
-    command: *const protocol.SessionStopCommand,
-    faults: Faults,
-) !SessionStopReply {
-    try store_core.begin(self);
+/// The Session a stop names, and the last Message admitted to it: the
+/// stop excludes every Message up to that one.
+const stop_target = rsql.Read(.{
+    .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff " ++
+        "FROM session WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { session: rsql.SessionHead, admission_cutoff: u64 },
+    .cardinality = .optional,
+});
+
+/// The Session's open Turn: its Operation, whether that still runs, how
+/// many of its Actions a stop cancels (unresolved and never attempted),
+/// and whether an attempted one is unresolved, which keeps the Turn open
+/// until its Attempt settles.
+const stop_turn = rsql.Read(.{
+    .sql = "SELECT t.turn_id,t.operation_id,o.resolution_code IS NULL AS running," ++
+        "(SELECT count(*) FROM action_operation a WHERE a.parent_operation_id=t.operation_id AND a.resolution_code IS NULL AND a.attempt_ordinal=0) AS cancellable," ++
+        "EXISTS(SELECT 1 FROM action_operation a WHERE a.parent_operation_id=t.operation_id AND a.resolution_code IS NULL AND a.attempt_ordinal<>0) AS in_flight " ++
+        "FROM turn t JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_code IS NULL LIMIT 1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { turn_id: rsql.Positive, operation_id: rsql.Positive, running: bool, cancellable: u64, in_flight: bool },
+    .cardinality = .optional,
+});
+
+/// The Actions of `operation_id` a stop cancels, in call order, from the
+/// call `after` on.
+const cancellable_actions = rsql.Read(.{
+    .sql = "SELECT action_id,call_ordinal FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0 " ++
+        "AND call_ordinal>=?2 ORDER BY call_ordinal",
+    .Args = struct { operation_id: u64, after: u64 },
+    .Row = struct { action_id: rsql.Positive, call_ordinal: u64 },
+    .cardinality = .each,
+});
+
+const insert_stop = rsql.Write(.{
+    .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
+    .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64 },
+    // A replay was classified first, so the key is free.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// The most Actions one cancelling write names: its ids, then the
+/// content, first position, Session and @now, fit SQLite's 17 parameters.
+const cancel_chunk = 8;
+
+/// `cancel_actions[n - 1]` cancels the `n` Actions it names, keyed from
+/// Zig (an UPDATE that numbers its rows from the table it updates is not
+/// portable): the k-th id named takes position `first_position + k - 1`.
+const cancel_actions = blk: {
+    var writes: [cancel_chunk]type = undefined;
+    for (&writes, 1..) |*write, n| write.* = rsql.Write(.{
+        .sql = cancelSql(n),
+        .Args = CancelArgs(n),
+        .expect = .{ .exact = .{ .rows = n, .otherwise = error.StopSelectionChanged } },
+    });
+    break :blk writes;
+};
+
+fn cancelSql(comptime n: usize) []const u8 {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var offsets: []const u8 = "";
+        var ids: []const u8 = "";
+        for (0..n) |k| {
+            offsets = offsets ++ std.fmt.comptimePrint(" WHEN ?{d} THEN {d}", .{ k + 4, k });
+            ids = ids ++ (if (k == 0) "" else ",") ++ std.fmt.comptimePrint("?{d}", .{k + 4});
+        }
+        return "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?1,acceptance_position=?2+CASE action_id" ++ offsets ++
+            " END,resolved_at=@now WHERE action_id IN (" ++ ids ++ ") AND session_ref=@session(?3) AND resolution_code IS NULL AND attempt_ordinal=0";
+    }
+}
+
+fn cancelField(comptime k: usize) []const u8 {
+    @setEvalBranchQuota(10_000);
+    return std.fmt.comptimePrint("action_{d}", .{k + 1});
+}
+
+fn CancelArgs(comptime n: usize) type {
+    @setEvalBranchQuota(100_000);
+    var names: [3 + n][]const u8 = undefined;
+    var types: [3 + n]type = undefined;
+    names[0..3].* = .{ "content_id", "first_position", "session" };
+    types[0..3].* = .{ u64, u64, rsql.SessionHead };
+    for (0..n) |k| {
+        names[3 + k] = cancelField(k);
+        types[3 + k] = u64;
+    }
+    return @Struct(.auto, null, &names, &types, &@splat(.{}));
+}
+
+/// Collects one `cancellable_actions` chunk.
+const CancelChunk = struct {
+    action_ids: [cancel_chunk]u64 = undefined,
+    len: usize = 0,
+    /// The call the next chunk starts from.
+    next: u64 = 0,
+
+    pub fn visit(chunk: *CancelChunk, row: *const cancellable_actions.Row) bool {
+        chunk.action_ids[chunk.len] = row.action_id.get();
+        chunk.len += 1;
+        chunk.next = row.call_ordinal + 1;
+        return chunk.len < cancel_chunk;
+    }
+};
+
+/// A stop's saved selection, and whether the Turn it selected has closed.
+const stop_selection = rsql.Read(.{
+    .sql = "SELECT stop.selected_turn_id,stop.admission_cutoff,t.outcome_code IS NOT NULL AS turn_closed FROM session_stop stop " ++
+        "LEFT JOIN turn t ON t.turn_id=stop.selected_turn_id WHERE stop.command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { selected_turn_id: ?rsql.Positive, admission_cutoff: u64, turn_closed: bool },
+    .cardinality = .one,
+});
+
+/// The Operation a stop interrupted, if any.
+const stop_interrupted = rsql.Read(.{
+    .sql = "SELECT operation_id FROM model_operation WHERE interrupted_by_command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { operation_id: rsql.Positive },
+    .cardinality = .optional,
+});
+
+fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
+    const turn = row.selected_turn_id orelse return .{ .selection = .{ .admission_cutoff = row.admission_cutoff }, .completion = .completed };
+    return .{
+        .selection = .{ .selected_turn_id = turn.get(), .admission_cutoff = row.admission_cutoff },
+        .completion = if (row.turn_closed) .completed else .pending,
+    };
+}
+
+/// A stop's own interruption finding the Operation changed is the stop's
+/// selection changing, as on main.
+pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
+    return stopRounds(a, command, faults) catch |err| switch (err) {
+        error.InterruptionTargetChanged => error.StopSelectionChanged,
+        else => err,
+    };
+}
+
+/// Round 1 reads the saved answer, the Session with its admission cutoff,
+/// and its open Turn with its Actions' counts. A replay reads the saved
+/// selection in a round of its own. When Actions are cancelled, a second
+/// round reads the cancellation text's row and the first chunk of them
+/// (it depends on the Turn), and each further chunk of `cancel_chunk` is
+/// one more round. The write round saves the command and the stop,
+/// interrupts a running Operation, cancels the Actions, closes the Turn
+/// unless an attempted Action keeps it open, and commits.
+fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
     const digest = command.semanticDigest();
-    switch (try classifyReplay(self, protocol.SessionStopRejection, .session_stop, command.key.slice(), command.session.slice(), &digest)) {
+    const key = command.key.slice();
+    const session = command.session.slice();
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, key, &saved);
+    var target: stop_target.Result = null;
+    var turn: stop_turn.Result = null;
+    if (protocol.validSessionId(session)) {
+        a.read(stop_target, .{ .session = session }, &target);
+        a.read(stop_turn, .{ .session = session }, &turn);
+    }
+    try a.run();
+    switch (try classify(protocol.SessionStopRejection, &saved, .session_stop, session, &digest)) {
         .fresh => {},
-        .conflict => return .conflict,
+        .conflict => {
+            try a.abandon(.{});
+            return .conflict;
+        },
         .accepted => {
-            const selection = try readSessionStopSelection(self, command.key.slice());
+            var selection: stop_selection.Result = undefined;
+            var interrupted: stop_interrupted.Result = undefined;
+            a.read(stop_selection, .{ .key = key }, &selection);
+            a.read(stop_interrupted, .{ .key = key }, &interrupted);
+            try a.run();
+            try a.abandon(.{});
+            const observed = stopObservation(&selection);
             return .{ .accepted = .{
                 .replayed = true,
-                .selection = selection,
-                .completion = try sessionStopCompletion(self, selection),
-                .interrupted_operation_id = try readInterruptedOperation(self, command.key.slice()),
+                .selection = observed.selection,
+                .completion = observed.completion,
+                .interrupted_operation_id = if (interrupted) |row| row.operation_id.get() else null,
             } };
         },
-        .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
+        .rejected => |code| {
+            try a.abandon(.{});
+            return .{ .rejected = .{ .replayed = true, .code = code } };
+        },
     }
 
-    if (!protocol.validSessionId(command.session.slice())) {
-        return saveSessionStopRejection(self, command, &digest, .invalid_session_reference, faults);
-    }
-    if (try turn_domain.sessionNextPosition(self, command.session.slice()) == null) {
-        return saveSessionStopRejection(self, command, &digest, .unknown_session, faults);
+    const rejection: ?protocol.SessionStopRejection = if (!protocol.validSessionId(session)) .invalid_session_reference else if (target == null) .unknown_session else null;
+    if (rejection) |code| {
+        var answer = StoredAnswer{ .accepted = false };
+        try answer.code.set(@tagName(code));
+        try queueCommand(a, key, .session_stop, session, &digest, null, null, &answer);
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try a.commit();
+        return .{ .rejected = .{ .replayed = false, .code = code } };
     }
 
-    const cutoff_statement = try store_core.cached(
-        self,
-        "SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1",
-    );
-    defer sqlite.resetCached(cutoff_statement);
-    try sqlite.bindText(cutoff_statement, 1, command.session.slice());
-    if (c.sqlite3_step(cutoff_statement) != c.SQLITE_ROW) return error.StopSelectionFailed;
-    const cutoff_value = c.sqlite3_column_int64(cutoff_statement, 0);
-    if (cutoff_value < 0) return error.CorruptStore;
-
-    const active_statement = try store_core.cached(
-        self,
-        "SELECT t.turn_id,t.operation_id,o.resolution_code FROM turn t " ++
-            "JOIN model_operation o ON o.operation_id=t.operation_id " ++
-            "WHERE t.session_ref=?1 AND t.outcome_code IS NULL",
-    );
-    defer sqlite.resetCached(active_statement);
-    try sqlite.bindText(active_statement, 1, command.session.slice());
-    const active_result = c.sqlite3_step(active_statement);
-    var selected_turn_id: ?u64 = null;
-    var current_operation_id: ?u64 = null;
-    var operation_unresolved = false;
-    if (active_result == c.SQLITE_ROW) {
-        const turn_value = c.sqlite3_column_int64(active_statement, 0);
-        const operation_value = c.sqlite3_column_int64(active_statement, 1);
-        if (turn_value <= 0 or operation_value <= 0) return error.CorruptStore;
-        selected_turn_id = @intCast(turn_value);
-        current_operation_id = @intCast(operation_value);
-        operation_unresolved = c.sqlite3_column_type(active_statement, 2) == c.SQLITE_NULL;
-    } else if (active_result != c.SQLITE_DONE) return error.StopSelectionFailed;
-
-    try insertCommand(
-        self,
-        command.key.slice(),
-        .session_stop,
-        command.session.slice(),
-        &digest,
-        null,
-        null,
-        .{ .accepted = true },
-    );
-    {
-        const position = try turn_domain.claimSessionPosition(self, command.session.slice());
-        const insert = try store_core.cached(
-            self,
-            "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) VALUES(?1,?2,?3,?4,?5,unixepoch())",
-        );
-        defer sqlite.resetCached(insert);
-        try sqlite.bindText(insert, 1, command.key.slice());
-        try sqlite.bindText(insert, 2, command.session.slice());
-        try sqlite.bindNullableU64(insert, 3, selected_turn_id);
-        try sqlite.bindI64(insert, 4, cutoff_value);
-        try sqlite.bindU64(insert, 5, position);
-        try sqlite.expectDone(insert);
-    }
+    const found = target.?;
+    const head = found.session;
+    const positions = try a.positions(head);
+    const answer: StoredAnswer = .{ .accepted = true };
+    try queueCommand(a, key, .session_stop, session, &digest, null, null, &answer);
+    const selection = SessionStopSelection{ .selected_turn_id = if (turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
+    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = try positions.take(1) });
+    var completion: protocol.SessionStopCompletion = .completed;
     var interrupted_operation_id: ?u64 = null;
-    if (selected_turn_id) |turn_id| {
-        if (operation_unresolved) {
-            interruptOperation(self, current_operation_id.?, command.key.slice()) catch |err| {
-                return switch (err) {
-                    error.InterruptionTargetChanged => error.StopSelectionChanged,
-                    else => err,
-                };
-            };
-            interrupted_operation_id = current_operation_id;
+    // The cancellation text's identity: its queued row reads the digest in
+    // place until commit.
+    var cancellation = content_domain.stop_cancellation;
+    if (turn) |open| {
+        if (open.running) {
+            a.write(interrupt_operation, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
+            interrupted_operation_id = open.operation_id.get();
         }
-        const unresolved_actions = try store_core.cached(
-            self,
-            "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 " ++
-                "AND resolution_code IS NULL AND attempt_ordinal=0",
-        );
-        defer sqlite.resetCached(unresolved_actions);
-        try sqlite.bindU64(unresolved_actions, 1, current_operation_id.?);
-        if (c.sqlite3_step(unresolved_actions) != c.SQLITE_ROW) return error.ActionReadFailed;
-        const unresolved_count = c.sqlite3_column_int64(unresolved_actions, 0);
-        if (unresolved_count < 0) return error.CorruptStore;
-        if (unresolved_count != 0) {
-            const cancellation_content_id = try content_domain.importBytesContent(self, content_domain.stop_cancellation_text, false, faults.content_import);
-            const first_position = try turn_domain.claimSessionPositions(self, command.session.slice(), @intCast(unresolved_count));
-            const cancel_actions = try store_core.cached(
-                self,
-                "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
-                    "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
-                    "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
-                    "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2,resolved_at=unixepoch()," ++
-                    "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
-                    "WHERE action_id IN (SELECT action_id FROM cancelled)",
-            );
-            defer sqlite.resetCached(cancel_actions);
-            try sqlite.bindU64(cancel_actions, 1, current_operation_id.?);
-            try sqlite.bindI64(cancel_actions, 2, cancellation_content_id);
-            try sqlite.bindU64(cancel_actions, 3, first_position);
-            try sqlite.expectDone(cancel_actions);
-            if (c.sqlite3_changes(self.database) != unresolved_count) return error.StopSelectionChanged;
-        }
-        try turn_domain.completeStoppedTurnIfReady(self, turn_id);
+        if (open.cancellable != 0) try cancelActions(a, positions, head, &open, &cancellation, faults);
+        // The stop now selects the Turn and has resolved every Action
+        // never attempted, so the Turn is ready (`turn.stopped_turn`)
+        // unless an attempted Action is unresolved.
+        if (open.in_flight) completion = .pending else try turn_domain.queueClose(a, positions, open.turn_id.get(), .cancelled);
     }
-    const selection = SessionStopSelection{
-        .selected_turn_id = selected_turn_id,
-        .admission_cutoff = @intCast(cutoff_value),
-    };
-    const completion = try sessionStopCompletion(self, selection);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{
         .replayed = false,
@@ -406,28 +494,45 @@ pub fn stopSessionLocked(
     } };
 }
 
-fn saveSessionStopRejection(
-    self: *Store,
-    command: *const protocol.SessionStopCommand,
-    digest: *const [32]u8,
-    code: protocol.SessionStopRejection,
+/// Cancels the open Turn's `open.cancellable` Actions in call order, each
+/// at the Session's next position, with the stop's cancellation text.
+fn cancelActions(
+    a: anytype,
+    positions: anytype,
+    head: rsql.SessionHead,
+    open: *const stop_turn.Row,
+    cancellation: *content_domain.Import,
     faults: Faults,
-) !SessionStopReply {
-    var answer = StoredAnswer{ .accepted = false };
-    try answer.code.set(@tagName(code));
-    try insertCommand(
-        self,
-        command.key.slice(),
-        .session_stop,
-        command.session.slice(),
-        digest,
-        null,
-        null,
-        answer,
-    );
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
-    return .{ .rejected = .{ .replayed = false, .code = code } };
+) !void {
+    var chunk: CancelChunk = .{};
+    content_domain.lookup(a, cancellation);
+    a.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = 0 }, cancel_chunk, &chunk);
+    try a.run();
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    const content_id = try content_domain.importBytes(a, cancellation, content_domain.stop_cancellation_text);
+    var cancelled: u64 = 0;
+    while (true) {
+        if (chunk.len != 0) switch (chunk.len) {
+            inline 1...cancel_chunk => |n| {
+                @setEvalBranchQuota(100_000);
+                var args: CancelArgs(n) = undefined;
+                args.content_id = content_id;
+                args.first_position = try positions.take(n);
+                args.session = head;
+                inline for (0..n) |k| @field(args, cancelField(k)) = chunk.action_ids[k];
+                a.write(cancel_actions[n - 1], args);
+            },
+            else => unreachable,
+        };
+        cancelled += chunk.len;
+        if (chunk.len < cancel_chunk) break;
+        chunk.len = 0;
+        a.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = chunk.next }, cancel_chunk, &chunk);
+        try a.run();
+    }
+    // Main checked that the cancelling UPDATE changed as many rows as it
+    // counted.
+    if (cancelled != open.cancellable) return error.StopSelectionChanged;
 }
 
 /// A Session a command names, as a round reads it: its head, and the
@@ -695,20 +800,6 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{ .replayed = false } };
-}
-
-// The caller owns the Store lock and transaction, including the causing command.
-fn interruptOperation(self: *Store, operation_id: u64, command_key: []const u8) !void {
-    const update = try store_core.cached(
-        self,
-        "UPDATE model_operation SET retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ "," ++
-            "interrupted_by_command_key=?2," ++ operation_resolved_at_sql ++ " WHERE operation_id=?1 AND resolution_code IS NULL",
-    );
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, operation_id);
-    try sqlite.bindText(update, 2, command_key);
-    try sqlite.expectDone(update);
-    if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
 }
 
 pub fn observeCommandLocked(self: *Store, key: []const u8) !CommandObservation {
@@ -1043,21 +1134,6 @@ fn readSessionStopSelection(self: *Store, command_key: []const u8) !SessionStopS
         .selected_turn_id = if (try sqlite.readNullablePositiveI64(statement, 0)) |value| @intCast(value) else null,
         .admission_cutoff = @intCast(cutoff),
     };
-}
-
-fn readInterruptedOperation(self: *Store, command_key: []const u8) !?u64 {
-    const statement = try store_core.cached(
-        self,
-        "SELECT operation_id FROM model_operation WHERE interrupted_by_command_key=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, command_key);
-    const result = c.sqlite3_step(statement);
-    if (result == c.SQLITE_DONE) return null;
-    if (result != c.SQLITE_ROW) return error.CorruptStore;
-    const operation_id = c.sqlite3_column_int64(statement, 0);
-    if (operation_id <= 0 or c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptStore;
-    return @intCast(operation_id);
 }
 
 fn readModelInterruptionTarget(self: *Store, command_key: []const u8) !ModelInterruptionTarget {

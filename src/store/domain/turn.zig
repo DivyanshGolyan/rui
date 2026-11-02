@@ -138,17 +138,6 @@ pub fn queueContinuation(a: anytype, turn_id: u64, session: rsql.SessionHead) vo
     a.write(record_continuation, .{ .turn_id = turn_id, .session = session });
 }
 
-/// `queueStopCompletion` for unconverted code, inside its transaction.
-pub fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var ready: stopped_turn.Result = undefined;
-    a.read(stopped_turn, .{ .turn_id = turn_id, .resolving_action_id = 0 }, &ready);
-    try a.run();
-    try queueStopCompletion(&a, ready, turn_id);
-    try a.apply();
-}
-
 /// `queueContinuation` for unconverted code, inside its transaction, for
 /// `session_ref`, the Turn's Session, which the caller has touched: the
 /// same statement, stepped at once, so it costs one statement as on main.

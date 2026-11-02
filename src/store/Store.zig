@@ -380,7 +380,9 @@ pub const Store = struct {
     ) SessionStopReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
     pub fn interruptModel(
