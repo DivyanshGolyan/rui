@@ -422,8 +422,11 @@ func readOutputAudit(deadline measurement.Deadline, store string) (outputAudit, 
 	return rows[0], nil
 }
 
+// Private content is one provider extras row per reasoning item, the
+// message item's and its one part's extras, and the usage row; the answer
+// text is shared with the Turn's result.
 func outputAuditValid(audit outputAudit, reasoning int) bool {
-	return audit.CanonicalOutputItems == reasoning+1 && audit.PrivateContentRows == reasoning+2 && audit.AssistantProjections == 1
+	return audit.CanonicalOutputItems == reasoning+1 && audit.PrivateContentRows == reasoning+3 && audit.AssistantProjections == 1
 }
 
 func outputCaseStatus(memory string, auditValid bool) string {
