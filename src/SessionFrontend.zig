@@ -915,10 +915,10 @@ fn drawFrame(self: *Self) !void {
     const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
     switch (change.shown) {
         .none => {},
-        .live => |span| if (caught_up) self.seen.live(if (self.seen.live_from) |at| at >= span.start else false, position, span.end),
+        .live => |rows| if (caught_up) self.seen.live(if (self.seen.live_from) |at| rows.first.order(at) != .gt else false, position, rows.next.offset),
         // A copy of live output can show rows no live frame did: more than
-        // a screen arrived between frames.
-        .copy => |span| self.seen.drew(span.start, span.end),
+        // a screen arrived between frames, or one line fills more than one.
+        .copy => |rows| self.seen.drew(rows.first, rows.next),
         .newer_end => if (through) |newer| self.seen.transcript(newer),
     }
 }
@@ -3210,4 +3210,33 @@ test "a frame counts the rows it drew as seen, not those a key read during its w
     try std.testing.expectEqual(@as(?u64, null), self.takeSeen());
     try held.settle();
     try std.testing.expectEqual(@as(?u64, 60), self.takeSeen());
+}
+
+test "a line taller than the screen counts as seen once transcript frames drew all its rows" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    try held.screen.append("before\n");
+    const rule = try held.screen.liveEnd();
+    // One line of about 75 rows wraps past every screen.
+    for (0..6000) |_| try held.screen.append("x");
+    try held.screen.append("\nafter\n");
+    self.live.cursor = .{ .position = 9 };
+    self.seen = .open(4, 9, .{ .at = rule }, try held.screen.liveEnd());
+    self.dirty = true;
+    try held.settle();
+    // The latest view shows the line's end, not its start.
+    try std.testing.expectEqual(@as(?u64, null), self.takeSeen());
+    try sendKeys(self, "\x1b[5~");
+    try held.settle();
+    while (!held.screen.transcriptAtTop()) {
+        try sendKeys(self, "\x1b[5~");
+        try held.settle();
+    }
+    while (held.screen.view == .transcript) {
+        try sendKeys(self, "\x1b[6~");
+        try held.settle();
+    }
+    try std.testing.expectEqual(@as(?u64, 9), self.takeSeen());
 }

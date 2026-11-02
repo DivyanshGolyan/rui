@@ -14,6 +14,7 @@ const queued_line = @import("queued_line.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const joinDrawn = @import("unseen.zig").join;
 const Self = @This();
 
 /// What the conversation area shows. The transcript is a frozen copy of live
@@ -25,17 +26,18 @@ pub const ViewKind = enum { live, transcript, inspection, action, message };
 /// What a reason's line under the input says, as its hint or a notice.
 pub const deny_words = "enter denies the command and sends this";
 
-/// Live offsets from the first row a frame drew whole to where its rows end.
-pub const Span = struct { start: u64, end: u64 };
+/// Live rows a frame drew: from `first` up to `next`, the first it left
+/// undrawn, at live offsets.
+pub const Rows = struct { first: Position, next: Position };
 
 /// What a frame encoded of the conversation. Keys its write pumps can move
 /// the view, and pages can join it, before the receipt.
 pub const Conversation = union(enum) {
     none,
-    /// The latest view.
-    live: Span,
+    /// The latest view, which draws through the end of live output.
+    live: Rows,
     /// A transcript copied from live output: the live rows it drew.
-    copy: Span,
+    copy: Rows,
     /// A transcript of newer pages: from its row `first` to `next`, the
     /// first it left undrawn, at absolute offsets. `end`: it drew the last.
     newer: struct { first: Position, next: Position, end: bool },
@@ -44,8 +46,8 @@ pub const Conversation = union(enum) {
 /// What a delivered frame showed of the conversation.
 pub const Shown = union(enum) {
     none,
-    live: Span,
-    copy: Span,
+    live: Rows,
+    copy: Rows,
     /// With the frames before it, every row of a transcript of newer pages
     /// from its top through its end.
     newer_end,
@@ -311,14 +313,9 @@ pub fn presented(self: *Self, delivered: Delivered) PresentationChange {
 fn joinShown(self: *Self, conversation: Conversation) Shown {
     return switch (conversation) {
         .none => .none,
-        .live => |span| .{ .live = span },
-        .copy => |span| .{ .copy = span },
-        .newer => |rows| {
-            const drawn = &self.newer_drawn.?;
-            if (rows.first.order(drawn.*) == .gt) return .none;
-            if (rows.next.order(drawn.*) == .gt) drawn.* = rows.next;
-            return if (rows.end) .newer_end else .none;
-        },
+        .live => |rows| .{ .live = rows },
+        .copy => |rows| .{ .copy = rows },
+        .newer => |rows| if (joinDrawn(&self.newer_drawn.?, rows.first, rows.next) and rows.end) .newer_end else .none,
     };
 }
 
@@ -482,11 +479,11 @@ pub fn transcriptAtBottom(self: *const Self) bool {
     return self.view == .transcript and self.browsing.atBottom(self.textLayout(), self.height);
 }
 
-/// Whether the latest live view shows the row at absolute live offset `at`.
-pub fn liveShows(self: *const Self, at: u64) bool {
-    if (at < self.live.origin) return false;
+/// Whether the latest live view shows the live row `at`.
+pub fn liveShows(self: *const Self, at: Position) bool {
+    if (at.offset < self.live.origin) return false;
     const first = self.live.first(self.textLayout(), self.height);
-    return (Position{ .offset = @intCast(at - self.live.origin) }).order(first) != .lt;
+    return (Position{ .offset = @intCast(at.offset - self.live.origin), .row = at.row }).order(first) != .lt;
 }
 
 /// Pages or lines through the shown document. Returns true when a downward
@@ -554,9 +551,10 @@ fn drawnConversation(self: *Self) !Conversation {
             const document = &self.live;
             try document.prepare();
             const first = document.first(layout, self.height);
-            // A partly drawn line is not drawn.
-            const start = document.origin + first.offset + @intFromBool(first.row != 0);
-            return .{ .live = .{ .start = start, .end = document.origin + document.length } };
+            return .{ .live = .{
+                .first = .{ .offset = @intCast(document.origin + first.offset), .row = first.row },
+                .next = .{ .offset = @intCast(document.origin + document.length) },
+            } };
         },
         .transcript => {},
         else => return .none,
@@ -572,14 +570,18 @@ fn drawnConversation(self: *Self) !Conversation {
         .end = bottom,
     } };
     const shift = self.copy_shift orelse return .none;
-    const start = if (first.row == 0) first.offset else document.nextLine(first.offset) orelse document.text().len;
     // Text prepended above the copy sits before its live offsets, so only
     // the rows drawn from the copy itself map to live ones.
     const base = @as(i64, @intCast(document.origin)) + shift;
-    const from = @max(base + @as(i64, @intCast(start)), @as(i64, @intCast(self.copy_front)));
-    const to = base + @as(i64, @intCast(@max(start, next.offset)));
-    if (to <= from) return .none;
-    return .{ .copy = .{ .start = @intCast(from), .end = @intCast(to) } };
+    const front = @as(i64, @intCast(self.copy_front));
+    const from = base + @as(i64, @intCast(first.offset));
+    const to = base + @as(i64, @intCast(next.offset));
+    if (to < front) return .none;
+    const rows: Rows = .{
+        .first = if (from < front) .{ .offset = self.copy_front } else .{ .offset = @intCast(from), .row = first.row },
+        .next = .{ .offset = @intCast(to), .row = next.row },
+    };
+    return if (rows.next.order(rows.first) == .gt) .{ .copy = rows } else .none;
 }
 
 /// Collapsed blocks an older page kept, its newest, and those newer rows
@@ -1787,13 +1789,14 @@ test "a transcript of live output names the live rows its frame drew, across old
     try screen.beginTranscript(0);
     for (0..20) |_| _ = screen.browse(false, false);
     const drawn = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{})).shown.copy;
-    // From the top row drawn, whole rows only.
+    // From the top row drawn.
     const top = try std.testing.allocator.dupe(u8, rowText(screen, 1, &storage));
     defer std.testing.allocator.free(top);
     try std.testing.expect(std.mem.startsWith(u8, top, "live "));
-    try std.testing.expect(std.mem.startsWith(u8, screen.live.text()[@intCast(drawn.start - screen.live.origin)..], top));
-    try std.testing.expect(drawn.end > drawn.start and (drawn.end - drawn.start) % 8 == 0);
-    try std.testing.expect(drawn.end < try screen.liveEnd());
+    try std.testing.expect(std.mem.startsWith(u8, screen.live.text()[drawn.first.offset - screen.live.origin ..], top));
+    try std.testing.expect(drawn.first.row == 0 and drawn.next.row == 0);
+    try std.testing.expect(drawn.next.offset > drawn.first.offset and (drawn.next.offset - drawn.first.offset) % 8 == 0);
+    try std.testing.expect(drawn.next.offset < try screen.liveEnd());
     // Text above the copy moves its offsets, not the live rows it names.
     const older = try tmp.dir.createFile(io, "older", .{ .read = true });
     defer older.close(io);

@@ -16,23 +16,8 @@ pub const widest_cluster = 8;
 /// escaped too: every frame that draws a cell writes its whole cluster.
 pub const longest_cluster = 64;
 
-/// A row of laid-out text: the logical line starting at origin-relative byte
-/// `offset`, and the row within that line's wrapping.
-pub const Position = struct {
-    offset: usize = 0,
-    row: u16 = 0,
-    /// Past every row; a view that has shown this far has shown everything.
-    pub const end: Position = .{ .offset = std.math.maxInt(usize) };
-
-    pub fn order(a: Position, b: Position) std.math.Order {
-        const lines = std.math.order(a.offset, b.offset);
-        return if (lines != .eq) lines else std.math.order(a.row, b.row);
-    }
-
-    pub fn min(a: Position, b: Position) Position {
-        return if (a.order(b) == .gt) b else a;
-    }
-};
+/// Its `offset` is origin-relative.
+pub const Position = @import("text_position.zig").Position;
 
 /// The width and width method vaxis lays text out with.
 pub const Layout = struct {
