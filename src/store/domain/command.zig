@@ -157,6 +157,7 @@ const admit_message = rsql.Write(.{
     .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
+pub const admit_message_sql = admit_message.sql;
 
 /// A peer's Message: the sender's own position orders the send among its
 /// other facts.
@@ -684,9 +685,8 @@ fn cancelActions(
 
 /// A Session a command names, as a round reads it: its head, and the
 /// provider a Message's model check needs.
-pub const target_session_sql = "SELECT session_ref,workspace_key,next_position,provider FROM session WHERE session_ref=?1";
 const target_session = rsql.Read(.{
-    .sql = target_session_sql,
+    .sql = "SELECT session_ref,workspace_key,next_position,provider FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct { session: rsql.SessionHead, provider: protocol.Provider },
     .cardinality = .optional,
@@ -1008,19 +1008,14 @@ fn kindCode(kind: protocol.CommandKind) u8 {
 /// The answer a `lookupCommand` round found, or null.
 fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?ExistingCommand {
     const row = if (saved.*) |*row| row else return null;
-    // Copied by length, as an answer's value is compared whole.
-    var target: protocol.Bounded(protocol.max_session_bytes) = .{};
-    target.set(row.target.slice()) catch unreachable;
-    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-    code.set(row.code.slice()) catch unreachable;
     return .{
         .kind = for (std.enums.values(protocol.CommandKind)) |candidate| {
             if (kindCode(candidate) == row.kind) break candidate;
         } else return error.CorruptStore,
-        .target = target,
+        .target = row.target,
         .digest = row.input_digest,
         .accepted = row.accepted,
-        .code = code,
+        .code = row.code,
         .revision = row.revision,
         .created = row.created,
         .primary_content_id = if (row.primary_content_id) |id| @intCast(id.get()) else null,

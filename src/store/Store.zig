@@ -206,7 +206,7 @@ pub const Store = struct {
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
-        // 17: a created Session's INSERT binds sixteen settings and `@now`.
+        // 17: a created Session's INSERT binds its sixteen Args as ?1..?16 and `@now` as ?17.
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, 17);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 4096);
@@ -602,9 +602,9 @@ pub const Store = struct {
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
+        var access: Access(.single, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
+        return entry.finish(Ordinary.none, action_domain.revokeActionSender(&access, binding));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {

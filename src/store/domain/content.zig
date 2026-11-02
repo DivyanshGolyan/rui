@@ -149,6 +149,37 @@ pub fn lookup(a: anytype, value: *Import) void {
     a.read(lookup_content, .{ .digest = &value.digest, .length = value.length, .private = value.private }, &value.found);
 }
 
+/// Two values' rows in one statement, for a round that needs both: a
+/// round queues `lookup_content` once.
+const lookup_pair = rsql.Read(.{
+    .sql = "SELECT (SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3) AS first," ++
+        "(SELECT content_id FROM content WHERE digest=?4 AND byte_length=?5 AND private=?6) AS second",
+    .Args = struct { first_digest: *const [32]u8, first_length: u64, first_private: bool, second_digest: *const [32]u8, second_length: u64, second_private: bool },
+    .Row = struct { first: ?rsql.Positive, second: ?rsql.Positive },
+    .cardinality = .one,
+});
+
+pub const Pair = lookup_pair.Result;
+
+/// `lookup` of two values at once; `foundPair` follows its round. Both
+/// values and `rows` must outlive the round.
+pub fn lookupPair(a: anytype, first: *const Import, second: *const Import, rows: *Pair) void {
+    a.read(lookup_pair, .{
+        .first_digest = &first.digest,
+        .first_length = first.length,
+        .first_private = first.private,
+        .second_digest = &second.digest,
+        .second_length = second.length,
+        .second_private = second.private,
+    }, rows);
+}
+
+/// After `lookupPair`'s round: each value's row, as `lookup` leaves it.
+pub fn foundPair(rows: *const Pair, first: *Import, second: *Import) void {
+    first.found = if (rows.first) |id| .{ .content_id = id } else null;
+    second.found = if (rows.second) |id| .{ .content_id = id } else null;
+}
+
 const ContentSlot = struct { id: i64, existing: bool };
 
 /// After `lookup`'s round: the found row, or a new row queued with a Host
@@ -278,7 +309,8 @@ pub fn sealedIdentity(field: *const protocol.ContentField) Import {
 /// identity `value` is. A file must still hold `field.length` bytes. A new
 /// row is queued and its round run, then the file streams into its payload
 /// while hashed, so a file that changed fails before COMMIT; a row that
-/// exists still has its file verified.
+/// exists still has its file verified. A new row whose insert would join
+/// one already queued (an `importBytes` row) runs that one first.
 pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *const Import, faults: Faults) !u64 {
     std.debug.assert(field.state == .value);
     if (field.file) |source| {
@@ -286,6 +318,7 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
     } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
+    if (value.found == null and a.queued != 0) try a.run();
     const slot = try importSlot(a, value);
     const id: u64 = @intCast(slot.id);
     // Run now, so a second import in this Access can queue its own row.

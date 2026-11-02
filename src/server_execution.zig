@@ -1136,7 +1136,7 @@ fn admitBashAttempt(
         if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
-    const arguments = host.store.openContent(input.arguments()) catch |err| {
+    const arguments = host.store.openContent(input.arguments) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be opened.");
         finishCustodyNow(host, slot);
         fenceDispatch(host, "Bash canonical input", err);
@@ -2588,14 +2588,10 @@ test "cleanup publication follows complete execution retirement" {
     var scratch = bashScratch(&host);
     scratch.io = std.testing.io;
     var input: store_module.BashExecutionInput = .{
-        .current = true,
-        .turn_id = 1,
-        .position = 1,
         .session = .{},
         .sender_handle = .{},
         .workspace = workspace,
-        .arguments_length = arguments.len,
-        .arguments_digest = undefined,
+        .arguments = .{ .length = arguments.len, .digest = undefined },
         .timeout_ms = 1000,
     };
     try input.session.set("k7m2qx");

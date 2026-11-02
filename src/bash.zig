@@ -949,7 +949,7 @@ pub const Preparation = struct {
             .timeout_ms = input.timeout_ms,
             .action_id = action_id,
             .faults = faults,
-            .source = .{ .length = input.arguments_length },
+            .source = .{ .length = input.arguments.length },
         };
         self.source.reader.open(arguments);
         if (faults.preparation) return self.fail(error.BashPreparationFailed);

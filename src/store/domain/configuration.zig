@@ -118,11 +118,19 @@ pub const ConfigurationContentAction = enum(u2) {
     clear,
 };
 
+/// A created Session has no output schema by default, so the schema's
+/// plan never imports empty content.
+pub const OutputSchemaAction = enum(u2) {
+    preserve,
+    import_requested,
+    clear,
+};
+
 pub const ConfigurationUpdatePlan = union(enum) {
     rejected: protocol.ConfigurationRejection,
     update: struct {
         instructions: ConfigurationContentAction,
-        output_schema: ConfigurationContentAction,
+        output_schema: OutputSchemaAction,
     },
 };
 
@@ -241,13 +249,13 @@ pub fn planConfigurationUpdate(
 }
 
 /// Round 1 reads the command's saved answer, the Session's saved
-/// configuration and the content lookup its instructions need. A creation
-/// reads its Workspace's key and whether its drawn reference is taken in
-/// a round of its own, after the replay check.
-/// An output schema's lookup is a round of its own, as the lookup
-/// statement is already in round 1. The decision is `applyConfiguration`;
-/// the write round saves the Session, the command and its revision, then
-/// commits.
+/// configuration and the content lookups its instructions and output
+/// schema need. A creation then reads its Workspace's key and whether its
+/// drawn reference is taken, which depends on the replay check: a replay
+/// draws no reference and canonicalizes no Workspace. Each new sealed
+/// import runs its insert before streaming into it (`importSealed`). The
+/// decision is `applyConfiguration`; the write round saves the Session,
+/// the command and its revision, then commits.
 pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
@@ -318,6 +326,8 @@ pub const ConfigurationReads = struct {
     instructions: content_domain.Import = undefined,
     output_schema: content_domain.Import = undefined,
     empty: content_domain.Import = content_domain.empty_content,
+    /// The rows `lookupPair` found, when round 1 needed two lookups.
+    pair: ?content_domain.Pair = null,
 };
 
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
@@ -330,9 +340,6 @@ const saved_session = rsql.Read(.{
     .Row = CurrentConfiguration,
     .cardinality = .optional,
 });
-
-/// The statement whose round reads the Session's Workspace key.
-pub const saved_session_sql = saved_session.sql;
 
 /// Where a new Session would go: the key of another Session's same
 /// Workspace, when there is one, and whether its new reference is taken.
@@ -372,6 +379,30 @@ const insert_session = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
+/// Queues inserting the created Session `head` with the settings `next`.
+/// `configure` calls it, and a test drives it with references the schema
+/// refuses.
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64) void {
+    a.write(insert_session, .{
+        .session = head,
+        .workspace = next.workspace.slice(),
+        .model = next.model.slice(),
+        .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
+        .tools_mask = next.tools_mask,
+        .permission_mode = next.permission_mode,
+        .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
+        .provider = next.provider,
+        .compaction_trigger = next.compaction_trigger,
+        .output_reservation = next.output_reservation,
+        .reasoning_effort = next.reasoning_effort,
+        .label = if (next.label) |*label| label.slice() else null,
+        .codec = @tagName(next.provider.codec()),
+        .digest = workspace_digest,
+        .created_seq = created_seq,
+        .workspace_key = head.workspace_key.get(),
+    });
+}
+
 const update_session = rsql.Write(.{
     .sql = "UPDATE session SET model=?2,instructions_content_id=?3,tools_mask=?4,permission_mode=?5,output_schema_content_id=?6,revision=?7,provider=?8," ++
         "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12 WHERE session_ref=@session(?1)",
@@ -392,6 +423,10 @@ const update_session = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
 });
 
+/// The UPDATE a configure of an existing Session runs once it has touched
+/// that Session, which a test faults.
+pub const update_session_sql = update_session.sql;
+
 /// The one writer of session_revision: it copies the Session row as
 /// written under `command_key`, which an earlier write of the round saved.
 const insert_revision = rsql.Write(.{
@@ -405,7 +440,9 @@ const insert_revision = rsql.Write(.{
 
 /// Queues reading `session_ref`'s saved configuration into `current` in
 /// place; `found` says whether it exists. A missing one leaves `current`
-/// as the caller declared it: `.{}`, the defaults a creation starts from.
+/// as the caller declared it, which `configure` declares with
+/// `CurrentConfiguration`'s field defaults: the settings a creation
+/// starts from.
 /// `checkSaved` follows the round.
 pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfiguration, found: *bool) void {
     a.readInto(saved_session, .{ .session = session_ref }, current, found);
@@ -441,14 +478,23 @@ fn newReference(io: std.Io, reference: *[protocol.session_id_bytes]u8) !void {
 }
 
 /// Queues what applying `configuration` to `session` reads (an empty
-/// `session` creates one) into `reads`.
+/// `session` creates one) into `reads`: one content lookup, or one pair of
+/// them when both the instructions and an output schema need one.
 pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *const protocol.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
-    if (configuration.instructions.state == .value) {
+    const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
         reads.instructions = content_domain.sealedIdentity(&configuration.instructions);
-        content_domain.lookup(a, &reads.instructions);
-    } else if (creating) content_domain.lookup(a, &reads.empty);
+        break :requested &reads.instructions;
+    } else if (creating) &reads.empty else null;
+    const output_schema: ?*content_domain.Import = if (configuration.output_schema.state == .value) requested: {
+        reads.output_schema = content_domain.sealedIdentity(&configuration.output_schema);
+        break :requested &reads.output_schema;
+    } else null;
+    if (instructions != null and output_schema != null) {
+        reads.pair = .{ .first = null, .second = null };
+        content_domain.lookupPair(a, instructions.?, output_schema.?, &reads.pair.?);
+    } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
 }
 
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
@@ -487,6 +533,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_output_schema };
     }
 
+    if (reads.pair) |*rows| content_domain.foundPair(rows, if (configuration.instructions.state == .value) &reads.instructions else &reads.empty, &reads.output_schema);
     const next = &reads.next;
     if (!creating and !reads.found) {
         return .{ .rejected = .unknown_session };
@@ -535,14 +582,9 @@ pub fn applyConfiguration(
     switch (content_actions.output_schema) {
         .preserve => {},
         .import_requested => {
-            reads.output_schema = content_domain.sealedIdentity(&configuration.output_schema);
-            content_domain.lookup(a, &reads.output_schema);
-            try a.run();
             command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
             next.output_schema_id = @intCast(command_output_schema_id.?);
         },
-        // A created Session's output schema defaults to none.
-        .default_empty => unreachable,
         .clear => next.output_schema_id = null,
     }
     var target: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -563,24 +605,7 @@ pub fn applyConfiguration(
             .workspace_key = if (reads.creation.workspace_key) |key| key else .of(created_seq),
             .next_position = .of(1),
         };
-        a.write(insert_session, .{
-            .session = head,
-            .workspace = next.workspace.slice(),
-            .model = next.model.slice(),
-            .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
-            .tools_mask = next.tools_mask,
-            .permission_mode = next.permission_mode,
-            .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
-            .provider = next.provider,
-            .compaction_trigger = next.compaction_trigger,
-            .output_reservation = next.output_reservation,
-            .reasoning_effort = next.reasoning_effort,
-            .label = if (next.label) |*label| label.slice() else null,
-            .codec = @tagName(next.provider.codec()),
-            .digest = &reads.workspace_digest,
-            .created_seq = created_seq,
-            .workspace_key = head.workspace_key.get(),
-        });
+        insertSession(a, head, next, &reads.workspace_digest, created_seq);
         try target.set(&reads.reference);
     } else {
         head = .{ .ref = session[0..protocol.session_id_bytes].*, .workspace_key = .of(next.workspace_key), .next_position = .of(next.next_position) };

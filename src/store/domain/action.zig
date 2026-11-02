@@ -67,25 +67,13 @@ pub const ActionSettlement = enum { effect, session_stop };
 
 pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
-/// What a Bash execution reads from its Attempt, decoded in place from the
-/// one row `bash_input` returns: first the facts that check the binding,
-/// then what the execution uses.
+/// What a Bash execution reads from its Attempt.
 pub const BashExecutionInput = struct {
-    /// Whether the Action is still the unresolved Attempt the binding names.
-    current: bool,
-    turn_id: u64,
-    /// The Session position of the Action's call.
-    position: u64,
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
     session: protocol.Bounded(protocol.max_session_bytes),
     sender_handle: protocol.Bounded(32),
+    workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    arguments: ContentReference,
     timeout_ms: u64,
-    arguments_length: u64,
-    arguments_digest: [32]u8,
-
-    pub fn arguments(input: *const BashExecutionInput) ContentReference {
-        return .{ .length = input.arguments_length, .digest = input.arguments_digest };
-    }
 };
 
 pub const ActiveOperationFilter = struct {
@@ -171,35 +159,47 @@ pub fn admitNextActionAttempt(
     } } };
 }
 
-/// The Action `binding` names, by its key, so it decodes into the caller's
-/// input in place; whether it is still that Attempt is a column.
+/// The unresolved Attempt `binding` names, with its revision and its call,
+/// or none: the binding is stale. Its text columns decode in place into
+/// the caller's input, through the Row's pointers.
 const bash_input = rsql.Read(.{
-    .sql = "SELECT (action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL) AS current," ++
-        "operation.turn_id,item.session_position AS position,revision.workspace,action.session_ref AS session,action.sender_handle," ++
-        "action.bash_timeout_ms AS timeout_ms,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest " ++
-        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-        "LEFT JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
-        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+    .sql = "SELECT item.session_position AS position,revision.workspace,action.session_ref AS session,action.sender_handle," ++
+        "action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
+        "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
+        "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
-        "LEFT JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id WHERE action.action_id=?1",
-    .Args = struct { action_id: u64, parent_operation_id: u64 },
-    .Row = BashExecutionInput,
-    .cardinality = .one,
+        "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
+        " AND action.resolution_code IS NULL",
+    .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
+    .Row = struct {
+        position: ?rsql.Positive,
+        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
+        session: *protocol.Bounded(protocol.max_session_bytes),
+        sender_handle: *protocol.Bounded(32),
+        timeout_ms: rsql.Positive,
+    },
+    .cardinality = .optional,
 });
 
-/// Round 1 reads the Attempt into `out`; round 2, which needs its Session
-/// and position, checks the Proposal its arguments come from. `out` is
-/// valid only when this returns without error.
+/// Round 1 reads the Attempt into `out`, as main's one SELECT did, so a
+/// missing, unattempted, resolved or rebound Attempt, or one without its
+/// revision or call, is `StaleActionAttemptBinding`. Round 2, which needs
+/// the call's position, checks the Proposal and takes the arguments' content
+/// from it. `out` is valid only when this returns without error.
 pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-    a.read(bash_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, out);
+    var row: bash_input.Row = .{ .position = null, .workspace = &out.workspace, .session = &out.session, .sender_handle = &out.sender_handle, .timeout_ms = undefined };
+    var found = false;
+    a.readInto(bash_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &row, &found);
     try a.run();
-    if (!out.current or out.turn_id != binding.turn_id) return error.StaleActionAttemptBinding;
-    // An attempted Action has its timeout and its revision's Workspace.
-    if (out.timeout_ms == 0 or out.workspace.len == 0) return error.CorruptStore;
+    if (!found) return error.StaleActionAttemptBinding;
+    const position = (row.position orelse return error.CorruptStore).get();
     var proposal: reads_domain.proposal_row.Result = undefined;
-    reads_domain.readProposal(a, out.session.slice(), out.position, &proposal);
+    reads_domain.readProposal(a, out.session.slice(), position, &proposal);
     try a.run();
-    _ = try reads_domain.proposalIdentity(proposal, out.position);
+    const reference = (try reads_domain.proposalIdentity(proposal, position)).metadata.fields[@backingInt(protocol.ProposalField.arguments)];
+    out.arguments = .{ .length = reference.length, .digest = reference.digest };
+    out.timeout_ms = row.timeout_ms.get();
 }
 
 /// The Session of the Attempt `binding` names, while it is attempted.
@@ -219,7 +219,9 @@ const revoke_sender = rsql.Write(.{
 });
 
 /// Clears the Attempt's sender handle, when `binding` names an attempted
-/// Action; otherwise changes nothing.
+/// Action; otherwise changes nothing. On a `.single` Access: the read and
+/// the one UPDATE, as main's UPDATE and its touch's Workspace read were,
+/// and no transaction.
 pub fn revokeActionSender(a: anytype, binding: ActionAttemptBinding) !void {
     var found: attempt_session.Result = undefined;
     a.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &found);
