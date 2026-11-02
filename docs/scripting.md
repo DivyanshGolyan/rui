@@ -1,6 +1,8 @@
 # Using Rui from scripts and agents
 
-Scripts and agents use one-shot commands grouped by resource: `session`, `request`, `action`, `host`, `defaults` and `auth`. `rui RESOURCE --help` and `rui RESOURCE COMMAND --help` describe the installed version's exact options. Help needs no Host or credentials.
+Scripts and agents use one-shot commands grouped by resource: `session`, `request`, `action`, `host`, `defaults` and `auth`.
+`rui RESOURCE --help` and `rui RESOURCE COMMAND --help` describe the installed version's exact options.
+Help needs no Host or credentials.
 
 Output follows three rules:
 
@@ -10,7 +12,8 @@ Output follows three rules:
 
 ## Start a Session
 
-One-shot commands never start a Host or sign in. Start the Host first:
+One-shot commands never start a Host or sign in.
+Start the Host first:
 
 ```sh
 STORE="$HOME/.local/share/rui/store"
@@ -19,7 +22,10 @@ SESSION=$(printf '%s' 'Investigate the failing test' | rui session start --store
 	--workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask)
 ```
 
-`session start` creates the Session and admits its first Message in one transaction. The ID it returns is an admission receipt, not a finished answer. An ID is exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`), such as `k7m2qx`. Creation settings you omit come from the current directory and your saved defaults.
+`session start` creates the Session and admits its first Message in one transaction.
+The ID it returns is an admission receipt, not a finished answer.
+An ID is exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`), such as `k7m2qx`.
+Creation settings you omit come from the current directory and your saved defaults.
 
 ## Send Messages and read results
 
@@ -29,23 +35,36 @@ rui request inspect SAVED_HANDLE
 rui request read-result SAVED_HANDLE
 ```
 
-`session start` and `session send` print a handle on stderr. Use it in place of `SAVED_HANDLE`. Both commands return once Rui admits the Message, not when the work finishes.
+`session start` and `session send` print a handle on stderr.
+Use it in place of `SAVED_HANDLE`.
+Both commands return once Rui admits the Message, not when the work finishes.
 
-- `request inspect` reports the Message's current state once. To wait, run it again later.
+- `request inspect` reports the Message's current state once.
+  To wait, run it again later.
 - `request read-result` prints the saved answer only after the work completes, even if the Session has done newer work since.
 - `request list` lists saved handles.
 
-If you lose the output of `session start`, recover its original handle to get the allocated ID. Do not start again with a new key.
+If you lose the output of `session start`, recover its original handle to get the allocated ID.
+Do not start again with a new key.
 
-The conversation shows commentary and the final answer as separate assistant messages, in the provider's stream order around tool calls. `request read-result` returns only the final answer. For responses whose messages have no phase, it returns the last assistant message.
+The conversation shows commentary and the final answer as separate assistant messages, in the provider's stream order around tool calls.
+`request read-result` returns only the final answer.
+For responses whose messages have no phase, it returns the last assistant message.
 
 ### Addressing
 
-`--to` takes the bare ID, without JSON or a prefix. A person or script can pass `--store`, or omit it to use the saved default Store. A peer Session always sends within its own Store, even when `HOME` points elsewhere, and rejects a different `--store`. An unknown ID fails with `no session k7m2qx in this Store` and creates no work. Random IDs are not authorization.
+`--to` takes the bare ID, without JSON or a prefix.
+A person or script can pass `--store`, or omit it to use the saved default Store.
+A peer Session always sends within its own Store, even when `HOME` points elsewhere, and rejects a different `--store`.
+An unknown ID fails with `no session k7m2qx in this Store` and creates no work.
+Random IDs are not authorization.
 
 ### Message text and instructions
 
-Message text comes only from stdin. Rui keeps the exact UTF-8 bytes, including NULs and trailing newlines. To send a file, redirect it. There is no `--text` option, inline text operand or file-valued instructions option.
+Message text comes only from stdin.
+Rui keeps the exact UTF-8 bytes, including NULs and trailing newlines.
+To send a file, redirect it.
+There is no `--text` option, inline text operand or file-valued instructions option.
 
 Set instructions separately:
 
@@ -53,7 +72,10 @@ Set instructions separately:
 rui session configure --store "$STORE" --session "$SESSION" --instructions - < instructions.txt
 ```
 
-An empty instruction stream clears the instructions. An empty Message stream sends nothing. Without `--session`, `session configure` creates a Session with no Message. With `--session`, it updates only that Session and keeps the settings you omit.
+An empty instruction stream clears the instructions.
+An empty Message stream sends nothing.
+Without `--session`, `session configure` creates a Session with no Message.
+With `--session`, it updates only that Session and keeps the settings you omit.
 
 ## Approve Actions
 
@@ -73,17 +95,32 @@ To reject it, run `rui action deny` with the same options.
 
 ## Recover from a lost reply
 
-If a command loses its reply or exits nonzero, Rui may still have accepted the work. To check, run `rui request inspect HANDLE`. To resend the same saved request, run `rui request recover HANDLE`. Do not submit a new Message to find out whether the first one arrived.
+If a command loses its reply or exits nonzero, Rui may still have accepted the work.
+To check, run `rui request inspect HANDLE`.
+To resend the same saved request, run `rui request recover HANDLE`.
+Do not submit a new Message to find out whether the first one arrived.
 
 ## Agents calling Rui
 
-Agents use the same commands from their Bash tool. Bash runs in the environment of the terminal that last sent the Session a Message, so a tool you install or a venv you activate is found by the agent's next command after your next Message. The `rui` installation that runs the Host comes first on `PATH`. A Message from another agent never replaces your environment, but fills a Session no person has sent to. Rui keeps the environment only in the Host's memory, never in the Store or request records, and never passes on variables whose names start with `RUI_`. A recovered request carries the environment of the terminal that recovers it.
+Agents use the same commands from their Bash tool.
+Bash runs in the environment of the terminal that last sent the Session a Message, so a tool you install or a venv you activate is found by the agent's next command after your next Message.
+The `rui` installation that runs the Host comes first on `PATH`.
+A Message from another agent never replaces your environment, but fills a Session no person has sent to.
+Rui keeps the environment only in the Host's memory, never in the Store or request records, and never passes on variables whose names start with `RUI_`.
+A recovered request carries the environment of the terminal that recovers it.
 
-An environment over 64 KiB is refused before anything is sent, naming its largest variables; recover the request from a shell with a smaller one. After a Host restart, or when the Host has dropped a long-unused Session's environment, Bash gets the system's own command directories (on macOS, those listed in `/etc/paths` and `/etc/paths.d`, such as Homebrew's) and the Host's `HOME` until a Message arrives. Bash never gets the Host's own environment, such as credentials.
+An environment over 64 KiB is refused before anything is sent, naming its largest variables; recover the request from a shell with a smaller one.
+After a Host restart, or when the Host has dropped a long-unused Session's environment, Bash gets the system's own command directories (on macOS, those listed in `/etc/paths` and `/etc/paths.d`, such as Homebrew's) and the Host's `HOME` until a Message arrives.
+Bash never gets the Host's own environment, such as credentials.
 
-Each model request tells the agent its own bare ID. Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority. To get an answer from another Session, an agent puts its own ID in the Message. The other Session replies with an ordinary `session send --to ID`.
+Each model request tells the agent its own bare ID.
+Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority.
+To get an answer from another Session, an agent puts its own ID in the Message.
+The other Session replies with an ordinary `session send --to ID`.
 
-An agent can label its own Session: `rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label "Fix the flaky resize test"`. `--label ""` clears it. A Label is display text: it never addresses a Session or reaches the model.
+An agent can label its own Session: `rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label "Fix the flaky resize test"`.
+`--label ""` clears it.
+A Label is display text: it never addresses a Session or reaches the model.
 
 ## Watch Sessions
 
@@ -92,6 +129,10 @@ An agent can label its own Session: `rui session configure --store "$RUI_STORE" 
 To watch many Sessions:
 
 1. List once and keep the reply's `since`.
-2. List again with `--since` that value. `delta` says `not_modified` (keep your rows), `changed` (replace only the rows returned) or `full` (a complete listing). Every reply carries the next `since`.
+2. List again with `--since` that value.
+   `delta` says `not_modified` (keep your rows), `changed` (replace only the rows returned) or `full` (a complete listing).
+   Every reply carries the next `since`.
 
-The token is opaque and does not survive a Host restart. A retry falling due changes no row, so compare `due_at_ms` with the clock yourself. To watch one Session, use `rui session inspect --session ID` rather than a listing.
+The token is opaque and does not survive a Host restart.
+A retry falling due changes no row, so compare `due_at_ms` with the clock yourself.
+To watch one Session, use `rui session inspect --session ID` rather than a listing.
