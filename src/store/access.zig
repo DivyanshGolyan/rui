@@ -126,6 +126,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// No transition takes positions in more Sessions than the change
         /// ring tracks; touching more only degrades the ring's record.
         const max_claims = change_ring.Touched.max;
+        /// A write names at most a message's two Sessions.
+        const max_sessions = 2;
 
         const Queued = struct {
             run: *const fn (*Self, *const Queued) Error!void,
@@ -141,9 +143,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 payload: struct { content_id: u64, bytes: []const u8 },
                 none: void,
             },
-            /// The reference a write's @session binds, read in place when
-            /// the round runs.
-            session_ref: change_ring.Id = undefined,
+            /// The references a write's @session markers bind, in its
+            /// Args' order, read in place when the round runs.
+            session_refs: [max_sessions]change_ring.Id = undefined,
         };
 
         /// An Access under `entry`'s lock.
@@ -168,7 +170,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             // An `.optional` result is a copy of the decoded Row.
             if (S.cardinality == .optional and @sizeOf(S.Row) > 1024)
                 @compileError("rsql: a Row over 1 KiB is never copied; read it with readInto: " ++ S.sql);
-            a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, null);
+            a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, &.{});
         }
 
         /// Queues an `.optional` read that decodes into `row` in place, so
@@ -177,7 +179,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// the round runs.
         pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *bool) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
-            a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, null);
+            a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, &.{});
         }
 
         /// Queues an `.each` read whose round hands each row in turn to
@@ -186,7 +188,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// the round.
         pub fn readEach(a: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
-            a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } }, null);
+            a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } }, &.{});
         }
 
         /// Ends the round: runs every queued statement in order.
@@ -214,13 +216,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             return &a.claims[a.claimed - 1];
         }
 
-        /// Queues a write, touching the Session its @session names. A
-        /// failed guard fails the round that runs it.
+        /// Queues a write, touching each Session its @session markers
+        /// name. A failed guard fails the round that runs it.
         pub fn write(a: *Self, comptime S: type, args: S.Args) void {
-            comptime std.debug.assert(S.kind == .write and mode != .read);
-            const session: ?rsql.SessionHead = if (S.session_field) |field| @field(args, field) else null;
-            if (session) |head| a.touch(head);
-            a.queueStatement(S, &args, runWrite(S), .{ .none = {} }, if (session) |head| head.ref else null);
+            comptime std.debug.assert(S.kind == .write and mode != .read and S.session_fields.len <= max_sessions);
+            var refs: [S.session_fields.len]change_ring.Id = undefined;
+            inline for (S.session_fields, &refs) |field, *ref| {
+                const head: rsql.SessionHead = @field(args, field);
+                a.touch(head);
+                ref.* = head.ref;
+            }
+            a.queueStatement(S, &args, runWrite(S), .{ .none = {} }, &refs);
         }
 
         /// The next value of `column`, inside this transaction.
@@ -332,7 +338,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             try a.run();
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
-                a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} }, claim.head.ref);
+                a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} }, &.{claim.head.ref});
                 try a.run();
             };
             a.claimed = 0;
@@ -357,7 +363,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
         }
 
-        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target"), session_ref: ?change_ring.Id) void {
+        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target"), session_refs: []const change_ring.Id) void {
             a.ensureOpen();
             if (a.failure != null) return;
             const statement = store_core.cachedTyped(a.store, S) catch |err| {
@@ -374,8 +380,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             } else 0;
             const slot = a.reserve() orelse return;
             slot.* = .{ .statement = statement, .run = runner, .target = target };
-            if (session_ref) |ref| slot.session_ref = ref;
-            sqlite.bindArgs(statement, S, args, now, if (session_ref != null) &slot.session_ref else null) catch |err| {
+            @memcpy(slot.session_refs[0..session_refs.len], session_refs);
+            sqlite.bindArgs(statement, S, args, now, slot.session_refs[0..session_refs.len]) catch |err| {
                 sqlite.resetCached(statement);
                 a.failure = err;
                 return;

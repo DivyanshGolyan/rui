@@ -398,12 +398,16 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
 /// the text uses @now. Integers are copied into the statement. Text and
 /// blobs are read in place when the round steps the statement, so nothing
 /// is allocated: a `[]const u8` or `*const [n]u8` argument is the caller's
-/// memory, which outlives the round, and a SessionHead binds `session_ref`,
-/// the reference the Access keeps until commit.
-pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64, session_ref: ?*const change_ring.Id) !void {
+/// memory, which outlives the round, and the n-th SessionHead binds
+/// `session_refs[n]`, a reference the Access keeps until commit.
+pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64, session_refs: []const change_ring.Id) !void {
     const info = @typeInfo(S.Args).@"struct";
+    comptime var head = 0;
     inline for (info.field_names, info.field_types, 1..) |name, Field, index| {
-        if (Field == rsql.SessionHead) try bindText(statement, index, session_ref.?) else try bindValue(statement, index, Field, @field(args, name));
+        if (Field == rsql.SessionHead) {
+            try bindText(statement, index, &session_refs[head]);
+            head += 1;
+        } else try bindValue(statement, index, Field, @field(args, name));
     }
     if (S.uses_now) try bindI64(statement, info.field_names.len + 1, now);
 }

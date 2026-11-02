@@ -335,7 +335,7 @@ pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
     const statement = try store_core.cachedTyped(self, lookup_content);
     defer sqlite.resetCached(statement);
-    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, null);
+    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, &.{});
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
     var row: lookup_content.Row = undefined;
     try sqlite.decodeRow(lookup_content.Row, statement, &row);

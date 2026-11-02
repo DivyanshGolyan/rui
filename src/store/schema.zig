@@ -673,6 +673,18 @@ pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
     }
 }
 
+/// Whether `table`'s column `column` may hold NULL.
+pub fn isNullable(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return each.nullable;
+            @compileError("schema: no column " ++ column ++ " in " ++ table);
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
 /// The column sets that identify one row of `table`: its primary key, its
 /// unique constraints, and its unique indexes without a WHERE (a partial
 /// index identifies rows only under its predicate).
