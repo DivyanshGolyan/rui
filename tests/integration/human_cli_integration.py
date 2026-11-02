@@ -418,6 +418,37 @@ def compaction_settings_case(home, store, workspace, socket_path):
             assert "Reasoning effort: " + effort in status, status
             assert "Output reservation:" not in status and "source unknown" not in status, status
             assert "not a guaranteed output budget" in status, status
+        # /effort and /rename are /configure's flags, with its checks and messages.
+        efforts = terminal_step(master, "/effort", "/effort LEVEL switches", composer=True)
+        assert "Efforts: low · [medium] · high · xhigh · max · /effort LEVEL switches" in efforts, efforts
+        configured_frame(master, "/effort high")
+        configured_frame(master, "/rename lane five")
+        status = flat(status_frame(master, session))
+        assert "Reasoning effort: high (Session override)" in status and "Label: lane five" in status, status
+        configured_frame(master, "/effort default")
+        assert "Reasoning effort: medium (catalog default)" in flat(status_frame(master, session))
+        configured_frame(master, '/rename "lane four"')
+        assert "Label: lane four" in flat(status_frame(master, session))
+        terminal_step(master, '/effort "high', "Usage: /effort [LEVEL]", composer=True)
+        told = lambda command, marker: [line for line in terminal_step(master, command, marker, composer=True).split("\n") if marker in line]
+        for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "unsupported_reasoning_effort"),
+                                       ("/rename " + "x" * 101, "/configure --label " + "x" * 101, "--label must be")):
+            assert told(short, marker) == told(spelled, marker), short
+        terminal_step(master, "/rename", "! Usage: /rename NAME", composer=True)
+        # Typing "/" lists the commands the word starts above the input; Tab
+        # completes, a space or Esc closes the list, and the input stays put.
+        listed = command_frame(master, "/c", lambda frame: "\n› /c" in frame, end="")
+        rows = listed.split("\n")
+        draft = rows.index("› /c")
+        assert rows[draft - 2].startswith("/configure [OPTIONS]") and rows[draft - 1].startswith("/copy [code|file]"), listed
+        assert "change this Session's settings" in rows[draft - 2], listed
+        bare = command_frame(master, "op", lambda frame: "\n› /cop\n" in frame or frame.endswith("\n› /cop"), end="")
+        assert "/configure [OPTIONS]" not in bare and "/copy [code|file]" in bare and bare.split("\n").index("› /cop") == draft, bare
+        completed = command_frame(master, "\t", lambda frame: "› /copy" in frame and "/copy [code|file]" not in frame, end="")
+        assert completed.split("\n").index("› /copy") == draft, completed
+        closed = command_frame(master, "\x15/ef\x1b", lambda frame: "› /ef" in frame and "/effort [LEVEL]" not in frame, end="")
+        assert "Esc returns to the overview" not in closed, closed
+        command_frame(master, "\x15", lambda frame: frame.split("\n")[draft] == "›", end="")
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
     records = set((home / ".config/rui/requests").glob("*.json"))
@@ -564,9 +595,9 @@ def shown(text, screen):
     return wrapped(text, screen)
 
 
-def command_frame(master, command, accept, timeout=15):
-    """Send `command`; return the first committed frame after it that
-    `accept`s with the composer ready in that same frame. Page identity,
+def command_frame(master, command, accept, timeout=15, *, end="\n"):
+    """Send `command` and `end`; return the first committed frame after it
+    that `accept`s with the composer ready in that same frame. Page identity,
     readiness and any absence check then describe one shown frame."""
     capture = terminal_capture(master)
     found = []
@@ -577,7 +608,7 @@ def command_frame(master, command, accept, timeout=15):
 
     capture.listener = observe
     try:
-        os.write(master, (command + "\n").encode())
+        os.write(master, (command + end).encode())
         deadline = time.monotonic() + timeout
         while not found:
             remaining = deadline - time.monotonic()

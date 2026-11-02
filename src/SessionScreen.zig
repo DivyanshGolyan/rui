@@ -9,6 +9,7 @@ const Frame = @import("TerminalFrame.zig");
 const draft_layout = @import("draft_layout.zig");
 const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
+const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
@@ -102,6 +103,8 @@ frames: u64 = 0,
 message_return: ViewKind = .live,
 // The rows of the shown document the latest frame drew.
 drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
+// The latest frame drew the command list, which Esc then closes first.
+listed: bool = false,
 height: u16 = 1,
 colour: bool,
 
@@ -606,6 +609,8 @@ pub const Footer = struct {
     command: bool = false,
     status: []const u8 = "",
     notice: []const u8 = "",
+    /// The commands the draft's command word starts, listed above the input.
+    commands: ?slash_commands.Matches = null,
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
     queued: ?Queued = null,
@@ -618,6 +623,27 @@ pub const Footer = struct {
 /// The Session line's facts, and the caller's copy of the line it last
 /// wrote, which it writes again when the facts change.
 pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line.Shown };
+
+/// One row per command, its usage aligned and its description quiet. When
+/// more match than rows fit, the last row counts the rest, unless it is
+/// the only row: then it shows the first command.
+fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, commands: slash_commands.Matches, overflow: *[32]u8) void {
+    var matches = commands;
+    const total = matches.count;
+    const rows: usize = if (total <= layout.list_height) total else if (layout.list_height >= 2) layout.list_height - 1 else layout.list_height;
+    for (0..rows) |index| {
+        const name = matches.next().?;
+        const usage = slash_commands.usage.get(name);
+        _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index)), .height = 1 }).print(&.{
+            .{ .text = usage, .style = self.style(.user) },
+            .{ .text = slash_commands.padding[usage.len..] },
+            .{ .text = slash_commands.table.get(name).description.?, .style = self.style(.quiet) },
+        }, .{ .wrap = .none });
+    }
+    if (rows == total or rows == layout.list_height) return;
+    const text = std.fmt.bufPrint(overflow, "+{d} more · type to narrow", .{total - rows}) catch unreachable;
+    _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(rows)), .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
+}
 
 /// Adopts the frame's geometry, selects its projection, encodes it and
 /// returns its receipt only after every byte is written and flushed.
@@ -682,6 +708,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .draft_anchor = if (selector) 0 else self.draft_anchor,
         .status = status,
         .notice = footer.notice,
+        .command_rows = if (selector) 0 else if (footer.commands) |commands| commands.count else 0,
         .calls = calls[0..if (selected) 0 else live.count],
         .total_calls = live.total,
         .live = footer.live != null,
@@ -697,6 +724,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     if (!selector) self.draft_anchor = layout.draft_lines[0].start;
     self.browsing_height = layout.browsing_height;
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
+    self.listed = layout.list_height != 0;
     _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
     _ = document.draw(window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
     if (layout.document_offset != 0) {
@@ -718,7 +746,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Cells borrow the clock's bytes until the frame is rendered.
     var live_clock: [work_line.max_clock_bytes]u8 = undefined;
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
-    // Cells borrow the row's bytes until the frame is rendered.
+    // Cells borrow these rows' bytes until the frame is rendered.
     var queued_text: [queued_line.text_capacity]u8 = undefined;
     var queued_label: [queued_line.label_capacity]u8 = undefined;
     if (layout.queued_height != 0) {
@@ -730,7 +758,9 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     }
     // Cells borrow the rule's label until the frame is rendered too.
     var rule_label: [64]u8 = undefined;
-    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.draft_top - 1, .height = 1 }), size.col, layout.draft, &rule_label);
+    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, &rule_label);
+    var overflow: [32]u8 = undefined;
+    if (layout.list_height != 0) self.drawCommands(window, &layout, footer.commands.?, &overflow);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -1334,6 +1364,26 @@ test "a queued Message sits dimmed right above the status, in the latest view on
     _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
     try std.testing.expect(!screenHas(screen, "queued", &buffer));
     try std.testing.expect(screenHas(screen, "Sent", &buffer));
+}
+
+test "a command list of one row shows a command, not only how many match" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const calls: View.Live = .{};
+    const footer: Footer = .{ .commands = slash_commands.Matches.of("/").? };
+    var buffer: [256]u8 = undefined;
+    for ([_]u16{ 6, 9, 24 }) |rows| {
+        errdefer std.debug.print("rows={d}\n", .{rows});
+        _ = try screen.render(&out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, footer, &calls);
+        try std.testing.expect(screen.listed);
+        try std.testing.expect(screenHas(screen, slash_commands.usage.get(.configure), &buffer));
+    }
 }
 
 fn screenHas(screen: *Self, text: []const u8, buffer: *[256]u8) bool {

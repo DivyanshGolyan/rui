@@ -16,6 +16,7 @@ const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
 const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
+const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
@@ -30,7 +31,7 @@ pub const Inspection = union(enum) { status, requests, help, command, copy: Copy
 
 /// What a /copy sends: the last answer or its last code block to the
 /// clipboard, or the last answer to a file.
-pub const Copy = enum { answer, code, file };
+pub const Copy = slash_commands.Copy;
 
 /// What a /copy read found. The clipboard takes its range of the scratch
 /// file after the UI joins the read.
@@ -1396,7 +1397,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAn Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\n/copy the last answer · /copy code its last code block · /copy file saves it here\nIn tmux, /copy needs set-clipboard on\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAn Action takes a or d + Enter\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands · Tab completes one\n\n" ++ slash_commands.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: rui auth login codex in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
