@@ -2252,6 +2252,9 @@ Interactive `/setup` keeps the same future-default capability.
 A new Session that takes the saved defaults (its start leaves out `--provider` or `--model`) and whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
 A start naming both `--provider` and `--model` reads no saved defaults, the effort included, so a script that spells them never depends on the preferences file; an overview opened with `--store`, `--provider` and `--model` starts its Sessions the same way.
 `rui session configure` creating a Session and each overview start read it at that moment, so a choice made since an overview opened applies.
+A `/setup` that runs in an overview also moves the provider and model its next Session starts on: the shell resolves them again from the launch's own `--provider` and `--model`, as given, and the saved defaults, through the same `new_session_selection` owner the launch used, so a selector the launch named still wins and `--clear-model` falls back to the provider's recommended model, as a fresh launch would.
+That resolution counts every sign-in as ready, as a caller that cannot ask does, since the Host answers readiness at the start; when no saved or named provider decides, the default in force stays.
+An overview opened with all three selectors never changes its default this way, and what `/configure` holds still leads, as `nextBinding` says.
 `/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; `/configure --reasoning-effort` changes only its Session.
 These edits never change an existing Session's saved binding or permission mode.
 An explicitly edited Store is validated and canonicalized before publication, allowing replacement of a deleted saved Store.

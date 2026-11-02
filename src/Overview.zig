@@ -31,6 +31,7 @@ const TerminalInput = @import("TerminalInput.zig");
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
+const new_session_selection = @import("new_session_selection.zig");
 const preferences = @import("preferences.zig");
 
 comptime {
@@ -52,9 +53,11 @@ pub const Options = struct {
     model: ?[]const u8 = null,
     /// This terminal's own successful login, Unix seconds.
     login_at: ?u64 = null,
-    /// The launch named the Store, provider and model, so, as there, a
-    /// start reads no saved defaults, the saved effort included.
-    explicit: bool = false,
+    /// The launch's own `--store`, `--provider` and `--model`, as given.
+    /// When it named all three, a start reads no saved defaults, the saved
+    /// effort included. Otherwise a `/setup` that ran re-resolves the
+    /// default from them and the saved defaults, as a fresh launch would.
+    selectors: new_session_selection.Intent = .{},
     /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
 };
@@ -835,7 +838,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .models = .{ .menu = menu } });
         },
         .save => |binding| return self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(outcome) } }),
-        .command => {
+        .command => |command| {
             const output = &self.output;
             const ran: view.Ran = .{
                 .output = output.bytes[0..@min(output.len, view.max_output_bytes)],
@@ -843,6 +846,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
                 // As a conversation drops an inspection that could not
                 // start, the overview says only that it did not run.
                 .outcome = if (outcome) |_| .done else |_| if (output.kept) .failed else .not_run,
+                .default = if (outcome) |_| if (command.name == .setup) self.savedDefault() else null else |_| null,
             };
             const next = self.event(.{ .ran = ran });
             // As in a conversation, a command that failed while it ran ends
@@ -856,6 +860,19 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .mark_read => |mark| if (!self.worker.cancellation.stopped.load(.acquire)) self.reads.sent(mark),
     }
     return null;
+}
+
+/// The default a fresh launch with this overview's selectors would take
+/// from the saved defaults now; null when they decide none, so the one in
+/// force stays. Readiness is the Host's to answer at the start, as for any
+/// caller that cannot ask, so every provider counts as ready here, and only
+/// a launch that named no provider and saved none needs the chooser.
+fn savedDefault(self: *const Self) ?view.Default {
+    const selectors = self.options.selectors;
+    if (!selectors.needsPreferences() or self.options.home.len == 0) return null;
+    const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = preferences.load(self.options.home) catch return null };
+    const binding = (snapshot.resolve(&.initFill(.configured)) catch return null) orelse return null;
+    return .of(binding.provider.slice(), binding.model.slice());
 }
 
 /// One captured `session start`: the composer's text and start settings
@@ -878,7 +895,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const effort = held.policy(held.at(start, "reasoning-effort"));
-    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or self.options.explicit or self.options.home.len == 0) null else if (start.binding().model) |model|
+    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or !self.options.selectors.needsPreferences() or self.options.home.len == 0) null else if (start.binding().model) |model|
         (try preferences.load(self.options.home)).startEffort(model)
     else
         null;
@@ -1791,6 +1808,9 @@ fn pin(home: []const u8, provider: []const u8, model: []const u8) !void {
     _ = try preferences.update(home, .{ .provider = .{ .set = provider }, .model = .{ .set = model } }, &readiness);
 }
 
+/// Selectors a launch that named the Store, provider and model gives.
+const explicit_selectors: new_session_selection.Intent = .{ .store = "/store", .provider = "codex", .model = "gpt-6-luna" };
+
 test "an overview left without a pick writes no default, pinned or not" {
     for ([_]bool{ false, true }) |pinned| {
         var tmp = std.testing.tmpDir(.{});
@@ -1925,7 +1945,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
     _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" }, .reasoning_effort = .{ .set = .high } }, &.initFill(.configured));
     inline for (.{ false, true }) |explicit| {
         var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = explicit }, fake_operations, &cancellation);
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = if (explicit) explicit_selectors else .{} }, fake_operations, &cancellation);
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
@@ -1938,7 +1958,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
     try bad.writeStreamingAll(std.testing.io, "version=1\n");
     bad.close(std.testing.io);
     var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = true }, fake_operations, &cancellation);
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = explicit_selectors }, fake_operations, &cancellation);
     defer rig.close();
     const starts = Seen.now.starts;
     try std.testing.expect(try rig.press("hello\n") == null);
@@ -3489,6 +3509,47 @@ test "/rename and /setup run through the conversation's command hook on the work
     try std.testing.expectEqualStrings("", Printing.session.slice());
     try std.testing.expectEqualStrings("Defaults (read only):\nNotifications: on\nrui: Host unavailable", overview.state.panel.?.output.text);
     try std.testing.expectEqual(@as(usize, 2), Printing.runs);
+}
+
+test "a /setup that saves another model starts the next Session on it, unless the launch named it or /configure holds one" {
+    const Case = struct { selectors: new_session_selection.Intent = .{}, setup: []const u8 = "/setup --model gpt-5.5\n", edit: preferences.Edit, configure: ?[]const u8 = null, model: []const u8 };
+    for ([_]Case{
+        .{ .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-5.5" },
+        .{ .setup = "/setup --clear-model\n", .edit = .{ .model = .clear }, .model = product_defaults.recommended_model },
+        .{ .selectors = .{ .model = "gpt-6-luna" }, .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-6-luna" },
+        .{ .selectors = explicit_selectors, .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-6-luna" },
+        .{ .edit = .{ .model = .{ .set = "gpt-5.5" } }, .configure = "/configure --model gpt-6-sol\n", .model = "gpt-6-sol" },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        try pin(home, "codex", "gpt-6-luna");
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = case.selectors }, fake_operations, &cancellation);
+        defer rig.close();
+        Printing.use(rig, tmp.dir);
+        // The CLI's /setup saves as `rui defaults configure` does.
+        const Setup = struct {
+            var at: []const u8 = "";
+            var edit: preferences.Edit = .{};
+            fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+                _ = try preferences.update(at, edit, &.initFill(.configured));
+                const said = "Rui: Saved.\n";
+                if (std.c.write(1, said.ptr, said.len) != said.len) return error.TestUnexpectedResult;
+            }
+        };
+        Setup.at = home;
+        Setup.edit = case.edit;
+        rig.overview.hooks.command = Setup.command;
+        if (case.configure) |line| try std.testing.expect(try rig.press(line) == null);
+        try std.testing.expect(try rig.press(case.setup) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(try rig.press("hello\n") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("codex", Seen.now.start.provider.?.slice());
+        try std.testing.expectEqualStrings(case.model, Seen.now.start.model.?.slice());
+    }
 }
 
 test "a command that cannot start says why, and one that fails while it runs ends the overview, whose way out prints its output" {
