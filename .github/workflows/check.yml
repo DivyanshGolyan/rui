@@ -302,6 +302,19 @@ jobs:
             echo "RUI_TEST_PG_PASSWORD=$password"
             echo "RUI_TEST_PG_CA_FILE=$certs/server.crt"
           } >> "$GITHUB_ENV"
+      - name: Give tests macOS's temporary directory shape
+        # macOS's TMPDIR is /var/folders/XX/<30>/T/ through a symlink to
+        # /private/var. Linux's short real /tmp hid that class three times
+        # (#579, #724, #755); here it fails on Linux first.
+        run: |
+          set -euo pipefail
+          real=/private/var/folders/rq/rui0linux0shaped0like0darwin00/T
+          sudo mkdir -p "$real"
+          sudo chown -R "$(id -u):$(id -g)" /private/var/folders
+          sudo ln -sfn /private/var/folders /var/folders
+          tmp=/var/folders/rq/rui0linux0shaped0like0darwin00/T/
+          test "$(realpath "$tmp")" = "$real"
+          echo "TMPDIR=$tmp" >> "$GITHUB_ENV"
       - name: Run selected targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
