@@ -2,7 +2,9 @@
 """Run the mechanical pre-push checks of CODING_STANDARDS.md#evidence in one step.
 
 Formatting, the CI policy tests, undefined fixture names, the development
-selection and, when Zig changed, the macOS type check. Focused
+selection and the macOS type check whenever CI's review selection would
+run it. The selection covers committed changes since the merge base with
+--base; formatting and the tests read the working tree. Focused
 `-Dtest-filter` runs and fix mutations stay the author's. Run it before
 every push, including after merging main.
 """
@@ -20,12 +22,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def checks(paths, available):
     targets = select(paths, "development", available)["targets"]
+    # check.yml's macos_typecheck runs whenever the review selection is non-empty.
+    typecheck = bool(select(paths, "review", available)["targets"])
     yield "zig fmt", ["zig", "fmt", "--check", "--ast-check", "build.zig", "src"]
     yield "tests/ci", [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci"]
     yield "undefined fixture names", [sys.executable, "-m", "ruff", "check", "--select", "F821", "tests"]
     if targets:
         yield "development selection", ["zig", "build", *targets, "--summary", "line"]
-    if any(path.endswith(".zig") or path == "build.zig.zon" for path in paths):
+    if typecheck:
         yield "macOS type check", ["zig", "build", "typecheck-macos", "--summary", "line"]
 
 
@@ -34,7 +38,8 @@ def main():
     parser.add_argument("--base", default="origin/main")
     args = parser.parse_args()
     available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / "build.zig").read_text()))
-    paths, _ = changed_paths(args.base, "HEAD")
+    base = subprocess.check_output(["git", "merge-base", "HEAD", args.base], cwd=ROOT, text=True).strip()
+    paths, _ = changed_paths(base, "HEAD")
     failed = []
     for name, command in checks(paths, available):
         print(f"== {name}: {' '.join(command)}", flush=True)

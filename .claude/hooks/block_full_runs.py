@@ -2,36 +2,39 @@
 """Claude Code PreToolUse hook: refuse local full suites that CI repeats.
 
 CODING_STANDARDS.md#evidence allows a full local run only to diagnose a CI
-red. Prefix the command with RUI_CI_RED=<run or issue> to say which.
+red. Prefix the command with RUI_CI_RED=<run or issue> to say which. This
+guards against habit, not against a determined bypass.
 """
 import json
 import re
-import shlex
 import sys
 
-FULL_TARGETS = {"test", "check", "check-full"}
-MIRRORS = ("pr-gates.sh", "nonroot-check.sh")
+# A zig build anywhere, including inside `bash -c '...'` or `(...)`, and its
+# arguments up to the end of its simple command.
+BUILD = re.compile(r"""(?:^|[\s;&|(){}'"`])(?:\S*/)?zig\s+build\b([^;&|()'"`\n]*)""")
+# The exemption is an assignment prefix of that same command.
+NAMED_RED = re.compile(r"""(?:^|[;&|(){}'"`])\s*(?:env\s+)?(?:\w+=\S*\s+)*RUI_CI_RED=\S+\s+"""
+                       r"""(?:(?:\w+=\S*|env|time|timeout\s+\S+)\s+)*$""")
+NAMED_PREFIX = re.compile(r"\s*(?:env\s+)?(?:\w+=\S*\s+)*RUI_CI_RED=\S+\s")
+MIRROR = re.compile(r"(?:pr-gates|nonroot-check)\.sh\b")
 
 
 def refusal(command):
     """Why the command is a full local run, or None."""
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
-        try:
-            words = shlex.split(segment)
-        except ValueError:
-            words = segment.split()
-        if any(word.startswith("RUI_CI_RED=") and len(word) > len("RUI_CI_RED=") for word in words):
+    for match in BUILD.finditer(command):
+        start = max(command.rfind(c, 0, match.start() + 1) for c in ";&|\n") + 1
+        if NAMED_RED.search(command[start:match.start() + 1] + " "):
             continue
-        if any(word.endswith(MIRRORS) for word in words):
+        words = match.group(1).split()
+        steps = {word for word in words if not word.startswith("-")}
+        if steps & {"check", "check-full"}:
+            return "zig build " + " ".join(sorted(steps & {"check", "check-full"}))
+        if "test" in steps and not any(word.startswith("-Dtest-filter=") for word in words):
+            return "zig build test without -Dtest-filter"
+    for match in MIRROR.finditer(command):
+        start = max(command.rfind(c, 0, match.start()) for c in ";&|\n") + 1
+        if not NAMED_PREFIX.match(command, start):
             return "a local mirror of CI"
-        builds = [i for i, word in enumerate(words[:-1]) if word.rsplit("/", 1)[-1] == "zig" and words[i + 1] == "build"]
-        if not builds:
-            continue
-        rest = words[builds[0] + 2:]
-        steps = {word for word in rest if not word.startswith("-")}
-        filtered = any(word.startswith("-Dtest-filter") for word in rest)
-        if steps & {"check", "check-full"} or ("test" in steps and not filtered):
-            return "zig build " + " ".join(sorted(steps & FULL_TARGETS))
     return None
 
 
