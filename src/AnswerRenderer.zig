@@ -495,9 +495,8 @@ fn linkByte(self: *Renderer, byte: u8) !void {
         .target => switch (byte) {
             '(' => self.link_depth += 1,
             ')' => if (self.link_depth == 0) {
+                // The closing `)` completes the link without being held.
                 if (!TerminalText.linkTarget(self.held[self.link_text_end + 2 .. self.link_len])) return self.dropLink(byte);
-                self.held[self.link_len] = byte;
-                self.link_len += 1;
                 return self.showText();
             } else {
                 self.link_depth -= 1;
@@ -571,7 +570,7 @@ fn showText(self: *Renderer) !void {
     const length = self.link_len;
     self.link = .none;
     self.link_len = 0;
-    try self.openLink(self.held[text_end + 2 .. length - 1]);
+    try self.openLink(self.held[text_end + 2 .. length]);
     for (self.held[1..text_end]) |byte| try self.prose(byte);
     try self.closeLink();
 }
@@ -1404,6 +1403,10 @@ test "text that is not a complete web link shows every byte as written" {
 test "a bare address longer than a link may carry stays plain text" {
     const long = "https://" ++ @as([TerminalText.max_link_bytes]u8, @splat('a'));
     try expectRendered(long ++ " ok", long ++ " ok");
+    // A link whose `)` arrives with the held bytes full still completes.
+    const text = @as([fence_limit - "[](https://x)".len + 1]u8, @splat('a'));
+    try expectRendered("[" ++ text ++ "](https://x)", comptime linked("https://x", &text));
+    try expectRendered("[" ++ text ++ "a](https://x)", "[" ++ text ++ "a](" ++ comptime linked("https://x", "https://x") ++ ")");
     // Each `)` past the host is trimmed in constant time.
     const closers = "https://a" ++ @as([2000]u8, @splat(')'));
     try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
