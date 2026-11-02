@@ -832,7 +832,6 @@ pub fn serve(
         3, // Two controls and concurrent discovery.
         served.any(),
         served.chatgpt() != null,
-        served.modelListKey() != null,
         os.tag,
     );
     if (descriptor_observation.soft_limit) |limit| {
@@ -848,7 +847,7 @@ pub fn serve(
                 .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
-                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} model_list={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
                 .{
                     active_capacity,
                     descriptor_requirement.total,
@@ -858,7 +857,6 @@ pub fn serve(
                     descriptor_requirement.clients,
                     descriptor_requirement.execution,
                     descriptor_requirement.authentication,
-                    descriptor_requirement.model_list,
                     descriptor_requirement.self_wake,
                 },
             );
@@ -872,7 +870,6 @@ pub fn serve(
         3,
         served.any(),
         served.chatgpt() != null,
-        served.modelListKey() != null,
         os.tag,
     );
     var descriptor_limit_buffer: [32]u8 = undefined;
@@ -1004,10 +1001,10 @@ pub fn serve(
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
     host.started_at = @intCast(started_at);
-    // Before intake, so its workers have stopped reading the list when it
-    // is freed. A list that cannot be fetched leaves the table standing in.
-    host.model_lists.start(io, allocator, served);
-    defer host.model_lists.stop();
+    // Freed after intake and execution are joined: they read and fill it.
+    // Pending from the start: execution launches the fetch, or settles it.
+    host.model_lists = .{ .io = io, .allocator = allocator, .providers = served, .openai = if (served.modelListKey() != null) .pending else .table };
+    defer host.model_lists.deinit();
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();

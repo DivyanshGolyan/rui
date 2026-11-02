@@ -8,7 +8,6 @@ const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
 const model_list = @import("model_list.zig");
-const h2 = @import("h2");
 const signal_stack = @import("signal_stack.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
@@ -344,10 +343,10 @@ pub const Host = struct {
     }
 };
 
-/// The OpenAI API key's model list: fetched once, on a thread of its own,
-/// when the Host starts, then kept until it stops. The key is read once at
-/// start, so the list never needs fetching again. ChatGPT has no public
-/// list; its list is always the table.
+/// The OpenAI API key's model list: the execution owner fetches it once as
+/// the Host starts and publishes it here, where it stays until the Host
+/// stops. The key is read once at start, so the list never needs fetching
+/// again. ChatGPT has no public list; its list is always the table.
 pub const ModelLists = struct {
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
@@ -355,28 +354,8 @@ pub const ModelLists = struct {
     mutex: std.Io.Mutex = .init,
     /// A live list's IDs are exact length, from `allocator`.
     openai: model_list.List = .table,
-    stop_requested: std.atomic.Value(bool) = .init(false),
-    thread: ?std.Thread = null,
 
-    /// Starts the fetch when this Host serves an OpenAI key whose endpoint
-    /// has a list beside it. One that cannot start leaves the table.
-    pub fn start(self: *ModelLists, io: std.Io, allocator: std.mem.Allocator, providers: *const providers_module.Providers) void {
-        self.* = .{ .io = io, .allocator = allocator, .providers = providers };
-        const served = providers.modelListKey() orelse return;
-        self.openai = .pending;
-        self.thread = signal_stack.spawn(.{}, fetch, .{ self, served }) catch |err| {
-            self.openai = .table_fallback;
-            stderr.print("rui: OpenAI model list not fetched ({s}); the picker shows Rui's models\n", .{@errorName(err)});
-            return;
-        };
-    }
-
-    /// Ends the fetch within 100 ms and frees the list.
-    pub fn stop(self: *ModelLists) void {
-        if (self.thread) |running| {
-            self.stop_requested.store(true, .release);
-            running.join();
-        }
+    pub fn deinit(self: *ModelLists) void {
         switch (self.openai) {
             .live => |ids| self.allocator.free(ids.bytes),
             .table, .pending, .table_fallback => {},
@@ -384,54 +363,31 @@ pub const ModelLists = struct {
         self.* = .{};
     }
 
-    fn fetch(self: *ModelLists, served: *const providers_module.Served) void {
-        const list: model_list.List = if (self.fetchIds(served)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
-            if (err != error.Interrupted)
-                stderr.print("rui: OpenAI model list unavailable ({s}); the picker shows Rui's models\n", .{@errorName(err)});
-            break :failed .table_fallback;
-        };
+    /// Under the lock: intake renders while execution sets.
+    pub fn set(self: *ModelLists, list: model_list.List) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        std.debug.assert(self.openai == .pending);
         self.openai = list;
     }
 
-    /// The fetched IDs, exact length from `allocator`. Its scratch is
-    /// mapped for the call, off the thread's stack.
-    noinline fn fetchIds(self: *ModelLists, served: *const providers_module.Served) ![]const u8 {
-        const key = served.credential.key_file;
-        var credentials: provider.Credentials = .{ .allocator = self.allocator };
-        var headers: model_adapter.Headers = undefined;
-        // The Responses request's own credential fields and endpoint rule.
-        try headers.initKey(served.endpoint, self.providers.ca_file, key.key, key.fixture, &credentials);
-        defer headers.deinit();
-        const url = try std.fmt.allocPrint(self.allocator, "{s}/models", .{providers_module.responsesBase(served.endpoint).?});
-        defer self.allocator.free(url);
-        // Read once, then released: only the IDs are kept.
-        const response = try std.heap.page_allocator.alloc(u8, model_list.max_response_bytes);
-        defer std.heap.page_allocator.free(response);
-        const outcome = try h2.exchange(self.io, .{
-            .url = url,
-            .method = .get,
-            .fields = headers.fields(),
-            .body = "",
-            .response = response,
-            .trust = if (self.providers.ca_file) |path| .{ .ca_file = path } else .system,
-            .proxy = h2.proxyFromEnvironment(),
-            .connect_timeout_ns = 15 * std.time.ns_per_s,
-            .total_timeout_ns = 30 * std.time.ns_per_s,
-            .stop = &self.stop_requested,
-        });
-        const answer = switch (outcome) {
-            .answered => |answer| answer,
-            .failed => return error.ModelListTransportFailed,
-            .timed_out => return error.ModelListTimedOut,
+    /// Publishes a fetched answer: its IDs, kept, or why there are none.
+    pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
+        const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
+            stderr.print("rui: OpenAI model list unavailable ({s}); the picker shows Rui's models\n", .{@errorName(err)});
+            break :failed .table_fallback;
         };
-        if (answer.status != 200) return error.ModelListRefused;
+        self.set(list);
+    }
+
+    /// The IDs of `body`, exact length from `allocator`. Its scratch is
+    /// mapped for the call, off the caller's stack.
+    noinline fn keep(allocator: std.mem.Allocator, body: anyerror![]const u8) ![]const u8 {
         var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         defer arena.deinit();
         const ids = try arena.allocator().create(model_list.IdBuffer);
-        const parsed = try model_list.parseOpenAi(arena.allocator(), answer.body, ids);
-        return self.allocator.dupe(u8, parsed.bytes);
+        const parsed = try model_list.parseOpenAi(arena.allocator(), try body, ids);
+        return allocator.dupe(u8, parsed.bytes);
     }
 
     /// Each served provider's list, borrowed under the lock for `write`.

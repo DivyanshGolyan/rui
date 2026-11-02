@@ -35,7 +35,7 @@ def assert_managed_descriptor_rejection(rejected, limit):
     required = inherited + fixed_host + 403 + 10 + authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
                     inherited=inherited, fixed_host=fixed_host, clients=403,
-                    execution=10, authentication=authentication, model_list=0, self_wake=2)
+                    execution=10, authentication=authentication, self_wake=2)
     assert fields == expected, (fields, expected)
     assert limit < required - 4 * (100 - 10), "only below-minimum intake may be refused"
     print(f"managed descriptor rejection passed: {expected}", flush=True)
@@ -256,7 +256,10 @@ def openai_base_url_run():
             assert headers[b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), headers
             assert b"chatgpt-account-id" not in headers, headers
         assert b"content-length" not in endpoint.request_headers[0], endpoint.request_headers[0]
-        print("openai base URL passed: the key goes over TLS to /custom/v1/models and /custom/v1/responses under RUI_OPENAI_BASE_URL, and the live list comes back")
+        # The list rides the model requests' connection, so the first
+        # message finds it open.
+        assert len(endpoint.connections) == 1, endpoint.connections
+        print("openai base URL passed: the key goes over TLS to /custom/v1/models and /custom/v1/responses under RUI_OPENAI_BASE_URL, and the live list comes back on the model requests' connection")
         complete = True
     finally:
         def retire():

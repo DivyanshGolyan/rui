@@ -501,7 +501,6 @@ pub const Client = extern struct {
 
 pub const Exchange = struct {
     url: []const u8,
-    method: Method = .post,
     fields: []const Field,
     body: []const u8,
     /// The response body lands here; a longer one ends `.sink_refused`.
@@ -514,13 +513,6 @@ pub const Exchange = struct {
     /// Polled at least every 100 ms; true cancels the request and returns
     /// `error.Interrupted`.
     cancelled: ?*const fn () bool = null,
-    /// The same, for an owner that keeps its stop flag: set cancels.
-    stop: ?*const std.atomic.Value(bool) = null,
-
-    fn interrupted(self: *const Exchange) bool {
-        if (self.stop) |flag| if (flag.load(.acquire)) return true;
-        return if (self.cancelled) |cancelled| cancelled() else false;
-    }
 };
 
 pub const ExchangeOutcome = union(enum) {
@@ -540,7 +532,7 @@ pub const ExchangeError = InitError || EndpointError || PrepareError || DriveErr
 /// device login) have none and run a few times an hour at most.
 pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
     const started = std.Io.Clock.awake.now(io).nanoseconds;
-    if (request.interrupted()) return error.Interrupted;
+    if (request.cancelled) |cancelled| if (cancelled()) return error.Interrupted;
     var client: Client = undefined;
     try client.init(std.heap.page_allocator, io, .{
         .stream_capacity = 1,
@@ -556,7 +548,6 @@ pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
     var stream: Stream = .idle;
     try client.prepare(&stream, .{
         .endpoint = endpoint,
-        .method = request.method,
         .fields = request.fields,
         .body = .{ .bytes = request.body },
         .sink = .{ .buffer = request.response },
@@ -574,7 +565,7 @@ pub fn exchange(io: std.Io, request: Exchange) ExchangeError!ExchangeOutcome {
             if (end.cause != .complete) return .{ .failed = end };
             return .{ .answered = .{ .status = stream.status().?, .body = request.response[0..@intCast(stream.responseLength())] } };
         }
-        if (request.interrupted()) return error.Interrupted;
+        if (request.cancelled) |cancelled| if (cancelled()) return error.Interrupted;
         const elapsed: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
         if (elapsed >= request.total_timeout_ns)
             return .{ .timed_out = .{ .request_sent = Record.of(&stream).flags.request_sent } };

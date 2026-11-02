@@ -330,7 +330,7 @@ def managed_descriptor_rejection(store, env, limit):
     execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 4 + 3
     expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
                     fixed_host=fixed_host, clients=clients, execution=execution,
-                    authentication=authentication, model_list=0, self_wake=2,
+                    authentication=authentication, self_wake=2,
                     required=inherited + fixed_host + clients + execution + authentication + 2)
     assert fields == expected, (fields, expected)
     # Refusal precedes the lease and diagnostic writer: no ready Host remains.

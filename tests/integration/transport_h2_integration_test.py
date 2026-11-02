@@ -251,7 +251,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                             return SimpleNamespace(returncode=1, stdout="", stderr=(
                                 "descriptor capacity insufficient: active_capacity=1 "
                                 f"required={required} soft_limit={limit} inherited={inherited} fixed_host={fixed} "
-                                f"clients=403 execution=10 authentication={authentication} model_list=0 self_wake=2"))
+                                f"clients=403 execution=10 authentication={authentication} self_wake=2"))
                         clock[0] += 5.2 if late == "read" else 4.95
                         key = args[-1]
                         text = "managed-federal" if key == "federal" else f"managed-{key[-1]}"
@@ -304,14 +304,14 @@ class ManagedDescriptorTests(unittest.TestCase):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=(
                     "rui: descriptor capacity insufficient: active_capacity=1 "
                     f"required={required} soft_limit=73 inherited={inherited} "
-                    "fixed_host=9 clients=403 execution=10 authentication=7 model_list=0 self_wake=2\n"))
+                    "fixed_host=9 clients=403 execution=10 authentication=7 self_wake=2\n"))
                 with os_semantics.simulate("darwin"):
                     self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 73), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
         correct = ("rui: descriptor capacity insufficient: active_capacity=1 "
                    "required=435 soft_limit=74 inherited=4 fixed_host=9 clients=403 "
-                   "execution=10 authentication=7 model_list=0 self_wake=2\n")
+                   "execution=10 authentication=7 self_wake=2\n")
         for before, after in (("required=435", "required=434"), ("authentication=7", "authentication=6"),
                               ("inherited=4", "inherited=5"), ("soft_limit=74", "soft_limit=73")):
             with self.subTest(before=before):
@@ -581,7 +581,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
             if fail_shutdown:
                 raise secondary
 
-        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=requests,
+        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=requests, connections=["one"],
                                    serve_forever=lambda: None, shutdown=shutdown,
                                    server_close=lambda: calls.append("close"))
         thread = SimpleNamespace(start=lambda: None, is_alive=lambda: False,
