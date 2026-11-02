@@ -22,15 +22,16 @@ const Bounded = @import("bounded.zig").Bounded;
 const unseen = @import("unseen.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Terminal = @import("SessionTerminal.zig");
-const preferences = @import("preferences.zig");
 const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
-/// Takes what /status reports from one Current capture whose attention rows
-/// are in the file, with HOME and the saved defaults (null when unreadable).
-pub const Status = *const fn (std.Io, []const u8, ?*const preferences.Values, *const protocol_reply.Current, std.Io.File, *status_page.Facts) anyerror!void;
+/// Takes what /status reports of the Session from one Current capture, whose
+/// attention rows are in the first file, into the Session given. True when
+/// it differs from the shown one (always without one): the second file then
+/// lists its Actions awaiting approval, as the page shows them.
+pub const Status = *const fn (std.Io, *const protocol_reply.Current, std.Io.File, *status_page.Session, ?*const status_page.Session, std.Io.File) anyerror!bool;
 pub const Inspection = union(enum) { status, requests, help, command, copy: Copy };
 
 /// What a /copy sends: the last answer or its last code block to the
@@ -53,7 +54,9 @@ pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
 /// Live output renders into the inspection scratch file and shows whole, with
 /// its footer, status and cursor, in one UI step after join.
 /// The frontend's private scratch files, which a read borrows whole.
-pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
+/// `status` holds the /status page shown; `actions` the Actions each of the
+/// two /status reads it alternates between lists.
+pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File, actions: [2]std.Io.File };
 
 /// The moment a Session line was read at. Every input of the context
 /// estimate takes a Session position and every settings change a revision,
@@ -205,8 +208,6 @@ pub const Newer = struct {
 
 pub const Job = struct {
     init: std.process.Init = undefined,
-    /// The process's HOME, empty without one.
-    home: []const u8 = "",
     store: []const u8 = "",
     session: []const u8 = "",
     files: Files = undefined,
@@ -243,14 +244,14 @@ pub const Job = struct {
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
     inspection_action: ?u64 = null,
-    // A scan renders /status from its own Current capture: when the user
-    // asks for it, or when the shown page (`status_shown`) would change.
+    // A scan takes /status from its own Current capture: when the user
+    // asks for it, or while the page shows `status_shown`, into
+    // `status_taken`, listing its Actions in `status_actions`.
     open_status: bool = false,
     watch_status: bool = false,
-    status_shown: u64 = 0,
-    /// What /status reports, when `result.status` says this read took it.
-    /// Left unwritten by each launch.
-    status_facts: status_page.Facts = undefined,
+    status_shown: ?*const status_page.Session = null,
+    status_taken: *status_page.Session = undefined,
+    status_actions: std.Io.File = undefined,
     // The moment the UI's Session line was read at, and whether it still
     // needs the unlabelled Session's name.
     line_read: ?Moment = null,
@@ -263,9 +264,9 @@ pub const Job = struct {
         line: ?Line = null,
         // The unlabelled Session's name, when this read looked it up.
         hint: ?Hint = null,
-        // /status from one Current capture is in the status file.
+        // `status_taken` holds /status from one Current capture, which
+        // differs from the shown page.
         status: bool = false,
-        status_digest: u64 = 0,
         // The newest Message admission this page holds, for Sent.
         delivered: u64 = 0,
         // Where a transcript may begin in this read's output (see Marks),
@@ -451,12 +452,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
         // Before anything else reuses scratch, which holds this capture's rows.
         if (job.open_status or job.watch_status) {
-            // New Sessions' rows show the saved defaults, read once per page.
-            const saved: ?preferences.Values = if (job.home.len != 0) preferences.load(job.home) catch null else null;
-            const defaults: ?*const preferences.Values = if (saved) |*values| values else null;
-            try job.status(task.io, job.home, defaults, &current, job.files.scratch, &job.status_facts);
-            job.result.status_digest = try statusDigest(&job.status_facts, job.inspection_submission);
-            job.result.status = job.open_status or job.result.status_digest != job.status_shown;
+            job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
         }
     }
     if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first_position) |position| {
@@ -528,23 +524,8 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-/// The /status page: its facts with `›` on `selected`, then the submission
-/// the UI shows with it.
-pub fn writeStatus(facts: *const status_page.Facts, selected: ?status_page.Setting, submission: ?Submission.View, out: *std.Io.Writer) !void {
-    try status_page.render(facts, selected, out);
-    try writeSubmission(submission, out);
-}
-
-/// Whatever the selection, the page changes exactly when this does.
-fn statusDigest(facts: *const status_page.Facts, submission: ?Submission.View) !u64 {
-    var buffer: [256]u8 = undefined;
-    var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(.init(0), &buffer);
-    try writeStatus(facts, null, submission, &hashing.writer);
-    try hashing.writer.flush();
-    return hashing.hasher.final();
-}
-
-fn writeSubmission(view: ?Submission.View, out: *std.Io.Writer) !void {
+/// The submission the UI shows under a page.
+pub fn writeSubmission(view: ?Submission.View, out: *std.Io.Writer) !void {
     const submission = view orelse return;
     try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
     if (submission.last_error) |err| try out.print("Last submission error: {s}\n", .{@errorName(err)});

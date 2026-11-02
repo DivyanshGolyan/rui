@@ -4,8 +4,8 @@
 
 ## Sub-features
 
-- `status-page`: `/status` shows `Session: NAME`, `Permission:` (bypass is described only here), `Work:` and the compaction rows, under `Browsing · Esc returns`.
-- `status-refresh`: a second `/status` during or after work shows current `Work:`, not stale text.
+- `status-page`: `/status` shows ` Status · NAME · ID`, the `Permissions` row (bypass is described only here), the `Work` section and the compaction rows, under `Browsing · Esc returns`.
+- `status-refresh`: a second `/status` during or after work shows the current `Work` state, not stale text.
 - `details`: `/details` shows full saved tool output.
 - `scroll-page`: PgUp/PgDn move by pages, and repeated PgUp reaches `Start of conversation`.
 - `scroll-wheel`: the physical wheel scrolls. Rui enables alternate scroll (`?1007h`) when the terminal reports it reset, so the terminal sends arrow keys. Rui does not enable mouse tracking.
@@ -24,7 +24,7 @@ Preconditions:
 - **Status.** Run `$V send "$RUN" s1 --text /status`, `--keys Enter`, then `$V wait "$RUN" s1 --marker 'Status · ' --after G`. The frame starts with `Browsing · Esc returns` and ` Status · ` with the Session's ID, marks the `Effort` row with `›`, contains `Permissions     bypass · Bash runs without asking`, and its `Work` section's state matches `$V rui "$RUN" session inspect --store STORE ID`, where ID is `sessions.demo` in the run's `run.json` (with seeded history that is `completed`, not `idle`).
 - **Return.** Run `$V send "$RUN" s1 --keys C-g` and `wait --marker '›' --composer --after G`. The live view shows no `Browsing` line.
 - **Refresh during work.** Send `slow please` and Enter, then `/status` while it streams. The `Work` section names the running state. After the answer, the open page must not keep `Working` once `Working…` is gone (a known 968d909 defect, C1); a fresh `/status` shows the completed work.
-- **Settings.** On `/status`, `Down` moves `›` to `Permissions`, then over the Session's `Model` and `Instructions` to New Sessions' `Model`; `Shift-Down` and PgDn still scroll. Enter on `Permissions` puts `/configure --permission-mode ` in the draft with `bypass` and `ask` listed; Down, Enter runs it and the page comes back with `ask · Bash asks first` and `›` on `Permissions`. Enter on `Name` puts `/configure --label` and the current name in the draft.
+- **Settings.** On `/status`, `Down` moves `›` to `Permissions`, then over the Session's fixed `Model`, `Store` and `Instructions` to New Sessions' `Model`; `Shift-Down` and PgDn still scroll. Enter on `Permissions` puts `/configure --permission-mode ` in the draft with `bypass` and `ask` listed; Down, Enter runs it and the page comes back with `ask · Bash asks first` and `›` on `Permissions`. Enter on `Name` puts `/configure --label` and the current name in the draft.
 - **Page.** Run `$V send "$RUN" s1 --keys PgUp` repeatedly until `wait --marker 'Start of conversation'`. Then `PgDn` until the composer is live.
 - **Wheel path (L1–L3 only).** Rui scrolls the wheel through alternate scroll (`?1007h`), so a terminal turns the wheel into `Up`/`Down`. `--keys Up` therefore stands in for the wheel, except on `/status`, where `Up` and `Down` move `›`. `--keys SGRWheelUp` sends an unsolicited mouse report, which Rui ignores by design. Both are byte replay, not hardware.
 - **Draft survives.** Type `keep me`, PgUp, then Ctrl-G. The caret row is still `› keep me` and the provider count is unchanged.
@@ -32,6 +32,6 @@ Preconditions:
 
 ## Gotchas
 
-- Rows wrap at narrow widths. Match `Permission:` rows by joined words, as `permission_row` does in `human_cli_integration.py`.
+- Rows wrap at narrow widths. Match `Permissions` rows by joined words, as `permission_row` does in `human_cli_integration.py`.
 - After Esc, wait for the next frame before sending more input (the lone-Esc deadline).
 - `/status` typed on a non-empty draft is draft text, not a command. Clear the draft first (`--keys BSpace` repeatedly).

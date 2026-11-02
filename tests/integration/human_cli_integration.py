@@ -127,12 +127,17 @@ def permission_row(frame, mode):
     return f" Permissions {value} Tools " in " ".join(frame.split())
 
 
-def folder_row(home, path):
-    """The /status Folder row for `path`, shown from `~` under HOME."""
+def home_path(home, path):
+    """`path` as /status shows it: from `~` under HOME."""
     text, home = str(path), str(home)
     if len(home) > 1 and (text == home or text.startswith(home + "/")):
         text = "~" + text[len(home):]
-    return "Folder          " + text
+    return text
+
+
+def folder_row(home, path):
+    """The /status Folder row for `path`."""
+    return "Folder          " + home_path(home, path)
 
 
 def status_row(page, label, following):
@@ -1860,6 +1865,7 @@ def command_entry_cases():
         read_terminal(master, "› ")
         status = terminal_step(master, "/status", " Status · ", composer=True)
         assert f" Status · {newer}\n" in status, status
+        assert status_row(status, "Store", "Instructions") == home_path(home, store) + " fixed for this Session", status
         assert "gpt-5.6-luna" not in status, status
         terminal_step(master, "/exit", "Resume: ")
         _, errors = terminal_exit(caller, master)

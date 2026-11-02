@@ -31,6 +31,7 @@ const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const unseen = @import("unseen.zig");
 const status_page = @import("status_page.zig");
+const preferences = @import("preferences.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -88,20 +89,22 @@ inspection: struct {
     kind: Inspection = .status,
     // /status was asked for; the next scan shows it.
     status_requested: bool = false,
-    // The shown inspection page is /status. Each scan replaces it, in the same
-    // frame as its page, when anything it reports changed. Its one Current read
-    // follows the page's, so it is never older than the history it shows with.
-    status_page: bool = false,
-    status_digest: u64 = 0,
+    // What two /status reads took of the Session, each listing its Actions
+    // in the matching `files.actions`: the shown page's, named by `status`,
+    // and the one the next read takes, so neither is copied. Null while the
+    // shown inspection page is not /status. Each scan replaces the page, in
+    // the same frame as its own, when anything it reports changed. Its one
+    // Current read follows the page's, so it is never older than the
+    // history it shows with.
+    sessions: [2]status_page.Session = undefined,
+    status: ?u1 = null,
+    // The defaults new Sessions start from, read when /status opens and
+    // after a command run over it.
+    defaults: status_page.Defaults = error.Unread,
     // The row Up and Down move `›` over and Enter changes. Each /status
     // starts at the first; a page that comes back after a change keeps it.
     selected: status_page.Setting = status_page.first,
-    // What the shown /status page reports: the page is rendered from it
-    // again for each selection, and a row's change starts from its value.
-    // Set with every page shown.
-    facts: status_page.Facts = undefined,
-    // The submission the read that took `facts` saw, shown under them, so
-    // the page shown is the one its digest describes.
+    // The submission the shown page shows under it.
     submission: ?Submission.View = null,
     // An inspection or Host command started and its result has not been
     // presented. A command may change configuration, so Messages and consent wait
@@ -224,14 +227,16 @@ const notice_capacity = @max(
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .known_read = self.known_read };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .known_read = self.known_read };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
-        job.watch_status = self.inspection.status_page and self.terminal.screen.view == .inspection;
-        job.status_shown = self.inspection.status_digest;
-        // The page reports the submission the UI shows with it.
-        if (job.open_status or job.watch_status) job.inspection_submission = self.submission.view();
+        job.watch_status = self.statusShown();
+        const shown = self.inspection.status;
+        const taken: u1 = if (shown) |index| ~index else 0;
+        job.status_shown = if (shown) |index| &self.inspection.sessions[index] else null;
+        job.status_taken = &self.inspection.sessions[taken];
+        job.status_actions = self.files.actions[taken];
     }
     job.result.compact_tools = self.live.compact_tools;
     return job;
@@ -1711,6 +1716,11 @@ fn settleReader(self: *Self) !void {
     } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
         if (self.reading.phase != .details or self.admission.details_sent == self.admission.sent) try self.showInspection();
         self.inspection.command_running = false; // Shown; exit no longer prints it.
+        // A /setup run over the page may have changed the defaults it shows.
+        if (self.reading.phase == .inspection and self.inspection.kind == .command and self.statusShown()) {
+            self.inspection.defaults = savedDefaults(self.home);
+            try self.refreshStatusPage();
+        }
     }
     try self.applyReader(end);
 }
@@ -1973,7 +1983,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
             self.admission.echo = null;
         };
-        if (result.status) try self.applyStatus();
+        if (self.job.open_status or self.job.watch_status) try self.applyStatus();
         if (result.line) |*line| self.line = line.*;
         if (result.hint) |*hint| self.hint = hint.*;
         self.live.view = result.live;
@@ -2091,7 +2101,7 @@ fn showInspection(self: *Self) !void {
             return;
         }
     }
-    self.inspection.status_page = false;
+    self.inspection.status = null;
     try self.terminal.screen.showFile(self.init.io, self.files.inspection, false);
     // The page heading already says how to return.
     self.notice = null;
@@ -2134,20 +2144,45 @@ fn applyStatus(self: *Self) !void {
     const screen = self.terminal.screen;
     const open = self.job.open_status and self.inspection.status_requested;
     if (!open and !self.statusShown()) return;
-    self.inspection.facts = self.job.status_facts;
-    self.inspection.submission = self.job.inspection_submission;
-    self.inspection.status_digest = self.job.result.status_digest;
-    try self.writeStatusPage();
+    const submission = self.submission.view();
+    if (!self.job.result.status and std.meta.eql(submission, self.inspection.submission)) return;
+    if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
+    self.inspection.submission = submission;
     if (open) {
         self.inspection.status_requested = false;
+        self.inspection.defaults = savedDefaults(self.home);
+        try self.writeStatusPage();
         try screen.showFile(self.init.io, self.files.status, false);
         self.notice = null;
-    } else try screen.refreshFile(self.init.io, self.files.status);
-    self.inspection.status_page = true;
+    } else try self.refreshStatusPage();
 }
 
-/// Renders the /status page from the facts it shows, `›` on the selected
-/// row, into the status file the screen shows.
+/// The defaults new Sessions start from, as the page shows them.
+fn savedDefaults(home: []const u8) status_page.Defaults {
+    const values = try preferences.load(home);
+    var saved: status_page.Saved = .{
+        .provider = if (values.provider.len == 0) status_page.Saved.rui else std.meta.stringToEnum(protocol.Provider, values.provider.slice()) orelse error.UnsupportedPreferenceProvider,
+        .model = .{ .len = 0 },
+        .effort = values.reasoning_effort,
+        .notifications = values.notifications,
+        .store = .{ .len = 0 },
+    };
+    try saved.model.set(values.model.slice());
+    if (saved.store) |*store| {
+        var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        if (values.store.len != 0) try store.set(values.store.slice()) else if (preferences.defaultStore(home, &fallback)) |path| try store.set(path) else |err| saved.store = err;
+    } else |_| unreachable;
+    return saved;
+}
+
+/// What the shown /status page reports.
+fn statusFacts(self: *const Self) status_page.Facts {
+    return .{ .home = self.home, .store = self.store, .session = &self.inspection.sessions[self.inspection.status.?], .defaults = &self.inspection.defaults };
+}
+
+/// Renders the /status page, `›` on the selected row, into the status file
+/// the screen shows: its facts, the Actions its read listed, then the
+/// submission under it.
 fn writeStatusPage(self: *Self) !void {
     const io = self.init.io;
     const file = self.files.status;
@@ -2155,8 +2190,23 @@ fn writeStatusPage(self: *Self) !void {
     try io.vtable.fileSeekTo(io.userdata, file, 0);
     var buffer: [4096]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
-    try reads.writeStatus(&self.inspection.facts, self.inspection.selected, self.inspection.submission, &output.interface);
+    const out = &output.interface;
+    const facts = self.statusFacts();
+    try status_page.render(facts, self.inspection.selected, out);
+    var actions = self.files.actions[self.inspection.status.?].reader(io, &.{});
+    _ = actions.interface.streamRemaining(out) catch |err| return switch (err) {
+        error.ReadFailed => actions.err.?,
+        error.WriteFailed => output.err.?,
+    };
+    try status_page.writeWorkEnd(&facts.session.work, out);
+    try reads.writeSubmission(self.inspection.submission, out);
     try output.flush();
+}
+
+/// Renders the shown /status page again and shows it in place.
+fn refreshStatusPage(self: *Self) !void {
+    try self.writeStatusPage();
+    try self.terminal.screen.refreshFile(self.init.io, self.files.status);
 }
 
 /// The view an inspection runs over. Input goes to the editor the latest
@@ -2169,7 +2219,7 @@ fn leaveFor(self: *Self, kind: Inspection) !void {
 
 /// The /status page is the view shown.
 fn statusShown(self: *const Self) bool {
-    return self.inspection.status_page and self.terminal.screen.view == .inspection;
+    return self.inspection.status != null and self.terminal.screen.view == .inspection;
 }
 
 /// Up or Down on the /status page with an empty draft moves `›` to the
@@ -2177,10 +2227,8 @@ fn statusShown(self: *const Self) bool {
 fn moveSelection(self: *Self, down: bool) !bool {
     if (!self.statusShown() or self.input.composition().bytes.len != 0) return false;
     self.inspection.selected = status_page.step(self.inspection.selected, down);
-    try self.writeStatusPage();
-    const screen = self.terminal.screen;
-    try screen.refreshFile(self.init.io, self.files.status);
-    screen.revealLine(status_page.line(self.inspection.selected));
+    try self.refreshStatusPage();
+    self.terminal.screen.revealLine(status_page.line(self.inspection.selected));
     return true;
 }
 
@@ -2191,7 +2239,7 @@ fn startChange(self: *Self) bool {
     if (!self.statusShown() or self.input.composition().bytes.len != 0) return false;
     var buffer: [status_page.max_draft_bytes]u8 = undefined;
     // Up and Down select only changeable rows.
-    switch (self.input.append(status_page.draft(self.inspection.selected, &self.inspection.facts, &buffer).?)) {
+    switch (self.input.append(status_page.draft(self.inspection.selected, self.statusFacts(), &buffer).?)) {
         // A value too long for the draft says so, as a list word does.
         .refused => |why| self.notice = refusedNotice(why),
         else => {},
@@ -2210,6 +2258,8 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
     defer directory.cleanup();
     const page = try directory.dir.createFile(std.testing.io, "page", .{ .read = true });
     defer page.close(std.testing.io);
+    const actions = try directory.dir.createFile(std.testing.io, "actions", .{ .read = true });
+    defer actions.close(std.testing.io);
     // Longer than a notice, so it opens as a page and hides the Action.
     const rows: [512]u8 = @splat('\n');
     try page.writePositionalAll(std.testing.io, &rows, 0);
@@ -2217,7 +2267,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
     for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "/status" }, .{ "a", "a" } }) |line| {
         errdefer std.debug.print("change={s} line={s}\n", .{ @tagName(change), line[1] });
         var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
-        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page, .actions = .{ actions, actions } }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
@@ -2254,7 +2304,9 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
                 try self.showInspection();
             },
             .status_page => {
-                self.job.status_facts = status_page.sample();
+                self.job.status_taken = &self.inspection.sessions[0];
+                status_page.sample(self.job.status_taken);
+                self.job.result.status = true;
                 self.job.open_status = true;
                 self.inspection.status_requested = true;
                 try self.applyStatus();
@@ -3461,34 +3513,60 @@ fn rowWith(screen: *Screen, needle: []const u8, storage: []u8) ?[]const u8 {
     return null;
 }
 
-/// Shows a /status page of `facts`, as a scan that read it does: the page
-/// asked for, or, with `open` false, the page shown refreshed in place.
-fn showStatus(held: *HeldFrontend, facts: *const status_page.Facts, open: bool) !void {
-    held.self.job.status_facts = facts.*;
-    held.self.job.open_status = open;
-    held.self.inspection.status_requested = open;
-    try held.self.applyStatus();
-    held.self.dirty = true;
+/// Shows a /status page as a scan that read it does: the page asked for,
+/// or, with `open` false, the page shown refreshed in place. Its Session is
+/// the sample's named `label`, with the model the composer names and no
+/// web search.
+fn showStatus(held: *HeldFrontend, open: bool, label: []const u8) !void {
+    const self = &held.self;
+    const session = &self.inspection.sessions[if (self.inspection.status) |shown| ~shown else 0];
+    status_page.sample(session);
+    session.web_search = false;
+    try session.model.set("gpt-5.5");
+    try session.label.set(label);
+    self.job.status_taken = session;
+    self.job.result.status = true;
+    self.job.open_status = open;
+    self.inspection.status_requested = open;
+    try self.applyStatus();
+    self.dirty = true;
     try held.settle();
 }
 
-/// A /status page's facts, its Model the one the composer names.
-fn statusFacts() !status_page.Facts {
-    var facts = status_page.sample();
-    facts.web_search = false;
-    try facts.model.set("gpt-5.5");
-    return facts;
+/// Gives `held` the files a /status page needs, and a HOME with no saved
+/// defaults.
+fn statusFiles(held: *HeldFrontend) !void {
+    const io = std.testing.io;
+    held.self.files.status = try held.tmp.dir.createFile(io, "status", .{ .read = true });
+    for (&held.self.files.actions, 0..) |*file, index| file.* = try held.tmp.dir.createFile(io, if (index == 0) "actions0" else "actions1", .{ .read = true });
+    held.self.home = held.self.directory;
+}
+
+fn closeStatusFiles(held: *HeldFrontend) void {
+    held.self.files.status.close(std.testing.io);
+    for (held.self.files.actions) |file| file.close(std.testing.io);
+}
+
+test "defaults no path or file names are unreadable, and none saved are Rui's" {
+    try std.testing.expectError(error.InvalidHome, savedDefaults(""));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    const saved = try savedDefaults(home);
+    try std.testing.expectEqual(status_page.Saved.rui, try saved.provider);
+    var store: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&store, "{s}/.local/share/rui/store", .{home}), (try saved.store).slice());
 }
 
 test "the /status page marks one changeable row, which Up and Down move and Enter starts changing" {
     const held = try HeldFrontend.create();
     defer held.destroy();
-    held.self.files.status = try held.tmp.dir.createFile(std.testing.io, "status", .{ .read = true });
-    defer held.self.files.status.close(std.testing.io);
+    try statusFiles(held);
+    defer closeStatusFiles(held);
     held.self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .high };
     try held.self.line.model.set("gpt-5.5");
-    const facts = try statusFacts();
-    try showStatus(held, &facts, true);
+    try showStatus(held, true, "fix-safari-export");
     var storage: [512]u8 = undefined;
     try std.testing.expectEqualStrings(" › Effort          high  model default", rowWith(held.screen, "Effort ", &storage).?);
     try std.testing.expectEqualStrings("   Permissions     bypass · Bash runs without asking", rowWith(held.screen, "Permissions", &storage).?);
@@ -3496,8 +3574,8 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     try sendKeys(&held.self, "\x1b[1;2B");
     try held.settle();
     try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Effort ", &storage).?, " › Effort"));
-    // Down moves the mark, past the Session's fixed Model and Instructions
-    // to the defaults' Model; PageUp and PageDown still scroll.
+    // Down moves the mark, past the Session's fixed Model, Store and
+    // Instructions to the defaults' Model; PageUp and PageDown still scroll.
     try sendKeys(&held.self, "\x1b[B");
     try held.settle();
     try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Effort ", &storage).?, "   Effort"));
@@ -3508,14 +3586,15 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "fixed for this Session", &storage).?, "   Model"));
     try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "set from a shell", &storage).?, "   Instructions"));
     // A refresh, as the open page's next read, keeps the mark.
-    try showStatus(held, &facts, false);
+    try showStatus(held, false, "fix-safari-export");
     try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Rui default", &storage).?, " › Model"));
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
     try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Headroom", &storage).?, " › Headroom"));
-    // Enter on a typed row puts its command and value in the draft to edit.
+    // Enter on Headroom drafts only its command, whose list offers
+    // `default`: the model's default never becomes an override of its value.
     try sendKeys(&held.self, "\r");
-    try std.testing.expectEqualStrings("/configure --output-reservation 0", held.self.input.composition().bytes);
+    try std.testing.expectEqualStrings("/configure --output-reservation ", held.self.input.composition().bytes);
     // With a draft, Up and Down keep their meaning: the mark stays.
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
@@ -3556,12 +3635,17 @@ test "a change run from the /status page replies under the page, which shows the
         errdefer std.debug.print("configured={}\n", .{configured});
         const held = try HeldFrontend.create();
         defer held.destroy();
-        held.self.files.status = try held.tmp.dir.createFile(std.testing.io, "status", .{ .read = true });
-        defer held.self.files.status.close(std.testing.io);
+        try statusFiles(held);
+        defer closeStatusFiles(held);
         held.self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "inspection", .{ .read = true });
         defer held.self.files.inspection.close(std.testing.io);
-        var facts = try statusFacts();
-        try showStatus(held, &facts, true);
+        try showStatus(held, true, "fix-safari-export");
+        var storage: [512]u8 = undefined;
+        // The defaults are read as the page opens, not on each read after.
+        const readiness: preferences.Readinesses = .initFill(.missing);
+        _ = try preferences.update(held.self.home, .{ .notifications = false }, &readiness);
+        try showStatus(held, false, "fix-safari-export");
+        try std.testing.expectEqualStrings("   Notifications   on", rowWith(held.screen, "Notifications", &storage).?);
         for (0..3) |_| try sendKeys(&held.self, "\x1b[B");
         try sendKeys(&held.self, "\r");
         try std.testing.expectEqualStrings("/configure --label fix-safari-export", held.self.input.composition().bytes);
@@ -3584,13 +3668,13 @@ test "a change run from the /status page replies under the page, which shows the
         try held.self.settleReader();
         held.self.dirty = true;
         try held.settle();
-        var storage: [512]u8 = undefined;
         if (configured) {
             try std.testing.expectEqualStrings("Configured.", held.self.notice.?);
+            // A command run over the page reads them again.
+            try std.testing.expectEqualStrings("   Notifications   off", rowWith(held.screen, "Notifications", &storage).?);
             try std.testing.expectEqualStrings(" › Name            fix-safari-export", rowWith(held.screen, "Name", &storage).?);
             // The open page's next read shows the new value, its mark where it was.
-            try facts.label.set("lane four");
-            try showStatus(held, &facts, false);
+            try showStatus(held, false, "lane four");
             try std.testing.expectEqualStrings(" › Name            lane four", rowWith(held.screen, "Name", &storage).?);
         } else {
             try std.testing.expect(rowWith(held.screen, "--label is 1-100", &storage) != null);

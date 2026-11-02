@@ -157,8 +157,8 @@ def smoke(fixture, row):
             terminal.call("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
         terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
     if row["name"] == "tmux-status":
-        terminal.wait(lambda text: "Browsing" in text and f"Session: {fixture.session}" in text
-                      and "Permission:" in text and "Work:" in text, "status page")
+        terminal.wait(lambda text: "Browsing" in text and " Status · " in text and f" · {fixture.session}" in text
+                      and "Permissions     " in text and " Work" in text, "status page")
         terminal.call("send-keys", "-t", "td4:0.0", "Escape")
         terminal.wait(lambda text: "Browsing" not in text and "›" in text, "status returned to live")
         assert_submitted(fixture.endpoint.requests, [])

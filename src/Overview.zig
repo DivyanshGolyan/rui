@@ -1095,13 +1095,13 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     }
     self.screen_fresh = false;
     screen.vx.queueRefresh();
-    var opened: [4]std.Io.File = undefined;
+    var opened: [6]std.Io.File = undefined;
     for (&opened, 0..) |*file, count| file.* = self.hooks.scratch(self.init) catch |err| {
         for (opened[0..count]) |done| done.close(io);
         left.ended = err;
         return left;
     };
-    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .status = opened[3] };
+    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .status = opened[3], .actions = opened[4..6].* };
     const frontend = self.init.gpa.create(SessionFrontend) catch |err| {
         for (opened) |file| file.close(io);
         left.ended = err;
@@ -1211,7 +1211,10 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
 /// guidance, then names the Session to resume.
 fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     const io = self.init.io;
-    defer if (left.files) |files| inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(io);
+    defer if (left.files) |files| {
+        inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(io);
+        for (files.actions) |file| file.close(io);
+    };
     defer if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
     const session = &left.session;
     const store = self.options.store;

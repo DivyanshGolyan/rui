@@ -359,6 +359,8 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
 /// The saved defaults select a provider and model whose sign-in is usable.
 fn nextSessionReady(values: *const preferences.Values, readiness: *const preferences.Readinesses) bool {
     const selectable = model_capability.capabilities(readiness);
+    // A saved provider or model Rui cannot select is not ready either: the
+    // full report that follows says which.
     const selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch return false;
     return selection == .selected and selection.selected.readiness.usable();
 }
@@ -1826,24 +1828,39 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
     try writer.flush();
 }
 
-/// Everything /status reports, from one Current capture whose attention
-/// rows are in `file`, and the saved defaults, null when unreadable.
-pub fn sessionStatus(io: std.Io, home: []const u8, defaults: ?*const preferences.Values, current: *const protocol_reply.Current, file: std.Io.File, facts: *status_page.Facts) anyerror!void {
-    try takeStatusFacts(facts, home, defaults, &current.settings);
-    facts.work = .{ .state = std.meta.activeTag(current.work.state.value), .approvals = current.actionable_count, .actions = undefined, .indeterminate = current.first_indeterminate, .indeterminate_count = current.indeterminate_count };
-    if (current.actionable_count == 0) return;
-    const Sink = struct {
-        work: *status_page.Work,
-        listed: usize = 0,
+/// What /status reports of the Session, from one Current capture whose
+/// attention rows are in `rows`, taken into `taken`. True when it differs
+/// from `shown` (always without one): `actions` then lists its Actions
+/// awaiting approval, in Current's order.
+pub fn sessionStatus(io: std.Io, current: *const protocol_reply.Current, rows: std.Io.File, taken: *status_page.Session, shown: ?*const status_page.Session, actions: std.Io.File) anyerror!bool {
+    try takeStatus(taken, current);
+    const Digest = struct {
+        hash: std.hash.Wyhash = .init(0),
+        count: u64 = 0,
         pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
-            if (row != .actionable or self.listed == status_page.max_listed_actions) return;
-            self.work.actions[self.listed] = row.actionable.action.value;
-            self.listed += 1;
+            if (row != .actionable) return;
+            self.hash.update(std.mem.asBytes(&row.actionable.action.value));
+            self.count += 1;
         }
     };
-    var sink: Sink = .{ .work = &facts.work };
-    try current.traverse(io, file, &sink);
-    if (sink.listed != facts.work.listed().len) return error.InvalidObservation;
+    var digest: Digest = .{};
+    try current.traverse(io, rows, &digest);
+    if (digest.count != current.actionable_count) return error.InvalidObservation;
+    taken.work.actions = digest.hash.final();
+    if (shown) |page| if (taken.eql(page)) return false;
+    try actions.setLength(io, 0);
+    var buffer: [1024]u8 = undefined;
+    var output = actions.writer(io, &buffer);
+    const List = struct {
+        out: *std.Io.Writer,
+        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
+            if (row == .actionable) try status_page.writeAction(row.actionable.action.value, self.out);
+        }
+    };
+    var list: List = .{ .out = &output.interface };
+    try current.traverse(io, rows, &list);
+    try output.interface.flush();
+    return true;
 }
 
 comptime {
@@ -1851,75 +1868,95 @@ comptime {
     std.debug.assert(status_page.max_label_bytes == protocol.max_label_bytes);
     std.debug.assert(status_page.max_path_bytes >= protocol.max_workspace_bytes and status_page.max_path_bytes >= std.Io.Dir.max_path_bytes);
     std.debug.assert(status_page.max_model_bytes == protocol.max_model_bytes);
+    std.debug.assert(status_page.max_key_bytes == protocol.max_key_bytes);
+    std.debug.assert(status_page.max_outcome_bytes == protocol.max_code_bytes);
+    std.debug.assert(status_page.max_recent == @typeInfo(@FieldType(protocol_reply.Current, "recent")).array.len);
 }
 
-test "/status takes its facts from Current and the saved defaults, leaving recent messages to /requests" {
+test "/status takes the Session's facts from Current, lists every Action awaiting approval, and says when they change" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
+    defer listed.close(io);
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
-    var saved: preferences.Values = .{};
-    saved.notifications = false;
-    const facts = try std.testing.allocator.create(status_page.Facts);
-    defer std.testing.allocator.destroy(facts);
+    const taken = try std.testing.allocator.create([2]status_page.Session);
+    defer std.testing.allocator.destroy(taken);
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
+    var defaults: status_page.Defaults = error.AccessDenied;
     var bytes: [4096]u8 = undefined;
-    for ([_]?*const preferences.Values{ &saved, null }) |defaults| {
-        try sessionStatus(io, "/home/d", defaults, &reply.current, file, facts);
-        var out = std.Io.Writer.fixed(&bytes);
-        try status_page.render(facts, null, &out);
-        const page = out.buffered();
-        // Recent messages are /requests'; nothing follows the work's state.
-        try std.testing.expect(std.mem.endsWith(u8, page, " Work\n   Finished\n"));
-        try std.testing.expect(std.mem.startsWith(u8, page, " Status · lane four · k7m2qx\n"));
-        try std.testing.expect(std.mem.indexOf(u8, page, "Folder          ~/w\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, page, "Tools           bash\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, page, "Permissions     ask · Bash asks first\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, page, "Effort          high  \x1b[90mSession override") != null);
-        try std.testing.expect(std.mem.indexOf(u8, page, "Compact at      1,000 tokens · now 310") != null);
-        try std.testing.expect(std.mem.indexOf(u8, page, "Model           gpt-6.1-sol · API key  \x1b[90mfixed") != null);
-        if (defaults != null) {
-            try std.testing.expect(std.mem.indexOf(u8, page, "Notifications   off\n") != null);
-            // No saved Store: the one commands fall back to.
-            try std.testing.expect(std.mem.indexOf(u8, page, "Store           ~/.local/share/rui/store\n") != null);
-        } else try std.testing.expect(std.mem.indexOf(u8, page, "Notifications   unavailable\n") != null);
+    var out = std.Io.Writer.fixed(&bytes);
+    try status_page.render(.{ .home = "/home/d", .store = "/home/d/s", .session = &taken[0], .defaults = &defaults }, .effort, &out);
+    try status_page.writeWorkEnd(&taken[0].work, &out);
+    const page = out.buffered();
+    for ([_][]const u8{
+        " Status · lane four · k7m2qx\n",
+        "Folder          ~/w\n",
+        "Tools           bash\n",
+        "Permissions     ask · Bash asks first\n",
+        "Effort          high  \x1b[90mSession override",
+        "Compact at      1,000 tokens · now 310",
+        "Model           gpt-6.1-sol · API key  \x1b[90mfixed",
+        "Store           ~/s  \x1b[90mfixed",
+        "Instructions    none\n",
+        " Work\n   Finished\n   Current message: m1\n   Recent messages (use /result KEY for an answer):\n     m1: completed\n",
+    }) |expected| {
+        errdefer std.debug.print("missing {s} in\n{s}\n", .{ expected, page });
+        try std.testing.expect(std.mem.indexOf(u8, page, expected) != null);
     }
+    try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
+    // The same capture again is no change, and leaves the list as it was.
+    try listed.writePositionalAll(io, "kept", 0);
+    try std.testing.expect(!try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    try std.testing.expectEqual(@as(u64, 4), try listed.length(io));
+    taken[0].work.recent_count = 0;
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
 }
 
-/// The facts the settings rows show, from the Session's settings and the
-/// saved defaults.
-fn takeStatusFacts(facts: *status_page.Facts, home: []const u8, defaults: ?*const preferences.Values, settings: *const protocol_reply.Current.Settings) !void {
-    facts.home = home;
-    try facts.session.set(settings.reference.slice());
-    facts.label.len = 0;
-    if (settings.label) |label| try facts.label.set(label.slice());
-    try facts.workspace.set(settings.workspace.slice());
-    facts.provider = settings.provider.value;
-    try facts.model.set(settings.model.slice());
-    facts.effort = if (settings.reasoning_effort) |effort| effort.value else null;
-    facts.effort_override = settings.reasoning_effort_override != null;
-    facts.permission = switch (settings.permission_mode.value) {
+/// The Session's settings and work as the page shows them, its Actions'
+/// digest aside.
+fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Current) !void {
+    const settings = &current.settings;
+    try taken.session.set(settings.reference.slice());
+    taken.label.len = 0;
+    if (settings.label) |label| try taken.label.set(label.slice());
+    try taken.workspace.set(settings.workspace.slice());
+    taken.provider = settings.provider.value;
+    try taken.model.set(settings.model.slice());
+    taken.effort = if (settings.reasoning_effort) |effort| effort.value else null;
+    taken.effort_override = settings.reasoning_effort_override != null;
+    taken.permission = switch (settings.permission_mode.value) {
         .ask => .ask,
         .bypass => .bypass,
     };
-    facts.bash = settings.tools.bash;
-    facts.web_search = settings.tools.web_search;
-    facts.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
-    facts.compaction_override = settings.compaction_trigger_override != null;
-    facts.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
-    facts.output_reservation = settings.output_reservation.value;
-    facts.reservation_override = settings.output_reservation_override != null;
-    facts.defaults_read = defaults != null;
-    const saved = defaults orelse return;
-    facts.defaults.provider = if (saved.provider.len != 0) std.meta.stringToEnum(protocol.Provider, saved.provider.slice()) else null;
-    try facts.defaults.model.set(saved.model.slice());
-    facts.defaults.effort = saved.reasoning_effort;
-    facts.defaults.notifications = saved.notifications;
-    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try facts.defaults.store.set(if (saved.store.len != 0) saved.store.slice() else preferences.defaultStore(home, &fallback) catch "");
+    taken.bash = settings.tools.bash;
+    taken.web_search = settings.tools.web_search;
+    taken.instructions = settings.instructions.bytes.value != 0;
+    taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
+    taken.compaction_override = settings.compaction_trigger_override != null;
+    taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
+    taken.output_reservation = settings.output_reservation.value;
+    taken.reservation_override = settings.output_reservation_override != null;
+    const work = &taken.work;
+    work.state = std.meta.activeTag(current.work.state.value);
+    work.approvals = current.actionable_count;
+    work.current_message = null;
+    if (current.selected_message) |selected| {
+        work.current_message = .{ .len = 0 };
+        try work.current_message.?.set(selected.slice());
+    }
+    work.indeterminate = current.first_indeterminate;
+    work.indeterminate_count = current.indeterminate_count;
+    work.recent_count = current.recent_count;
+    for (current.recent[0..current.recent_count], work.recent[0..current.recent_count]) |*from, *to| {
+        try to.message.set(from.message.slice());
+        try to.outcome.set(from.outcome.slice());
+    }
 }
 
 fn writeSafeFieldTo(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
