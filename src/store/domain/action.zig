@@ -88,10 +88,10 @@ fn containsNoActiveOperation(_: *const anyopaque, _: u64) bool {
 }
 
 pub fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
     if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
-    return access.finish(Ordinary.action, actionContentLocked(self, session_ref, action_id, column));
+    return entry.finish(Ordinary.action, actionContentLocked(self, session_ref, action_id, column));
 }
 
 fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {

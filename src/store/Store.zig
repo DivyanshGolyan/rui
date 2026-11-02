@@ -81,7 +81,7 @@ pub const Store = struct {
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
-    // Access.release closes the read transaction before unlocking, including
+    // Entry.release closes the read transaction before unlocking, including
     // errors and yielded historical scans. Logical readers cannot pin the WAL.
     read_blob: ContentBlob = .{},
     // Source-level proof only: no counters/storage in the production Store.
@@ -329,9 +329,9 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        const access = enter(self, .none) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, configuration_domain.configureLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .none) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, configuration_domain.configureLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -360,9 +360,9 @@ pub const Store = struct {
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
-        const access = enter(self, .none) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .none) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
     }
 
     pub fn stopSession(
@@ -370,9 +370,9 @@ pub const Store = struct {
         command: *const protocol.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
-        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     pub fn interruptModel(
@@ -380,9 +380,9 @@ pub const Store = struct {
         command: *const protocol.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
-        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     pub fn decidePermission(
@@ -390,27 +390,27 @@ pub const Store = struct {
         command: *const protocol.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
-        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
     }
 
     // Reverse chronological, with call order breaking ties at a completed
@@ -418,54 +418,54 @@ pub const Store = struct {
     // The fixed end is the last committed position at the first read, not a
     // count of visible rows; a private-only append cannot become public later.
     pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
     }
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
     pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
     }
 
     pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
     }
 
     /// The Message with no Session sender next to `position` at `end`: one
     /// seek in the index of those Messages, then its content's metadata.
     pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
         try request.validate();
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
     }
 
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
     }
 
     pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
         try request.validate();
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
     }
 
     pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -473,9 +473,9 @@ pub const Store = struct {
     pub fn captureFailedResponse(self: *Store, request: *const protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
         const selection = request.failed_response.?;
         const binding = binding: {
-            const access = try enter(self, .none);
-            defer access.release();
-            break :binding try access.finish(Ordinary.content, report_domain.failedResponseBindingLocked(self, request.session.slice(), selection));
+            const entry = try enter(self, .none);
+            defer entry.release();
+            break :binding try entry.finish(Ordinary.content, report_domain.failedResponseBindingLocked(self, request.session.slice(), selection));
         };
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
@@ -493,9 +493,9 @@ pub const Store = struct {
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
-            const access = try enter(self, .none);
-            defer access.release();
-            try access.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
+            const entry = try enter(self, .none);
+            defer entry.release();
+            try entry.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
         }
         return capture.seal();
     }
@@ -508,9 +508,9 @@ pub const Store = struct {
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
-            const access = try enter(self, .none);
-            defer access.release();
-            try access.finishCapture(&capture, report_domain.renderSessionListLocked(self, request, &capture));
+            const entry = try enter(self, .none);
+            defer entry.release();
+            try entry.finishCapture(&capture, report_domain.renderSessionListLocked(self, request, &capture));
         }
         return capture.seal();
     }
@@ -530,9 +530,9 @@ pub const Store = struct {
     }
 
     pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, model_admission_domain.admitNextModelAttemptLocked(self, kind, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, model_admission_domain.admitNextModelAttemptLocked(self, kind, faults));
     }
 
     pub fn admitNextActionAttempt(
@@ -541,28 +541,28 @@ pub const Store = struct {
         faults: Faults,
     ) !?ActionAttemptAdmission {
         if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, action_domain.admitNextActionAttemptLocked(self, bash_timeout_ms, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, action_domain.admitNextActionAttemptLocked(self, bash_timeout_ms, faults));
     }
 
     /// `out` is valid only when this returns without error.
     pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.action_attempt, action_domain.readBashExecutionInputLocked(self, binding, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.action_attempt, action_domain.readBashExecutionInputLocked(self, binding, out));
     }
 
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, action_domain.revokeActionSenderLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, action_domain.revokeActionSenderLocked(self, binding));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, action_domain.actionSupersededByStopLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, action_domain.actionSupersededByStopLocked(self, binding));
     }
 
     pub fn withActionDispatchHandoff(
@@ -571,9 +571,9 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        try access.finish(Ordinary.action_dispatch, action_domain.validateActionDispatchLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatchLocked(self, binding));
         // Launch failures are effect outcomes, not canonical faults; the
         // caller settles or fences them. The handoff still runs under the lock.
         try handoff(context);
@@ -587,15 +587,15 @@ pub const Store = struct {
         faults: Faults,
     ) !ActionSettlement {
         if (result.len == 0) return error.InvalidActionResult;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttemptLocked(self, binding, code, result, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttemptLocked(self, binding, code, result, faults));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, .{}, action_domain.recoverOneUncertainActionLocked(self, active));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, .{}, action_domain.recoverOneUncertainActionLocked(self, active));
     }
 
     pub fn tryAdmitNextModelRetry(
@@ -603,9 +603,9 @@ pub const Store = struct {
         active: ActiveOperationFilter,
         faults: Faults,
     ) !?AttemptAdmission {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, model_admission_domain.tryAdmitNextModelRetryLocked(self, active, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, model_admission_domain.tryAdmitNextModelRetryLocked(self, active, faults));
     }
 
     /// Opens the view in `out`, where it stays until it closes: a view
@@ -616,10 +616,10 @@ pub const Store = struct {
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
-        const access = try enter(self, .none);
-        defer access.release();
-        try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
-        return access.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        return entry.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
     }
 
     pub fn isFenced(self: *const Store) bool {
@@ -632,9 +632,9 @@ pub const Store = struct {
     }
 
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, model_settlement_domain.operationSupersededByControlLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, model_settlement_domain.operationSupersededByControlLocked(self, binding));
     }
 
     pub fn withDispatchHandoff(
@@ -643,9 +643,9 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
         // As for Actions, dispatch failures belong to the caller.
         try handoff(context);
     }
@@ -656,9 +656,9 @@ pub const Store = struct {
     /// prevents a second refresh. Returns false when the Operation already
     /// claimed, or when no replacement allowance would remain.
     pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.attempt_binding, .{}, model_settlement_domain.claimModelAuthRefreshLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.attempt_binding, .{}, model_settlement_domain.claimModelAuthRefreshLocked(self, binding));
     }
 
     pub fn settleModelAttemptFailure(
@@ -677,18 +677,18 @@ pub const Store = struct {
         }
         const report = failure.report();
         std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.attempt_binding, faults, model_settlement_domain.settleModelAttemptFailureLocked(self, binding, failure, disposition, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.attempt_binding, faults, model_settlement_domain.settleModelAttemptFailureLocked(self, binding, failure, disposition, faults));
     }
 
     pub fn recoverOneExhaustedModelAttempt(
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, .{}, model_settlement_domain.recoverOneExhaustedModelAttemptLocked(self, active));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, .{}, model_settlement_domain.recoverOneExhaustedModelAttemptLocked(self, active));
     }
 
     pub fn settleModelSuccess(
@@ -697,9 +697,9 @@ pub const Store = struct {
         output: *const ValidatedOutput,
         faults: Faults,
     ) !void {
-        const access = try enter(self, .fromSettlement(faults.settlement_trace));
-        defer access.release();
-        return access.finishTransaction(Ordinary.model_success, faults, model_settlement_domain.settleModelSuccessLocked(self, binding, output, faults));
+        const entry = try enter(self, .fromSettlement(faults.settlement_trace));
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.model_success, faults, model_settlement_domain.settleModelSuccessLocked(self, binding, output, faults));
     }
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
@@ -837,20 +837,20 @@ pub const Ordinary = struct {
     }
 };
 
-const AccessTrace = union(enum) {
+const EntryTrace = union(enum) {
     none,
     control: ControlTrace,
     settlement: SettlementTrace,
 
-    fn fromControl(trace: ?ControlTrace) AccessTrace {
+    fn fromControl(trace: ?ControlTrace) EntryTrace {
         return if (trace) |value| .{ .control = value } else .none;
     }
 
-    fn fromSettlement(trace: ?SettlementTrace) AccessTrace {
+    fn fromSettlement(trace: ?SettlementTrace) EntryTrace {
         return if (trace) |value| .{ .settlement = value } else .none;
     }
 
-    fn mark(self: AccessTrace, phase: enum { requested, acquired, complete }) void {
+    fn mark(self: EntryTrace, phase: enum { requested, acquired, complete }) void {
         switch (self) {
             .none => {},
             .control => |trace| trace.mark(switch (phase) {
@@ -871,14 +871,14 @@ const AccessTrace = union(enum) {
 /// `release`. Errors leave through `finish` or `finishTransaction`, which
 /// return the entry point's declared ordinary errors and fence the rest.
 /// Only `lockAdmin` otherwise takes the mutex, for open/close diagnostics.
-const Access = struct {
+const Entry = struct {
     const max_result_bytes = 1024;
 
     store: *Store,
-    trace: AccessTrace,
+    trace: EntryTrace,
     changes: i64,
 
-    pub fn finish(self: Access, comptime Expected: type, result: anytype) @TypeOf(result) {
+    pub fn finish(self: Entry, comptime Expected: type, result: anytype) @TypeOf(result) {
         comptime Ordinary.produced(Expected, @TypeOf(result));
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
@@ -889,7 +889,7 @@ const Access = struct {
 
     /// Rolls back any open transaction first; a failed rollback fences
     /// and replaces the original error, including an ordinary one.
-    pub fn finishTransaction(self: Access, comptime Expected: type, faults: Faults, result: anytype) Transaction(@TypeOf(result)) {
+    pub fn finishTransaction(self: Entry, comptime Expected: type, faults: Faults, result: anytype) Transaction(@TypeOf(result)) {
         comptime Ordinary.produced(Expected, @TypeOf(result));
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
@@ -900,7 +900,7 @@ const Access = struct {
     }
 
     /// Report capture marks its own scratch failures ordinary.
-    fn finishCapture(self: Access, capture: *const SessionReportCapture, result: anytype) @TypeOf(result) {
+    fn finishCapture(self: Entry, capture: *const SessionReportCapture, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
             if (capture.ordinary_failure) return err;
@@ -908,7 +908,7 @@ const Access = struct {
         };
     }
 
-    pub fn release(self: Access) void {
+    pub fn release(self: Entry) void {
         const store = self.store;
         store.read_blob.close();
         if (@import("builtin").is_test) store.statements.assertIdle();
@@ -946,20 +946,20 @@ const Access = struct {
     }
 };
 
-pub fn enter(self: *Store, trace: AccessTrace) error{StoreFenced}!Access {
+pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
     if (self.isFenced()) return error.StoreFenced;
     trace.mark(.requested);
     self.mutex.lockUncancelable(self.io);
     self.touched = .{};
     // Rows a test changed outside any entry point belong to none.
     if (@import("builtin").is_test) clearTouchOracleForTesting(self);
-    const access: Access = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database) };
+    const entry: Entry = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database) };
     trace.mark(.acquired);
     if (self.isFenced()) {
-        access.release();
+        entry.release();
         return error.StoreFenced;
     }
-    return access;
+    return entry;
 }
 
 /// Administrative access without canonical classification.

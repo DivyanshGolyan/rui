@@ -170,9 +170,9 @@ pub fn writeCheckedBytes(_: *Store, blob: ?*c.sqlite3_blob, hash: *std.crypto.ha
 }
 
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, openContentIdentityLocked(self, reference, private));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, openContentIdentityLocked(self, reference, private));
 }
 
 fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
@@ -185,9 +185,9 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     if (start > reader.reference.length) return error.RangeOutOfBounds;
     const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
     if (wanted != 0) reader.prepareRead();
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    try access.finish(Ordinary.none, readOwnedContentLocked(self, reader, start, destination[0..wanted]));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    try entry.finish(Ordinary.none, readOwnedContentLocked(self, reader, start, destination[0..wanted]));
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
 }
@@ -198,7 +198,7 @@ pub fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, 
 }
 
 // Each reader owns its copied source window. Neither interleaved readers
-// nor another row at the same offset can borrow those bytes. Access still
+// nor another row at the same offset can borrow those bytes. Entry still
 // owns and closes the SQLite handle before callbacks or yields.
 fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: u64, end: u64, destination: []u8) !void {
     if (destination.len == 0) return;
@@ -223,7 +223,7 @@ fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: 
     }
 }
 
-// Called only inside one Access. Reuse avoids repeated overflow-page walks
+// Called only inside one Entry. Reuse avoids repeated overflow-page walks
 // within synchronous work, never across callbacks or preparation yields.
 fn readBlob(self: *Store, content_id: i64, start: u64, destination: []u8) !void {
     if (destination.len == 0) return;

@@ -420,9 +420,9 @@ pub const HistoricalReader = struct {
 pub const OutputItemKind = output_format.OutputItemKind;
 
 fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, readHistoricalSettingsLocked(self, view, out));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, readHistoricalSettingsLocked(self, view, out));
 }
 
 fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
@@ -469,21 +469,21 @@ fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *Histo
 }
 
 fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return .{ .ready = try access.finish(Ordinary.historical_entry, readHistoricalEntryLocked(self, view, after_position)) };
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return .{ .ready = try entry.finish(Ordinary.historical_entry, readHistoricalEntryLocked(self, view, after_position)) };
 }
 
 fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, validateHistoricalOutputsStepLocked(self, view));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, validateHistoricalOutputsStepLocked(self, view));
 }
 
 fn readPrefixSeal(self: *Store, binding: AttemptBinding) !?PrefixSeal {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, readPrefixSealLocked(self, binding));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, readPrefixSealLocked(self, binding));
 }
 
 pub fn readPrefixSealLocked(self: *Store, binding: AttemptBinding) !?PrefixSeal {
@@ -497,9 +497,9 @@ pub fn readPrefixSealLocked(self: *Store, binding: AttemptBinding) !?PrefixSeal 
 }
 
 fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.attempt_binding, .{}, recordPrefixSealLocked(self, binding, seal));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finishTransaction(Ordinary.attempt_binding, .{}, recordPrefixSealLocked(self, binding, seal));
 }
 
 fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
@@ -516,9 +516,9 @@ fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const Pr
 }
 
 fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, readCompactionAnchorLocked(self, base_id));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, readCompactionAnchorLocked(self, base_id));
 }
 
 /// The position of the base's one compaction item.
@@ -822,9 +822,9 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
 }
 
 fn readHistoricalOutput(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, readHistoricalOutputLocked(self, view, position));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, readHistoricalOutputLocked(self, view, position));
 }
 
 fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
@@ -882,9 +882,9 @@ fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64
 }
 
 fn readHistoricalPart(self: *Store, view: *HistoricalView) !?HistoricalPart {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, readHistoricalPartLocked(self, view));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, readHistoricalPartLocked(self, view));
 }
 
 fn readHistoricalPartLocked(self: *Store, view: *HistoricalView) !?HistoricalPart {
@@ -966,9 +966,9 @@ fn readHistoricalToolResult(
     self: *Store,
     view: *HistoricalView,
 ) !?HistoricalToolResult {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, readHistoricalToolResultLocked(self, view));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, readHistoricalToolResultLocked(self, view));
 }
 
 fn readHistoricalToolResultLocked(

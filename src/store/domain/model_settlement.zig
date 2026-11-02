@@ -122,9 +122,9 @@ pub const ValidatedOutput = struct {
 };
 
 pub fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    try access.finish(Ordinary.attempt_binding, validateCurrentAttempt(self, binding));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    try entry.finish(Ordinary.attempt_binding, validateCurrentAttempt(self, binding));
 }
 
 pub fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKind {

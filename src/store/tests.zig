@@ -1034,8 +1034,8 @@ test "a Session creation that rolls back never reaches a since listing" {
     const session = try configureTestSession(&storage, "rollback-config");
     const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
     {
-        const access = try store_core.enter(&storage, .none);
-        defer access.release();
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
         const current = (try store_core.readSessionForTesting(&storage, session.slice())).?;
         try std.testing.expect(try configuration_domain.insertSession(&storage, "zzzzzz", &current));
@@ -1062,8 +1062,8 @@ test "the touch oracle names a Session whose rows changed without a touch" {
     const session = configured.accepted.session.slice();
     const generation = storage.commit_generation.load(.acquire);
     {
-        const access = try store_core.enter(&storage, .none);
-        defer access.release();
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
         // A writer that forgets its touch.
         var sql: [96]u8 = undefined;
@@ -2449,7 +2449,7 @@ test "canonical report and Action read failures fence later commands" {
 }
 
 test "Store entry points lock and fence only through canonical access" {
-    // Every entry point classifies its errors through `Access`; a new path
+    // Every entry point classifies its errors through `Entry`; a new path
     // cannot take the mutex, read or set the fence beside it, or enter
     // without returning through a classifier.
     const sources = .{
@@ -2482,7 +2482,7 @@ test "Store entry points lock and fence only through canonical access" {
         _ = entries.next();
         while (entries.next()) |rest| : (entered += 1) {
             const body = rest[0 .. std.mem.indexOf(u8, rest, "\n    }\n") orelse rest.len];
-            try std.testing.expect(std.mem.indexOf(u8, body, "access.finish") != null);
+            try std.testing.expect(std.mem.indexOf(u8, body, "entry.finish") != null);
         }
     }
     try std.testing.expectEqual(@as(usize, 2), locks);
@@ -2877,8 +2877,8 @@ test "claiming Session positions stops at the largest position, and fails when i
     const last: u64 = std.math.maxInt(i64);
     try execSessionSql(storage.database, "UPDATE session SET next_position=9223372036854775805 WHERE session_ref=?1", session.slice());
     {
-        const access = try store_core.enter(&storage, .none);
-        defer access.release();
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
         try std.testing.expectEqual(last - 2, try turn_domain.claimSessionPositions(&storage, session.slice(), 2));
         try std.testing.expectError(error.SessionPositionExhausted, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
@@ -2891,8 +2891,8 @@ test "claiming Session positions stops at the largest position, and fails when i
     try execSessionSql(storage.database, "UPDATE session SET next_position=1 WHERE session_ref=?1", session.slice());
     try sqlite.exec(storage.database, "CREATE TEMP TRIGGER skip_claim BEFORE UPDATE OF next_position ON main.session BEGIN SELECT RAISE(IGNORE); END");
     {
-        const access = try store_core.enter(&storage, .none);
-        defer access.release();
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
         try std.testing.expectError(error.CorruptStore, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
         try store_core.execute(&storage, "ROLLBACK");
