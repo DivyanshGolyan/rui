@@ -21,6 +21,7 @@ const failure_class = @import("failure_class.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const session_work = @import("session_work.zig");
+const TerminalText = @import("TerminalText.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
@@ -1915,7 +1916,7 @@ const Painter = struct {
         if (codepoint == '\n') return self.glyphs.newline;
         // A tab shows as one space, as in a conversation.
         if (codepoint == '\t') return " ";
-        if (codepoint < 0x20 or (codepoint >= 0x7f and codepoint < 0xa0) or codepoint == replacement) return "?";
+        if (TerminalText.isControl(codepoint) or codepoint == replacement) return "?";
         if (!self.caps.unicode and codepoint > 0x7e) return "?";
         return null;
     }
@@ -4617,6 +4618,20 @@ test "every line fits the screen as the terminal measures it" {
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |line| try std.testing.expect(gwidth.gwidth(line, caps.width) <= width);
     };
+}
+
+test "bidi controls in a title or a starter's Label cannot reorder a row" {
+    const bidi = "\u{202e}\u{2066}\u{200f}\u{061c}";
+    var state = try opened(&.{
+        session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Pay " ++ bidi ++ "evil" }),
+        session("t7v8w9", .{ .stopped = .{ .since = test_now_s - 30, .cause = .stop } }, .{ .label = "Next", .first = .{ .position = 1, .admission = 2, .sender = "k7m2qx".* } }),
+    });
+    defer state.deinit();
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Pay ????evil") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "for \"Pay ?") != null);
+    for ([_][]const u8{ "\u{202e}", "\u{2066}", "\u{200f}", "\u{061c}" }) |control| try std.testing.expect(std.mem.indexOf(u8, text, control) == null);
 }
 
 test "untrusted text cannot reach the terminal as control bytes" {

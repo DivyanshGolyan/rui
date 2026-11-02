@@ -32,8 +32,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
-    const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
-    if (ci.directory != null and test_filter != null) @panic("CI artifacts contain unfiltered tests");
+    const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text (repeatable)") orelse &.{};
+    if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseSafe,
         }),
-        .filters = if (test_filter) |filter| &.{filter} else &.{},
+        .filters = test_filters,
     });
     configureSqlite(b, tests);
     configureBashPlatform(b, tests);
@@ -64,7 +64,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseSafe,
         }),
-        .filters = &.{test_filter orelse "Host processing wait does not consume response transfer inactivity"},
+        .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
     });
     configureSqlite(b, deadline_witness);
     configureBashPlatform(b, deadline_witness);
@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseSafe,
         }),
-        .filters = if (test_filter) |filter| &.{filter} else &.{},
+        .filters = test_filters,
     });
     configureTerminalEditor(b, logic_tests);
     const run_logic_tests = ci.run(logic_tests);
@@ -97,7 +97,7 @@ pub fn build(b: *std.Build) void {
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
     if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| {
-        const h2_tests = b.addTest(.{ .root_module = h2, .filters = if (test_filter) |filter| &.{filter} else &.{} });
+        const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
@@ -110,7 +110,7 @@ pub fn build(b: *std.Build) void {
     const codec_runtime_test_step = b.step("test-codec-runtime", "Run the codec sandbox's own tests against tiny modules");
     const codec_runtime_tests = b.addTest(.{
         .root_module = addCodecRuntime(b, target, .ReleaseSafe, true),
-        .filters = if (test_filter) |filter| &.{filter} else &.{},
+        .filters = test_filters,
     });
     codec_runtime_tests.root_module.addAnonymousImport("codec_runtime_fixture", .{
         .root_source_file = addWasmModule(b, "codec-runtime-fixture", "src/codec_runtime/fixture.zig").getEmittedBin(),

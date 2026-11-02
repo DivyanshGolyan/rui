@@ -776,7 +776,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Whether the line under the input says Enter denies: only then does a
     // reason's frame offer the denial.
     var says_deny = false;
-    if (footer.notice.len != 0) {
+    if (layout.notice.length != 0) {
         _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
         says_deny = std.mem.indexOf(u8, footer.notice, deny_words) != null;
     } else if (layout.line_height != 0) {
