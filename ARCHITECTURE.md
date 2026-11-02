@@ -1718,6 +1718,7 @@ Matching retries recover the original selection/answer, including idle stops; ob
 A fresh stop needs a fresh key.
 Callers retain key and exact inputs before sending, without managing Turn identity or coordinating Session reuse for retries.
 Concurrent Session use remains outside the expected workflow.
+`rui session stop --all` reads the Session listing and sends one ordinary Session stop, with its own generated key, for each Session the overview's Ctrl-X could stop; it adds no cross-Session stop authority, and a Session that starts work after its listing page is read is not stopped.
 
 ### Interrupting one model operation
 
@@ -2283,12 +2284,12 @@ A ready existing Host retains its actual capacity/capabilities; no model capabil
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
-A row's mark pulses when the mark changes, so when the row starts, finishes, fails, stops or begins waiting; a state change under the same mark, such as working to Bash and back, holds still.
-Each row keeps the second its mark last changed, carried across listings while the mark is the same.
-Until three seconds after that second, which shows as about two seconds once the listing reports it, the mark steps through itself and `· ∙ •`, one frame per 140 ms of the monotonic clock, then holds still.
-The change second sets each pulse's phase, so marks that changed apart pulse apart.
-Only a Unicode, colour screen pulses, and a row faded while the Host does not answer holds still.
-The core ticks as each pulse ends, the overview wakes for frames only while a pulsing mark is on screen, and each frame writes only the cells that changed.
+Marks hold still: `●` active, `◌` queued, `○` idle or waiting on approval, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
+Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
+Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
+The overview wakes for frames only while a spinner is on screen, and each frame writes only the cells that changed.
+Beside its title a row says only what its mark and group leave out: approval, a retry and its countdown, the running command, stopping, and the Session that started a failed or stopped one.
+Divyansh chose this on 2026-11-02, replacing the 2026-10-30 pulse on every mark change.
 Enter on a row opens that Session's conversation; Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
 Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
 In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
@@ -2717,14 +2718,15 @@ This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
 Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
-Any other work is the conversation's last line: `• Starting · 3s`, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
+Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
 A browsed page or transcript keeps the line under its shown text, so above the status when the page is full.
 The line takes a row after the input, status and overflow rows and before call rows, which the overflow row then counts; with no row left it is dropped rather than refusing the terminal.
 While a permission prompt is open the Action's instructions speak instead.
-An overview row of work under way says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
-The overview's group headings carry no counts and no line counts its rows: the rows and the headline say it.
-Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
+The overview groups its rows as Yours, Active (thinking, running a tool, waiting on approval, retrying or stopping), Queued (waiting for a model slot), Idle, Finished, and Stopped or failed; a Session the person spoke in is in Yours only.
+Each group heading ends in its count, folded rows included, `Active · 3`, and the Queued heading says its rows' state, so they show only how long they have waited.
+Divyansh asked for the counts and chose Active and Queued on 2026-11-02, replacing the 2026-10-31 headings without counts.
 A Message a person or script sends while work is under way waits dimmed right above the status and the input's rule, as one row with the newest such Message's first line, cut to fit, and `queued`, or `N queued`, at the right, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
 Divyansh approved that row and those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
@@ -2869,7 +2871,10 @@ Only after trying those alternatives may genuine row pressure shorten the bounde
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 
-Peer Messages show as one upright, dim line each, never with `›`: `← k7m2qx · first line` for a Message from a peer, `→ k7m2qx · first line` for one this Session sent, and `! → k7m2qx — Failed` for a send its target refused.
+Peer Messages show as one upright, dim line each, never with `›`: `← Received message from NAME · first line` for a Message from a peer, `→ Messaged NAME · first line` for one this Session sent, and `! Messaged NAME — Failed` for a send its target refused.
+NAME is the peer's label as the Store holds it when the page is read, so a rename shows on every row; a peer without one shows its ID (`k7m2qx`).
+The Store looks the label up once per peer row; it is not copied into the Message.
+Peer rows group with tool rows: one after a tool row or another peer row follows it with no blank line, and a failed send stands apart as a failed tool row does.
 The line keeps one row and ends in `…` when it does not fit.
 A Message with more than its line shows (a later non-blank line, or a first line past 200 bytes) ends in `…` too, and Ctrl-O opens it like a collapsed user block.
 Its admission time goes in the right margin as on a user block; below 60 columns it does not show.
@@ -2941,6 +2946,10 @@ Content cannot select a style, and all escaping, exact permission text and termi
 Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.
 Successful outcome aggregates do not repeat assistant rows.
 Assistant opening, live, history and human keyed-result text use `AnswerRenderer`; User, Tool Result and inspection fields use terminal escaping without Markdown interpretation.
+`AnswerRenderer` shows a Markdown link to an `http` or `https` address as its underlined text and a bare address as itself, each an OSC 8 hyperlink, so the terminal opens it on click and the address is not laid out (Divyansh asked for this on 2026-11-02).
+Other link targets, links inside code or emphasis, Markdown link titles and addresses longer than 2,048 bytes stay literal, and `/copy` still sends the Markdown with every address.
+The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
+A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
 Normal tool presentation shows the canonical outcome header, omitting routine zero exit codes and stdout/stderr tails.
 It retains failure, indeterminate outcomes and capture or cleanup warnings even after a successful exit.
 The public result's tail delimiters control display only, never execution, permission or outcome classification.
@@ -3305,7 +3314,7 @@ The position only advances: one at or before the stored one changes nothing, so 
 A missing Session, or a position the Session has not reached, answers `mark_read_refused` with `SessionNotFound` or `PositionNotReached` and changes nothing; a canonical Store failure answers as for any request, and the client returns it as one.
 The write starts no work and changes no settings revision.
 Unlike other Session writes it touches nothing in the change ring: no Session list row shows the position, so a list watching the Session has nothing to read again.
-Wire version 5 added the pages' `hosted_call` items, after version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
+Wire version 6 added the `label` on the Session a Message row names as sender or target, after version 5 added the pages' `hosted_call` items, version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 
 Opening reads the latest Activity page as before, and the page's `read_through` places the dim rule `── new since you looked ──` on a line of its own above the first shown item after it.
 The conversation opens at the latest view when the Session was never read, when no item after the position shows, or when the latest view shows the rule.

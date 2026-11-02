@@ -14,6 +14,11 @@ const Style = packed struct {
 };
 const InlineKind = enum { none, emphasis, strong, code };
 const InlineRetention = enum { candidate, literal };
+/// A link waiting for its last byte. `[text](address)` shows its text and
+/// a bare `http://` or `https://` address shows itself, both as OSC 8 links.
+/// A candidate never crosses a line, so it shares `held` with fences, which
+/// begin and end only at line starts.
+const Link = enum { none, text, text_closed, target, bare };
 
 out: *std.Io.Writer,
 prefix: [prefix_limit]u8 = undefined,
@@ -36,7 +41,17 @@ escape_next: bool = false,
 literal_run: ?u8 = null,
 fence_pending: bool = false,
 fence_literal: bool = false,
-fence_bytes: [fence_limit]u8 = undefined,
+/// A pending fenced block's bytes, or a pending link's.
+held: [fence_limit]u8 = undefined,
+link: Link = .none,
+link_len: usize = 0,
+link_depth: u16 = 0,
+link_text_end: usize = 0,
+link_escape: bool = false,
+/// The link text is being shown: no link starts inside it.
+in_link: bool = false,
+/// The previous prose byte continues a word, so `h` there starts no address.
+after_word: bool = false,
 fence_len: usize = 0,
 fence_body_start: usize = 0,
 fence_line_start: usize = 0,
@@ -69,13 +84,15 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
             try self.flushPrefix();
         }
         if (byte == '\n') {
+            try self.endLink();
+            self.after_word = false;
             try self.flushSpan();
             self.escape_next = false;
             self.literal_run = null;
             if (self.line_style) try self.transition(.{});
             self.line_style = false;
             if (self.fence_pending) {
-                self.fence_bytes[self.fence_len] = byte;
+                self.held[self.fence_len] = byte;
                 self.fence_len += 1;
                 self.fence_body_start = self.fence_len;
                 self.fence_line_start = self.fence_len;
@@ -95,10 +112,11 @@ pub fn finish(self: *Renderer) !void {
         try self.flushPrefix();
     }
     if (self.fence_pending and !self.fence_literal) {
-        if (closingFence(self.fence_bytes[self.fence_line_start..self.fence_len])) {
-            try self.literalBlock(self.fence_bytes[self.fence_body_start..self.fence_line_start]);
-        } else try self.literalBlock(self.fence_bytes[0..self.fence_len]);
+        if (closingFence(self.held[self.fence_line_start..self.fence_len])) {
+            try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
+        } else try self.literalBlock(self.held[0..self.fence_len]);
     }
+    try self.endLink();
     try self.flushSpan();
     if (self.line_style) try self.transition(.{});
     try self.terminal_text.finish(self.out);
@@ -113,7 +131,7 @@ fn flushPrefix(self: *Renderer) !void {
     while (fence_indent < prefix.len and fence_indent < 3 and prefix[fence_indent] == ' ') : (fence_indent += 1) {}
     if (std.mem.startsWith(u8, prefix[fence_indent..], "```")) {
         if (!self.literal_line and openingFence(prefix)) {
-            @memcpy(self.fence_bytes[0..prefix.len], prefix);
+            @memcpy(self.held[0..prefix.len], prefix);
             self.fence_len = prefix.len;
             self.fence_pending = true;
             return;
@@ -228,12 +246,12 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
     if (!self.fence_literal and self.fence_len == fence_limit) {
         // We cannot promise that a closing fence exists. Emit all retained
         // syntax and keep subsequent bytes literal until this block ends.
-        try self.literalBlock(self.fence_bytes[0..self.fence_len]);
+        try self.literalBlock(self.held[0..self.fence_len]);
         self.fence_literal = true;
         self.fence_closer_possible = true;
         self.fence_closer_indent = 0;
         self.fence_closer_ticks = 0;
-        for (self.fence_bytes[self.fence_line_start..self.fence_len]) |line_byte| self.fenceCloserByte(line_byte);
+        for (self.held[self.fence_line_start..self.fence_len]) |line_byte| self.fenceCloserByte(line_byte);
         self.fence_len = 0;
     }
     if (self.fence_literal) {
@@ -250,11 +268,11 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
         } else self.fenceCloserByte(byte);
         return;
     }
-    self.fence_bytes[self.fence_len] = byte;
+    self.held[self.fence_len] = byte;
     self.fence_len += 1;
     if (byte == '\n') {
-        if (closingFence(self.fence_bytes[self.fence_line_start .. self.fence_len - 1])) {
-            try self.literalBlock(self.fence_bytes[self.fence_body_start..self.fence_line_start]);
+        if (closingFence(self.held[self.fence_line_start .. self.fence_len - 1])) {
+            try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
             self.fence_pending = false;
             self.fence_len = 0;
             self.fence_body_start = 0;
@@ -282,8 +300,11 @@ fn proseSlice(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| try self.prose(byte);
 }
 
-fn prose(self: *Renderer, byte: u8) !void {
+fn prose(self: *Renderer, byte: u8) (std.Io.Writer.Error || error{NoSpaceLeft})!void {
     if (self.literal_line) return self.safe(byte);
+    if (self.link != .none) return self.linkByte(byte);
+    const after_word = self.after_word;
+    self.after_word = std.ascii.isAlphanumeric(byte) or byte >= 0x80;
     if (self.code_closer and byte != '`') try self.renderInline();
     if (self.star_run != 0 and byte != '*') {
         // Lookahead belongs to the following recognizer, not the closer.
@@ -308,6 +329,12 @@ fn prose(self: *Renderer, byte: u8) !void {
             self.span_len = 0;
             self.inline_count = 0;
             try self.retainInline(byte);
+        } else if (!self.in_link and (byte == '[' or (!after_word and (byte == 'h' or byte == 'H')))) {
+            self.link = if (byte == '[') .text else .bare;
+            self.held[0] = byte;
+            self.link_len = 1;
+            self.link_depth = 0;
+            self.link_escape = false;
         } else try self.safe(byte);
         return;
     }
@@ -405,11 +432,11 @@ fn retainInline(self: *Renderer, byte: u8) !void {
 fn renderInline(self: *Renderer) !void {
     if (self.inline_retention == .literal) return self.resetInline();
     const marker_len: usize = if (self.inline_kind == .strong) 2 else 1;
-    const parent: Style = .{ .bold = self.line_style };
+    const parent = self.base();
     const outer: Style = if (self.inline_kind == .code)
         .{ .bold = parent.bold, .underline = true }
     else
-        .{ .bold = parent.bold or self.inline_kind == .strong, .italic = self.inline_kind == .emphasis };
+        .{ .bold = parent.bold or self.inline_kind == .strong, .italic = self.inline_kind == .emphasis, .underline = parent.underline };
     try self.transition(outer);
     var i = marker_len;
     const end = self.span_len - marker_len;
@@ -424,6 +451,154 @@ fn renderInline(self: *Renderer) !void {
     }
     try self.transition(parent);
     self.resetInline();
+}
+
+/// The style of plain text here: a heading's bold, a link's underline.
+fn base(self: *const Renderer) Style {
+    return .{ .bold = self.line_style, .underline = self.in_link };
+}
+
+/// Takes one byte into the pending link: it completes the link, stays
+/// pending, or shows the held bytes as ordinary prose.
+fn linkByte(self: *Renderer, byte: u8) !void {
+    switch (self.link) {
+        .none => unreachable,
+        .bare => {
+            const scheme: []const u8 = if (self.link_len > 4 and self.held[4] == ':') "http://" else "https://";
+            if (self.link_len == 4) {
+                if (byte != ':' and std.ascii.toLower(byte) != 's') return self.dropLink(byte);
+            } else if (self.link_len < scheme.len) {
+                if (std.ascii.toLower(byte) != scheme[self.link_len]) return self.dropLink(byte);
+            } else if (self.link_len == scheme.len and (byte == '/' or addressEnds(byte))) {
+                // No host: what the scheme held was never an address.
+                return self.dropLink(byte);
+            } else if (addressEnds(byte)) {
+                try self.showBare();
+                return self.prose(byte);
+            } else if (self.link_len == TerminalText.max_link_bytes) return self.dropLink(byte);
+        },
+        .text => if (self.link_escape) {
+            self.link_escape = false;
+        } else switch (byte) {
+            '\\' => self.link_escape = true,
+            '[' => return self.dropLink(byte),
+            ']' => {
+                if (self.link_len == 1) return self.dropLink(byte);
+                self.link = .text_closed;
+                self.link_text_end = self.link_len;
+            },
+            else => {},
+        },
+        .text_closed => if (byte == '(') {
+            self.link = .target;
+        } else return self.dropLink(byte),
+        .target => switch (byte) {
+            '(' => self.link_depth += 1,
+            ')' => if (self.link_depth == 0) {
+                // The closing `)` completes the link without being held.
+                if (!TerminalText.linkTarget(self.held[self.link_text_end + 2 .. self.link_len])) return self.dropLink(byte);
+                return self.showText();
+            } else {
+                self.link_depth -= 1;
+            },
+            else => if (byte <= ' ' or byte >= 0x7f or byte == '[') return self.dropLink(byte),
+        },
+    }
+    if (self.link_len == self.held.len) return self.dropLink(byte);
+    self.held[self.link_len] = byte;
+    self.link_len += 1;
+}
+
+/// A line or the answer ends: a bare address ends with it, other links
+/// are left incomplete.
+fn endLink(self: *Renderer) !void {
+    // Dropped text can hold a bare address, which ends here too.
+    while (self.link != .none) {
+        if (self.link == .bare) try self.showBare() else try self.dropHeld();
+    }
+}
+
+fn dropLink(self: *Renderer, byte: u8) !void {
+    try self.dropHeld();
+    try self.prose(byte);
+}
+
+/// Shows the held bytes as prose that was never a link. Only the first byte
+/// started the candidate: a text candidate holds no other `[`, so prose
+/// rereading the rest starts at most a bare candidate, whose held bytes
+/// are written behind this read.
+fn dropHeld(self: *Renderer) !void {
+    const length = self.link_len;
+    self.link = .none;
+    self.link_len = 0;
+    try self.safe(self.held[0]);
+    self.after_word = std.ascii.isAlphanumeric(self.held[0]);
+    for (1..length) |index| {
+        const byte = self.held[index];
+        try self.prose(byte);
+    }
+}
+
+/// A bare address ends before trailing punctuation, which reads as the
+/// sentence's, and before a `)` it did not open.
+fn showBare(self: *Renderer) !void {
+    var end = self.link_len;
+    // Unopened `)`s: a trimmed `)` closes one fewer, a trimmed `(` one more.
+    var unopened = @as(isize, @intCast(std.mem.count(u8, self.held[0..end], ")"))) - @as(isize, @intCast(std.mem.count(u8, self.held[0..end], "(")));
+    while (end > "http://".len) : (end -= 1) {
+        const last = self.held[end - 1];
+        if (last == ')' and unopened > 0) {
+            unopened -= 1;
+            continue;
+        }
+        if (std.mem.indexOfScalar(u8, ".,:;!?'\"*_~]", last) == null) break;
+    }
+    const address = self.held[0..end];
+    if (!TerminalText.linkTarget(address)) return self.dropHeld();
+    const length = self.link_len;
+    self.link = .none;
+    self.link_len = 0;
+    try self.openLink(address);
+    try self.safeSlice(address);
+    try self.closeLink();
+    for (self.held[end..length]) |byte| try self.prose(byte);
+}
+
+/// Shows `[text](address)`'s text, with its own markup, as the link.
+fn showText(self: *Renderer) !void {
+    const text_end = self.link_text_end;
+    const length = self.link_len;
+    self.link = .none;
+    self.link_len = 0;
+    try self.openLink(self.held[text_end + 2 .. length]);
+    for (self.held[1..text_end]) |byte| try self.prose(byte);
+    try self.closeLink();
+}
+
+fn openLink(self: *Renderer, address: []const u8) !void {
+    try self.terminal_text.finish(self.out);
+    try self.out.writeAll(TerminalText.link_open);
+    try self.out.writeAll(address);
+    try self.out.writeAll(TerminalText.link_end);
+    self.in_link = true;
+    try self.transition(self.base());
+}
+
+fn closeLink(self: *Renderer) !void {
+    try self.flushSpan();
+    self.escape_next = false;
+    self.literal_run = null;
+    self.in_link = false;
+    try self.transition(self.base());
+    try self.terminal_text.finish(self.out);
+    try self.out.writeAll(TerminalText.link_close);
+    self.after_word = true;
+}
+
+/// Where a bare address ends: at a space, a control, non-ASCII text or
+/// a byte that delimits an address in prose.
+fn addressEnds(byte: u8) bool {
+    return byte <= ' ' or byte >= 0x7f or std.mem.indexOfScalar(u8, "<>\"`[", byte) != null;
 }
 
 fn transition(self: *Renderer, next: Style) !void {
@@ -1147,4 +1322,92 @@ test "the last code block is the last complete fenced block" {
             } else try std.testing.expect(found == null);
         }
     }
+}
+
+fn expectRendered(input: []const u8, expected: []const u8) !void {
+    for (0..input.len + 1) |split| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer };
+        try renderer.feed(input[0..split]);
+        for (input[split..]) |byte| try renderer.feed(&.{byte});
+        try renderer.finish();
+        try std.testing.expectEqualStrings(expected, output.written());
+    }
+}
+
+fn linked(comptime address: []const u8, comptime text: []const u8) []const u8 {
+    return TerminalText.link_open ++ address ++ TerminalText.link_end ++ "\x1b[4m" ++ text ++ "\x1b[0m" ++ TerminalText.link_close;
+}
+
+test "a Markdown link shows its text as an OSC 8 link and hides its address" {
+    try expectRendered("See [github.com](https://github.com/a/b).", "See " ++ comptime linked("https://github.com/a/b", "github.com") ++ ".");
+    // How answers cite sources: the parentheses around the link stay.
+    try expectRendered("Zig 0.17 ([ziglang.org](https://ziglang.org/download/))\n", "Zig 0.17 (" ++ comptime linked("https://ziglang.org/download/", "ziglang.org") ++ ")\n");
+    try expectRendered("[`main.zig`](https://x.dev/m) and [*a* b](http://y.dev/(1))", comptime linked("https://x.dev/m", "main.zig") ++ " and " ++
+        TerminalText.link_open ++ "http://y.dev/(1)" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[3m\x1b[4ma\x1b[0m\x1b[4m b\x1b[0m" ++ TerminalText.link_close);
+    try expectRendered("# [Rui](https://r.dev)\n", "\x1b[1m" ++ TerminalText.link_open ++ "https://r.dev" ++ TerminalText.link_end ++ "\x1b[0m\x1b[1m\x1b[4mRui\x1b[0m\x1b[1m" ++ TerminalText.link_close ++ "\x1b[0m\n");
+}
+
+test "a bare address is its own OSC 8 link without the sentence's punctuation" {
+    try expectRendered("Docs: https://ziglang.org/doc/, then", "Docs: " ++ comptime linked("https://ziglang.org/doc/", "https://ziglang.org/doc/") ++ ", then");
+    try expectRendered("(see https://en.wikipedia.org/wiki/Zig_(language)).", "(see " ++ comptime linked("https://en.wikipedia.org/wiki/Zig_(language)", "https://en.wikipedia.org/wiki/Zig_(language)") ++ ").");
+    try expectRendered("- HTTP://A.dev\nhttp://b.dev", "\x1b[1m-\x1b[0m " ++ comptime linked("HTTP://A.dev", "HTTP://A.dev") ++ "\n" ++ linked("http://b.dev", "http://b.dev"));
+}
+
+/// The text a terminal shows for rendered output: without SGR and OSC 8.
+fn visible(output: []const u8, shown: *std.Io.Writer) !void {
+    var index: usize = 0;
+    while (index < output.len) {
+        if (std.mem.startsWith(u8, output[index..], "\x1b[")) {
+            index = std.mem.indexOfScalarPos(u8, output, index, 'm').? + 1;
+        } else if (std.mem.startsWith(u8, output[index..], TerminalText.link_open)) {
+            index = std.mem.indexOfPos(u8, output, index, TerminalText.link_end).? + TerminalText.link_end.len;
+        } else {
+            try shown.writeByte(output[index]);
+            index += 1;
+        }
+    }
+}
+
+test "text that is not a complete web link shows every byte as written" {
+    inline for (.{
+        .{ "[a](src/a.zig)", false },        .{ "[a](ftp://x)", false },           .{ "[a](javascript:alert(1))", false },
+        .{ "xhttps://y.dev", false },        .{ "http:/x https:// httpx", false }, .{ "[a] (https://x)", true },
+        .{ "[](https://x)", true },          .{ "[a](https://x y)", true },        .{ "[a](https://x\nnext", true },
+        .{ "[a\n](https://x)", true },       .{ "[[a]](https://x)", true },        .{ "\\[a](https://x)", true },
+        .{ "https:/// https://. x", false },
+    }) |case| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer };
+        try renderer.feed(case[0]);
+        try renderer.finish();
+        errdefer std.debug.print("input={s} output={f}\n", .{ case[0], std.zig.fmtString(output.written()) });
+        var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer shown.deinit();
+        try visible(output.written(), &shown.writer);
+        try std.testing.expectEqualStrings(case[0], shown.written());
+        // A web address left in broken link syntax is still a bare link.
+        try std.testing.expectEqual(case[1], std.mem.indexOf(u8, output.written(), TerminalText.link_open) != null);
+    }
+    try expectRendered("[a](./b) [c](https://d.dev)", "[a](./b) " ++ comptime linked("https://d.dev", "c"));
+    // A control ends an address and stays visible.
+    try expectRendered("[a](https://x\x1b)", "[a](" ++ comptime linked("https://x", "https://x") ++ "\\x1b)");
+    // Code is never a link.
+    try expectRendered("`https://x.dev` ok", "\x1b[4mhttps://x.dev\x1b[0m ok");
+    // A bare address ends with its line.
+    try expectRendered("[a](https://x\nnext", "[a](" ++ comptime linked("https://x", "https://x") ++ "\nnext");
+}
+
+test "a bare address longer than a link may carry stays plain text" {
+    const long = "https://" ++ @as([TerminalText.max_link_bytes]u8, @splat('a'));
+    try expectRendered(long ++ " ok", long ++ " ok");
+    // A link whose `)` arrives with the held bytes full still completes.
+    const text = @as([fence_limit - "[](https://x)".len + 1]u8, @splat('a'));
+    try expectRendered("[" ++ text ++ "](https://x)", comptime linked("https://x", &text));
+    try expectRendered("[" ++ text ++ "a](https://x)", "[" ++ text ++ "a](" ++ comptime linked("https://x", "https://x") ++ ")");
+    // Each `)` past the host is trimmed in constant time.
+    const closers = "https://a" ++ @as([2000]u8, @splat(')'));
+    try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
 }

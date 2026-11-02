@@ -957,6 +957,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         says_deny = self.selected.approval == .reason and text.len != 0;
     }
     if (selector) window.hideCursor() else window.showCursor(layout.caret_column, layout.caret_row);
+    // Every frame: links can reach the grid from any document.
+    try self.boundLinks();
     // Finish consuming every borrowed cell before output can pump input and
     // change the browsing document. The frame shares the cell memory budget.
     // Any failure is fatal; never drop a frame and continue accepting consent.
@@ -982,6 +984,36 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     try out.writeAll(frame.written());
     try out.flush();
     return .{ .frame = self.frames };
+}
+
+/// The shown grid copies each linked cell's address into an arena that
+/// keeps every cell's largest copy until the grid is replaced. A frame links
+/// at most `frame_link_bytes` of addresses, and a grid whose copies reach
+/// `grid_link_bytes` is replaced and the next frame redrawn whole, so links
+/// stay within the cell memory budget at any geometry.
+const frame_link_bytes = 128 * 1024;
+const grid_link_bytes = 512 * 1024;
+
+fn boundLinks(self: *Self) !void {
+    var linked: usize = 0;
+    var kept: usize = 0;
+    for (self.vx.screen.buf, self.vx.screen_last.buf) |*cell, last| {
+        kept += last.uri.capacity;
+        if (cell.link.uri.len == 0) continue;
+        if (linked + cell.link.uri.len > frame_link_bytes) cell.link = .{} else linked += cell.link.uri.len;
+    }
+    if (kept < grid_link_bytes) return;
+    const allocator = self.memory.allocator();
+    const width = self.vx.screen_last.width;
+    const height = self.vx.screen_last.height;
+    // As on resize: retire the old grid before charging its replacement.
+    const empty = try vaxis.AllocatingScreen.init(allocator, 0, 0);
+    self.vx.screen_last.deinit(allocator);
+    self.vx.screen_last = empty;
+    const replacement = try vaxis.AllocatingScreen.init(allocator, width, height);
+    self.vx.screen_last.deinit(allocator);
+    self.vx.screen_last = replacement;
+    self.vx.queueRefresh();
 }
 
 /// The input row while an Action waits: Allow once and Deny with the
@@ -2450,4 +2482,35 @@ test "an offer stands only for its own frame: no Enter decides on a later frame 
         screen.releaseAction();
         try deliver(screen, &held, size);
     }
+}
+
+test "links stay within the cell memory budget at every frame and over many frames" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const TerminalText = @import("TerminalText.zig");
+    const uri = "https://" ++ @as([TerminalText.max_link_bytes - "https://".len]u8, @splat('a'));
+    for (0..40) |_| try screen.append(TerminalText.link_open ++ uri ++ TerminalText.link_end ++ @as([79]u8, @splat('x')) ++ TerminalText.link_close ++ "\n");
+    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    var linked: usize = 0;
+    for (screen.vx.screen.buf) |cell| linked += @intFromBool(cell.link.uri.len != 0);
+    try std.testing.expectEqual(frame_link_bytes / uri.len, linked);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), TerminalText.link_open ++ uri ++ TerminalText.link_end) != null);
+    // Copies an earlier frame left in the shown grid reach its bound: the
+    // grid is replaced and the next frame draws every cell again.
+    const arena = screen.vx.screen_last.arena.allocator();
+    for (screen.vx.screen_last.buf[0 .. grid_link_bytes / uri.len]) |*cell| try cell.uri.ensureTotalCapacity(arena, uri.len);
+    out.clearRetainingCapacity();
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    var kept: usize = 0;
+    for (screen.vx.screen_last.buf) |cell| kept += cell.uri.capacity;
+    try std.testing.expect(kept < grid_link_bytes);
+    // Unchanged, the frame would write nothing; redrawn, it writes every row.
+    try std.testing.expect(out.written().len > 20 * 79);
 }

@@ -547,12 +547,12 @@ fn turn(self: *Self) !?Next {
     if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
     try self.dispatch(.all);
     // Frames count on the monotonic clock, so a wall-clock step cannot
-    // stall or race the pulse; ticks keep the Host's wall clock.
+    // stall or race the spinner; ticks keep the Host's wall clock.
     const awake_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds;
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
-    if (try self.draw(awake_ms / view.pulse_interval_ms)) |next| return next;
-    const pulses = if (self.shown) |*held| held.pulses else false;
-    const timeout = switch (self.input.wait(awake_ns, self.budget(now_ms, awake_ms, pulses))) {
+    if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
+    const spins = if (self.shown) |*held| held.spins else false;
+    const timeout = switch (self.input.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
         .expire => 0,
         .poll => |milliseconds| milliseconds,
     };
@@ -1090,7 +1090,7 @@ fn draw(self: *Self, frame: u64) !?Next {
     self.terminal.writeWaiting(&bytes.writer) catch return error.OutOfMemory;
     screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
     self.frame = bytes.toArrayList();
-    // The terminal already shows it; keep the new screen, whose pulse is
+    // The terminal already shows it; keep the new screen, whose spinner is
     // current.
     if (self.frame.items.len == 0) {
         self.forget();
@@ -1126,12 +1126,12 @@ fn forget(self: *Self) void {
 }
 
 /// How long the loop may wait, in milliseconds, -1 for ever: until the
-/// core's next tick, and while the screen pulses, no later than its next
+/// core's next tick, and while the screen spins, no later than its next
 /// frame. Until then only input, the worker or a signal wakes it.
-fn budget(self: *const Self, now_ms: u64, awake_ms: u64, pulses: bool) i32 {
+fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
     const tick: i32 = if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
-    if (!pulses) return tick;
-    const frame: i32 = @intCast(view.pulse_interval_ms - awake_ms % view.pulse_interval_ms);
+    if (!spins) return tick;
+    const frame: i32 = @intCast(view.spin_interval_ms - awake_ms % view.spin_interval_ms);
     return if (tick < 0) frame else @min(tick, frame);
 }
 
@@ -1978,40 +1978,31 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
 }
 
-test "each frame rewrites a pulsing mark alone, until its pulse ends" {
+test "each frame rewrites your working Session's spinner alone, and without colour it holds still" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
     const overview = rig.overview;
     overview.caps = .{};
-    // The listed row began working this second, so its mark pulses. Its
-    // phase is its change second, 2 mod 4, so frame 2 shows the steady
-    // mark and frame 3 the first dot.
-    const changed = (test_now_s - 10) * 1000;
-    try std.testing.expect(try overview.event(.{ .tick = changed }) == null);
+    // The listed row is yours and working, so its mark is the spinner, at
+    // the frame's step.
+    try std.testing.expect(try overview.event(.{ .tick = (test_now_s - 10) * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     var buffer: [64 * 1024]u8 = undefined;
-    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.pulses);
+    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.spins);
     try std.testing.expect(std.mem.count(u8, rig.drawn(&buffer), "\x1b[2K") == 24);
-    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.pulses);
+    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.spins);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
-    try std.testing.expect(try overview.draw(3) == null and overview.shown.?.pulses);
-    const pulse = rig.drawn(&buffer);
-    try std.testing.expect(std.mem.indexOf(u8, pulse, "m·\x1b[0m") != null);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pulse, "H\x1b[0"));
-    try std.testing.expect(std.mem.indexOf(u8, pulse, "\x1b[2K") == null);
-    // The tick that ends the pulse leaves the steady mark.
-    try std.testing.expect(try overview.event(.{ .tick = changed + view.pulse_window_ms }) == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try overview.draw(4) == null and !overview.shown.?.pulses);
-    // In colour the pen carries to the next changed span, so the mark
-    // ends in that span's SGR rather than a reset.
-    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "m●") != null);
-    try std.testing.expect(try overview.draw(5) == null and !overview.shown.?.pulses);
-    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    try std.testing.expect(try overview.draw(3) == null and overview.shown.?.spins);
+    const turned = rig.drawn(&buffer);
+    try std.testing.expect(std.mem.indexOf(u8, turned, view.spinner[3]) != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, turned, "H\x1b[0"));
+    try std.testing.expect(std.mem.indexOf(u8, turned, "\x1b[2K") == null);
+    overview.caps = .{ .depth = .none };
+    try std.testing.expect(try overview.draw(4) == null and !overview.shown.?.spins);
 }
 
-test "the loop waits for the core's next tick, and while the screen pulses no later than its next frame" {
+test "the loop waits for the core's next tick, and while the screen spins no later than its next frame" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
@@ -2020,8 +2011,8 @@ test "the loop waits for the core's next tick, and while the screen pulses no la
     // While a listing is in flight the core needs no tick.
     try std.testing.expect(try overview.event(.{ .tick = start }) == null);
     try std.testing.expectEqual(@as(i32, -1), overview.budget(start, 280, false));
-    try std.testing.expectEqual(@as(i32, 140), overview.budget(start, 280, true));
-    try std.testing.expectEqual(@as(i32, 1), overview.budget(start, 419, true));
+    try std.testing.expectEqual(@as(i32, 120), overview.budget(start, 280, true));
+    try std.testing.expectEqual(@as(i32, 1), overview.budget(start, 399, true));
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(i32, 100), overview.budget(start + 900, 40, false));
     try std.testing.expectEqual(@as(i32, 100), overview.budget(start + 900, 40, true));
