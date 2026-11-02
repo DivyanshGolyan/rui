@@ -36,28 +36,42 @@ const format_binary: u16 = 1;
 pub const Outbox = struct {
     buffer: []u8,
     len: usize = 0,
+    /// Bytes of a streamed Bind value still owed (`beginBindStreamed`).
+    streaming_left: u32 = 0,
+    /// Bytes discarded so far: with `written`, tells the owner whether a
+    /// message's bytes (a COMMIT's, say) have left the outbox.
+    sent: u64 = 0,
 
+    /// Borrowed until the next append or `discard`.
     pub fn bytes(self: *const Outbox) []const u8 {
         return self.buffer[0..self.len];
+    }
+
+    /// Bytes ever appended. Taken after writing a message, it is the
+    /// position `sent` passes once that message's last byte is discarded.
+    pub fn written(self: *const Outbox) u64 {
+        return self.sent + self.len;
     }
 
     /// Drops the first `count` bytes, after the owner sent them.
     pub fn discard(self: *Outbox, count: usize) void {
         std.debug.assert(count <= self.len);
-        std.mem.copyForwards(u8, self.buffer, self.buffer[count..self.len]);
+        if (count < self.len) std.mem.copyForwards(u8, self.buffer, self.buffer[count..self.len]);
         self.len -= count;
+        self.sent += count;
     }
 
     pub fn free(self: *const Outbox) usize {
         return self.buffer.len - self.len;
     }
 
-    /// Appends as much of `data` as fits and returns how much did: the body
-    /// of a value started by `beginBindStreamed`.
+    /// Appends as much of `data` as fits, never past the value started by
+    /// `beginBindStreamed`, and returns how much did.
     pub fn appendPart(self: *Outbox, data: []const u8) usize {
-        const count = @min(data.len, self.free());
+        const count = @min(data.len, self.free(), self.streaming_left);
         @memcpy(self.buffer[self.len..][0..count], data[0..count]);
         self.len += count;
+        self.streaming_left -= @intCast(count);
         return count;
     }
 
@@ -80,6 +94,8 @@ pub const Outbox = struct {
     /// word, failing with nothing written when the part written now
     /// (`now_len` bytes of body) does not fit.
     fn begin(self: *Outbox, tag: ?u8, body_len: usize, now_len: usize) error{NoSpace}!void {
+        std.debug.assert(self.streaming_left == 0);
+        std.debug.assert(4 + body_len <= std.math.maxInt(i32));
         const head: usize = if (tag == null) 4 else 5;
         if (self.free() < head + now_len) return error.NoSpace;
         if (tag) |t| self.put(&.{t});
@@ -174,9 +190,12 @@ pub fn beginBindStreamed(out: *Outbox, statement: []const u8, params: []const ?[
     try out.begin('B', head + streamed_len + 4, head);
     putBindHead(out, statement, params, params.len + 1);
     out.putInt(u32, streamed_len);
+    out.streaming_left = streamed_len;
 }
 
+/// After exactly the declared bytes went through `appendPart`.
 pub fn endBindStreamed(out: *Outbox) EncodeError!void {
+    std.debug.assert(out.streaming_left == 0);
     if (out.free() < 4) return error.NoSpace;
     putResultFormats(out);
 }
@@ -266,6 +285,8 @@ pub const RowDescription = struct {
     pub const Iterator = struct {
         reader: Reader,
 
+        /// `parseMessage` checked every field's layout before handing the
+        /// description out, so these reads cannot fail.
         pub fn next(self: *Iterator) ?Field {
             if (self.reader.bytes.len == 0) return null;
             const name = self.reader.string() catch unreachable;
@@ -317,6 +338,8 @@ pub const Message = union(enum) {
     empty_query,
 };
 
+/// Slices point into the input given to `Decoder.next` and live until the
+/// owner discards or overwrites those bytes.
 pub const Event = union(enum) {
     message: Message,
     /// A DataRow starts; this many column events follow.
@@ -343,6 +366,7 @@ pub const Severity = enum { err, fatal, panic, other };
 /// dropped, so a long message cannot grow it.
 pub const Diagnostic = struct {
     sqlstate: [5]u8 = @splat('0'),
+    sqlstate_len: u8 = 0,
     severity_buffer: [5]u8 = undefined,
     severity_len: u8 = 0,
     message_buffer: [128]u8 = undefined,
@@ -489,6 +513,8 @@ pub const Decoder = struct {
                         if (!self.fields.terminated) return error.ProtocolViolation;
                         self.state = .header;
                         if (self.fields.notice) continue;
+                        // A SQLSTATE is exactly five characters; any other is not classified.
+                        if (self.fields.diagnostic.sqlstate_len != 5) return error.ProtocolViolation;
                         return .{ .consumed = at, .event = .{ .error_response = self.fields.diagnostic } };
                     }
                     if (rest.len == 0) return .{ .consumed = at, .event = null };
@@ -508,6 +534,7 @@ fn keepField(diagnostic: *Diagnostic, code: u8, offset: usize, part: []const u8)
     switch (code) {
         'C' => for (part, offset..) |byte, at| {
             if (at < 5) diagnostic.sqlstate[at] = byte;
+            diagnostic.sqlstate_len = @intCast(@min(at + 1, 6));
         },
         'V' => for (part, offset..) |byte, at| {
             if (at >= diagnostic.severity_buffer.len) {
@@ -566,12 +593,14 @@ fn parseMessage(tag: u8, body: []const u8) DecodeError!Message {
                 break :sasl .{ .sasl = .{ .body = list } };
             },
             11 => rest: {
-                defer reader.bytes = &.{};
-                break :rest .{ .sasl_continue = reader.bytes };
+                const data = reader.bytes;
+                reader.bytes = &.{};
+                break :rest .{ .sasl_continue = data };
             },
             12 => rest: {
-                defer reader.bytes = &.{};
-                break :rest .{ .sasl_final = reader.bytes };
+                const data = reader.bytes;
+                reader.bytes = &.{};
+                break :rest .{ .sasl_final = data };
             },
             else => |code| other: {
                 reader.bytes = &.{};
@@ -617,19 +646,26 @@ fn parseMessage(tag: u8, body: []const u8) DecodeError!Message {
 
 /// What an ErrorResponse means for the Store, from its SQLSTATE class.
 pub const Class = enum {
-    /// Class 08: the connection is gone or unusable.
+    /// Class 08, and 57P01/57P02: the connection is gone or the server is
+    /// ending it.
     connection,
-    /// 57P01-57P03, class 53: the server is shutting down, starting up,
-    /// or out of resources.
+    /// 57P03 and class 53 but 53100: the server is starting up or out of
+    /// resources.
     unavailable,
+    /// 53100: the disk is full.
+    storage_full,
     /// Class 28: the credential was refused.
     authentication,
     /// 3D000: the database does not exist.
     missing_database,
-    /// 57014 (statement_timeout) and 55P03 (lock_timeout).
-    timeout,
-    /// 40001 and 40P01.
+    /// 57014: statement_timeout.
+    statement_timeout,
+    /// 55P03: lock_timeout.
+    lock_timeout,
+    /// 40001.
     serialization,
+    /// 40P01.
+    deadlock,
     /// Class 23.
     constraint,
     /// 25006: a read-only transaction or a hot standby.
@@ -645,14 +681,15 @@ pub const Class = enum {
 
 pub fn classify(sqlstate: [5]u8) Class {
     const exact = [_]struct { [5]u8, Class }{
-        .{ "57P01".*, .unavailable },
-        .{ "57P02".*, .unavailable },
+        .{ "57P01".*, .connection },
+        .{ "57P02".*, .connection },
         .{ "57P03".*, .unavailable },
+        .{ "53100".*, .storage_full },
         .{ "3D000".*, .missing_database },
-        .{ "57014".*, .timeout },
-        .{ "55P03".*, .timeout },
+        .{ "57014".*, .statement_timeout },
+        .{ "55P03".*, .lock_timeout },
         .{ "40001".*, .serialization },
-        .{ "40P01".*, .serialization },
+        .{ "40P01".*, .deadlock },
         .{ "25006".*, .read_only },
         .{ "RUI01".*, .guard },
     };
@@ -677,7 +714,7 @@ pub const Security = enum {
     /// SSLRequest first, then the TLS handshake, then SCRAM, with channel
     /// binding when the server offers it. The only way over TCP.
     tls,
-    /// A Unix socket: no TLS, and any method but cleartext or MD5.
+    /// A Unix socket: no TLS; the server's trust or peer method, or SCRAM.
     local,
 };
 
@@ -694,6 +731,8 @@ pub const Options = struct {
 };
 
 pub const StartupError = EncodeError || DecodeError || scram.Error || error{
+    /// A user, database or setting holds a NUL.
+    InvalidStartupValue,
     TlsRefused,
     AuthMethodRefused,
     /// The server answered with an ErrorResponse; see `Startup.diagnostic`.
@@ -726,7 +765,7 @@ pub const Startup = struct {
     diagnostic: Diagnostic = .{},
     params: Parameters = .{},
     backend: struct { pid: u32 = 0, key: u32 = 0 } = .{},
-    channel_binding: ?tls.ChannelBinding = null,
+    channel_binding: ?scram.ChannelBinding = null,
 
     const Phase = enum { initial, ssl_requested, tls_handshake, startup_sent, sasl_first_sent, sasl_final_sent, authenticated, ready };
 
@@ -739,7 +778,7 @@ pub const Startup = struct {
         standard_conforming_strings: bool = false,
 
         fn record(self: *Parameters, name: []const u8, value: []const u8) void {
-            if (equals(name, "server_version")) {
+            if (std.mem.eql(u8, name, "server_version")) {
                 // "15.4", "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)", "17beta1".
                 const digits = std.mem.indexOfNone(u8, value, "0123456789") orelse value.len;
                 self.server_major = std.fmt.parseUnsigned(u32, value[0..digits], 10) catch 0;
@@ -748,14 +787,14 @@ pub const Startup = struct {
                     const minor_digits = std.mem.indexOfNone(u8, rest, "0123456789") orelse rest.len;
                     self.server_minor = std.fmt.parseUnsigned(u32, rest[0..minor_digits], 10) catch 0;
                 } else self.server_minor = 0;
-            } else if (equals(name, "server_encoding")) {
-                self.server_encoding_utf8 = equals(value, "UTF8");
-            } else if (equals(name, "client_encoding")) {
-                self.client_encoding_utf8 = equals(value, "UTF8");
-            } else if (equals(name, "integer_datetimes")) {
-                self.integer_datetimes = equals(value, "on");
-            } else if (equals(name, "standard_conforming_strings")) {
-                self.standard_conforming_strings = equals(value, "on");
+            } else if (std.mem.eql(u8, name, "server_encoding")) {
+                self.server_encoding_utf8 = std.mem.eql(u8, value, "UTF8");
+            } else if (std.mem.eql(u8, name, "client_encoding")) {
+                self.client_encoding_utf8 = std.mem.eql(u8, value, "UTF8");
+            } else if (std.mem.eql(u8, name, "integer_datetimes")) {
+                self.integer_datetimes = std.mem.eql(u8, value, "on");
+            } else if (std.mem.eql(u8, name, "standard_conforming_strings")) {
+                self.standard_conforming_strings = std.mem.eql(u8, value, "on");
             }
         }
 
@@ -769,8 +808,8 @@ pub const Startup = struct {
     };
 
     pub fn init(options: Options) StartupError!Startup {
-        if (!validString(options.user) or !validString(options.database)) return error.ProtocolViolation;
-        for (options.settings) |pair| if (!validString(pair[0]) or !validString(pair[1])) return error.ProtocolViolation;
+        if (!validString(options.user) or !validString(options.database)) return error.InvalidStartupValue;
+        for (options.settings) |pair| if (!validString(pair[0]) or !validString(pair[1])) return error.InvalidStartupValue;
         try scram.checkPassword(options.password);
         return .{ .options = options };
     }
@@ -788,7 +827,7 @@ pub const Startup = struct {
 
     /// After a verified handshake. `binding` is the server certificate's
     /// tls-server-end-point hash, when it has one.
-    pub fn tlsReady(self: *Startup, binding: ?tls.ChannelBinding, out: *Outbox) StartupError!void {
+    pub fn tlsReady(self: *Startup, binding: ?scram.ChannelBinding, out: *Outbox) StartupError!void {
         std.debug.assert(self.phase == .tls_handshake);
         self.channel_binding = binding;
         try self.sendStartup(out);
@@ -905,10 +944,6 @@ pub const Startup = struct {
         return self.params.server_major * 10000 + self.params.server_minor;
     }
 };
-
-fn equals(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, a, b);
-}
 
 test {
     _ = scram;

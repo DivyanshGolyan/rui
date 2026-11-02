@@ -3,30 +3,26 @@
 //! `Wire.out`, and the connection's owner moves both to and from the
 //! socket. Nothing here touches a descriptor.
 //!
-//! Verification is never off: the chain against the trust (h2's loader,
-//! so `SSL_CERT_FILE` and the host bundles behave the same for the Store as
-//! for providers) and the host name or IP literal against the leaf.
+//! Verification is never off: the chain against the trust and the host
+//! name or IP literal against the leaf. The context settings, host naming
+//! and trust loading are h2's, so `SSL_CERT_FILE` and the host bundles
+//! behave the same for the Store as for providers. On macOS, `.system` is
+//! the bundle OpenSSL reads (`/etc/ssl/cert.pem`), not SecTrust.
 const std = @import("std");
 const h2 = @import("h2");
-const c = h2.openssl;
+const shared = h2.openssl_client;
+const c = shared.c;
 
 pub const Trust = h2.Trust;
-pub const HostKind = enum { dns_name, ip_literal };
+pub const HostKind = shared.HostKind;
 
-const tls12_ciphers = "ECDHE+AESGCM:ECDHE+CHACHA20";
-// SSL_OP_NO_TICKET and SSL_OP_NO_RENEGOTIATION; their macros do not translate.
-const no_ticket: u64 = 1 << 14;
-const no_renegotiation: u64 = 1 << 30;
+/// Room for one TLS record of a full plaintext fragment (2^14 bytes plus
+/// TLS 1.2's largest expansion and the record header), so encrypting one
+/// `send_buffer_bytes` outbox never stops halfway for want of room.
+pub const max_record_bytes = 16 * 1024 + 2048 + 5;
 
 /// The certificate hash SCRAM-SHA-256-PLUS binds (RFC 5929 section 4.1).
-pub const ChannelBinding = struct {
-    buffer: [c.EVP_MAX_MD_SIZE]u8,
-    len: u8,
-
-    pub fn bytes(self: *const ChannelBinding) []const u8 {
-        return self.buffer[0..self.len];
-    }
-};
+pub const ChannelBinding = @import("scram.zig").ChannelBinding;
 
 /// The ciphertext OpenSSL may read (`in[in_used..]`) and the room it may
 /// write (`out[out_used..]`) during one call.
@@ -41,19 +37,10 @@ pub const Context = struct {
     ctx: *c.SSL_CTX,
     bio_method: *c.BIO_METHOD,
 
-    /// TLS 1.2 or later with AEAD suites only, no renegotiation, no session
-    /// cache or tickets (every connection verifies afresh), and no record
-    /// buffers held while idle.
     pub fn init(trust: Trust) h2.EndpointError!Context {
-        const ctx = c.SSL_CTX_new(c.TLS_client_method()) orelse return error.OutOfMemory;
+        const ctx = shared.newContext() orelse return error.OutOfMemory;
         errdefer c.SSL_CTX_free(ctx);
-        if (c.SSL_CTX_set_min_proto_version(ctx, c.TLS1_2_VERSION) != 1) return error.OutOfMemory;
-        c.SSL_CTX_set_verify(ctx, c.SSL_VERIFY_PEER, null);
-        _ = c.SSL_CTX_set_mode(ctx, c.SSL_MODE_RELEASE_BUFFERS | c.SSL_MODE_ENABLE_PARTIAL_WRITE | c.SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-        _ = c.SSL_CTX_set_session_cache_mode(ctx, c.SSL_SESS_CACHE_OFF);
-        if (c.SSL_CTX_set_cipher_list(ctx, tls12_ciphers) != 1) return error.OutOfMemory;
-        _ = c.SSL_CTX_set_options(ctx, no_ticket | no_renegotiation);
-        try h2.loadTrust(ctx, trust);
+        try shared.loadTrust(ctx, trust);
         const method = c.BIO_meth_new(c.BIO_get_new_index() | c.BIO_TYPE_SOURCE_SINK, "pg wire") orelse return error.OutOfMemory;
         if (c.BIO_meth_set_write(method, bioWrite) != 1 or
             c.BIO_meth_set_read(method, bioRead) != 1 or
@@ -81,7 +68,8 @@ pub const Transfer = union(enum) {
     want_read,
     /// `Wire.out` is full: send it and call again.
     want_write,
-    /// The peer's close_notify, or a fatal TLS error.
+    /// The peer's close_notify, or a fatal TLS error. Either ends the
+    /// connection; the Store fences on both alike.
     closed,
 };
 
@@ -101,13 +89,7 @@ pub const Session = struct {
         const bio = c.BIO_new(context.bio_method) orelse return error.OutOfMemory;
         // One BIO for both directions consumes one reference.
         c.SSL_set_bio(ssl, bio, bio);
-        const named = switch (kind) {
-            .ip_literal => c.X509_VERIFY_PARAM_set1_ip_asc(c.SSL_get0_param(ssl), &host_z) == 1,
-            .dns_name => c.SSL_set_tlsext_host_name(ssl, &host_z) == 1 and c.SSL_set1_host(ssl, &host_z) == 1,
-        };
-        if (!named) return error.InvalidHost;
-        // A wildcard covers a whole label (`*.example.com`), never part of one.
-        c.SSL_set_hostflags(ssl, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+        if (!shared.nameHost(ssl, host_z[0..host.len :0], kind, false)) return error.InvalidHost;
         c.SSL_set_connect_state(ssl);
         return .{ .ssl = ssl, .bio = bio };
     }
@@ -149,7 +131,8 @@ pub const Session = struct {
 
     /// The tls-server-end-point hash of the verified leaf: its signature's
     /// digest, SHA-256 in place of MD5 or SHA-1. Null for a signature with
-    /// no separate digest (Ed25519), which SCRAM cannot bind.
+    /// no separate digest (Ed25519, RSA-PSS), which SCRAM cannot bind; a
+    /// server offering only PLUS is then refused.
     pub fn channelBinding(self: *const Session) ?ChannelBinding {
         const cert = c.SSL_get0_peer_certificate(self.ssl) orelse return null;
         var digest_nid: c_int = c.NID_undef;
@@ -157,6 +140,7 @@ pub const Session = struct {
         if (digest_nid == c.NID_md5 or digest_nid == c.NID_sha1) digest_nid = c.NID_sha256;
         const digest = c.EVP_get_digestbynid(digest_nid) orelse return null;
         var binding: ChannelBinding = .{ .buffer = undefined, .len = 0 };
+        comptime std.debug.assert(binding.buffer.len >= c.EVP_MAX_MD_SIZE);
         var len: c_uint = 0;
         if (c.X509_digest(cert, digest, &binding.buffer, &len) != 1) return null;
         binding.len = @intCast(len);

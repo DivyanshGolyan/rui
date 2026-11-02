@@ -1,7 +1,6 @@
 //! The client side of SCRAM-SHA-256 (RFC 5802, RFC 7677), with the
 //! tls-server-end-point channel binding of SCRAM-SHA-256-PLUS (RFC 5929).
 const std = @import("std");
-const tls = @import("tls.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -9,17 +8,39 @@ const base64 = std.base64.standard;
 
 pub const nonce_seed_bytes = 18;
 const nonce_bytes = base64.Encoder.calcSize(nonce_seed_bytes);
-/// Longer than any client message this file writes and any server-first
-/// message it accepts.
+/// Longer than any client message this file writes: the client-final
+/// message repeats the server's nonce, which is capped by
+/// `max_server_first_bytes`.
 pub const max_message_bytes = 512;
+const max_server_first_bytes = 256;
+comptime {
+    const binding = base64.Encoder.calcSize("p=tls-server-end-point,,".len + 64);
+    std.debug.assert("c=".len + binding + ",r=".len + max_server_first_bytes + ",p=".len + base64.Encoder.calcSize(32) <= max_message_bytes);
+}
 const max_salt_bytes = 64;
+/// Postgres's default is 4096. The cap bounds the PBKDF2 work a server can
+/// ask of the Store worker before it answers anything, to well under a
+/// second.
+pub const max_iterations = 1_000_000;
+
+/// The certificate hash SCRAM-SHA-256-PLUS binds (RFC 5929 section 4.1).
+pub const ChannelBinding = struct {
+    /// EVP_MAX_MD_SIZE.
+    buffer: [64]u8,
+    len: u8,
+
+    pub fn bytes(self: *const ChannelBinding) []const u8 {
+        return self.buffer[0..self.len];
+    }
+};
 
 pub const Error = error{
     /// Not printable ASCII; see `checkPassword`.
     UnsupportedPassword,
+    /// The server asked for more than `max_iterations`.
+    UnsupportedIterations,
     AuthFailed,
     ProtocolViolation,
-    NoSpace,
 };
 
 /// The server hashes the password after SASLprep, which maps and
@@ -37,7 +58,7 @@ pub const Binding = union(enum) {
     /// A server that does offer it then refuses the downgrade.
     unused,
     /// `p=tls-server-end-point`.
-    server_end_point: tls.ChannelBinding,
+    server_end_point: ChannelBinding,
 
     fn gs2Header(self: *const Binding) []const u8 {
         return switch (self.*) {
@@ -87,7 +108,7 @@ pub const Client = struct {
     /// The client-final message for `server_first`. Remembers the server
     /// signature `verifyServerFinal` expects.
     pub fn clientFinal(self: *Client, server_first: []const u8, password: []const u8, buffer: *[max_message_bytes]u8) Error![]const u8 {
-        if (server_first.len > max_message_bytes) return error.ProtocolViolation;
+        if (server_first.len > max_server_first_bytes) return error.ProtocolViolation;
         var attributes = std.mem.splitScalar(u8, server_first, ',');
         const combined = try attribute(attributes.next(), 'r');
         const salt_text = try attribute(attributes.next(), 's');
@@ -102,6 +123,7 @@ pub const Client = struct {
         base64.Decoder.decode(salt[0..salt_len], salt_text) catch return error.ProtocolViolation;
         const iterations = std.fmt.parseUnsigned(u32, iterations_text, 10) catch return error.ProtocolViolation;
         if (iterations == 0) return error.ProtocolViolation;
+        if (iterations > max_iterations) return error.UnsupportedIterations;
 
         var salted: [Sha256.digest_length]u8 = undefined;
         std.crypto.pwhash.pbkdf2(&salted, password, salt[0..salt_len], iterations, Hmac) catch return error.ProtocolViolation;
@@ -117,7 +139,7 @@ pub const Client = struct {
         @memcpy(binding_input[0..header.len], header);
         var binding_len = header.len;
         if (self.binding == .server_end_point) {
-            const hash = self.binding.server_end_point.bytes();
+            const hash = self.binding.server_end_point.buffer[0..self.binding.server_end_point.len];
             @memcpy(binding_input[binding_len..][0..hash.len], hash);
             binding_len += hash.len;
         }
@@ -125,7 +147,7 @@ pub const Client = struct {
         const without_proof = std.fmt.bufPrint(buffer, "c={s},r={s}", .{
             base64.Encoder.encode(&channel, binding_input[0..binding_len]),
             combined,
-        }) catch return error.NoSpace;
+        }) catch unreachable; // max_message_bytes covers the longest (comptime check above).
 
         var bare: [max_message_bytes]u8 = undefined;
         const first_bare = self.clientFirstBare(&bare);
@@ -136,7 +158,7 @@ pub const Client = struct {
         var proof: [Hmac.mac_length]u8 = undefined;
         for (&proof, client_key, client_signature) |*byte, key, signature| byte.* = key ^ signature;
         var proof_text: [base64.Encoder.calcSize(proof.len)]u8 = undefined;
-        const tail = std.fmt.bufPrint(buffer[without_proof.len..], ",p={s}", .{base64.Encoder.encode(&proof_text, &proof)}) catch return error.NoSpace;
+        const tail = std.fmt.bufPrint(buffer[without_proof.len..], ",p={s}", .{base64.Encoder.encode(&proof_text, &proof)}) catch unreachable;
         return buffer[0 .. without_proof.len + tail.len];
     }
 
@@ -189,11 +211,16 @@ test "a server nonce that does not extend the client's, or a mandatory extension
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abc,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096", "pencil", &buffer));
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("m=x,r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096", "pencil", &buffer));
     try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=0", "pencil", &buffer));
+    try std.testing.expectError(error.UnsupportedIterations, client.clientFinal("r=abc1,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1000001", "pencil", &buffer));
+    // The longest server nonce accepted still fits the client-final buffer.
+    const longest = "r=abc" ++ @as([max_server_first_bytes - "r=abc,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1".len]u8, @splat('x')) ++ ",s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1";
+    _ = try client.clientFinal(longest, "pencil", &buffer);
+    try std.testing.expectError(error.ProtocolViolation, client.clientFinal("r=abcx" ++ longest[5..], "pencil", &buffer));
     try std.testing.expectError(error.AuthFailed, client.verifyServerFinal("e=invalid-proof"));
 }
 
 test "channel binding sends the certificate hash behind the p= header" {
-    var hash: tls.ChannelBinding = .{ .buffer = undefined, .len = 32 };
+    var hash: ChannelBinding = .{ .buffer = undefined, .len = 32 };
     @memset(hash.buffer[0..32], 0xab);
     var client = Client.withNonce("", "abc", .{ .server_end_point = hash });
     var buffer: [max_message_bytes]u8 = undefined;

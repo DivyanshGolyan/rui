@@ -594,6 +594,7 @@ pub fn build(b: *std.Build) void {
         process_integrations.step.dependOn(&run_tests.step);
         process_integrations.step.dependOn(&run_renderer_allocation.step);
         process_integrations.step.dependOn(h2_test_step);
+        process_integrations.step.dependOn(pg_test_step);
         process_integrations.step.dependOn(codec_runtime_test_step);
     }
     process_integrations.addFileInput(ci.path(release));

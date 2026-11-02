@@ -278,7 +278,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
       - name: Start Postgres 15 with TLS for test-pg's live rounds
-        if: ${{ contains(matrix.targets, 'test-pg') || contains(matrix.targets, 'check') }}
+        if: ${{ contains(matrix.targets, 'test-pg') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') }}
         run: |
           set -euo pipefail
           certs="$RUNNER_TEMP/pg-certs"

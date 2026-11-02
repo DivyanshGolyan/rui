@@ -44,9 +44,17 @@ const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
 const tls = @import("tls.zig");
 
-/// The OpenSSL bindings this module links, for the Store's Postgres TLS,
-/// which shares one copy of the library and its trust loading.
-pub const openssl = c;
+/// What the Store's Postgres TLS shares with this module: one copy of
+/// OpenSSL, its client settings, host naming and trust loading. Its
+/// `.system` trust is the bundle OpenSSL reads, never SecTrust, which
+/// verifies only this module's sessions on its job threads.
+pub const openssl_client = struct {
+    pub const c = @import("h2_c");
+    pub const HostKind = tls.HostKind;
+    pub const newContext = tls.newContext;
+    pub const nameHost = tls.nameHost;
+    pub const loadTrust = tls.loadTrust;
+};
 
 /// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
@@ -185,11 +193,6 @@ pub const Trust = union(enum) {
     /// Only the certificates in this PEM file (`--provider-ca-file`).
     ca_file: []const u8,
 };
-
-/// Loads `trust` into a context the caller built: the CA file, or the
-/// system's trust as OpenSSL reads it (never SecTrust, which verifies only
-/// h2's own sessions).
-pub const loadTrust = tls.loadTrust;
 
 pub const Options = struct {
     /// Most streams alive at once. Sizes the connection table: one

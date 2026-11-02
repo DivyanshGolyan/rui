@@ -62,9 +62,11 @@ fn transcript(input: []const u8, chunk: usize, writer: *std.Io.Writer) !void {
             continue;
         }
         if (fed == input.len) break;
-        std.mem.copyForwards(u8, &inbox, inbox[start..end]);
-        end -= start;
-        start = 0;
+        if (start > 0) {
+            std.mem.copyForwards(u8, &inbox, inbox[start..end]);
+            end -= start;
+            start = 0;
+        }
         const count = @min(chunk, input.len - fed, inbox.len - end);
         try std.testing.expect(count > 0);
         @memcpy(inbox[end..][0..count], input[fed..][0..count]);
@@ -177,7 +179,7 @@ test "notices are skipped at any length and an error keeps its SQLSTATE, severit
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     try transcript(notice ++ failure, 1000, &output.writer);
-    try std.testing.expectEqualStrings("error 57P01 fatal unavailable " ++ &@as([128]u8, @splat('m')) ++ "\n", output.written());
+    try std.testing.expectEqualStrings("error 57P01 fatal connection " ++ &@as([128]u8, @splat('m')) ++ "\n", output.written());
 }
 
 test "malformed messages are protocol violations, never misread" {
@@ -194,6 +196,9 @@ test "malformed messages are protocol violations, never misread" {
         comptime hex("470000000700000000"),
         // An ErrorResponse whose field list is not terminated.
         comptime hex("450000000a43323230313200"),
+        // An ErrorResponse whose SQLSTATE is not five characters.
+        comptime fieldMessage('E', "VERROR\x00C08\x00"),
+        comptime fieldMessage('E', "VERROR\x00C080060\x00"),
         // ParameterStatus missing its value's terminator.
         comptime hex("5300000007610062"),
         // A non-row message larger than the inbox.
@@ -213,12 +218,13 @@ test "malformed messages are protocol violations, never misread" {
 
 test "SQLSTATEs map to the Store's classes" {
     const cases = [_]struct { []const u8, pg.Class }{
-        .{ "08006", .connection },     .{ "57P01", .unavailable },      .{ "53300", .unavailable },
-        .{ "28P01", .authentication }, .{ "3D000", .missing_database }, .{ "57014", .timeout },
-        .{ "55P03", .timeout },        .{ "40001", .serialization },    .{ "40P01", .serialization },
-        .{ "23505", .constraint },     .{ "25006", .read_only },        .{ "RUI01", .guard },
-        .{ "42P01", .statement },      .{ "0A000", .statement },        .{ "XX000", .server_fault },
-        .{ "58030", .server_fault },   .{ "22012", .other },
+        .{ "08006", .connection },       .{ "57P01", .connection },        .{ "57P03", .unavailable },
+        .{ "53300", .unavailable },      .{ "53100", .storage_full },      .{ "28P01", .authentication },
+        .{ "3D000", .missing_database }, .{ "57014", .statement_timeout }, .{ "55P03", .lock_timeout },
+        .{ "40001", .serialization },    .{ "40P01", .deadlock },          .{ "23505", .constraint },
+        .{ "25006", .read_only },        .{ "RUI01", .guard },             .{ "42P01", .statement },
+        .{ "0A000", .statement },        .{ "XX000", .server_fault },      .{ "58030", .server_fault },
+        .{ "22012", .other },
     };
     for (cases) |case| try std.testing.expectEqual(case[1], pg.classify(case[0][0..5].*));
 }
@@ -355,9 +361,9 @@ const Live = struct {
     inbox: [pg.receive_buffer_bytes]u8 = undefined,
     in_start: usize = 0,
     in_end: usize = 0,
-    cipher_in: [pg.receive_buffer_bytes]u8 = undefined,
+    cipher_in: [tls.max_record_bytes]u8 = undefined,
     cipher_len: usize = 0,
-    cipher_out: [pg.send_buffer_bytes]u8 = undefined,
+    cipher_out: [tls.max_record_bytes]u8 = undefined,
     server_version_num: u32 = 0,
     channel_bound: bool = false,
     refusal: pg.Diagnostic = .{},
@@ -452,6 +458,7 @@ const Live = struct {
     /// Sends what OpenSSL wrote and drops the ciphertext it read.
     fn settle(self: *Live, wire: *const tls.Wire) !void {
         try self.sendRaw(wire.out[0..wire.out_used]);
+        if (wire.in_used == 0) return;
         std.mem.copyForwards(u8, &self.cipher_in, self.cipher_in[wire.in_used..self.cipher_len]);
         self.cipher_len -= wire.in_used;
     }
@@ -486,9 +493,11 @@ const Live = struct {
 
     /// Reads more plaintext behind the unconsumed bytes, moved to the front.
     fn fill(self: *Live) !void {
-        std.mem.copyForwards(u8, &self.inbox, self.inbox[self.in_start..self.in_end]);
-        self.in_end -= self.in_start;
-        self.in_start = 0;
+        if (self.in_start > 0) {
+            std.mem.copyForwards(u8, &self.inbox, self.inbox[self.in_start..self.in_end]);
+            self.in_end -= self.in_start;
+            self.in_start = 0;
+        }
         while (true) {
             var wire: tls.Wire = .{ .in = self.cipher_in[0..self.cipher_len], .out = &self.cipher_out };
             const transfer = self.session.read(&wire, self.inbox[self.in_end..]);
@@ -698,4 +707,20 @@ test "live: a bound value larger than the outbox streams through it, and a long 
     var md5_text: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&md5_text, "{x}", .{&digest_hex});
     try std.testing.expectEqualStrings(&md5_text, events.items[1]);
+}
+
+test "a streamed Bind takes exactly its declared bytes, and sent counts past a message once it left the outbox" {
+    var buffer: [64]u8 = undefined;
+    var out: pg.Outbox = .{ .buffer = &buffer };
+    try pg.beginBindStreamed(&out, "", &.{}, 10);
+    try std.testing.expectEqual(@as(usize, 10), out.appendPart("abcdefghijklmno"));
+    try std.testing.expectEqual(@as(usize, 0), out.appendPart("p"));
+    try pg.endBindStreamed(&out);
+    try pg.writeExecute(&out);
+    try pg.writeSync(&out);
+    const commit_end = out.written();
+    out.discard(out.len - 1);
+    try std.testing.expect(out.sent < commit_end);
+    out.discard(1);
+    try std.testing.expectEqual(commit_end, out.sent);
 }
