@@ -5,7 +5,8 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
-const Access = @import("../access.zig").Access;
+const store_access = @import("../access.zig");
+const Access = store_access.Access;
 const rsql = @import("../rsql.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
@@ -136,6 +137,12 @@ pub const stop_cancellation: Import = blk: {
     break :blk .ofBytes(stop_cancellation_text, false);
 };
 
+/// The empty value's identity, hashed when the Host is built.
+pub const empty_content: Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes("", false);
+};
+
 /// Queues the read that finds `value`'s row; `importSlot` follows its round.
 /// `value` must outlive the round, which reads its digest in place.
 pub fn lookup(a: anytype, value: *Import) void {
@@ -259,45 +266,51 @@ fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8)
 }
 
 pub fn importEmptyContent(self: *Store) !i64 {
-    var empty: protocol.ContentField = .{ .state = .value };
-    empty.digest = protocol.contentDigest("");
-    return importContent(self, &empty, .{});
+    return importBytesContent(self, "", false, false);
 }
 
-pub fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
-    std.debug.assert(content.state == .value);
-    if (content.file) |source| {
-        if (try source.length(self.io) != content.length) return error.ContentChanged;
-    } else if (content.length != 0 or
-        !std.mem.eql(u8, &protocol.contentDigest(""), &content.digest))
-    {
+/// The identity of sealed caller content, as `lookup` finds it.
+pub fn sealedIdentity(field: *const protocol.ContentField) Import {
+    return .{ .digest = field.digest, .length = field.length, .private = false };
+}
+
+/// After `lookup`'s round: the id of the sealed content `field`, whose
+/// identity `value` is. A file must still hold `field.length` bytes. A new
+/// row is queued and its round run, then the file streams into its payload
+/// while hashed, so a file that changed fails before COMMIT; a row that
+/// exists still has its file verified.
+pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *const Import, faults: Faults) !u64 {
+    std.debug.assert(field.state == .value);
+    if (field.file) |source| {
+        if (try source.length(io) != field.length) return error.ContentChanged;
+    } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
-    const slot = try contentSlot(self, &content.digest, content.length, false);
-    if (slot.existing) {
-        if (content.file) |source| {
-            try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
-        }
-        return slot.id;
+    const slot = try importSlot(a, value);
+    const id: u64 = @intCast(slot.id);
+    // Run now, so a second import in this Access can queue its own row.
+    if (!slot.existing) try a.run();
+    if (slot.existing or field.length == 0) {
+        if (field.file) |source| try verifyExternalContent(io, source, field.length, &field.digest, null, faults);
+        return id;
     }
-    const content_id = slot.id;
+    const file = field.file orelse return error.MissingContentCustody;
+    const sink = try a.contentSink(id);
+    defer sink.close();
+    try verifyExternalContent(io, file, field.length, &field.digest, sink, faults);
+    return id;
+}
 
-    if (content.length == 0) {
-        if (content.file) |source| {
-            try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
-        }
-        return content_id;
-    }
-    var blob: ?*c.sqlite3_blob = null;
-    if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 1, &blob) != c.SQLITE_OK) {
-        return error.ContentWriteFailed;
-    }
-    defer _ = c.sqlite3_blob_close(blob);
-    const file = content.file orelse return error.MissingContentCustody;
-    // Verify the exact bytes copied while the row is still uncommitted.
-    // The caller rolls back the whole transaction if verification fails.
-    try verifyExternalContent(self.io, file, content.length, &content.digest, blob, faults);
-    return content_id;
+/// `importSealed` for unconverted code, inside its transaction.
+pub fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var value = sealedIdentity(content);
+    lookup(&a, &value);
+    try a.run();
+    const id = try importSealed(&a, self.io, content, &value, faults);
+    try a.apply();
+    return @intCast(id);
 }
 
 pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
@@ -346,7 +359,7 @@ fn verifyExternalContent(
     file: std.Io.File,
     expected_length: u64,
     expected_digest: *const [32]u8,
-    destination: ?*c.sqlite3_blob,
+    destination: ?store_access.ContentSink,
     faults: Faults,
 ) !void {
     var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
@@ -357,11 +370,8 @@ fn verifyExternalContent(
         if (count != wanted) return error.ContentReadFailed;
         if (faults.content_read) return error.InjectedContentReadFailure;
         copy.hash.update(copy.window[0..count]);
-        if (destination) |blob| {
-            if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
-            if (c.sqlite3_blob_write(blob, copy.window[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
-                return error.ContentWriteFailed;
-            }
+        if (destination) |sink| {
+            try sink.write(copy.window[0..count], offset);
             if (faults.content_import) return error.InjectedContentImportFailure;
         }
         offset += count;

@@ -286,8 +286,9 @@ pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
 pub fn Read(comptime spec: ReadSpec) type {
     comptime {
         if (statementError(.read, spec.sql, spec.Args, spec.Row)) |message| @compileError(message ++ ": " ++ spec.sql);
-        // `.one` and `.at_most` decode in place; an `.optional` or `.each` Row is copied.
-        if ((spec.cardinality == .optional or spec.cardinality == .each) and @sizeOf(spec.Row) > 1024)
+        // `.one` and `.at_most` decode in place; an `.each` Row is decoded
+        // into the round's frame. `Access.read` refuses a big `.optional`.
+        if (spec.cardinality == .each and @sizeOf(spec.Row) > 1024)
             @compileError("rsql: a Row over 1 KiB is never copied; read it .one or .at_most(1): " ++ spec.sql);
     }
     return struct {
@@ -574,6 +575,7 @@ fn insertSessionError(comptime tokens: []const Token, comptime marker_index: usi
             if (tokens[index].depth != 1) continue;
             if (tokens[index].isSymbol(',')) count += 1 else if (tokens[index].is("session_ref")) column = count;
         }
+        if (isWord(tokens, index + 1, "SELECT")) return copySessionError(tokens, marker_index, column, count, index + 1);
         if (!isWord(tokens, index + 1, "VALUES") or !(index + 2 < tokens.len and tokens[index + 2].isSymbol('('))) return misplaced;
         // The value at `column`'s place: a lone token between depth-1 commas.
         var found = false;
@@ -593,6 +595,37 @@ fn insertSessionError(comptime tokens: []const Token, comptime marker_index: usi
         if (!found or index + 1 != tokens.len) return misplaced;
         if (value != count) return "rsql: an INSERT gives one value per column";
         return null;
+    }
+}
+
+/// Why an `INSERT INTO t(...) SELECT ...` does not copy from exactly one
+/// Session's row, or null. It must read `FROM session` alone, give the bare
+/// `session_ref` as the session_ref value, one value per column, and name
+/// the Session in its WHERE as an UPDATE does. The Session's key pins one
+/// row, so every row it writes belongs to that Session.
+fn copySessionError(comptime tokens: []const Token, comptime marker_index: usize, comptime column: ?usize, comptime count: usize, comptime select: usize) ?[]const u8 {
+    comptime {
+        const misplaced = "rsql: an INSERT ... SELECT names its Session by copying session_ref FROM session alone, WHERE session_ref=@session(?k)";
+        const target = column orelse return misplaced;
+        var value: usize = 0;
+        var start = select + 1;
+        var index = start;
+        var found = false;
+        while (index < tokens.len and !(tokens[index].depth == 0 and tokens[index].is("FROM"))) : (index += 1) {
+            const end = tokens[index].depth == 0 and tokens[index].isSymbol(',');
+            if (!end and !(index + 1 < tokens.len and tokens[index + 1].depth == 0 and tokens[index + 1].is("FROM"))) continue;
+            const item = tokens[start..if (end) index else index + 1];
+            if (value == target) {
+                if (item.len != 1 or !item[0].is("session_ref")) return misplaced;
+                found = true;
+            }
+            value += 1;
+            start = index + 1;
+        }
+        if (!found or index + 2 >= tokens.len or !tokens[index + 1].is("session") or !tokens[index + 2].is("WHERE")) return misplaced;
+        if (value != count + 1) return "rsql: an INSERT gives one value per column";
+        if (marker_index < index) return misplaced;
+        return whereSessionError(tokens[index..], marker_index - index);
     }
 }
 
@@ -617,8 +650,8 @@ fn whereSessionError(comptime tokens: []const Token, comptime marker_index: usiz
     }
 }
 
-/// Whether a SELECT returns at most one row: it ends in `LIMIT 1`, or its
-/// keys pin it (`pinsOneRow`).
+/// Whether a SELECT returns at most one row: it ends in `LIMIT 1`, it has
+/// no FROM, or its keys pin it (`pinsOneRow`).
 fn returnsOneRow(comptime sql: []const u8) bool {
     comptime {
         @setEvalBranchQuota(400 * sql.len + 10_000);
@@ -626,7 +659,11 @@ fn returnsOneRow(comptime sql: []const u8) bool {
         const n = tokens.len;
         const limited = n >= 2 and tokens[n - 2].depth == 0 and tokens[n - 2].is("LIMIT") and
             tokens[n - 1].kind == .number and std.mem.eql(u8, tokens[n - 1].text, "1");
-        return limited or pinsOneRow(sql);
+        // A SELECT with no FROM returns its one row of values.
+        const from = for (tokens) |token| {
+            if (token.depth == 0 and token.is("FROM")) break true;
+        } else false;
+        return limited or !from or pinsOneRow(sql);
     }
 }
 
@@ -1112,7 +1149,18 @@ test "a write names its Session with @session on its table's own session_ref" {
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now)", Stop, void));
     try std.testing.expectEqualStrings(inserted, comptime statementError(.write, "INSERT INTO session_stop(session_ref,command_key,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now)", Stop, void).?);
     try std.testing.expectEqualStrings(inserted, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,coalesce(@session(?2),'x'),?3,0,@now)", Stop, void).?);
-    try std.testing.expectEqualStrings(inserted, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT ?1,@session(?2),?3,0,@now", Stop, void).?);
+    const copied = "rsql: an INSERT ... SELECT names its Session by copying session_ref FROM session alone, WHERE session_ref=@session(?k)";
+    try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT ?1,@session(?2),?3,0,@now", Stop, void).?);
+
+    // A copy of one Session's row: its key pins the row the WHERE names.
+    const Copy = struct { session: SessionHead, key: []const u8 };
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1)", Copy, void));
+    try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT ?2,revision,?2 FROM session WHERE session_ref=@session(?1)", Copy, void).?);
+    try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT s.session_ref,revision,?2 FROM session s WHERE session_ref=@session(?1)", Copy, void).?);
+    try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM turn WHERE session_ref=@session(?1)", Copy, void).?);
+    try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session JOIN turn ON turn.session_ref=session.session_ref WHERE session_ref=@session(?1)", Copy, void).?);
+    try std.testing.expectEqualStrings("rsql: a WHERE that names a Session joins its terms with AND only, outside parentheses", comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1) OR revision=1", Copy, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT gives one value per column", comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision FROM session WHERE session_ref=@session(?1) AND ?2 IS NOT NULL", Copy, void).?);
     try std.testing.expectEqualStrings(inserted, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now),(?1,'other',?3,0,@now)", Stop, void).?);
 }
 
@@ -1148,4 +1196,5 @@ test "a read is keyed to one row only when keys pin every table it reads" {
     try std.testing.expect(comptime returnsOneRow("SELECT turn_id FROM turn WHERE turn_id<=?1 ORDER BY turn_id LIMIT 1"));
     try std.testing.expect(!comptime returnsOneRow("SELECT turn_id FROM turn WHERE turn_id<=?1 ORDER BY turn_id LIMIT 2"));
     try std.testing.expect(!comptime returnsOneRow("SELECT turn_id FROM turn WHERE turn_id IN (SELECT turn_id FROM turn LIMIT 1)"));
+    try std.testing.expect(comptime returnsOneRow("SELECT EXISTS(SELECT 1 FROM session WHERE session_ref=?1) AS taken"));
 }

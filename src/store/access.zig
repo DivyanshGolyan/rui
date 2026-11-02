@@ -88,6 +88,21 @@ pub const ContentBlob = struct {
     }
 };
 
+/// Writes one content payload in place, at offsets the writer chooses.
+pub const ContentSink = struct {
+    blob: *c.sqlite3_blob,
+
+    pub fn write(sink: ContentSink, bytes: []const u8, offset: u64) error{ ContentWriteFailed, ContentTooLarge }!void {
+        if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
+        if (c.sqlite3_blob_write(sink.blob, bytes.ptr, @intCast(bytes.len), @intCast(offset)) != c.SQLITE_OK) return error.ContentWriteFailed;
+    }
+
+    pub fn close(sink: ContentSink) void {
+        // Close reports only an earlier write failure, already returned.
+        _ = c.sqlite3_blob_close(sink.blob);
+    }
+};
+
 pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     return struct {
         const Self = @This();
@@ -119,6 +134,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             target: union {
                 /// A read's result.
                 destination: *anyopaque,
+                /// A `readInto` read's row, and whether it found one.
+                into: struct { row: *anyopaque, found: *bool },
                 /// An `.each` read's visitor, and how many rows it may step.
                 each: struct { visitor: *anyopaque, limit: u64 },
                 payload: struct { content_id: u64, bytes: []const u8 },
@@ -148,7 +165,19 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Queues a read; `destination` is defined once the round runs.
         pub fn read(a: *Self, comptime S: type, args: S.Args, destination: *S.Result) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality != .each);
+            // An `.optional` result is a copy of the decoded Row.
+            if (S.cardinality == .optional and @sizeOf(S.Row) > 1024)
+                @compileError("rsql: a Row over 1 KiB is never copied; read it with readInto: " ++ S.sql);
             a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, null);
+        }
+
+        /// Queues an `.optional` read that decodes into `row` in place, so
+        /// a Row over 1 KiB is never copied; `found` says whether there was
+        /// one. A missing row leaves `row` as it was. Both are defined once
+        /// the round runs.
+        pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *bool) void {
+            comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
+            a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, null);
         }
 
         /// Queues an `.each` read whose round hands each row in turn to
@@ -234,6 +263,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             }
             if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(offset)) != c.SQLITE_OK) return error.ContentReadFailed;
             if (@import("builtin").is_test) _ = a.store.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
+        }
+
+        /// A sink for the payload of the content row `content_id`, which
+        /// a write of this Access inserted and a round has run. It writes
+        /// into the open transaction, so the bytes commit with the row.
+        pub fn contentSink(a: *Self, content_id: u64) Error!ContentSink {
+            comptime std.debug.assert(mode != .read);
+            if (a.failure) |err| return err;
+            var blob: ?*c.sqlite3_blob = null;
+            if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
+            return .{ .blob = blob.? };
         }
 
         /// Runs the queued writes and one compare-and-set per Session that
@@ -392,6 +432,19 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                         },
                         .each => @compileError("readEach runs an .each read"),
                     }
+                }
+            }.run;
+        }
+
+        fn runInto(comptime S: type) *const fn (*Self, *const Queued) Error!void {
+            return &struct {
+                fn run(_: *Self, entry: *const Queued) Error!void {
+                    const statement = entry.statement.?;
+                    const into = entry.target.into;
+                    into.found.* = try nextRow(statement);
+                    if (!into.found.*) return;
+                    try sqlite.decodeRow(S.Row, statement, @ptrCast(@alignCast(into.row)));
+                    if (!S.single_row and try nextRow(statement)) return error.CorruptStore;
                 }
             }.run;
         }

@@ -206,7 +206,8 @@ pub const Store = struct {
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, 16);
+        // 17: a created Session's INSERT binds sixteen settings and `@now`.
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, 17);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 4096);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_ATTACHED, 0);
@@ -336,7 +337,9 @@ pub const Store = struct {
     ) ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, configuration_domain.configureLocked(self, command, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, faults))) catch .infrastructure_failure;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.

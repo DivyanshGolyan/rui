@@ -154,9 +154,15 @@ test "Store allocates six character IDs atomically retries collisions and replay
     try std.testing.expect(replay.replayed and replay.created);
     try std.testing.expectEqualStrings(b.session.slice(), replay.session.slice());
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
-    const current = (try store_core.readSessionForTesting(&storage, a.session.slice())).?;
+    // The schema refuses a noncanonical reference even when a writer binds one.
+    var copy_buffer: [1024]u8 = undefined;
+    const copy = try std.fmt.bufPrintSentinel(&copy_buffer, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode," ++
+        "output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec," ++
+        "workspace_digest,created_at,created_seq,workspace_key) SELECT ?1,workspace,model,instructions_content_id,tools_mask,permission_mode," ++
+        "output_schema_content_id,1,1,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at," ++
+        "(SELECT max(created_seq)+1 FROM session),workspace_key FROM session WHERE session_ref='{s}'", .{a.session.slice()}, 0);
     for ([_][]const u8{ "short", "1234567", "K7m2qx", "k7m2qi", "k7m\x00qx" }) |invalid| {
-        try std.testing.expectError(error.StatementFailed, configuration_domain.insertSession(&storage, invalid, &current, 1_000_000));
+        try std.testing.expectError(error.StatementFailed, execSessionSql(storage.database, copy, invalid));
     }
     var unknown = try completeConfiguration("unknown-update", "k7m2qx", workspace, "model-c");
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, storage.configure(&unknown, .{}).rejected.code);
@@ -1040,7 +1046,11 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
-        var fault: TestingStatementFault = .{ .sql = store_core.session_workspace_key_sql };
+        // A configure reads the key with the Session's saved configuration.
+        var fault: TestingStatementFault = .{ .sql = switch (route) {
+            .configure => configuration_domain.saved_session_sql,
+            .message => store_core.session_workspace_key_sql,
+        } };
         switch (route) {
             .configure => {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -1078,11 +1088,13 @@ test "a Session creation that rolls back never reaches a since listing" {
     const session = try configureTestSession(&storage, "rollback-config");
     const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
     {
+        // The creation's write round runs, then its transaction rolls back.
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const create = try completeConfiguration("rollback-create", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        const current = (try store_core.readSessionForTesting(&storage, session.slice())).?;
-        try std.testing.expect(try configuration_domain.insertSession(&storage, "zzzzzz", &current, try store_core.takeIdentity(&storage, .created_seq)));
+        try std.testing.expect(try configuration_domain.applyConfigurationLocked(&storage, "", &create.configuration, .{}) == .accepted);
         try store_core.rollbackAfterError(&storage, .{});
     }
     // The rolled-back insert still moved the commit counter. The hint
@@ -6756,7 +6768,13 @@ test "real SQLite full during import publishes no canonical prefix" {
     // `finishTransaction` then fences it as a non-ordinary error.
     try std.testing.expectError(
         error.CanonicalStorageFull,
-        configuration_domain.configureLocked(&storage, &command, .{}),
+        configure: {
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
+            defer a.deinit();
+            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, .{}));
+        },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     store_core.fence(&storage, error.CanonicalStorageFull) catch {};

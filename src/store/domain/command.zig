@@ -11,6 +11,8 @@ const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
+const rsql = @import("../rsql.zig");
+const Access = @import("../access.zig").Access;
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
@@ -183,7 +185,7 @@ pub fn submitMessageLocked(
         null;
     var configured: ?configuration_domain.Applied = null;
     if (code == null) if (command.configuration) |*configuration| {
-        switch (try configuration_domain.applyConfiguration(self, "", configuration, faults)) {
+        switch (try configuration_domain.applyConfigurationLocked(self, "", configuration, faults)) {
             .rejected => |rejection| code = std.meta.stringToEnum(protocol.MessageRejection, @tagName(rejection)).?,
             .accepted => |value| {
                 session = value.session;
@@ -838,8 +840,81 @@ fn Replay(comptime Rejection: type) type {
     };
 }
 
-/// Classifies a keyed command against its saved answer. Any saved answer
-/// ends the caller's transaction before it returns.
+/// A command's saved answer, by its key.
+pub const saved_command = rsql.Read(.{
+    .sql = "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct {
+        kind: u8,
+        target: protocol.Bounded(protocol.max_session_bytes),
+        input_digest: [32]u8,
+        accepted: bool,
+        code: protocol.Bounded(protocol.max_code_bytes),
+        revision: u64,
+        created: bool,
+        primary_content_id: ?rsql.Positive,
+    },
+    .cardinality = .optional,
+});
+
+/// Queues reading the saved answer of the command `key`; `classify`
+/// follows its round.
+pub fn lookupCommand(a: anytype, key: []const u8, destination: *saved_command.Result) void {
+    a.read(saved_command, .{ .key = key }, destination);
+}
+
+/// Each command kind's stored code.
+fn kindCode(kind: protocol.CommandKind) u8 {
+    return switch (kind) {
+        .configure => 1,
+        .message => 2,
+        .session_stop => 3,
+        .model_interruption => 4,
+        .permission_decision => 5,
+    };
+}
+
+/// The answer a `lookupCommand` round found, or null.
+fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?ExistingCommand {
+    const row = if (saved.*) |*row| row else return null;
+    // Copied by length, as an answer's value is compared whole.
+    var target: protocol.Bounded(protocol.max_session_bytes) = .{};
+    target.set(row.target.slice()) catch unreachable;
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    code.set(row.code.slice()) catch unreachable;
+    return .{
+        .kind = for (std.enums.values(protocol.CommandKind)) |candidate| {
+            if (kindCode(candidate) == row.kind) break candidate;
+        } else return error.CorruptStore,
+        .target = target,
+        .digest = row.input_digest,
+        .accepted = row.accepted,
+        .code = code,
+        .revision = row.revision,
+        .created = row.created,
+        .primary_content_id = if (row.primary_content_id) |id| @intCast(id.get()) else null,
+    };
+}
+
+/// Classifies a keyed command against the saved answer `lookupCommand`
+/// read. Any saved answer is a replay, and its caller ends the
+/// transaction without writing.
+pub fn classify(
+    comptime Rejection: type,
+    saved: *const saved_command.Result,
+    kind: protocol.CommandKind,
+    target: []const u8,
+    digest: *const [32]u8,
+) error{CorruptStore}!Replay(Rejection) {
+    const existing = try savedAnswer(saved) orelse return .fresh;
+    if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !existing.target.eql(target)) or
+        !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
+    if (existing.accepted) return .{ .accepted = existing };
+    return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse return error.CorruptStore };
+}
+
+/// `lookupCommand` and `classify` for unconverted code, inside the
+/// transaction it opened, which any saved answer rolls back.
 pub fn classifyReplay(
     self: *Store,
     comptime Rejection: type,
@@ -848,53 +923,23 @@ pub fn classifyReplay(
     target: []const u8,
     digest: *const [32]u8,
 ) !Replay(Rejection) {
-    const existing = try readExistingCommand(self, key) orelse return .fresh;
-    try store_core.rollback(self);
-    if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !existing.target.eql(target)) or
-        !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
-    if (existing.accepted) return .{ .accepted = existing };
-    return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse
-        return error.CorruptStore };
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var saved: saved_command.Result = undefined;
+    lookupCommand(&a, key, &saved);
+    try a.run();
+    if (saved != null) try store_core.rollback(self);
+    return classify(Rejection, &saved, kind, target, digest);
 }
 
+/// `lookupCommand` for unconverted code.
 fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
-    const statement = try store_core.cached(self, "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, key);
-    const step_result = c.sqlite3_step(statement);
-    if (step_result == c.SQLITE_DONE) return null;
-    if (step_result != c.SQLITE_ROW) return error.CommandReadFailed;
-    const kind_value = c.sqlite3_column_int(statement, 0);
-    const kind: protocol.CommandKind = switch (kind_value) {
-        1 => .configure,
-        2 => .message,
-        3 => .session_stop,
-        4 => .model_interruption,
-        5 => .permission_decision,
-        else => return error.CorruptStore,
-    };
-    var target: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(statement, 1, &target);
-    const digest = try sqlite.readDigest(statement, 2);
-    const accepted_value = c.sqlite3_column_int(statement, 3);
-    if (accepted_value != 0 and accepted_value != 1) return error.CorruptStore;
-    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-    try sqlite.readText(statement, 4, &code);
-    const revision_value = c.sqlite3_column_int64(statement, 5);
-    if (revision_value < 0) return error.CorruptStore;
-    const created_value = c.sqlite3_column_int(statement, 6);
-    if (created_value != 0 and created_value != 1) return error.CorruptStore;
-    const primary_content_id = sqlite.readNullablePositiveI64(statement, 7) catch return error.CorruptStore;
-    return .{
-        .kind = kind,
-        .target = target,
-        .digest = digest,
-        .accepted = accepted_value == 1,
-        .code = code,
-        .revision = @intCast(revision_value),
-        .created = created_value == 1,
-        .primary_content_id = primary_content_id,
-    };
+    var a = Access(.read, error{}).within(self);
+    defer a.deinit();
+    var saved: saved_command.Result = undefined;
+    lookupCommand(&a, key, &saved);
+    try a.run();
+    return savedAnswer(&saved);
 }
 
 fn readMessageAdmission(
@@ -1042,6 +1087,54 @@ fn sessionStopCompletion(self: *Store, selection: SessionStopSelection) !protoco
     return if (try turn_domain.turnIsComplete(self, turn_id)) .completed else .pending;
 }
 
+const insert_command = rsql.Write(.{
+    .sql = "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    .Args = struct {
+        key: []const u8,
+        kind: u8,
+        target: []const u8,
+        digest: *const [32]u8,
+        primary_content_id: ?u64,
+        secondary_content_id: ?u64,
+        accepted: bool,
+        code: []const u8,
+        revision: u64,
+        created: bool,
+        command_seq: u64,
+    },
+    // A replay was classified first, so the key is free.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Queues saving the command `key` with its `answer`, which, like `key`,
+/// `target` and `digest`, must outlive the round.
+pub fn queueCommand(
+    a: anytype,
+    key: []const u8,
+    kind: protocol.CommandKind,
+    target: []const u8,
+    digest: *const [32]u8,
+    primary_content_id: ?u64,
+    secondary_content_id: ?u64,
+    answer: *const StoredAnswer,
+) !void {
+    a.write(insert_command, .{
+        .key = key,
+        .kind = kindCode(kind),
+        .target = target,
+        .digest = digest,
+        .primary_content_id = primary_content_id,
+        .secondary_content_id = secondary_content_id,
+        .accepted = answer.accepted,
+        .code = answer.code.slice(),
+        .revision = answer.revision,
+        .created = answer.created,
+        .command_seq = try a.identity(.command_seq),
+    });
+}
+
+/// `queueCommand` for unconverted code, inside its transaction.
 pub fn insertCommand(
     self: *Store,
     key: []const u8,
@@ -1052,30 +1145,10 @@ pub fn insertCommand(
     secondary_content_id: ?i64,
     answer: StoredAnswer,
 ) !void {
-    const statement = try store_core.cached(self, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
-        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, key);
-    const kind_value: i64 = switch (kind) {
-        .configure => 1,
-        .message => 2,
-        .session_stop => 3,
-        .model_interruption => 4,
-        .permission_decision => 5,
-    };
-    try sqlite.bindI64(statement, 2, kind_value);
-    try sqlite.bindText(statement, 3, target);
-    try sqlite.bindBlob(statement, 4, digest);
-    try sqlite.bindNullableI64(statement, 5, primary_content_id);
-    try sqlite.bindNullableI64(statement, 6, secondary_content_id);
-    const accepted_value: i64 = if (answer.accepted) 1 else 0;
-    try sqlite.bindI64(statement, 7, accepted_value);
-    try sqlite.bindText(statement, 8, answer.code.slice());
-    try sqlite.bindU64(statement, 9, answer.revision);
-    const created_value: i64 = if (answer.created) 1 else 0;
-    try sqlite.bindI64(statement, 10, created_value);
-    try sqlite.bindU64(statement, 11, try store_core.takeIdentity(self, .command_seq));
-    try sqlite.expectDone(statement);
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    try queueCommand(&a, key, kind, target, digest, if (primary_content_id) |id| @intCast(id) else null, if (secondary_content_id) |id| @intCast(id) else null, &answer);
+    try a.apply();
 }
 
 fn insertMessageAdmission(
