@@ -5159,7 +5159,7 @@ def main(mode="all", correlation_case="all"):
             # cases through the Message protocol without changing their input.
             from control_integration import raw_request
             for index in range(40):
-                wire = {"version": "4", "kind": "message", "store": str(store),
+                wire = {"version": host_process.WIRE_VERSION, "kind": "message", "store": str(store),
                     "key": f"{prefix}-{index}", "session": session, "sender": None, "sender_handle": None,
                     "text": {"state": "value", "value": ""}}
                 head, body = raw_request(host.rui_ready_fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
