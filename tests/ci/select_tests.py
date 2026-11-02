@@ -69,7 +69,7 @@ RULES = (
       "tests/integration/product_defaults.py"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "CLI selection and otherwise unnamed native caller checks"),
-    (("src/store.zig", "src/store/*"), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
+    (("src/store.zig", "src/store/*", "!src/store/wire/*"), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
      "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance"),
     (("tests/integration/peer_integration.py",), ("check",), ("check",),
      "Peer round trip through installed Bash, runtime address and capture recovery"),
@@ -243,6 +243,12 @@ def execution_batches(targets, check_part="all"):
                else [target] for target in targets if target in isolated])
 
 
+def matches(path, patterns):
+    """A path matches a rule's patterns unless a "!" pattern excludes it."""
+    included = any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns if not pattern.startswith("!"))
+    return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
+
+
 def select(paths, phase, available):
     targets, native_targets, reasons = set(), set(), set()
     manual_checks = set()
@@ -261,7 +267,7 @@ def select(paths, phase, available):
             continue
         matched = False
         for patterns, checks, native_checks, reason in RULES:
-            if any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns):
+            if matches(path, patterns):
                 targets.update(checks)
                 native_targets.update(native_checks)
                 reasons.add(reason)
