@@ -1448,13 +1448,73 @@ test "a save still queued as the overview ends runs, and the way out names it" {
     defer rig.close();
     try std.testing.expect(try rig.press("/model\n") == null);
     try std.testing.expect(try rig.settle() == null);
-    // gpt-5.5 both sign-ins offer: Enter opens the choice, Enter picks.
-    try std.testing.expect(try rig.press("\n\n") == null);
+    // Down to gpt-6-luna, which both sign-ins offer: Enter opens the choice, Enter picks.
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
     try std.testing.expectEqual(Job.save, std.meta.activeTag(rig.overview.jobs[rig.overview.job_count - 1]));
     var buffer: [1024]u8 = undefined;
     const guidance = try finishedGuidance(rig, &buffer);
-    try std.testing.expectEqualStrings("gpt-5.5", Seen.now.saved.?.model.slice());
-    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-5.5") != null);
+    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-6-luna") != null);
+}
+
+/// Fake operations whose saves write the preferences file under the
+/// overview's home, counted in `Seen.now.saves`.
+const file_saving_operations: Operations = blk: {
+    var ops = fake_operations;
+    ops.save_default = struct {
+        fn save(self: *Self, binding: view.Default) !void {
+            Seen.now.saves += 1;
+            try saveDefault(self, binding);
+        }
+    }.save;
+    break :blk ops;
+};
+
+/// Pins `provider` and `model` in the preferences file under `home`, as
+/// /setup or another terminal would.
+fn pin(home: []const u8, provider: []const u8, model: []const u8) !void {
+    const readiness: preferences.Readinesses = .initFill(.configured);
+    _ = try preferences.update(home, .{ .provider = .{ .set = provider }, .model = .{ .set = model } }, &readiness);
+}
+
+test "an overview left without a pick writes no default, pinned or not" {
+    for ([_]bool{ false, true }) |pinned| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        if (pinned) try pin(home, "openai", "gpt-6-luna");
+        var cancellation: client.Cancellation = .{};
+        // Without a pin, the overview opens on the built-in default.
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = if (pinned) "openai" else "codex", .model = if (pinned) "gpt-6-luna" else "gpt-5.5" }, file_saving_operations, &cancellation);
+        defer rig.close();
+        var buffer: [1024]u8 = undefined;
+        const guidance = try finishedGuidance(rig, &buffer);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
+        try std.testing.expect(std.mem.indexOf(u8, guidance, "New Sessions use") == null);
+        const values = try preferences.load(home);
+        try std.testing.expectEqualStrings(if (pinned) "openai" else "", values.provider.slice());
+        try std.testing.expectEqualStrings(if (pinned) "gpt-6-luna" else "", values.model.slice());
+    }
+}
+
+test "a default saved elsewhere while the overview is open outlasts its exit without a pick" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    try pin(home, "codex", "gpt-5.5");
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.settle() == null);
+    try pin(home, "openai", "gpt-6-luna");
+    var buffer: [1024]u8 = undefined;
+    _ = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
+    const values = try preferences.load(home);
+    try std.testing.expectEqualStrings("openai", values.provider.slice());
+    try std.testing.expectEqualStrings("gpt-6-luna", values.model.slice());
 }
 
 test "a pick made while a save runs is written before the departure, which names only it" {

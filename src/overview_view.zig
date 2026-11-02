@@ -702,8 +702,10 @@ pub const State = struct {
     asking_models: bool = false,
     /// A `save_default` is unanswered.
     asking_save: bool = false,
-    /// The newest save that ended, and whether the person saw how. A save
-    /// is wanted while `default` is not what it saved.
+    /// What the preferences file gives new Sessions: the default the
+    /// overview opened on, which it never saves, or the newest save that
+    /// ended and whether the person saw how. A save is wanted while
+    /// `default` is not this binding.
     saved: ?struct { binding: Default, outcome: Saved, shown: bool } = null,
 
     /// The token of the last completed listing.
@@ -742,6 +744,8 @@ pub const State = struct {
     /// The caller owns `home` for the state's lifetime.
     pub fn init(self: *State, gpa: Allocator, options: Options) error{OutOfMemory}!void {
         self.* = .{ .gpa = gpa, .home = options.home, .cwd = 0, .login_at = options.login_at, .default = options.default };
+        // Read or resolved before the overview opened, so only a pick asks for a save.
+        if (options.default) |binding| self.saved = .{ .binding = binding, .outcome = .done, .shown = true };
         errdefer self.deinit();
         self.cwd = try self.intern(options.cwd);
     }
