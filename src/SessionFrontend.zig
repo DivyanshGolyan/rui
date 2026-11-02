@@ -799,6 +799,43 @@ fn statusLines(buffer: *[Frame.status_capacity]u8, notice: []const u8, context: 
     return .{ .text = text, .yielding = end + @intFromBool(end != 0 and end < text.len) };
 }
 
+test "status lines keep the notice and instructions beside an oversized context" {
+    var buffer: [Frame.status_capacity]u8 = undefined;
+    const notice: [1536]u8 = @splat('n');
+    // A context whose cut falls inside a two-byte scalar.
+    var context: [4000]u8 = undefined;
+    for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
+    const lines = statusLines(&buffer, &notice, &context, false, "Type a + Enter").text;
+    try std.testing.expect(std.mem.startsWith(u8, lines, &notice));
+    try std.testing.expect(std.mem.endsWith(u8, lines, "…\nType a + Enter"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(lines));
+    try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "", false, "Sent").text);
+    try std.testing.expectEqualStrings("! x\nWorkspace: /w\nSent", statusLines(&buffer, "! x", "Workspace: /w", false, "Sent").text);
+}
+
+test "status lines mark the notice and a hint, never the instructions, as yielding" {
+    var buffer: [Frame.status_capacity]u8 = undefined;
+    for ([_]struct { []const u8, []const u8, bool, []const u8, []const u8 }{
+        .{ "! x", "Workspace: /w", false, "Sent", "! x\n" },
+        .{ "! x", "In tmux", true, "Sent", "! x\nIn tmux\n" },
+        .{ "", "In tmux", true, "Sent", "In tmux\n" },
+        .{ "", "Workspace: /w", false, "Sent", "" },
+        .{ "", "", false, "Sent", "" },
+        .{ "! x", "", false, "", "! x" },
+        .{ "! x", "In tmux", true, "", "! x\nIn tmux" },
+        .{ "! x", "", false, "Sent", "! x\n" },
+        .{ "! a\n  b", "", false, "Sent", "! a\n  b\n" },
+    }) |case| {
+        const status = statusLines(&buffer, case[0], case[1], case[2], case[3]);
+        try std.testing.expectEqualStrings(case[4], status.text[0..status.yielding]);
+    }
+    // A shortened hint keeps its ellipsis inside what yields.
+    const long: [4000]u8 = @splat('h');
+    const status = statusLines(&buffer, "! x", &long, true, "Sent");
+    try std.testing.expect(std.mem.endsWith(u8, status.text[0..status.yielding], "…\n"));
+    try std.testing.expectEqualStrings("Sent", status.text[status.yielding..]);
+}
+
 /// Another client decided, or the Turn ended: the choice can no longer decide.
 /// It leaves before more input is read, so no key decides; a fragmented
 /// sequence finishes under the choice decoder first, and a line begun there

@@ -116,8 +116,10 @@ fn planFixed(self: *Self, document: *Viewport.Document, input: Input) !void {
     try self.status.append(input.status.text);
     const reserve: u16 = if (input.approval) 2 else 1;
     var status_rows = try rows(&self.status, layout);
-    if (input.approval and status_rows > input.height - reserve and std.mem.eql(u8, input.status.text, approval_choice)) {
+    const kept = input.status.text[input.status.yielding..];
+    if (input.approval and status_rows > input.height - reserve and std.mem.eql(u8, kept, approval_choice)) {
         self.status.clear();
+        try self.status.append(input.status.text[0..input.status.yielding]);
         try self.status.append("a Allow / d Deny\nEnter");
         status_rows = try rows(&self.status, layout);
     }
@@ -333,7 +335,14 @@ test "a notice that does not fit yields before the frame fails" {
     var input: Input = .{ .width = 20, .height = 4, .cursor = 0, .status = .{ .text = notice ++ approval_choice, .yielding = notice.len }, .approval = true, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
     try std.testing.expectEqualStrings("a Allow / d Deny\nEnter", frame.status.text());
+    // The shorter wording comes before dropping a notice that fits beside it.
+    const short = "! No.\n";
+    input.status = .{ .text = short ++ approval_choice, .yielding = short.len };
+    input.height = 5;
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings(short ++ "a Allow / d Deny\nEnter", frame.status.text());
     // A taller terminal keeps the notice above the full instructions.
+    input.status = .{ .text = notice ++ approval_choice, .yielding = notice.len };
     input.height = 12;
     try frame.plan(&document, input);
     try std.testing.expectEqualStrings(notice ++ approval_choice, frame.status.text());
