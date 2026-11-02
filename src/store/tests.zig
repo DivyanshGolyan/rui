@@ -1277,10 +1277,46 @@ test "abandoning an Access that has ended runs nothing" {
 
 test "the tables that carry Sessions are exactly the ones the touch oracle watches" {
     inline for (store_schema.tables) |table| {
-        const watched = comptime for (sqlite.touch_oracle_owners) |owner| {
-            if (std.mem.eql(u8, owner[0], table.name)) break true;
+        const watched = comptime for (sqlite.touch_oracle_tables) |watched_table| {
+            if (std.mem.eql(u8, watched_table, table.name)) break true;
         } else false;
         try std.testing.expectEqual(watched, comptime store_schema.carriesSessions(table.name));
+    }
+}
+
+test "the touch oracle names a sender whose sent Message changed without its touch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const recipient = try configureTestSession(&storage, "oracle-recipient");
+    const sender = try configureTestSession(&storage, "oracle-sender");
+    try submitTestMessage(&storage, &tmp, "oracle-message-file", "oracle-message", recipient.slice(), "hello");
+    var sql: [256]u8 = undefined;
+    {
+        // Make the Message a sent one, touching both its Sessions.
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='oracle-message'", .{sender.slice()}, 0));
+        try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
+        try store_core.touch(&storage, recipient.slice());
+        try store_core.touch(&storage, sender.slice());
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
+    }
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        try store_core.touch(&storage, recipient.slice());
+        // A column only the recipient reads.
+        try sqlite.exec(storage.database, "UPDATE message_admission SET turn_id=NULL WHERE command_key='oracle-message'");
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
+        // A hand-written writer that changes what the sender's page reads
+        // and skips the sender.
+        try sqlite.exec(storage.database, "UPDATE message_admission SET admitted_at=admitted_at+1 WHERE command_key='oracle-message'");
+        try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
+        try store_core.touch(&storage, sender.slice());
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
 }
 
