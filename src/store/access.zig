@@ -103,6 +103,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             target: union {
                 /// A read's result.
                 destination: *anyopaque,
+                /// An `.each` read's visitor, and how many rows it may step.
+                each: struct { visitor: *anyopaque, limit: u64 },
                 payload: struct { content_id: u64, bytes: []const u8 },
                 none: void,
             },
@@ -129,8 +131,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// Queues a read; `destination` is defined once the round runs.
         pub fn read(a: *Self, comptime S: type, args: S.Args, destination: *S.Result) void {
-            comptime std.debug.assert(S.kind == .read);
+            comptime std.debug.assert(S.kind == .read and S.cardinality != .each);
             a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, null);
+        }
+
+        /// Queues an `.each` read whose round hands each row in turn to
+        /// `visitor.visit(*const S.Row) bool`, until it returns false, the
+        /// rows end, or `limit` rows were stepped. `visitor` must outlive
+        /// the round.
+        pub fn readEach(a: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
+            comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
+            a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } }, null);
         }
 
         /// Ends the round: runs every queued statement in order.
@@ -340,6 +351,24 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                                 if (S.single_row) break;
                             }
                         },
+                        .each => @compileError("readEach runs an .each read"),
+                    }
+                }
+            }.run;
+        }
+
+        fn runEach(comptime S: type, comptime Visitor: type) *const fn (*Self, *const Queued) Error!void {
+            return &struct {
+                fn run(_: *Self, entry: *const Queued) Error!void {
+                    const statement = entry.statement.?;
+                    const each = entry.target.each;
+                    const visitor: *Visitor = @ptrCast(@alignCast(each.visitor));
+                    // At most 1 KiB (`rsql.Read`).
+                    var row: S.Row = undefined;
+                    var stepped: u64 = 0;
+                    while (stepped < each.limit and try nextRow(statement)) : (stepped += 1) {
+                        try sqlite.decodeRow(S.Row, statement, &row);
+                        if (!visitor.visit(&row)) break;
                     }
                 }
             }.run;

@@ -256,6 +256,10 @@ pub const Cardinality = union(enum) {
     optional,
     /// Up to this many; one more is `CorruptStore`.
     at_most: u16,
+    /// Each row in turn to the visitor of `Access.readEach`, which steps
+    /// at most the limit it is given. The bound is not a `LIMIT ?k`: a
+    /// bound LIMIT would make SQLite re-prepare the statement on every use.
+    each,
 };
 
 pub fn Rows(comptime Row: type, comptime max: u16) type {
@@ -282,8 +286,9 @@ pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
 pub fn Read(comptime spec: ReadSpec) type {
     comptime {
         if (statementError(.read, spec.sql, spec.Args, spec.Row)) |message| @compileError(message ++ ": " ++ spec.sql);
-        // `.one` and `.at_most` decode in place; an `.optional` Row is copied once.
-        if (spec.cardinality == .optional and @sizeOf(spec.Row) > 1024) @compileError("rsql: a Row over 1 KiB is never copied; read it .one or .at_most(1): " ++ spec.sql);
+        // `.one` and `.at_most` decode in place; an `.optional` or `.each` Row is copied.
+        if ((spec.cardinality == .optional or spec.cardinality == .each) and @sizeOf(spec.Row) > 1024)
+            @compileError("rsql: a Row over 1 KiB is never copied; read it .one or .at_most(1): " ++ spec.sql);
     }
     return struct {
         pub const kind: StatementKind = .read;
@@ -294,6 +299,7 @@ pub fn Read(comptime spec: ReadSpec) type {
             .one => Row,
             .optional => ?Row,
             .at_most => |max| Rows(Row, max),
+            .each => void,
         };
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
         pub const uses_now = usesNow(spec.sql);

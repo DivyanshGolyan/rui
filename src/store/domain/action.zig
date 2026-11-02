@@ -5,12 +5,10 @@ const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
-const Store = store_core.Store;
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
-const c = sqlite.c;
 const ContentReference = content_domain.ContentReference;
 const Faults = store_core.Faults;
 
@@ -337,69 +335,80 @@ pub fn settleActionAttempt(
     return if (found.stopped) .session_stop else .effect;
 }
 
-pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilter) !bool {
-    const limit = try std.math.add(usize, active.maximum_exclusions, 1);
-    var selected: ?u64 = null;
-    {
-        const select = try store_core.cached(
-            self,
-            "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt " ++
-                "WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id",
-        );
-        defer sqlite.resetCached(select);
-        var scanned: usize = 0;
-        while (scanned < limit) : (scanned += 1) switch (c.sqlite3_step(select)) {
-            c.SQLITE_ROW => {
-                const action_id = c.sqlite3_column_int64(select, 0);
-                const operation_id = c.sqlite3_column_int64(select, 1);
-                if (action_id <= 0 or operation_id <= 0) return error.CorruptStore;
-                if (!active.contains(@intCast(action_id))) {
-                    selected = @intCast(action_id);
-                    break;
-                }
-            },
-            c.SQLITE_DONE => break,
-            else => return error.ActionReadFailed,
-        };
+/// Unresolved Attempts in id order.
+const uncertain_actions = rsql.Read(.{
+    .sql = "SELECT action_id FROM action_operation @index(action_operation_unresolved_attempt) " ++
+        "WHERE resolution_code IS NULL AND " ++ action_attempted_sql ++ " ORDER BY action_id",
+    .Args = struct {},
+    .Row = struct { action_id: rsql.Positive },
+    .cardinality = .each,
+});
+
+/// The Session and Turn of the Attempt `action_id`, while it is unresolved.
+const uncertain_facts = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id FROM action_operation action " ++
+        "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.action_id=?1 AND action.resolution_code IS NULL AND action." ++ action_attempted_sql,
+    .Args = struct { action_id: u64 },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive },
+    .cardinality = .optional,
+});
+
+const resolve_uncertain = rsql.Write(.{
+    .sql = "UPDATE action_operation SET resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3,resolved_at=@now " ++
+        "WHERE action_id=?1 AND session_ref=@session(?4) AND resolution_code IS NULL AND " ++ action_attempted_sql,
+    .Args = struct { action_id: u64, content_id: u64, position: u64, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
+});
+
+const indeterminate_text = "Bash outcome is indeterminate after Host recovery; the command was not replayed.";
+
+/// `indeterminate_text`'s identity, hashed when the Host is built.
+const indeterminate: content_domain.Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes(indeterminate_text, false);
+};
+
+/// Picks the first scanned Attempt no execution slot holds.
+const UncertainChoice = struct {
+    active: ActiveOperationFilter,
+    chosen: ?u64 = null,
+
+    pub fn visit(choice: *UncertainChoice, row: *const uncertain_actions.Row) bool {
+        if (choice.active.contains(row.action_id.get())) return true;
+        choice.chosen = row.action_id.get();
+        return false;
     }
-    const action_id = selected orelse return false;
-    try store_core.begin(self);
-    const action = try store_core.cached(self, "SELECT session_ref FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1");
-    defer sqlite.resetCached(action);
-    try sqlite.bindU64(action, 1, action_id);
-    if (c.sqlite3_step(action) != c.SQLITE_ROW) return error.ActionSelectionChanged;
-    var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(action, 0, &session_ref);
-    const content_id = try content_domain.importBytesContent(
-        self,
-        "Bash outcome is indeterminate after Host recovery; the command was not replayed.",
-        false,
-        false,
-    );
-    const position = try turn_domain.claimSessionPosition(self, session_ref.slice());
-    const update = try store_core.cached(
-        self,
-        "UPDATE action_operation SET resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3,resolved_at=unixepoch() " ++
-            "WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1",
-    );
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, action_id);
-    try sqlite.bindI64(update, 2, content_id);
-    try sqlite.bindU64(update, 3, position);
-    try sqlite.expectDone(update);
-    if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-    const turn_statement = try store_core.cached(
-        self,
-        "SELECT operation.turn_id FROM action_operation action JOIN model_operation operation " ++
-            "ON operation.operation_id=action.parent_operation_id WHERE action.action_id=?1",
-    );
-    defer sqlite.resetCached(turn_statement);
-    try sqlite.bindU64(turn_statement, 1, action_id);
-    if (c.sqlite3_step(turn_statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const turn_id = c.sqlite3_column_int64(turn_statement, 0);
-    if (turn_id <= 0) return error.CorruptStore;
-    try turn_domain.completeStoppedTurnIfReady(self, @intCast(turn_id));
-    try turn_domain.recordContinuation(self, @intCast(turn_id), session_ref.slice());
-    try store_core.commit(self);
+};
+
+/// Resolves one Attempt no slot holds as indeterminate. The read Access
+/// `candidate` scans outside any transaction, so a pass that finds none
+/// costs one statement; the scan stops at the first Attempt `active` does
+/// not hold, after at most one more than it can exclude. The write
+/// Access `a` reads the Attempt's facts, then whether its stopped Turn is
+/// ready, which needs the Turn, then resolves it and commits.
+pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveOperationFilter) !bool {
+    var choice: UncertainChoice = .{ .active = active };
+    candidate.readEach(uncertain_actions, .{}, try std.math.add(u64, active.maximum_exclusions, 1), &choice);
+    try candidate.run();
+    const action_id = choice.chosen orelse return false;
+
+    var facts: uncertain_facts.Result = undefined;
+    var content = indeterminate;
+    a.read(uncertain_facts, .{ .action_id = action_id }, &facts);
+    content_domain.lookup(a, &content);
+    try a.run();
+    const found = facts orelse return error.ActionSelectionChanged;
+    const turn_id = found.turn_id.get();
+    var completion: turn_domain.stopped_turn.Result = undefined;
+    a.read(turn_domain.stopped_turn, .{ .turn_id = turn_id, .resolving_action_id = action_id }, &completion);
+    try a.run();
+
+    const positions = try a.positions(found.session);
+    const content_id = try content_domain.importBytes(a, &content, indeterminate_text);
+    a.write(resolve_uncertain, .{ .action_id = action_id, .content_id = content_id, .position = try positions.take(1), .session = found.session });
+    try turn_domain.queueStopCompletion(a, completion, turn_id);
+    turn_domain.queueContinuation(a, turn_id, found.session);
+    try a.commit();
     return true;
 }

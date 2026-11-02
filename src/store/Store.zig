@@ -634,7 +634,11 @@ pub const Store = struct {
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, .{}, action_domain.recoverOneUncertainActionLocked(self, active));
+        var candidate: Access(.read, error{}) = .open(&entry);
+        defer candidate.deinit();
+        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.recoverOneUncertainAction(&candidate, &access, active)));
     }
 
     pub fn tryAdmitNextModelRetry(
