@@ -375,6 +375,9 @@ pub const Ran = struct {
         /// overview, as a conversation ends.
         failed,
     } = .done,
+    /// The default saved defaults now give the next Session, after a
+    /// `/setup` that ran; null leaves the one in force.
+    default: ?Default = null,
 };
 
 /// The most a command's output the overview keeps.
@@ -2104,6 +2107,8 @@ fn ranCommand(state: *State, ran: Ran) error{OutOfMemory}!void {
     }
     state.gpa.free(command.text);
     state.command = null;
+    // What /configure holds still leads, as `nextBinding` says.
+    if (ran.default) |binding| state.default = binding;
     // The next listing shows the new label.
     if (name == .rename) state.next_list_ms = 0;
     switch (ran.outcome) {

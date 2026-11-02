@@ -1194,7 +1194,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         .provider = entry.binding.provider.slice(),
         .model = entry.binding.model.slice(),
         .login_at = entry.login_at,
-        .explicit = !(new_session_selection.Intent{ .store = options.store, .provider = options.provider, .model = options.model }).needsPreferences(),
+        .selectors = .{ .store = options.store, .provider = options.provider, .model = options.model },
     });
 }
 
