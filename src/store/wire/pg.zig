@@ -948,5 +948,5 @@ pub const Startup = struct {
 test {
     _ = scram;
     _ = tls;
-    _ = @import("tests.zig");
+    _ = @import("pg_tests.zig");
 }

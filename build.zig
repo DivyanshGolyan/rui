@@ -446,6 +446,29 @@ pub fn build(b: *std.Build) void {
     const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
     preference_policy_step.dependOn(&preference_policy_integration.step);
 
+    const mysql_wire_tests = b.addTest(.{
+        .name = "rui-mysql-wire-test",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/mysql_wire_test.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    mysql_wire_tests.root_module.addImport("mysql_wire", b.createModule(.{
+        .root_source_file = b.path("src/store/wire/mysql.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
+    mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
+    mysql_wire_integration.addFileArg(ci.path(mysql_wire_tests));
+    const mysql_wire_integration_step = b.step(
+        "mysql-wire-integration",
+        "Run the MySQL wire client against a real MySQL 8.4 server in Docker",
+    );
+    mysql_wire_integration_step.dependOn(&mysql_wire_integration.step);
+
     const codex_h2_integration = b.addSystemCommand(&.{"python3"});
     codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
     codex_h2_integration.addFileArg(ci.path(release_safe));
