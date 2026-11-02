@@ -100,6 +100,9 @@ inspection: struct {
     // again for each selection, and a row's change starts from its value.
     // Set with every page shown.
     facts: status_page.Facts = undefined,
+    // The submission the read that took `facts` saw, shown under them, so
+    // the page shown is the one its digest describes.
+    submission: ?Submission.View = null,
     // An inspection or Host command started and its result has not been
     // presented. A command may change configuration, so Messages and consent wait
     // for every inspection; exit prints an unshown command's output, which can
@@ -2132,6 +2135,7 @@ fn applyStatus(self: *Self) !void {
     const open = self.job.open_status and self.inspection.status_requested;
     if (!open and !self.statusShown()) return;
     self.inspection.facts = self.job.status_facts;
+    self.inspection.submission = self.job.inspection_submission;
     self.inspection.status_digest = self.job.result.status_digest;
     try self.writeStatusPage();
     if (open) {
@@ -2151,7 +2155,7 @@ fn writeStatusPage(self: *Self) !void {
     try io.vtable.fileSeekTo(io.userdata, file, 0);
     var buffer: [4096]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
-    try reads.writeStatus(&self.inspection.facts, self.inspection.selected, self.submission.view(), &output.interface);
+    try reads.writeStatus(&self.inspection.facts, self.inspection.selected, self.inspection.submission, &output.interface);
     try output.flush();
 }
 
