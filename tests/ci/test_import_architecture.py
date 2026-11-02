@@ -5,12 +5,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from import_architecture import check, cyclic_edges, production_imports, store_unit
+from import_architecture import (check, cyclic_edges, production_imports, store_access_sources, store_boundary,
+                                 store_unit)
 
 
 class ImportArchitectureTest(unittest.TestCase):
     def test_repository_production_imports_do_not_add_cycles(self):
         check()
+
+    def test_repository_store_boundary_and_access_sources(self):
+        root = Path(__file__).resolve().parents[2]
+        store_boundary(root)
+        store_access_sources(root)
 
     def test_baseline_test_only_and_new_cycle_controls(self):
         with tempfile.TemporaryDirectory() as directory, patch(
@@ -138,8 +144,55 @@ const y = @import("after.zig");
                   "src/store/domain/a.zig": {"src/store/Store.zig", "src/protocol.zig"}, "src/protocol.zig": set()}
         self.assertEqual(cyclic_edges(store_unit(inside)), [])
         self.assertEqual(store_unit(inside)["src/store.zig"], {"src/protocol.zig"})
-        with self.assertRaisesRegex(ValueError, "import src/store.zig instead"):
-            store_unit({**inside, "src/server.zig": {"src/store/domain/a.zig"}})
-        with self.assertRaisesRegex(ValueError, "Store files import each other directly"):
-            store_unit({**inside, "src/store/domain/a.zig": {"src/store.zig"}})
-        store_unit({**inside, "src/store/schema.zig": {"src/store.zig"}})
+
+    def store_tree(self, directory, files):
+        root = Path(directory)
+        for name, text in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text)
+        return root
+
+    def test_store_boundary_covers_every_source_file_and_its_tests(self):
+        files = {
+            "src/store.zig": 'pub const Store = @import("store/Store.zig").Store;\ntest { _ = @import("store/tests.zig"); }',
+            "src/store/Store.zig": 'const a = @import("domain/a.zig");\nconst p = @import("../protocol.zig");',
+            "src/store/domain/a.zig": 'const store_core = @import("../Store.zig");',
+            "src/store/tests.zig": 'test { _ = @import("../server.zig"); }',
+            "src/protocol.zig": "const value = 1;",
+            "src/server.zig": 'const store = @import("store.zig");',
+        }
+        for name, text, error in (
+                ("src/unreached.zig", 'test { _ = @import("store/domain/a.zig"); }', "import src/store.zig instead"),
+                ("src/h2/deep.zig", 'const s = @import("../store/Store.zig");', "import src/store.zig instead"),
+                ("src/tests.zig", 'test { _ = @import("store/tests.zig"); }', "import src/store.zig instead"),
+                ("src/store/domain/a.zig", 'test { _ = @import("../../store.zig"); }', "import each other directly"),
+                ("src/store/schema.zig", 'const facade = @import("../store.zig");', "import each other directly")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = self.store_tree(directory, files)
+                store_boundary(root)
+                self.store_tree(directory, {name: text})
+                with self.assertRaisesRegex(ValueError, error):
+                    store_boundary(root)
+
+    def test_lock_and_fence_sources_follow_the_store_directory(self):
+        access = 'test "Store entry points lock and fence only through canonical access" {{\n{}\n}}\n'
+        listing = '    const sources = .{ @embedFile("Store.zig"), @embedFile("domain/a.zig") };'
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.store_tree(directory, {
+                "src/store.zig": 'pub const Store = @import("store/Store.zig").Store; // fn',
+                "src/store/Store.zig": "pub fn enter() void {}",
+                "src/store/domain/a.zig": "pub fn f() void {}",
+                "src/store/tests.zig": access.format(listing),
+            })
+            store_access_sources(root)
+            (root / "src/store/domain/b.zig").write_text("pub fn g() void {}")
+            with self.assertRaisesRegex(ValueError, "the Store's files are"):
+                store_access_sources(root)
+            (root / "src/store/domain/b.zig").unlink()
+            (root / "src/store/tests.zig").write_text(access.format(listing.replace('@embedFile("domain/a.zig")', "")))
+            with self.assertRaisesRegex(ValueError, "the Store's files are"):
+                store_access_sources(root)
+            (root / "src/store/tests.zig").write_text(access.format(listing))
+            (root / "src/store.zig").write_text("pub fn helper() void {}")
+            with self.assertRaisesRegex(ValueError, "declares a function"):
+                store_access_sources(root)
