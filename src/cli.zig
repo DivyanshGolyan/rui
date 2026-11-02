@@ -1636,10 +1636,11 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
-        // The saved effort is a default too, so only a fully explicit
-        // configuration skips the saved defaults.
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null or !input.reasoning_effort.present) blk: {
-            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider, --model and --reasoning-effort reads saved defaults");
+        // The saved effort comes with the saved defaults: a configuration
+        // naming both provider and model reads none, so a script that
+        // spells them never depends on the preferences file.
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
+            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
             break :blk try preferences.load(home);
         } else .{} };
         binding = try snapshot.resolveUnprompted();
