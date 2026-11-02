@@ -77,6 +77,11 @@ fn run(init: std.process.Init) !void {
         return printHelp(init.io, .{ .resource = resource });
     }
     const command = cli_args.find(resource, args[2]) orelse {
+        var operation: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
+            stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
+            return error.InvalidArguments;
+        };
         stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
         return error.InvalidArguments;
     };
@@ -190,7 +195,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
-        .host_start, .host_stop, .host_status => try host(init, command, parsed),
+        .host_start, .host_pause, .host_status => try host(init, command, parsed),
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
@@ -433,7 +438,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"), null);
-    if (command == .host_stop) return stopHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
+    if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
     switch (status) {
@@ -467,11 +472,11 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
     try output.finish();
 }
 
-fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
+fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
     const target = explicit_instance orelse switch (client.hostStatus(io, selected)) {
         .ready => |ready| ready.instance,
         .unavailable, .owned_unavailable => {
-            stderr.diagnostic("rui: no ready Host identity to stop. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
+            stderr.diagnostic("rui: no ready Host identity to pause. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
             return error.HostStopUnconfirmed;
         },
         .incompatible => return error.IncompatibleHost,
@@ -481,30 +486,30 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     const hex = std.fmt.bytesToHex(target, .lower);
     var notice_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
     var notice = std.Io.Writer.fixed(&notice_bytes);
-    try notice.writeAll("rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store ");
+    try notice.writeAll("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store ");
     try TerminalText.writeShellWord(&notice, paths.store.slice());
     try notice.print(" --instance {s}\n", .{&hex});
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
     const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
-        stderr.diagnostic("rui: stop reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
+        stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
         return err;
     };
     switch (outcome) {
         .acknowledged => {
             var output: JsonOutput = undefined;
             const writer = output.init(io, .stdout);
-            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_stop\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
+            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
             try writer.print(",\"instance\":\"{s}\",\"retirement\":\"unconfirmed\"}}\n", .{&hex});
             try output.finish();
         },
         .instance_changed => {
-            stderr.diagnostic("rui: Host instance changed; replacement was not stopped. Inspect rui host status before any new intent.\n", .{});
+            stderr.diagnostic("rui: Host instance changed; replacement was not paused. Inspect rui host status before any new intent.\n", .{});
             return error.HostInstanceChanged;
         },
         .unavailable => {
-            stderr.diagnostic("rui: Host stop unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
+            stderr.diagnostic("rui: Host pause unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
             return error.HostStopUnconfirmed;
         },
     }
@@ -517,7 +522,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     switch (client.hostStatus(io, selected)) {
         .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
         .incompatible => {
-            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host stop, then run this rui again; saved work is unchanged.\n", .{});
+            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
             return error.IncompatibleHost;
         },
         .access_failure => return error.StoreAccessFailed,
@@ -634,7 +639,7 @@ fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "r
     if (capacity) |requested| if (requested != ready.active_capacity) notice: {
         var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
-        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means stopping this Host and all its work: rui host stop --store ", .{ ready.active_capacity, requested }) catch break :notice;
+        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means pausing this Host and all its work: rui host pause --store ", .{ ready.active_capacity, requested }) catch break :notice;
         TerminalText.writeShellWord(&notice, ready.store.slice()) catch break :notice;
         notice.writeByte('\n') catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
@@ -1255,7 +1260,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
     };
     const provider = std.meta.stringToEnum(protocol.Provider, selected.provider.slice()).?;
     if (protocol.routeOf(ready.capabilities.providers, provider) == .unserved) {
-        stderr.diagnostic("rui: the running Host does not serve {s}; it was not restarted. Stop it with rui host stop, then run rui again.\n", .{@tagName(provider)});
+        stderr.diagnostic("rui: the running Host does not serve {s}; it was not restarted. Pause it with rui host pause, then run rui again.\n", .{@tagName(provider)});
         return error.HostModelUnavailable;
     }
     entry.binding = selected;
