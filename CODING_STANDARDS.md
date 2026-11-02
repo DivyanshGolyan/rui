@@ -14,6 +14,7 @@ Then edit the owning section and affected verification cases; keep rationale bes
 Identify conflicts with accepted behavior explicitly.
 Replace superseded text rather than creating parallel ADRs, proposals, glossaries, summaries or amendment ledgers.
 Keep [Research](research/README.md) a compact index of reproducible evidence.
+Write the top-level documents and docs/ one sentence per line, so PRs that edit different sentences of one paragraph merge without a conflict; `python3 tests/ci/sentence_lines.py` rewrites them and the policy job checks them.
 
 ## Engineering
 
