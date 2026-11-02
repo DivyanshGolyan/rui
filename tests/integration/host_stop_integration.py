@@ -136,7 +136,7 @@ def mixed_effect_drain(provider_first):
         large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * 128000)[0]
         provider_release = threading.Event()
         endpoint = fixture.SuccessEndpoint([], responses_by_input={
-            "bash": proposal, "provider": (fixture.ResponseSpec(large, {}, gate_timeout=60), provider_release)})
+            "bash": proposal, "provider": (fixture.ResponseSpec(large, {}), provider_release)})
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         host = None
