@@ -159,9 +159,9 @@ transcript: struct {
 } = .{},
 // What this visit has seen of the conversation, for "new since you looked".
 seen: unseen.Seen = .{},
-// How far an earlier visit saw the conversation, not yet recorded: the
-// opening records it before reading, so it lands past what was seen.
-unrecorded_read: ?u64 = null,
+// How far the person has read the conversation as far as the overview
+// knows, which the Store may not hold yet: the opening lands past it.
+known_read: ?u64 = null,
 // One collapsed Message shown in full.
 expansion: struct {
     // Ctrl-O waits for the frame it names a block in; the read then waits for
@@ -206,7 +206,7 @@ const notice_capacity = @max(
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .unrecorded_read = self.unrecorded_read };
+    self.job = .{ .init = self.init, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .known_read = self.known_read };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -270,8 +270,8 @@ pub const Outcome = enum { detached, interrupted, returned };
 /// caller restores the terminal before `leave` joins them, so a borrower that
 /// cannot stop at once never holds the terminal raw. `self` stays in the
 /// caller's storage until `leave` returns.
-pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, unrecorded_read: ?u64, lender: Lender) !Outcome {
-    self.* = .{ .unrecorded_read = unrecorded_read, .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
+pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, known_read: ?u64, lender: Lender) !Outcome {
+    self.* = .{ .known_read = known_read, .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
@@ -1291,9 +1291,6 @@ fn land(self: *Self, rule: ?u64) !void {
     const screen = self.terminal.screen;
     const placed: unseen.Rule = if (result.rule == .at) .{ .at = rule.? } else result.rule;
     self.seen = .open(result.read_through, result.cursor.position, placed, try screen.liveEnd());
-    // Should the Host not have taken it, leaving records it again.
-    if (self.unrecorded_read) |position| self.seen.carry(position);
-    self.unrecorded_read = null;
     // A pending Action wins: it opens on the latest view, which shows it.
     if (self.live.work.first_action != null) return;
     const shown = if (self.seen.live_from) |at| screen.liveShows(at) else false;

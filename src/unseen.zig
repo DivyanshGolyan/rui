@@ -52,8 +52,8 @@ pub const Rule = union(enum) {
 
 /// What one visit has seen of a conversation.
 pub const Seen = struct {
-    /// The read-through position the Store holds as far as this visit
-    /// knows: what the opening read, then what leaving took to record.
+    /// The read-through position as far as this visit knows: what the
+    /// opening placed the rule after, then what leaving took to record.
     recorded: ?u64 = null,
     /// Every row through this position has shown.
     through: ?u64 = null,
@@ -93,12 +93,6 @@ pub const Seen = struct {
     /// every row after `through`. Text no frame drew never joins.
     pub fn drew(self: *Seen, first: u64, next: u64) void {
         if (self.live_from) |*from| _ = join(from, first, next);
-    }
-
-    /// An earlier visit saw the conversation through `position`, which the
-    /// Store may not hold yet: leaving records it with what this visit saw.
-    pub fn carry(self: *Seen, position: u64) void {
-        self.advance(position);
     }
 
     /// A frame showed the end of the transcript of rows after the
@@ -213,14 +207,6 @@ test "rows a poll brought past the view count once a transcript frame drew them,
     // Later polls continue from there.
     seen.live(true, 33, 990);
     try std.testing.expectEqual(@as(?u64, 33), seen.take());
-}
-
-test "a position an earlier visit saw is recorded with this visit's" {
-    var seen = Seen.open(4, 9, .none, 300);
-    seen.carry(7);
-    try std.testing.expectEqual(@as(?u64, 7), seen.take());
-    seen.carry(5);
-    try std.testing.expectEqual(@as(?u64, null), seen.take());
 }
 
 test "frames that end and start inside a line join once together they drew all of it" {

@@ -212,9 +212,9 @@ pub const Job = struct {
     opening: bool = false,
     older: ?protocol_reply.ConversationCursor = null,
     target: Target = .older,
-    // The opening first records this read-through position, which an
-    // earlier visit saw but the Store may not hold yet.
-    unrecorded_read: ?u64 = null,
+    // How far the person has read the Session as far as the overview knows,
+    // which the Store may not hold yet: the opening lands past it.
+    known_read: ?u64 = null,
     recall: ?Input.Step = null,
     // The latest live work held queued input: a listed echo, whose read
     // was earlier, is labelled by it.
@@ -427,12 +427,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     const requests = task.requests();
     var cursor = job.cursor;
     if (job.opening) cursor.direction = .backward;
-    // The page then reads the position back. No saved work depends on it:
-    // a Host that does not take it keeps the earlier one.
-    if (job.opening) if (job.unrecorded_read) |position| requests.markRead(job.store, job.session, position, requests.markReadDeadline()) catch |err| switch (err) {
-        error.CanonicalStoreFailure => return err,
-        else => {},
-    };
     const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
         .page => |page| page,
         .failure => |failure| return requests.failRead(failure),
@@ -493,10 +487,12 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // opening reads the same after any history (see `list`).
     if (job.opening) {
         job.result.lowest = 1;
-        job.result.read_through = page.facts.read_through;
+        // Positions only rise, so the furthest known is the read-through.
+        const read_through = if (job.known_read) |known| @max(known, page.facts.read_through orelse 0) else page.facts.read_through;
+        job.result.read_through = read_through;
         const oldest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else null;
-        switch (unseen.place(page.facts.read_through, oldest, page.facts.beyond_unseen)) {
-            .here => output.unseen_after = page.facts.read_through,
+        switch (unseen.place(read_through, oldest, page.facts.beyond_unseen)) {
+            .here => output.unseen_after = read_through,
             .older => job.result.rule = .older,
             .none => {},
         }
@@ -2090,6 +2086,24 @@ test "Messages waiting at an opening on the rule show in the queued row, and the
     try std.testing.expectEqual(unseen.Rule.older, older.result.rule);
     try std.testing.expect(std.mem.indexOf(u8, early.shown, unseen.rule) == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, early.shown, "please wait"));
+}
+
+test "an opening lands past a read the overview knows and the Store does not hold yet" {
+    // The Store holds 5; the person read through 19 and the mark is still
+    // on its way. The opening lands as it would on a Store holding 19.
+    const tail = [_]FakeHost.Tail{ .{ .value = FakeHost.message(1) }, .{ .value = FakeHost.message(2) } };
+    var behind: FakeHost = .{ .history = 20, .tail = &tail, .end = 22, .read_through = 5 };
+    var opening: Job = .{ .session = "k7m2qx", .opening = true, .known_read = 19, .line_read = .{ .revision = 1, .end = 22 } };
+    try behind.read(&opening);
+    try std.testing.expectEqual(@as(?u64, 19), opening.result.read_through);
+    try std.testing.expectEqual(unseen.Rule{ .at = 0 }, opening.result.rule);
+    try std.testing.expect(std.mem.startsWith(u8, behind.shown, unseen.rule));
+    // A Store already past it wins.
+    var ahead: FakeHost = .{ .history = 20, .tail = &tail, .end = 22, .read_through = 19 };
+    var later: Job = .{ .session = "k7m2qx", .opening = true, .known_read = 5, .line_read = .{ .revision = 1, .end = 22 } };
+    try ahead.read(&later);
+    try std.testing.expectEqual(@as(?u64, 19), later.result.read_through);
+    try std.testing.expectEqual(unseen.Rule{ .at = 0 }, later.result.rule);
 }
 
 test "a stop labels a Message that showed while it waited at the opening" {
