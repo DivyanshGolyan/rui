@@ -3283,7 +3283,7 @@ The position only advances: one at or before the stored one changes nothing, so 
 A missing Session, or a position the Session has not reached, answers `mark_read_refused` with `SessionNotFound` or `PositionNotReached` and changes nothing; a canonical Store failure answers as for any request, and the client returns it as one.
 The write starts no work and changes no settings revision.
 Unlike other Session writes it touches nothing in the change ring: no Session list row shows the position, so a list watching the Session has nothing to read again.
-Wire version 5 added the pages' `hosted_call` items, after version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
+Wire version 6 added the `label` on the Session a Message row names as sender or target, after version 5 added the pages' `hosted_call` items, version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 
 Opening reads the latest Activity page as before, and the page's `read_through` places the dim rule `── new since you looked ──` on a line of its own above the first shown item after it.
 The conversation opens at the latest view when the Session was never read, when no item after the position shows, or when the latest view shows the rule.
