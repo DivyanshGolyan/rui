@@ -43,8 +43,12 @@ pub const Options = struct {
     /// Whether the command alone does something; else alone it only says
     /// its usage, so Enter on it in the list waits for an option.
     alone: bool,
+    /// Whether its --reasoning-effort is one Session's, so it lists the
+    /// efforts that Session's model offers; else it is a default for any
+    /// model and lists every effort.
+    session: bool,
 
-    fn of(comptime grammar: cli_args.Definition, comptime names: []const []const u8, comptime alone: bool) Options {
+    fn of(comptime grammar: cli_args.Definition, comptime names: []const []const u8, comptime alone: bool, comptime session: bool) Options {
         var entries: [names.len]Entry = undefined;
         for (&entries, names) |*entry, option| {
             const argument = grammar.argumentOf(option) orelse @compileError("no option --" ++ option);
@@ -52,7 +56,7 @@ pub const Options = struct {
             entry.* = .{ .word = "--" ++ option ++ " ", .shown = "--" ++ option ++ if (argument) |shape| " " ++ shape else "", .description = "", .runs = argument == null };
         }
         const final = entries;
-        return .{ .grammar = grammar, .entries = &final, .alone = alone };
+        return .{ .grammar = grammar, .entries = &final, .alone = alone, .session = session };
     }
 };
 
@@ -88,10 +92,10 @@ comptime {
 
 /// The settings a live Session changes. Its model and sign-in never change,
 /// and its instructions come only from a shell.
-const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "output-schema", "text-output" }, false);
+const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "output-schema", "text-output" }, false, true);
 
 /// Future defaults, as /setup saves them; /setup alone shows them.
-const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true);
+const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true, false);
 
 /// The conversation's commands, declared in the order its list and /help
 /// show them.
@@ -140,7 +144,7 @@ pub const conversation = Commands(ConversationName, .{
 
 /// What the overview's /configure holds for the next Session: a fresh
 /// Session's settings.
-const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false);
+const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false, true);
 
 /// The overview's commands.
 pub const overview = Commands(enum { configure, exit, model }, .{
@@ -285,7 +289,7 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
                     const previous = before[if (std.mem.lastIndexOfScalar(u8, before, ' ')) |space| space + 1 else 0..];
                     // A word after an option that takes a value is that value.
                     if (std.mem.startsWith(u8, previous, "--")) if (options.grammar.argumentOf(previous[2..])) |argument| if (argument) |shape| {
-                        if (std.mem.eql(u8, previous[2..], "reasoning-effort")) list.offerEfforts(context) else list.offerValues(shape);
+                        if (options.session and std.mem.eql(u8, previous[2..], "reasoning-effort")) list.offerEfforts(context) else list.offerValues(shape);
                         return list;
                     };
                     for (options.entries) |entry| if (std.mem.startsWith(u8, entry.word, list.typed)) list.add(entry);
@@ -366,18 +370,26 @@ pub const List = struct {
         return self.entries[0..self.count];
     }
 
-    /// What Tab or Enter adds to the draft for the entry at `index`: the
+    /// The highlighted entry's index: `highlight`, or the last entry when
+    /// the list narrowed under it (the model changed, say) before an edit
+    /// reset it.
+    pub fn row(self: *const List, highlight: usize) usize {
+        std.debug.assert(self.count != 0);
+        return @min(highlight, self.count - 1);
+    }
+
+    /// What Tab or Enter adds to the draft for the highlighted entry: the
     /// rest of its word.
-    pub fn completion(self: *const List, index: usize) []const u8 {
-        return self.entries[index].word[self.typed.len..];
+    pub fn completion(self: *const List, highlight: usize) []const u8 {
+        return self.entries[self.row(highlight)].word[self.typed.len..];
     }
 
     /// What Enter does with the entry at `index` in `draft`: the command it
     /// completes, written into `buffer`, to run; or only the rest of its
     /// word, to add, when another word must follow or the line would not fit.
-    pub fn enter(self: *const List, draft: []const u8, index: usize, buffer: []u8) union(enum) { run: []const u8, add: []const u8 } {
-        const entry = self.entries[index];
-        const rest = self.completion(index);
+    pub fn enter(self: *const List, draft: []const u8, highlight: usize, buffer: []u8) union(enum) { run: []const u8, add: []const u8 } {
+        const entry = self.entries[self.row(highlight)];
+        const rest = self.completion(highlight);
         const line = std.mem.trimEnd(u8, entry.word, " ");
         const length = draft.len + line.len - self.typed.len;
         if (!entry.runs or length > buffer.len) return .{ .add = rest };
@@ -389,7 +401,7 @@ pub const List = struct {
     /// The first of `rows` rows that keep the highlighted entry in view.
     pub fn firstShown(self: *const List, highlight: usize, rows: usize) usize {
         const fit = named(self.count, rows);
-        return @min((highlight + 1) -| fit, self.count - fit);
+        return @min((self.row(highlight) + 1) -| fit, self.count - fit);
     }
 
     /// Cells from a row's start to its description: the widest shown text
@@ -516,6 +528,26 @@ test "/configure lists its options, then an option's fixed values" {
     try std.testing.expectEqual(@as(usize, 0), conversation.suggest("/configure --label ", .{}).?.count);
     const efforts = conversation.suggest("/configure --reasoning-effort ", .{ .model = "gpt-5.5" }).?;
     try std.testing.expectEqualStrings("default", efforts.shown()[efforts.count - 1].word);
+    // /setup saves a default for any model, so it lists every effort,
+    // whatever this Session's model offers.
+    const saved = conversation.suggest("/setup --reasoning-effort ", .{ .model = "gpt-5.5" }).?;
+    try std.testing.expectEqual(std.enums.values(ReasoningEffort).len + 1, saved.count);
+    // Every option of every list is offered, and one with a value is
+    // followed by a list of its fixed words, empty for free text.
+    inline for (.{ .{ conversation, "/configure ", live_options }, .{ conversation, "/setup ", setup_options }, .{ overview, "/configure ", start_options } }) |case| {
+        const listed = case[0].suggest(case[1], .{ .model = "gpt-6-luna" }).?;
+        try std.testing.expectEqual(case[2].entries.len, listed.count);
+        for (case[2].entries, listed.shown()) |entry, shown| {
+            try std.testing.expectEqualStrings(entry.word, shown.word);
+            var draft: [64]u8 = undefined;
+            const line = try std.fmt.bufPrint(&draft, "{s}{s}", .{ case[1], entry.word });
+            const after = case[0].suggest(line, .{ .model = "gpt-6-luna" }).?;
+            if (entry.runs) try std.testing.expectEqual(case[2].entries.len, after.count);
+        }
+    }
+    // A highlight past a list that narrowed takes its last row.
+    try std.testing.expectEqual(@as(usize, 0), trigger.row(5));
+    try std.testing.expectEqualStrings("default", trigger.completion(5));
     // After a value, options again.
     try std.testing.expectEqualStrings("--tools ", conversation.suggest("/configure --permission-mode ask --t", .{}).?.shown()[0].word);
     // Quoted text is the shell's to read; the list stops.
