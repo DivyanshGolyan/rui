@@ -54,7 +54,6 @@ const StatementCache = sqlite.StatementCache;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
-const workspace_key_sql = sqlite.workspace_key_sql;
 
 pub const Store = struct {
     io: std.Io,
@@ -983,13 +982,22 @@ pub fn rollback(self: *Store) !void {
     try execute(self, "ROLLBACK");
 }
 
-/// The change ring's key for a Workspace: the rowid of its first
-/// Session, or 0 while it has none. Workspaces are immutable and
-/// Sessions are never deleted, so a Session's key never changes.
+/// A Workspace's identity in the Store: SHA-256 of its canonical text.
+/// Reads compare it, then the text, so a collision never merges two.
+pub fn workspaceDigest(workspace: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(workspace, &digest, .{});
+    return digest;
+}
+
+/// The change ring's key for a Workspace: the stored key of its
+/// Sessions (the created_seq of its first), or 0 while it has none.
 pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
-    const statement = try cached(self, workspace_key_sql);
+    const statement = try cached(self, "SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1");
     defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, workspace);
+    const digest = workspaceDigest(workspace);
+    try sqlite.bindBlob(statement, 1, &digest);
+    try sqlite.bindText(statement, 2, workspace);
     return switch (c.sqlite3_step(statement)) {
         c.SQLITE_DONE => 0,
         c.SQLITE_ROW => @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
@@ -997,19 +1005,19 @@ pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
     };
 }
 
+pub const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";
+
 /// The key of `session_ref`'s Workspace, or null when no such Session
 /// exists.
 fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
-    const statement = try cached(self, "SELECT workspace FROM session WHERE session_ref=?1");
-    // Reset only after the key lookup: it binds this row's text in place.
+    const statement = try cached(self, session_workspace_key_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
-    switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => return null,
-        c.SQLITE_ROW => {},
-        else => return error.SessionReadFailed,
-    }
-    return try readWorkspaceKey(self, try sqlite.boundedColumnText(statement, 0, protocol.max_workspace_bytes));
+    return switch (c.sqlite3_step(statement)) {
+        c.SQLITE_DONE => null,
+        c.SQLITE_ROW => @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
+        else => error.SessionReadFailed,
+    };
 }
 
 /// Runs a write whose `RETURNING session_ref` names each changed row's

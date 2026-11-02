@@ -504,13 +504,17 @@ pub fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*prot
 }
 
 pub fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-    // created_seq is max+1 inside the creating transaction.
-    const statement = try store_core.cached(self, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,created_at,created_seq) " ++
-        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,unixepoch(),coalesce(max(created_seq),0)+1 FROM session WHERE true ON CONFLICT(session_ref) DO NOTHING");
+    // created_seq is max+1 inside the creating transaction; a Workspace's
+    // key is the created_seq of its first Session.
+    const statement = try store_core.cached(self, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key) " ++
+        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,unixepoch(),allocated.seq,coalesce((SELECT workspace_key FROM session WHERE workspace_digest=?16 AND workspace=?2 LIMIT 1),allocated.seq) " ++
+        "FROM (SELECT coalesce(max(created_seq),0)+1 AS seq FROM session) allocated WHERE true ON CONFLICT(session_ref) DO NOTHING");
     defer sqlite.resetCached(statement);
     try bindSettings(statement, session_ref, current);
     try sqlite.bindU64(statement, 9, current.next_position);
     try sqlite.bindText(statement, 15, @tagName(current.provider.codec()));
+    const digest = store_core.workspaceDigest(current.workspace.slice());
+    try sqlite.bindBlob(statement, 16, &digest);
     try sqlite.expectDone(statement);
     if (c.sqlite3_changes(self.database) != 1) return false;
     try store_core.touch(self, session_ref);

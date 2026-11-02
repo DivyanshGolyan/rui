@@ -84,7 +84,6 @@ const submitTestMessage = store_testing.submitTestMessage;
 const testingPublicProjection = store_testing.testingPublicProjection;
 const testing_absent_model_evidence = store_testing.testing_absent_model_evidence;
 const tool_continuation_selection_sql = model_admission_domain.tool_continuation_selection_sql;
-const workspace_key_sql = sqlite.workspace_key_sql;
 
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
@@ -997,7 +996,7 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
-        var fault: TestingStatementFault = .{ .sql = workspace_key_sql };
+        var fault: TestingStatementFault = .{ .sql = store_core.session_workspace_key_sql };
         switch (route) {
             .configure => {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -7464,6 +7463,46 @@ test "fresh Store uses current schema and rejects the prior version" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database}), .{}));
 }
 
+test "a Workspace is matched by its digest and then its text" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const first_workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var nested = try tmp.dir.createDirPathOpen(std.testing.io, "other", .{});
+    defer nested.close(std.testing.io);
+    var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const other_workspace = other_buffer[0..try nested.realPath(std.testing.io, &other_buffer)];
+
+    var first_command = try completeConfiguration("digest-first", "", first_workspace, "model");
+    const first = storage.configure(&first_command, .{}).accepted.session;
+    var sibling_command = try completeConfiguration("digest-sibling", "", first_workspace, "model");
+    const sibling = storage.configure(&sibling_command, .{}).accepted.session;
+    // A digest collision: the first Workspace's Sessions carry the other's digest.
+    {
+        var sql: [160]u8 = undefined;
+        const forged = std.fmt.bytesToHex(store_core.workspaceDigest(other_workspace), .lower);
+        try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE session SET workspace_digest=x'{s}'", .{&forged}, 0));
+    }
+    var other_command = try completeConfiguration("digest-other", "", other_workspace, "model");
+    const other = storage.configure(&other_command, .{}).accepted.session;
+
+    var sql: [128]u8 = undefined;
+    const first_key = try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{first.slice()}, 0));
+    try std.testing.expectEqual(first_key, try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{sibling.slice()}, 0)));
+    try std.testing.expectEqual(first_key, try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT created_seq FROM session WHERE session_ref='{s}'", .{first.slice()}, 0)));
+    const other_key = try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{other.slice()}, 0));
+    try std.testing.expectEqual(other_key, try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT created_seq FROM session WHERE session_ref='{s}'", .{other.slice()}, 0)));
+    try std.testing.expect(other_key != first_key);
+
+    var scope: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try scope.set(other_workspace);
+    const listed = try TestingListing.read(&storage, &tmp, .{ .workspace = scope });
+    try listed.expectReferences(&.{other.slice()[0..protocol.session_id_bytes].*});
+}
+
 test "existing Store rejects noncanonical durable authority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9532,8 +9571,8 @@ test "runnable discovery measures eligible ineligible and history populations in
                 try sqlite.exec(
                     database,
                     "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
-                        "output_schema_content_id,revision,next_position,created_at,created_seq) " ++
-                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,1000000)",
+                        "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -9550,8 +9589,8 @@ test "runnable discovery measures eligible ineligible and history populations in
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
-                    "output_schema_content_id,revision,next_position,created_at,created_seq) " ++
-                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1 FROM sequence; " ++
+                    "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
@@ -9703,8 +9742,8 @@ fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try sqlite.exec(
         database,
         "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask," ++
-            "permission_mode,revision,next_position,created_at,created_seq) " ++
-            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1,base+row_number() OVER (ORDER BY session_ref) " ++
+            "permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
             "FROM (SELECT DISTINCT session_ref FROM model_operation),(SELECT coalesce(max(created_seq),0) AS base FROM session)",
     );
 }

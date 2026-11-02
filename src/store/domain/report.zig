@@ -344,11 +344,16 @@ fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, 
         const statement = if (request.workspace == null)
             try store_core.cached(self, "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT 9")
         else
-            try store_core.cached(self, "SELECT created_seq,session_ref FROM session INDEXED BY session_workspace_list WHERE created_seq>?1 AND created_seq<=?2 AND workspace=?3 ORDER BY created_seq LIMIT 9");
+            try store_core.cached(self, "SELECT created_seq,session_ref FROM session INDEXED BY session_workspace_list WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT 9");
         defer sqlite.resetCached(statement);
         try sqlite.bindU64(statement, 1, request.after);
         try sqlite.bindU64(statement, 2, ceiling);
-        if (request.workspace) |*workspace| try sqlite.bindText(statement, 3, workspace.slice());
+        var digest: [32]u8 = undefined;
+        if (request.workspace) |*workspace| {
+            digest = store_core.workspaceDigest(workspace.slice());
+            try sqlite.bindBlob(statement, 3, &digest);
+            try sqlite.bindText(statement, 4, workspace.slice());
+        }
         while (true) {
             const step = c.sqlite3_step(statement);
             if (step == c.SQLITE_DONE) break;

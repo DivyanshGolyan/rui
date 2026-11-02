@@ -151,9 +151,6 @@ pub const StatementCache = struct {
     }
 };
 
-/// A Workspace's change-ring key: the rowid of its first Session.
-pub const workspace_key_sql = "SELECT rowid FROM session INDEXED BY session_workspace_list WHERE workspace=?1 ORDER BY rowid LIMIT 1";
-
 pub fn resetCached(statement: *c.sqlite3_stmt) void {
     _ = c.sqlite3_reset(statement);
     _ = c.sqlite3_clear_bindings(statement);

@@ -22,7 +22,7 @@ pub const schema_version: u32 = 46;
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
-    .{ .schema_version = 46, .digest = 0x9300a2cbc17b6266 },
+    .{ .schema_version = 46, .digest = 0x6731f43d33a0b95c },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -195,9 +195,15 @@ pub const tables = [_]Table{
             // Creation order: list cursors and the Workspace key, allocated
             // max+1 in the creating transaction.
             .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
+            // SHA-256 of `workspace`. Workspace equality compares it, then the
+            // text, so a collision never merges two Workspaces.
+            .{ .name = "workspace_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
+            // The change ring's key: created_seq of the Workspace's first Session.
+            .{ .name = "workspace_key", .type = .int },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
+        .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
             references("output_schema_content_id", "content", content_reference),
@@ -581,7 +587,7 @@ pub const tables = [_]Table{
 };
 
 pub const indexes = [_]Index{
-    .{ .name = "session_workspace_list", .table = "session", .columns = &.{"workspace"} },
+    .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
     .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
