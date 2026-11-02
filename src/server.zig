@@ -1974,11 +1974,12 @@ fn renderConversationPage(response: protocol.JsonOut, page: *const store_module.
     for (page.items[0..page.count], 0..) |item, index| {
         if (index != 0) try response.append(",");
         switch (item.kind) {
+            .hosted_call => try response.appendShape(shapes.hosted_call, .{ item.position, item.ordinal }),
             inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, item.content.length, item.content.digest }),
         }
         switch (item.kind) {
             .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, item.sender }),
-            .tool_result => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{presentation}),
+            .tool_result, .hosted_call => if (item.presentation) |presentation| try response.appendShape(shapes.presentation, .{presentation}),
             .assistant => {},
         }
         try response.appendShape(shapes.item_end, .{});
@@ -3152,7 +3153,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .ordinal = max,
             .kind = kind,
             .content = content,
-            .presentation = if (kind == .tool_result) presentation else null,
+            .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
             .admitted_at = if (kind == .user) max else null,
             .sender = if (kind == .user) .{ .session = session } else null,
         };
@@ -3187,6 +3188,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .assistant = reference },
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field) } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
+        .{ .hosted_call = presentation },
         .{ .outcome = .{ .turn = max, .operation = max, .code = code, .content = reference } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },

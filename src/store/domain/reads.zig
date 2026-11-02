@@ -71,7 +71,9 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
             " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn INDEXED BY turn_outcome_position WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ range("outcome_position", "0") ++
             " UNION ALL SELECT position,0,7,NULL FROM session_stop INDEXED BY session_stop_position WHERE session_ref=?1 AND " ++ range("position", "0") ++ order,
-        "SELECT sender_position AS position,0 AS ordinal,9 AS kind,NULL AS id FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++ order,
+        "SELECT sender_position AS position,0 AS ordinal,9 AS kind,NULL AS id FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++
+            " UNION ALL SELECT session_position,0,10,NULL FROM model_output_item INDEXED BY model_output_history " ++
+            "WHERE session_ref=?1 AND item_kind=5 AND " ++ range("session_position", "0") ++ order,
     };
 }
 
@@ -250,7 +252,12 @@ pub fn publicConversationPageLocked(self: *Store, request: *const protocol.Conve
     const end = if (request.end == 0) next_position - 1 else request.end;
     if (request.end != 0 and (request.before_position > end or end >= next_position or
         end > std.math.maxInt(i64))) return error.InvalidCursor;
-    if (request.before_position != 0) {
+    if (request.before_position != 0) cursor: {
+        // A cursor names an item: a hosted call, or an item with content.
+        if (request.before_ordinal == 0) if (hostedCallLocked(self, request.session.slice(), request.before_position)) |_| break :cursor else |err| switch (err) {
+            error.ContentNotFound => {},
+            else => return err,
+        };
         _ = publicConversationContentLocked(self, request.session.slice(), request.before_position, request.before_ordinal) catch |err| switch (err) {
             error.ContentNotFound => return error.InvalidCursor,
             else => return err,
@@ -267,7 +274,9 @@ pub fn publicConversationPageLocked(self: *Store, request: *const protocol.Conve
         "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4,coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
         "FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "WHERE tool_groups.position<=?2) " ++
+        "WHERE tool_groups.position<=?2 " ++
+        // A hosted call is public at its own item's position.
+        "UNION ALL SELECT item.session_position,0,5,NULL FROM model_output_item item WHERE item.session_ref=?1 AND item.item_kind=5 AND item.session_position<=?2) " ++
         "SELECT position,ordinal,kind,content_id FROM public WHERE (?3=0 OR position<?3 OR (position=?3 AND ordinal<?4)) " ++
         "ORDER BY position DESC,ordinal DESC LIMIT 17");
     defer sqlite.resetCached(statement);
@@ -286,6 +295,13 @@ pub fn publicConversationPageLocked(self: *Store, request: *const protocol.Conve
         const position = c.sqlite3_column_int64(statement, 0);
         const ordinal = c.sqlite3_column_int64(statement, 1);
         const kind = c.sqlite3_column_int(statement, 2);
+        if (kind == 5) {
+            if (position <= 0 or ordinal != 0) return error.CorruptStore;
+            const call = try hostedCallLocked(self, request.session.slice(), @intCast(position));
+            page.items[page.count] = .{ .position = @intCast(position), .ordinal = 0, .kind = .hosted_call, .content = .{ .length = 0, .digest = protocol.contentDigest("") }, .presentation = call.presentation };
+            page.count += 1;
+            continue;
+        }
         const content_id = c.sqlite3_column_int64(statement, 3);
         if (position <= 0 or ordinal < 0 or content_id <= 0 or
             (kind != 1 and kind != 3 and kind != 4) or
@@ -526,6 +542,32 @@ fn toolPresentationLocked(self: *Store, operation: u64, ordinal: u64, publicatio
         else => return error.CorruptStore,
     };
     return result;
+}
+
+/// The hosted tool call at `position`, as an accepted Operation's output
+/// recorded it: its line, its outcome and when its Operation resolved.
+pub fn hostedCallLocked(self: *Store, session: []const u8, position: u64) !struct { presentation: protocol.ToolPresentation, at: u64 } {
+    const statement = try store_core.cached(self, "SELECT item.description,item.call_failed,op.resolved_at," ++
+        "op.session_ref=item.session_ref AND op.attempt_ordinal=item.attempt_ordinal AND op.purpose=0 AND " ++
+        store_schema.oneOf("op.resolution_code", &accepted_resolutions) ++
+        " FROM model_output_item item LEFT JOIN model_operation op ON op.operation_id=item.operation_id " ++
+        "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=5");
+    defer sqlite.resetCached(statement);
+    try sqlite.bindText(statement, 1, session);
+    try sqlite.bindU64(statement, 2, position);
+    switch (c.sqlite3_step(statement)) {
+        c.SQLITE_ROW => {},
+        c.SQLITE_DONE => return error.ContentNotFound,
+        else => return error.ActivityReadFailed,
+    }
+    if (c.sqlite3_column_int(statement, 3) != 1) return error.CorruptStore;
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try sqlite.readText(statement, 0, &description);
+    if (!protocol.ToolPresentation.validDescription(description.slice())) return error.CorruptStore;
+    return .{
+        .presentation = .{ .description = description, .code = if (c.sqlite3_column_int(statement, 1) != 0) .failed else .succeeded, .publication_position = position },
+        .at = @intCast(try sqlite.readNullablePositiveI64(statement, 2) orelse return error.CorruptStore),
+    };
 }
 
 pub fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
@@ -800,6 +842,11 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
             try sqlite.bindText(select, 2, session);
             if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.CorruptStore;
             result.item.at = @intCast(try sqlite.readNullablePositiveI64(select, 0) orelse return error.CorruptStore);
+        },
+        10 => {
+            const call = try hostedCallLocked(self, session, position);
+            result.item.value = .{ .hosted_call = call.presentation };
+            result.item.at = call.at;
         },
         8 => {
             const admission = try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;

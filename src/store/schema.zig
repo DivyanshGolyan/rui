@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 49;
+pub const schema_version: u32 = 50;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes needs a new row, and so a new schema_version.
 /// Review rule: a row, once merged, is never edited.
@@ -26,6 +26,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 47, .digest = 0x51267b57c44099bc },
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0xeebe0b0c9cfaa50f },
+    .{ .schema_version = 50, .digest = 0x9d902d8761f4713e },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -466,6 +467,10 @@ pub const tables = [_]Table{
             .{ .name = "phase", .type = .int, .default = "0", .check = "phase IN (0,1,2) AND (phase=0 OR item_kind=2)" },
             .{ .name = "extras_content_id", .type = .int },
             .{ .name = "part_count", .type = .int, .check = "part_count>=0 AND (part_count=0 OR item_kind IN (1,2))" },
+            // A hosted tool call's description and outcome: every tool
+            // call is shown by its description.
+            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "call_failed", .type = .flag, .default = "0", .check = "(call_failed=0 OR item_kind=5)" },
         },
         .primary_key = &.{ "operation_id", "item_ordinal" },
         .uniques = &.{ &.{ "session_ref", "session_position" }, &.{ "operation_id", "item_id_digest" } },

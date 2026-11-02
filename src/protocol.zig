@@ -383,7 +383,8 @@ pub const PermissionDecisionRejection = enum {
     action_not_pending,
 };
 pub const MessageProgressStatus = WorkState.Progress;
-pub const ConversationItemKind = enum { user, assistant, tool_result };
+/// A hosted call has no content: its presentation is the whole item.
+pub const ConversationItemKind = enum { user, assistant, tool_result, hosted_call };
 
 pub const PermissionDecisionCommand = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -614,7 +615,7 @@ pub const ActivityItem = struct {
     /// The Host Unix second the row's owning fact committed.
     at: u64,
     value: Value,
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed };
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed };
     pub const Content = struct {
         length: u64,
         digest: [32]u8,
@@ -651,6 +652,8 @@ pub const ActivityItem = struct {
         pub const call = .{ "{\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":[", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, "]}" };
         /// Holes: content, presentation.
         pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
+        /// A call the provider ran, shown by its line alone. Hole: presentation.
+        pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
         /// Holes: turn, operation, code, content.
         pub const outcome = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
         /// Holes: key, turn, cutoff, completion.
@@ -680,6 +683,7 @@ pub const ActivityItem = struct {
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
             .assistant => |content| try writeShape(out, value_shapes.assistant, .{content}),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
+            .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{presentation}),
             .call => |call| {
                 comptime std.debug.assert(call.fields.len == 3);
                 var fields: [3]Content = undefined;
@@ -2690,11 +2694,14 @@ pub const conversation_page_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
     /// Holes: position, ordinal, content length and digest.
     pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
+        comptime std.debug.assert(kind != .hosted_call);
         return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\",\"display\":\"omitted\"}" };
     }
+    /// A Hosted Call item, which has no content. Holes: position, ordinal.
+    pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
     /// A User item's admission. Holes: second, sending peer.
     pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer } };
-    /// A Tool Result item's presentation. Hole: it.
+    /// A Tool Result or Hosted Call item's presentation. Hole: it.
     pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentation } };
     pub const item_end = .{"}"};
 
@@ -2704,6 +2711,7 @@ pub const conversation_page_reply = struct {
             .user => shapeBytes(admission),
             .tool_result => shapeBytes(presentation),
             .assistant => 0,
+            .hosted_call => return shapeBytes(hosted_call) + shapeBytes(presentation) + shapeBytes(item_end),
         };
         return shapeBytes(item(kind)) + extra + shapeBytes(item_end);
     }
