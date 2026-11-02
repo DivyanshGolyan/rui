@@ -97,9 +97,13 @@ Existing one-way-door approvals still apply.
 - A PR whose CI is green and whose Codex review is clean merges now.
   Do not hold it for a local run of tests CI repeats (full `zig build test`, `check`, or a local mirror of Selected); [Evidence](CODING_STANDARDS.md#evidence) sets the focused pre-push checks.
   Ship post-merge fixes as follow-up PRs.
+  If main moved since the PR's CI ran, first merge `origin/main` into it locally and run `python3 tests/ci/prepush.py`, and fix any failure before merging: two PRs green on their own can break main together (#768 and #769).
 - Never sit idle on CI or Codex, however long they take.
   Once a PR is pushed, start the next piece at once: independent work on a fresh branch from `origin/main`, dependent work on a branch stacked on the open one.
   Return to merge when the checks finish.
+- Run PRs in parallel only when they touch different files.
+  Work that shares a file with an open PR, in this lane or another, is dependent: stack it on that PR and land the stack in order.
+  Before splitting work across lanes, check the open PRs for files the new work would touch.
 - For work published as PRs, open a PR that depends on another after its base lands on `main`, rebased onto `origin/main`.
   Changes that join `wip/land-N` stack as above.
 - Mac and upgrade qualification run after main advances; daily full runs remain backstops.
