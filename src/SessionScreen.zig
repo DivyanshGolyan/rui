@@ -144,8 +144,9 @@ frames: u64 = 0,
 message_return: ViewKind = .live,
 // The rows of the shown document the latest frame drew.
 drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
-// The latest frame drew the command list, which Esc then closes first.
-listed: bool = false,
+// The command list the latest frame built for the draft: the one value the
+// list's keys act on (`slash_commands.Shown`).
+commands: ?slash_commands.Shown = null,
 height: u16 = 1,
 colour: bool,
 
@@ -776,10 +777,8 @@ pub const Footer = struct {
     command: bool = false,
     status: []const u8 = "",
     notice: []const u8 = "",
-    /// What the list above the input shows for the draft, and its
-    /// highlighted row.
-    commands: ?slash_commands.List = null,
-    highlight: usize = 0,
+    /// The list above the input for the draft, with its highlighted row.
+    commands: ?slash_commands.Shown = null,
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
     queued: ?Queued = null,
@@ -797,14 +796,16 @@ pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line
 /// highlighted one reversed as the Action's choice is. When more match
 /// than rows fit, the last row counts the rest, unless it is the only row;
 /// the rows follow the highlight.
-fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, list: *const slash_commands.List, highlight: usize, overflow: *[32]u8) void {
+fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, shown: *const slash_commands.Shown, overflow: *[32]u8) void {
+    const list = &shown.list;
+    const highlight = shown.highlight;
     const total = list.count;
     const rows = slash_commands.named(total, layout.list_height);
     const first = list.firstShown(highlight, layout.list_height);
     const column = list.descriptionColumn();
     for (list.shown()[first..][0..rows], first..) |entry, index| {
         var text = self.style(.user);
-        text.reverse = index == list.row(highlight);
+        text.reverse = index == highlight;
         const cells = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index - first)), .height = 1 });
         _ = cells.printSegment(.{ .text = entry.shown, .style = text }, .{ .wrap = .none });
         if (entry.description.len != 0 and column < cells.width) _ = cells.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = entry.description, .style = self.style(.quiet) }, .{ .wrap = .none });
@@ -877,7 +878,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .draft_anchor = if (selector) 0 else self.draft_anchor,
         .status = status,
         .notice = footer.notice,
-        .command_rows = if (selector) 0 else if (footer.commands) |commands| commands.count else 0,
+        .command_rows = if (selector) 0 else if (footer.commands) |commands| commands.rows() else 0,
         .calls = calls[0..if (selected) 0 else live.count],
         .total_calls = live.total,
         .live = footer.live != null,
@@ -893,7 +894,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     if (!selector) self.draft_anchor = layout.draft_lines[0].start;
     self.browsing_height = layout.browsing_height;
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
-    self.listed = layout.list_height != 0;
+    self.commands = footer.commands;
+    if (self.commands) |*commands| commands.drew(layout.list_height != 0);
     _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
     _ = document.draw(window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
     if (layout.document_offset != 0) {
@@ -929,7 +931,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var rule_label: [64]u8 = undefined;
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, &rule_label);
     var overflow: [32]u8 = undefined;
-    if (layout.list_height != 0) self.drawCommands(window, &layout, &footer.commands.?, footer.highlight, &overflow);
+    if (layout.list_height != 0) self.drawCommands(window, &layout, &self.commands.?, &overflow);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -1579,12 +1581,12 @@ test "a command list of one row shows a command, not only how many match" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const calls: View.Live = .{};
-    const footer: Footer = .{ .commands = slash_commands.conversation.suggest("/", .{}).? };
+    const footer: Footer = .{ .commands = .{ .list = slash_commands.conversation.suggest("/", .{}).?, .revision = 0 } };
     var buffer: [256]u8 = undefined;
     for ([_]u16{ 6, 9, 24 }) |rows| {
         errdefer std.debug.print("rows={d}\n", .{rows});
         _ = try screen.render(&out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, footer, &calls);
-        try std.testing.expect(screen.listed);
+        try std.testing.expectEqual(.drawn, screen.commands.?.seen);
         try std.testing.expect(screenHas(screen, slash_commands.conversation.usage.get(.configure), &buffer));
     }
 }

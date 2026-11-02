@@ -58,10 +58,6 @@ colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
 input: Input = undefined,
-/// The draft revision Esc closed the command list on; any edit reopens it.
-commands_closed: ?u64 = null,
-/// The list row Up and Down moved to, for the draft revision they moved it on.
-list_highlight: struct { revision: u64 = 0, row: usize = 0 } = .{},
 submission: Submission = undefined,
 reader: Task = .{},
 // The reader's only context; the UI reads its result after join.
@@ -645,19 +641,22 @@ test "frontend lists the efforts of the Session's model once it is read, the one
     self.input.init();
     for ("/effort ") |byte| _ = self.input.feed(byte);
     try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
-    try std.testing.expect(self.commandList() == null);
+    try std.testing.expect(self.commands(null) == null);
     self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .medium };
     try self.line.model.set("gpt-5.5");
-    const list = self.commandList().?;
-    try std.testing.expectEqualStrings("low", list.shown()[0].word);
-    try std.testing.expectEqualStrings("current", list.shown()[1].description);
-    // Down moves the highlight, which Tab puts in the draft.
-    try std.testing.expect(self.moveListRow(true));
-    try std.testing.expectEqualStrings("medium", self.commandList().?.completion(self.listRow()));
+    var shown = self.commands(null).?;
+    try std.testing.expectEqualStrings("low", shown.list.shown()[0].word);
+    try std.testing.expectEqualStrings("current", shown.list.shown()[1].description);
+    // Down moves the highlight, which the next frame keeps and Tab puts in
+    // the draft.
+    shown.move(true);
+    shown = self.commands(shown).?;
+    try std.testing.expectEqualStrings("medium", shown.list.completion(shown.highlight));
     // Typing moves it back to the first.
     _ = self.input.feed('m');
     try std.testing.expectEqualStrings("/effort m", self.input.composition().bytes);
-    try std.testing.expectEqualStrings("edium", self.commandList().?.completion(self.listRow()));
+    shown = self.commands(shown).?;
+    try std.testing.expectEqualStrings("edium", shown.list.completion(shown.highlight));
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -943,7 +942,7 @@ fn drawFrame(self: *Self) !void {
     const position = self.live.cursor.position;
     const through = if (self.transcript.newer) |newer| newer.through else null;
     // Reading completes only after delivery; the receipt stales the frame.
-    const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .highlight = self.listRow(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+    const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
     switch (change.shown) {
         .none => {},
         .live => |span| if (caught_up) self.seen.live(if (self.seen.live_from) |at| span.first <= at else false, position, span.next),
@@ -954,46 +953,28 @@ fn drawFrame(self: *Self) !void {
     }
 }
 
-/// What the list above the draft shows: the commands its command word
-/// starts, or the choices for the word typed after one, unless Esc closed
-/// the list on this draft. Null when nothing matches.
-fn commandList(self: *const Self) ?slash_commands_shared.List {
-    if (self.commands_closed) |closed| if (closed == self.input.revision) return null;
-    return self.suggestion();
-}
-
-/// The list the draft calls for, shown or closed.
-fn suggestion(self: *const Self) ?slash_commands_shared.List {
+/// The next frame's list above the draft, after `previous`: the commands
+/// its command word starts, or the choices for the word typed after one.
+/// Null when nothing matches.
+fn commands(self: *const Self, previous: ?slash_commands_shared.Shown) ?slash_commands_shared.Shown {
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
-    const list = slash_commands.suggest(self.input.composition().bytes, context) orelse return null;
-    return if (list.count != 0) list else null;
+    return slash_commands_shared.Shown.next(previous, self.input.revision, slash_commands.suggest(self.input.composition().bytes, context));
 }
 
-/// The highlighted row of the list: the first until Up or Down moves it on
-/// this draft.
-fn listRow(self: *const Self) usize {
-    return if (self.list_highlight.revision == self.input.revision) self.list_highlight.row else 0;
+/// The list the latest frame drew for the draft as it is now, which Enter,
+/// Esc and the arrows act on.
+fn shownCommands(self: *const Self) ?*slash_commands_shared.Shown {
+    return slash_commands_shared.Shown.drawnAt(&self.terminal.screen.commands, self.input.revision);
 }
 
-/// Up or Down in a list moves its highlight, stopping at its ends; false
-/// when no list shows for the draft.
-fn moveListRow(self: *Self, down: bool) bool {
-    const list = self.commandList() orelse return false;
-    const row = self.listRow();
-    self.list_highlight = .{ .revision = self.input.revision, .row = if (down) @min(row + 1, list.count - 1) else row -| 1 };
-    self.dirty = true;
-    return true;
-}
-
-/// Tab: the rest of the highlighted entry's word; null for a draft no list
-/// is for, which takes the tab.
-fn tabCompletion(context: *const anyopaque, _: []const u8) ?[]const u8 {
+/// Tab: the rest of the highlighted entry's word in the latest frame's
+/// list, also after Esc closed it; null for a draft no list is for, which
+/// takes the tab.
+fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
-    if (slash_commands.suggest(self.input.composition().bytes, .{}) == null) return null;
-    // Tab completes after Esc closed the list too, from its first row.
-    const list = self.suggestion() orelse return "";
-    return list.completion(self.listRow());
+    if (slash_commands.suggest(draft, .{}) == null) return null;
+    return slash_commands_shared.Shown.completion(&self.terminal.screen.commands, self.input.revision) orelse "";
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1155,7 +1136,10 @@ fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     switch (action) {
         // A shown list takes the arrows, as the overview's model list does.
-        .scroll_up, .scroll_down => if (screen.inputRow() != .draft or !screen.listed or !self.moveListRow(action == .scroll_down)) try self.scroll(action == .scroll_down, false),
+        .scroll_up, .scroll_down => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
+            shown.move(action == .scroll_down);
+            self.dirty = true;
+        } else try self.scroll(action == .scroll_down, false),
         .page_up, .page_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
         .older, .newer => if (self.input.press(action == .older) == .typed) {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
@@ -1164,11 +1148,11 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc and Ctrl-G only cancel a stop prompt, as on the overview.
             if (action == .close and self.overviewSays().asking) return;
             // Esc closes only a list the person saw.
-            if (action == .close and screen.listed and screen.inputRow() == .draft and self.commandList() != null) {
-                self.commands_closed = self.input.revision;
+            if (action == .close and screen.inputRow() == .draft) if (self.shownCommands()) |shown| {
+                shown.seen = .closed;
                 self.dirty = true;
                 return;
-            }
+            };
             // Leaving also abandons a Message page not yet shown, and returns
             // the input row to a waiting Action's choice.
             self.dropMessageRequest();
@@ -1539,10 +1523,10 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
         } else try self.beginMessage(.{ .message = ticket }),
         // Enter in a shown list takes its highlighted entry: it runs the
         // command that entry completes, or adds the word another follows.
-        // Only a list the latest frame drew: a screen too short for one
-        // shows none, and Enter there runs the line as typed.
-        .command => if (if (screen.listed) self.commandList() else null) |list| {
-            const taken = list.enter(self.listRow());
+        // Only a list the latest frame drew for this draft: a screen too
+        // short for one shows none, and Enter there runs the line as typed.
+        .command => if (self.shownCommands()) |shown| {
+            const taken = shown.list.enter(shown.highlight);
             switch (self.input.append(taken.rest)) {
                 .refused => |why| self.notice = refusedNotice(why),
                 else => if (taken.runs) {
@@ -2872,16 +2856,42 @@ test "Up, Down and Enter take a row only from a list the latest frame drew" {
     // Typed since the latest frame, so never seen: Down scrolls rather
     // than moving a hidden highlight, and Enter runs the line as typed.
     try stepKeys(held, "/\x1b[B");
-    try std.testing.expectEqual(@as(usize, 0), self.listRow());
+    try held.settle();
+    try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try stepKeys(held, "\x15/he\r");
     try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice.?);
     // Drawn: Enter takes the highlighted /help.
     try stepKeys(held, "/he");
     try held.settle();
-    try std.testing.expect(held.screen.listed);
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\r");
     try std.testing.expect(self.notice == null or !std.mem.startsWith(u8, self.notice.?, "! Unknown command"));
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
+}
+
+test "a key on a draft changed since the latest frame acts with no list" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // The frame drew the list for `/h`; `e` changes the draft before any
+    // frame lists it, so Enter runs `/he` as typed rather than take /help.
+    try stepKeys(held, "/h");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    try stepKeys(held, "e\r");
+    try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice.?);
+    // Down on a draft no frame listed moves no highlight: the next list
+    // starts at its first row.
+    try stepKeys(held, "/");
+    try held.settle();
+    try stepKeys(held, "c\x1b[B");
+    try held.settle();
+    try std.testing.expect(held.screen.commands.?.list.count > 1);
+    try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
+    // Esc on a draft no frame listed acts as Esc rather than close a list.
+    try stepKeys(held, "o\x07");
+    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {
@@ -2892,11 +2902,11 @@ test "Esc closes the command list first only when the latest frame drew it" {
     // Drawn: the first Esc closes only the list, the next one acts as Esc.
     try stepKeys(held, "/st");
     try held.settle();
-    try std.testing.expect(held.screen.listed);
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
     try std.testing.expect(self.notice == null);
     try held.settle();
-    try std.testing.expect(!held.screen.listed);
+    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
     // Typed since the latest frame, so never seen: Esc acts at once.
@@ -2907,7 +2917,7 @@ test "Esc closes the command list first only when the latest frame drew it" {
     const file = try held.adopt(3);
     defer file.close(std.testing.io);
     try held.settle();
-    try std.testing.expect(held.screen.listed);
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Row.draft, held.screen.inputRow());

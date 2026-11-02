@@ -23,6 +23,7 @@ const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
+const slash_commands = @import("slash_commands.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
@@ -337,8 +338,6 @@ draft: [view.draft_capacity]u8 = undefined,
 /// The byte the latest frame's first composer line starts at, kept first by
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
-/// The shown frame listed the draft's commands.
-listed: bool = false,
 /// The worker's descriptors: it writes one byte as its job ends.
 done: [2]c_int = .{ -1, -1 },
 /// Signal wakes.
@@ -658,7 +657,7 @@ fn sendStatuses(self: *Self) void {
 }
 
 fn composerDraft(self: *const Self) view.Draft {
-    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits, .listed = self.listed };
+    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits };
 }
 
 /// Takes the queued job at `index` out of the queue.
@@ -1042,14 +1041,13 @@ fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
     return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion }, .edits = edits };
 }
 
-/// Tab: the rest of the highlighted entry's word; null for a draft no list
-/// is for, which takes the tab.
+/// Tab: the rest of the highlighted entry's word in the latest frame's
+/// list, also after Esc closed it; null for a draft no list is for, which
+/// takes the tab.
 fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
     if (view.commands.suggest(draft, .{}) == null) return null;
-    // Tab still takes a word after Esc closed the list.
-    const list = view.suggestion(&self.state, self.composerDraft()) orelse return "";
-    return list.completion(self.state.list_row);
+    return slash_commands.Shown.completion(&self.state.commands, self.composer.edits) orelse "";
 }
 
 /// One input through `mode`'s route, with the overview's one key table.
@@ -1082,7 +1080,7 @@ fn draw(self: *Self, frame: u64) !?Next {
     var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
     errdefer screen.deinit();
     self.draft_anchor = screen.draft_anchor;
-    self.listed = screen.listed;
+    self.state.commands = screen.commands;
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
     // Waiting reports and a notification go first, through the frame's
