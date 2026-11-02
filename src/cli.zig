@@ -2239,10 +2239,12 @@ fn stopListedSession(init: std.process.Init, parsed: *const cli_args.Parsed, sto
         stderr.diagnostic("rui: {s} not stopped: its stop was not saved ({s}).\n", .{ session, @errorName(err) });
         return err;
     };
+    // The send closes the capture and undefines it, so the handle is copied first.
+    const handle = captured.identity().key;
     sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null) catch |err| {
         // A refusal already printed its saved answer and replay command.
         if (err != error.MutationNotAccepted)
-            stderr.diagnostic("rui: not sure {s} stopped ({s}). Check with: rui request recover {s}\n", .{ session, @errorName(err), captured.identity().key.slice() });
+            stderr.diagnostic("rui: not sure {s} stopped ({s}). Check with: rui request recover {s}\n", .{ session, @errorName(err), handle.slice() });
         return err;
     };
 }

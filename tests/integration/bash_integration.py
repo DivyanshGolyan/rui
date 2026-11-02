@@ -1018,7 +1018,7 @@ def main():
         )
     )
     stop_all_marker = state / "stop-all-marker"
-    for name in ("stop-all-a", "stop-all-b", "stop-all-lost"):
+    for name in ("stop-all-a", "stop-all-b", "stop-all-lost", "stop-all-lost-2"):
         responses.append(
             fixture.sse_tool_calls(
                 f"{name}-calls",
@@ -1489,21 +1489,30 @@ def main():
         assert nothing.stderr == "\nrui: no Session in this Store has work to stop.\n", nothing
         # A stop saved but whose reply is lost is unconfirmed, never "not
         # stopped", and names the handle that recovers its saved answer.
-        lost = configure(state, store, "stop-all-lost-config")
-        fixture.message(state, store, "stop-all-lost-message", lost, "execute")
-        fixture.wait_for(lambda: action_for(store, lost), "stop-all-lost stoppable Action")
+        lost = []
+        for name in ("stop-all-lost", "stop-all-lost-2"):
+            waiter = configure(state, store, f"{name}-config")
+            fixture.message(state, store, f"{name}-message", waiter, "execute")
+            fixture.wait_for(lambda: action_for(store, waiter), f"{name} stoppable Action")
+            lost.append(waiter)
         dropped = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store), "--test-drop-reply", "after-commit"],
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
+        # Each lost reply is named with its own handle, and the second Session
+        # is still stopped after the first reply was lost.
         assert dropped.returncode == 1 and dropped.stdout == "", dropped
-        handle = re.search(r"^request: (\S+) ", dropped.stderr, re.M).group(1)
-        assert f"rui: not sure {lost} stopped (" in dropped.stderr, dropped
-        assert f"Check with: rui request recover {handle}\n" in dropped.stderr, dropped
+        handles = re.findall(r"^request: (\S+) ", dropped.stderr, re.M)
+        assert len(handles) == 2, dropped
+        unconfirmed = re.findall(r"^rui: not sure (\S+) stopped \(\w+\)\. Check with: rui request recover (\S+)$", dropped.stderr, re.M)
+        assert {waiter for waiter, _ in unconfirmed} == set(lost), dropped
+        assert [h for _, h in unconfirmed] == handles, dropped
         assert "not stopped:" not in dropped.stderr, dropped
-        fixture.wait_for(lambda: resolution(store, lost) == "cancelled", "saved stop of the lost reply")
-        recovered = subprocess.run([str(fixture.RUI), "request", "recover", handle],
-                                   env=stop_all_env, text=True, capture_output=True, timeout=15)
-        assert recovered.returncode == 0, recovered
-        assert json.loads(recovered.stdout)["context"]["session"] == lost, recovered
+        assert "rui: 2 of 2 stops failed or are unconfirmed" in dropped.stderr, dropped
+        for (waiter, handle) in unconfirmed:
+            fixture.wait_for(lambda: resolution(store, waiter) == "cancelled", "saved stop of a lost reply")
+            recovered = subprocess.run([str(fixture.RUI), "request", "recover", handle],
+                                       env=stop_all_env, text=True, capture_output=True, timeout=15)
+            assert recovered.returncode == 0, recovered
+            assert json.loads(recovered.stdout)["context"]["session"] == waiter, recovered
         assert not stop_all_marker.exists()
 
         session = configure(state, store, "prelaunch-stop-config")
