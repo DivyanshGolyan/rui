@@ -668,7 +668,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             self.menu = .{};
             return self.event(.{ .models = .{ .menu = menu } });
         },
-        .save => return self.event(.{ .saved = savedAs(outcome) }),
+        .save => |binding| return self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(outcome) } }),
     }
     return null;
 }
@@ -997,15 +997,18 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 }
 
 /// Every way out: restores the terminal, answers the worker's job through
-/// `complete` as the loop does, runs a queued save, then writes the
-/// ledger's guidance before anything that can return. The departure is whole before the restore
+/// `complete` as the loop does, saves the default if the file is behind it,
+/// then writes the ledger's guidance before anything that can return. The departure is whole before the restore
 /// result is read. A conversation's own guidance and the Detached notice
 /// follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.worker.cancel();
     const answered: anyerror!?Next = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
-    self.settleSave();
+    // A local file write, so it ends before the departure says how.
+    if (self.state.saveWanted()) |binding| {
+        _ = self.event(.{ .saved = .{ .binding = binding, .outcome = savedAs(self.ops.save_default(self, binding)) } }) catch {};
+    }
     // A ledger entry prints well under 512 bytes.
     var bytes: [view.max_requests * 512 + view.max_late_save_bytes]u8 = undefined;
     var guidance = std.Io.Writer.fixed(&bytes);
@@ -1023,14 +1026,6 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             return self.leave(left.*, restored);
         },
     }
-}
-
-/// Runs a save still queued as the overview ends: it is a local file write,
-/// so it ends before the departure says how.
-fn settleSave(self: *Self) void {
-    for (self.jobs[0..self.job_count]) |job| if (job == .save) {
-        _ = self.event(.{ .saved = savedAs(self.ops.save_default(self, job.save)) }) catch {};
-    };
 }
 
 /// Lets the conversation the person left join its borrowers and write its
@@ -1173,6 +1168,7 @@ const Seen = struct {
     conversed: view.Reference = @splat(0),
     model_lists: usize = 0,
     saved: ?struct { provider: view.Provider, model: protocol.Bounded(64) } = null,
+    saves: usize = 0,
     /// How many Sessions the fake listing returns, from `listed_references`.
     listed: usize = 1,
 
@@ -1266,6 +1262,7 @@ const fake_operations: Operations = .{
     .save_default = struct {
         fn save(_: *Self, binding: view.Default) !void {
             Seen.now.saved = .{ .provider = binding.provider, .model = Seen.bounded(binding.model.slice()) };
+            Seen.now.saves += 1;
         }
     }.save,
     .converse = struct {
@@ -1458,6 +1455,30 @@ test "a save still queued as the overview ends runs, and the way out names it" {
     const guidance = try finishedGuidance(rig, &buffer);
     try std.testing.expectEqualStrings("gpt-5.5", Seen.now.saved.?.model.slice());
     try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-5.5") != null);
+}
+
+test "a pick made while a save runs is written before the departure, which names only it" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    // Down to gpt-6-luna; Enter opens the sign-in choice, Enter picks ChatGPT.
+    try std.testing.expect(try rig.press("\x1b[B\n\n") == null);
+    // Its save starts, and nothing answers it before the next pick.
+    try overview.dispatch(.all);
+    try std.testing.expect(overview.worker.thread != null and overview.job == .save);
+    try std.testing.expect(try rig.press("/model\n") == null);
+    try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .table }}) } }) == null);
+    try std.testing.expect(try rig.press("\x1b[B\n") == null);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", overview.state.default.?.model.slice());
+    var buffer: [1024]u8 = undefined;
+    const guidance = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.saves);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", Seen.now.saved.?.model.slice());
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "New Sessions use gpt-6.1-sol") != null);
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-6-luna") == null);
 }
 
 test "a model list the Host cannot answer and one Rui cannot read reach the core apart" {
