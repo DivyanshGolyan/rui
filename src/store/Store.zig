@@ -559,7 +559,11 @@ pub const Store = struct {
         if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, action_domain.admitNextActionAttemptLocked(self, bash_timeout_ms, faults));
+        var candidate: Access(.read, error{}) = .open(&entry);
+        defer candidate.deinit();
+        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, bash_timeout_ms, faults)));
     }
 
     /// `out` is valid only when this returns without error.

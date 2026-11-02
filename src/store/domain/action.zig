@@ -18,16 +18,30 @@ const Ordinary = store_core.Ordinary;
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
 const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
-/// Reads only `action_operation_executable`, so an Action waiting for
-/// permission costs admission nothing.
-pub const next_action_attempt_sql =
-    "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
-    "INDEXED BY action_operation_executable JOIN model_operation operation " ++
-    "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-    "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-    "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-    "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
-    "ORDER BY action.action_id LIMIT 1";
+/// The next Action ready for an Attempt, with its Session. Reads only
+/// `action_operation_executable`, so an Action waiting for permission costs
+/// admission nothing.
+const next_action_attempt = rsql.Read(.{
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms,s.session_ref,s.workspace_key,s.next_position " ++
+        "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
+        "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+        "JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+        "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
+        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+        "ORDER BY action.action_id LIMIT 1",
+    .Args = struct {},
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, bash_timeout_override_ms: ?rsql.Positive, session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+pub const next_action_attempt_sql = next_action_attempt.sql;
+
+const attempt_action = rsql.Write(.{
+    .sql = "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=@now,bash_timeout_ms=?2,sender_handle=?3 " ++
+        "WHERE action_id=?1 AND session_ref=@session(?4) AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
+    .Args = struct { action_id: u64, timeout_ms: u64, sender_handle: []const u8, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
+});
 
 pub const ActionAttemptBinding = attempt.ActionAttemptBinding;
 
@@ -119,47 +133,36 @@ fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, co
     return .{ .length = metadata.length, .digest = metadata.digest };
 }
 
-pub fn admitNextActionAttemptLocked(
-    self: *Store,
+/// The read Access `candidate` finds the next Action outside any
+/// transaction, so a poll that finds none costs one statement. The held
+/// Store mutex excludes every other writer, so the candidate is still
+/// current when the write Access `a` attempts it.
+pub fn admitNextActionAttempt(
+    candidate: anytype,
+    a: anytype,
+    io: std.Io,
     bash_timeout_ms: u64,
     faults: Faults,
 ) !?ActionAttemptAdmission {
-    const select = try store_core.cached(self, next_action_attempt_sql);
-    defer sqlite.resetCached(select);
-    const step = c.sqlite3_step(select);
-    if (step == c.SQLITE_DONE) return null;
-    if (step != c.SQLITE_ROW) return error.ActionSelectionFailed;
-    const action_id = c.sqlite3_column_int64(select, 0);
-    const parent_operation_id = c.sqlite3_column_int64(select, 1);
-    const turn_id = c.sqlite3_column_int64(select, 2);
-    if (action_id <= 0 or parent_operation_id <= 0 or turn_id <= 0) return error.CorruptStore;
-    const selected_timeout_ms = if (try sqlite.readNullablePositiveI64(select, 3)) |override|
-        @as(u64, @intCast(override))
-    else
-        bash_timeout_ms;
-    // The held Store mutex excludes every other writer, so the candidate
-    // read outside the transaction is still current inside it.
-    _ = c.sqlite3_reset(select);
-    try store_core.begin(self);
+    var next: next_action_attempt.Result = undefined;
+    candidate.read(next_action_attempt, .{}, &next);
+    try candidate.run();
+    const found = next orelse return null;
     var random: [16]u8 = undefined;
-    try std.Io.randomSecure(self.io, &random);
+    try std.Io.randomSecure(io, &random);
     const sender_handle = std.fmt.bytesToHex(random, .lower);
-    const update = try store_core.cached(
-        self,
-        "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=unixepoch(),bash_timeout_ms=?2,sender_handle=?3 " ++
-            "WHERE action_id=?1 AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 RETURNING session_ref",
-    );
-    defer sqlite.resetCached(update);
-    try sqlite.bindI64(update, 1, action_id);
-    try sqlite.bindU64(update, 2, selected_timeout_ms);
-    try sqlite.bindText(update, 3, &sender_handle);
-    if (try store_core.stepTouching(self, update) != 1) return error.ActionSelectionChanged;
+    a.write(attempt_action, .{
+        .action_id = found.action_id.get(),
+        .timeout_ms = if (found.bash_timeout_override_ms) |override| override.get() else bash_timeout_ms,
+        .sender_handle = &sender_handle,
+        .session = found.session,
+    });
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
     return .{ .permit = .{ .binding = .{
-        .turn_id = @intCast(turn_id),
-        .parent_operation_id = @intCast(parent_operation_id),
-        .action_id = @intCast(action_id),
+        .turn_id = found.turn_id.get(),
+        .parent_operation_id = found.parent_operation_id.get(),
+        .action_id = found.action_id.get(),
     } } };
 }
 

@@ -297,10 +297,10 @@ pub fn Read(comptime spec: ReadSpec) type {
         };
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
         pub const uses_now = usesNow(spec.sql);
-        /// Whether keys alone limit the result to one row (`pinsOneRow`),
-        /// so a `.one` or `.optional` read need not step again to prove
-        /// there is no second.
-        pub const keyed = pinsOneRow(spec.sql);
+        /// Whether the text alone limits the result to one row
+        /// (`returnsOneRow`), so a read need not step again to prove there
+        /// is no second.
+        pub const single_row = returnsOneRow(spec.sql);
     };
 }
 
@@ -608,6 +608,19 @@ fn whereSessionError(comptime tokens: []const Token, comptime marker_index: usiz
             if (token.depth == 0 and token.is("session_ref") and index != marker_index - 2) return misplaced;
         }
         return null;
+    }
+}
+
+/// Whether a SELECT returns at most one row: it ends in `LIMIT 1`, or its
+/// keys pin it (`pinsOneRow`).
+fn returnsOneRow(comptime sql: []const u8) bool {
+    comptime {
+        @setEvalBranchQuota(400 * sql.len + 10_000);
+        const tokens = tokenize(sql);
+        const n = tokens.len;
+        const limited = n >= 2 and tokens[n - 2].depth == 0 and tokens[n - 2].is("LIMIT") and
+            tokens[n - 1].kind == .number and std.mem.eql(u8, tokens[n - 1].text, "1");
+        return limited or pinsOneRow(sql);
     }
 }
 
@@ -1126,4 +1139,7 @@ test "a read is keyed to one row only when keys pin every table it reads" {
     try std.testing.expect(!comptime pinsOneRow("SELECT turn_id FROM turn WHERE session_ref=?1 AND outcome_code IS NULL"));
     try std.testing.expect(!comptime pinsOneRow("SELECT o.turn_id FROM action_operation a JOIN model_operation o ON o.operation_id=a.parent_operation_id WHERE action_id=?1"));
     try std.testing.expect(!comptime pinsOneRow("SELECT a.action_id FROM model_operation o JOIN action_operation a ON a.parent_operation_id=o.operation_id WHERE o.operation_id=?1"));
+    try std.testing.expect(comptime returnsOneRow("SELECT turn_id FROM turn WHERE turn_id<=?1 ORDER BY turn_id LIMIT 1"));
+    try std.testing.expect(!comptime returnsOneRow("SELECT turn_id FROM turn WHERE turn_id<=?1 ORDER BY turn_id LIMIT 2"));
+    try std.testing.expect(!comptime returnsOneRow("SELECT turn_id FROM turn WHERE turn_id IN (SELECT turn_id FROM turn LIMIT 1)"));
 }

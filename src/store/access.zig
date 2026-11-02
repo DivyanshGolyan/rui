@@ -309,12 +309,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 fn run(_: *Self, entry: *const Queued) Error!void {
                     const statement = entry.statement.?;
                     const destination: *S.Result = @ptrCast(@alignCast(entry.target.destination));
-                    // A read whose keys allow one row takes no step to look for a second.
+                    // A read whose text allows one row takes no step to look for a second.
                     switch (S.cardinality) {
                         .one => {
                             if (!try nextRow(statement)) return error.CorruptStore;
                             try sqlite.decodeRow(S.Row, statement, destination);
-                            if (!S.keyed and try nextRow(statement)) return error.CorruptStore;
+                            if (!S.single_row and try nextRow(statement)) return error.CorruptStore;
                         },
                         .optional => {
                             if (!try nextRow(statement)) {
@@ -325,7 +325,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                             var row: S.Row = undefined;
                             try sqlite.decodeRow(S.Row, statement, &row);
                             destination.* = row;
-                            if (!S.keyed and try nextRow(statement)) return error.CorruptStore;
+                            if (!S.single_row and try nextRow(statement)) return error.CorruptStore;
                         },
                         .at_most => |max| {
                             destination.len = 0;
@@ -333,7 +333,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                                 if (destination.len == max) return error.CorruptStore;
                                 try sqlite.decodeRow(S.Row, statement, &destination.items[destination.len]);
                                 destination.len += 1;
-                                if (S.keyed) break;
+                                if (S.single_row) break;
                             }
                         },
                     }
