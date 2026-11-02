@@ -46,6 +46,9 @@ pub const Options = struct {
     model: ?[]const u8 = null,
     /// This terminal's own successful login, Unix seconds.
     login_at: ?u64 = null,
+    /// The launch named the Store, provider and model, so, as there, a
+    /// start reads no saved defaults, the saved effort included.
+    explicit: bool = false,
     /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
 };
@@ -816,7 +819,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const effort = held.policy(held.at(start, "reasoning-effort"));
-    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or self.options.home.len == 0) null else if (start.binding().model) |model|
+    const saved_effort: ?model_capability.ReasoningEffort = if (effort.present or self.options.explicit or self.options.home.len == 0) null else if (start.binding().model) |model|
         (try preferences.load(self.options.home)).startEffort(model)
     else
         null;
@@ -1323,6 +1326,7 @@ const Seen = struct {
         model: ?protocol.Bounded(64) = null,
         permission_mode: protocol.Bounded(64) = .{},
         label: ?protocol.Bounded(64) = null,
+        reasoning_effort: ?protocol.Bounded(64) = null,
     } = .{},
     stops: usize = 0,
     stopped: view.Reference = @splat(0),
@@ -1402,6 +1406,7 @@ const fake_operations: Operations = .{
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
                 .permission_mode = Seen.bounded(settings.permission_mode.value),
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
+                .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
             };
             reply.* = .{ .outcome = .accepted, .session = "n3w5es".* };
             reply.handle.set("start-handle") catch unreachable;
@@ -1811,6 +1816,35 @@ test "a start with no saved binding names no model, so the Host refuses it" {
     try std.testing.expect(Seen.now.start.provider == null and Seen.now.start.model == null);
     try std.testing.expectEqualStrings(product_defaults.permission_mode, Seen.now.start.permission_mode.slice());
     try std.testing.expect(Seen.now.start.label == null);
+}
+
+test "a start takes the saved effort only when the launch read saved defaults" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" }, .reasoning_effort = .{ .set = .high } }, &.initFill(.configured));
+    inline for (.{ false, true }) |explicit| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = explicit }, fake_operations, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.press("hello\n") == null);
+        try std.testing.expect(try rig.settle() == null);
+        if (explicit) try std.testing.expect(Seen.now.start.reasoning_effort == null) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
+    }
+    // A launch that named everything starts even over an unreadable file.
+    var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});
+    defer config.close(std.testing.io);
+    const bad = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
+    try bad.writeStreamingAll(std.testing.io, "version=1\n");
+    bad.close(std.testing.io);
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .explicit = true }, fake_operations, &cancellation);
+    defer rig.close();
+    const starts = Seen.now.starts;
+    try std.testing.expect(try rig.press("hello\n") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(starts + 1, Seen.now.starts);
 }
 
 test "the loop opens the resumed Session first, lists on its tick, draws once and leaves on Ctrl-D" {
