@@ -1885,7 +1885,8 @@ def command_entry_cases():
         read_terminal(master, "› ")
         status = terminal_step(master, "/status", " Status · ", composer=True)
         assert f" Status · {newer}\n" in status, status
-        assert status_row(status, "Store", "Instructions") == home_path(home, store) + " fixed for this Session", status
+        # The path wraps at the screen edge, so compare it without layout spaces.
+        assert "".join(status_row(status, "Store", "Instructions").split()) == "".join((home_path(home, store) + "fixed for this Session").split()), status
         assert "gpt-5.6-luna" not in status, status
         terminal_step(master, "/exit", "Resume: ")
         _, errors = terminal_exit(caller, master)
