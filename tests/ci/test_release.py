@@ -34,6 +34,9 @@ def git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
+# Fake builds from this minor version know host pause; earlier ones, host stop.
+PAUSE_SINCE = 41
+
 class PlanTest(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
@@ -188,9 +191,9 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         if path.exists() and reported is None:
             return hashlib.sha256(path.read_bytes()).hexdigest()
         stage = self.root / "stage" / version / name
+        minor = version.split(".")[1]
         (stage / "bin").mkdir(parents=True)
-        (stage / "bin/rui").write_text(fake_rui.script(f"rui {reported or version} (abc123)", version.split(".")[1], version,
-                                                      pause=int(version.split(".")[1]) >= 41))
+        (stage / "bin/rui").write_text(fake_rui.script(f"rui {reported or version} (abc123)", minor, version, pause=int(minor) >= PAUSE_SINCE))
         (stage / "bin/rui").chmod(0o755)
         (stage / "THIRD_PARTY_NOTICES.md").write_text("notices")
         path.parent.mkdir(parents=True, exist_ok=True)

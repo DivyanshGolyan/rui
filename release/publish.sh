@@ -112,15 +112,15 @@ _rui_saved_format() {
 }
 
 # _rui_ready BIN -> success when `BIN host status` reports a ready Host.
+_rui_ready() {
+    case $("$1" host status </dev/null 2>/dev/null) in *'"status":"ready"'*) return 0 ;; esac
+    return 1
+}
+
 # _rui_pause BIN -> the Host shutdown command BIN knows: builds before the
 # rename call it host stop.
 _rui_pause() {
     if "$1" host pause --help </dev/null >/dev/null 2>&1; then printf 'host pause'; else printf 'host stop'; fi
-}
-
-_rui_ready() {
-    case $("$1" host status </dev/null 2>/dev/null) in *'"status":"ready"'*) return 0 ;; esac
-    return 1
 }
 
 # _rui_physical FILE -> FILE with its directory's symlinks and dots resolved.

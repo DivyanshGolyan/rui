@@ -77,10 +77,11 @@ fn run(init: std.process.Init) !void {
         return printHelp(init.io, .{ .resource = resource });
     }
     const command = cli_args.find(resource, args[2]) orelse {
-        if (cli_args.retiredOperation(resource, args[2])) |retired| {
-            stderr.diagnostic("rui: `{s} {s}` is now `rui {s} {s}`. {s} Nothing was sent.\n", .{ @tagName(resource), retired.name, @tagName(resource), retired.replacement.definition().name, retired.reason });
+        var operation: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
+            stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
             return error.InvalidArguments;
-        }
+        };
         stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
         return error.InvalidArguments;
     };

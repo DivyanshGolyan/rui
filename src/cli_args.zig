@@ -425,8 +425,9 @@ pub fn resourceHelp(resource: Resource, writer: *std.Io.Writer) !void {
     try writer.print("Use rui {s} COMMAND --help for options.\n", .{@tagName(resource)});
 }
 
-/// Former top-level commands and their resource-first replacements. They are
-/// refused rather than read as a fresh conversation's prompt.
+/// Former commands and their replacements: top-level names, refused rather
+/// than read as a fresh conversation's prompt, and `RESOURCE OPERATION` pairs.
+/// `host stop` became `host pause` because the next Host resumes its work.
 const retired_names = [_][2][]const u8{
     .{ "exec", "session configure|send" },                 .{ "follow", "request inspect" },                      .{ "wait-session", "session inspect" },
     .{ "result", "request read-result" },                  .{ "setup", "defaults inspect|configure" },            .{ "serve", "host serve" },
@@ -436,22 +437,11 @@ const retired_names = [_][2][]const u8{
     .{ "observe-command", "request inspect" },             .{ "recover", "request recover" },                     .{ "retry", "request recover" },
     .{ "read-result", "request read-result" },             .{ "requests", "request list" },                       .{ "inspect-action", "action inspect" },
     .{ "allow-action", "action allow" },                   .{ "deny-action", "action deny" },                     .{ "read-action-call-id", "action read-call-id" },
-    .{ "read-action-arguments", "action read-arguments" },
+    .{ "read-action-arguments", "action read-arguments" }, .{ "host stop", "host pause" },
 };
 
 pub fn retired(name: []const u8) ?[]const u8 {
     for (retired_names) |entry| if (std.mem.eql(u8, entry[0], name)) return entry[1];
-    return null;
-}
-
-/// A former operation, its replacement and why it changed.
-pub const RetiredOperation = struct { resource: Resource, name: []const u8, replacement: Command, reason: []const u8 };
-const retired_operations = [_]RetiredOperation{
-    .{ .resource = .host, .name = "stop", .replacement = .host_pause, .reason = "Paused work resumes when a Host starts again; rui session stop ends one Session's work for good." },
-};
-
-pub fn retiredOperation(resource: Resource, name: []const u8) ?RetiredOperation {
-    for (retired_operations) |entry| if (entry.resource == resource and std.mem.eql(u8, entry.name, name)) return entry;
     return null;
 }
 
@@ -617,8 +607,8 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expect(try expectMissing(.session_configure, &.{}) == null);
     try std.testing.expectEqualStrings("defaults inspect|configure", retired("setup").?);
     try std.testing.expect(retired("session") == null and retired("fix the build") == null);
-    try std.testing.expectEqual(Command.host_pause, retiredOperation(.host, "stop").?.replacement);
-    try std.testing.expect(retiredOperation(.session, "stop") == null and find(.host, "stop") == null);
+    try std.testing.expectEqualStrings("host pause", retired("host stop").?);
+    try std.testing.expect(retired("session stop") == null and find(.host, "stop") == null);
 }
 
 test "Host start help states the product default capacity and existing-Host precedence" {

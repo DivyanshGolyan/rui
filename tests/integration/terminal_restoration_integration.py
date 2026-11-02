@@ -2841,7 +2841,7 @@ def host_diagnostic_cases(state, library):
                     assert stopped.returncode == 0, stopped
                     stop_reply = json.loads(stopped.stdout)
                     assert {key: stop_reply[key] for key in ("type", "status", "instance", "retirement")} == {
-                        "type": "host_stop", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
+                        "type": "host_pause", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
                     assert "pause interrupts all work in this Store" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
                     # A stop acknowledgement is not cleanup completion: the

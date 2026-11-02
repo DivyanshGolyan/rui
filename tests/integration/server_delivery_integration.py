@@ -237,7 +237,7 @@ def main():
             identity = json.loads(discovery_body)["instance"]
             reported = json.loads(stopped.stdout)
             assert {name: reported[name] for name in ("type", "status", "instance", "retirement")} == {
-                "type": "host_stop", "status": "acknowledged", "instance": identity, "retirement": "unconfirmed",
+                "type": "host_pause", "status": "acknowledged", "instance": identity, "retirement": "unconfirmed",
             }, stopped
             assert stopped.stderr.endswith(f" --instance {identity}\n"), stopped
             for request in stop_requests:

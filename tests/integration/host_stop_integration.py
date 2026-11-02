@@ -387,7 +387,7 @@ def main():
             current_cli = subprocess.run([RUI, "host", "pause", "--store", store],
                                          capture_output=True, text=True, timeout=10)
             assert current_cli.returncode == 0 and json.loads(current_cli.stdout) == {
-                "version": host_process.WIRE_VERSION, "type": "host_stop", "status": "acknowledged", "store": str(store.resolve()),
+                "version": host_process.WIRE_VERSION, "type": "host_pause", "status": "acknowledged", "store": str(store.resolve()),
                 "instance": newer, "retirement": "unconfirmed",
             }, current_cli
             notice = current_cli.stderr
