@@ -15,7 +15,7 @@ Run fixtures as a non-root user. Root bypasses the file and socket permission de
 | Build or dependency | Linux `check-full` and mapped checks on the landing tip; macOS `check-full` and empty-cache acceptance daily |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
-The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig). Run `python3 tests/ci/select_tests.py --base origin/main --phase review` on the candidate. The selector unions affected subsystems and falls back to `check` for unmapped source or integration code. It does not infer dependencies. Long, churn, full Debug and H2 targets follow their mappings, not an unconditional per-PR gate.
+The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig). CI runs `python3 tests/ci/select_tests.py --base origin/main --phase review` on the pushed head. Run it locally only to diagnose a CI red; [Evidence](CODING_STANDARDS.md#evidence) lists the pre-push checks. The selector unions affected subsystems and falls back to `check` for unmapped source or integration code. It does not infer dependencies. Long, churn, full Debug and H2 targets follow their mappings, not an unconditional per-PR gate.
 
 | Subsystem | Landing-tip minimum | Exceptions and notes |
 | --- | --- | --- |

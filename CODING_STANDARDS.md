@@ -10,7 +10,7 @@ Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only whe
 
 ## Engineering
 
-Ground design in concrete caller behavior. Before work from a design, mock or multi-PR plan starts, map every requirement, every "reuse X" and every element of the referenced design to a PR or task, or to a "left out" list the user sees before approving. Keep independent concerns independent; familiarity and line/module counts do not establish simplicity. Obtain independent opinions on material design questions.
+Ground design in concrete caller behavior. Before work from a design, mock or multi-PR plan starts, map every requirement, every "reuse X" and every element of the referenced design to a PR or task, or to a "left out" list the user sees before approving. When the user drops a requirement, list every planned or merged piece that only it justified, and propose deleting each one before building more. Keep independent concerns independent; familiarity and line/module counts do not establish simplicity. Obtain independent opinions on material design questions.
 
 ### Ownership and transitions
 
@@ -73,7 +73,16 @@ Validate findings against the contract and owner. For each actionable finding, g
 
 ## Evidence
 
-Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`. During review-fix rounds, run the `select_tests.py --phase development` targets, the touched owners' focused tests and a mutation that reverts each fix and shows its new test fails; the PR's Selected run executes the review-phase set on the pushed head. Broaden/repeat checks only for changes or unresolved concerns. Live provider checks remain opt-in.
+Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`. Before every push, including review-fix rounds and after merging main, run only these checks:
+
+- the `select_tests.py --phase development` targets
+- the touched owners' focused tests (`-Dtest-filter`)
+- a mutation that reverts each fix and shows its new test fails
+- `zig fmt --check`
+- `python3 -B -m unittest discover -s tests/ci`
+- `zig build typecheck-macos` when Zig changed
+
+The PR's Selected run executes the review-phase set on the pushed head. Never run a full local suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) except to diagnose a CI red. Live provider checks remain opt-in.
 
 Test meaningful failures and recovery against independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority. A concurrent test peer records what it observed before it replies or exits, so cancelling or joining it once the code under test returns cannot change the result; check this by temporarily delaying each peer read, reply and exit. Order test actors with a gate or event, never a sleep. Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/test_harness_contracts.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
 
@@ -83,6 +92,6 @@ For each new owner-boundary regression on a [strict path](AGENTS.md#landing), de
 
 For documentation, check contract preservation, references and `git diff --check`. Report passed checks, material limits, pre-existing failures and interrupted/unrun checks; state whether delivery is local, committed, published or deployed. Implementation claims require inspected source. Keep accepted decisions, source inspection, prototypes, compilation and native process-crash evidence distinct. OS-crash and power-loss recovery are outside the supported contract.
 
-For changes touching the [strict landing paths](AGENTS.md#landing), pause the affected outcome after a failed or unknown check, not independent work; assertions, unexplained timeouts and unknown results require diagnosis, not replay. Elsewhere, Selected CI retries a failed shard once automatically, and other reds follow the landing rule: file an issue and fix forward. Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure. An unexplained fail-then-pass is not reliable green.
+For changes touching the [strict landing paths](AGENTS.md#landing), pause the affected outcome after a failed or unknown check, not independent work. A Mac check, or a signature that [CI triage](.claude/skills/rui-ci-triage/SKILL.md) shows already fails on main, pauses nothing on main; it holds only `stable`. Otherwise, assertions, unexplained timeouts and unknown results require diagnosis, not replay. Elsewhere, Selected CI retries a failed shard once automatically, and other reds follow the landing rule: file an issue and fix forward. Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure. An unexplained fail-then-pass is not reliable green.
 
 Required checks execute on the gated tip; build caches accelerate compilation and never cache test acceptance. Keep results in PR checks and existing artifacts rather than growing coordination records. Pin consumed dependencies, not unused installed-Amp bytes or fixture-policy hashes.
