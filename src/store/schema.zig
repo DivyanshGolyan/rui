@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 50;
+pub const schema_version: u32 = 49;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -27,8 +27,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
     .{ .schema_version = 47, .digest = 0x51267b57c44099bc },
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
-    .{ .schema_version = 49, .digest = 0xeebe0b0c9cfaa50f },
-    .{ .schema_version = 50, .digest = 0xb7efd1d980b639eb },
+    .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {

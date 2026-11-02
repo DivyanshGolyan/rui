@@ -3175,7 +3175,7 @@ A valid Bash descriptor retains its label even when Bash is disabled and the cal
 The Store combines that admission-owned label with canonical outcomes for shared `ToolPresentation` metadata on Current, Activity, and Conversation.
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
 One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the same 100-byte bound.
-The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 50).
+The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 49).
 Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.
 Divyansh chose to show one line per search on 2026-11-02 (web search PR 3).
 
