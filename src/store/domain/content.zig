@@ -5,12 +5,12 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const Access = @import("../access.zig").Access;
+const rsql = @import("../rsql.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
 const Faults = store_core.Faults;
 const Ordinary = store_core.Ordinary;
-
-const content_lookup_sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3";
 
 pub const ContentReference = struct {
     length: u64,
@@ -115,49 +115,91 @@ pub const ContentBlob = struct {
     }
 };
 
-const ContentSlot = struct { id: i64, existing: bool };
+const lookup_content = rsql.Read(.{
+    .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
+    .Args = struct { digest: *const [32]u8, length: u64, private: bool },
+    .Row = struct { content_id: rsql.Positive },
+    .cardinality = .optional,
+});
 
-pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
-    const find = try store_core.cached(self, content_lookup_sql);
-    defer sqlite.resetCached(find);
-    try sqlite.bindBlob(find, 1, digest);
-    try sqlite.bindU64(find, 2, length);
-    try sqlite.bindI64(find, 3, @as(i64, if (private) 1 else 0));
-    const result = c.sqlite3_step(find);
-    if (result == c.SQLITE_ROW) {
-        const id = c.sqlite3_column_int64(find, 0);
-        if (id <= 0) return error.CorruptStore;
-        return .{ .id = id, .existing = true };
+const insert_content = rsql.Write(.{
+    .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
+    .Args = struct { content_id: u64, digest: *const [32]u8, length: u64, private: bool },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// The result of every Action and Turn a Session stop cancels.
+pub const stop_cancellation_text = "Cancelled by Session stop.";
+
+/// A content identity, and the row a lookup round found for it.
+pub const Import = struct {
+    digest: [32]u8,
+    length: u64,
+    private: bool,
+    found: lookup_content.Result = null,
+
+    pub fn ofBytes(bytes: []const u8, private: bool) Import {
+        return .{ .digest = protocol.contentDigest(bytes), .length = bytes.len, .private = private };
     }
-    if (result != c.SQLITE_DONE) return error.ContentReadFailed;
-    const insert = try store_core.cached(
-        self,
-        "INSERT INTO content(digest,byte_length,payload,private) VALUES(?1,?2,zeroblob(?2),?3)",
-    );
-    defer sqlite.resetCached(insert);
-    try sqlite.bindBlob(insert, 1, digest);
-    try sqlite.bindU64(insert, 2, length);
-    try sqlite.bindI64(insert, 3, @as(i64, if (private) 1 else 0));
-    try sqlite.expectDone(insert);
-    const id = c.sqlite3_last_insert_rowid(self.database);
-    if (id <= 0) return error.ContentWriteFailed;
-    return .{ .id = id, .existing = false };
+};
+
+/// `stop_cancellation_text`'s identity, hashed when the Host is built.
+pub const stop_cancellation: Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes(stop_cancellation_text, false);
+};
+
+/// Queues the read that finds `value`'s row; `importSlot` follows its round.
+/// `value` must outlive the round, which reads its digest in place.
+pub fn lookup(a: anytype, value: *Import) void {
+    a.read(lookup_content, .{ .digest = &value.digest, .length = value.length, .private = value.private }, &value.found);
 }
 
+const ContentSlot = struct { id: i64, existing: bool };
+
+/// After `lookup`'s round: the found row, or a new row queued with a Host
+/// identity and a zeroed payload of the right length. `value` must outlive
+/// the round that writes it.
+pub fn importSlot(a: anytype, value: *const Import) !ContentSlot {
+    if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
+    const id = try a.identity(.content_id);
+    a.write(insert_content, .{ .content_id = id, .digest = &value.digest, .length = value.length, .private = value.private });
+    return .{ .id = @intCast(id), .existing = false };
+}
+
+/// After `lookup`'s round: the id of `bytes`, whose identity `value` is,
+/// queueing the row and its payload when none exists. `bytes` must outlive
+/// the round that writes them.
+pub fn importBytes(a: anytype, value: *const Import, bytes: []const u8) !u64 {
+    std.debug.assert(bytes.len == value.length);
+    const slot = try importSlot(a, value);
+    if (!slot.existing) a.writeContent(@intCast(slot.id), bytes);
+    return @intCast(slot.id);
+}
+
+/// `importSlot` for unconverted code, inside its transaction.
+pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var value: Import = .{ .digest = digest.*, .length = length, .private = private };
+    lookup(&a, &value);
+    try a.run();
+    const slot = try importSlot(&a, &value);
+    try a.apply();
+    return slot;
+}
+
+/// `importBytes` for unconverted code, inside its transaction.
 pub fn importBytesContent(self: *Store, bytes: []const u8, private: bool, fail_import: bool) !i64 {
     if (fail_import) return error.InjectedContentImportFailure;
-    const digest = protocol.contentDigest(bytes);
-    const slot = try contentSlot(self, &digest, bytes.len, private);
-    if (slot.existing or bytes.len == 0) return slot.id;
-    var blob: ?*c.sqlite3_blob = null;
-    if (c.sqlite3_blob_open(self.database, "main", "content", "payload", slot.id, 1, &blob) != c.SQLITE_OK) {
-        return error.ContentWriteFailed;
-    }
-    defer _ = c.sqlite3_blob_close(blob);
-    if (c.sqlite3_blob_write(blob, bytes.ptr, @intCast(bytes.len), 0) != c.SQLITE_OK) {
-        return error.ContentWriteFailed;
-    }
-    return slot.id;
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var value: Import = .ofBytes(bytes, private);
+    lookup(&a, &value);
+    try a.run();
+    const id = try importBytes(&a, &value, bytes);
+    try a.apply();
+    return @intCast(id);
 }
 
 pub fn writeCheckedBytes(_: *Store, blob: ?*c.sqlite3_blob, hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8, written: *u64, length: u64) !void {
@@ -170,9 +212,9 @@ pub fn writeCheckedBytes(_: *Store, blob: ?*c.sqlite3_blob, hash: *std.crypto.ha
 }
 
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    return access.finish(Ordinary.none, openContentIdentityLocked(self, reference, private));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    return entry.finish(Ordinary.none, openContentIdentityLocked(self, reference, private));
 }
 
 fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
@@ -185,9 +227,9 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     if (start > reader.reference.length) return error.RangeOutOfBounds;
     const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
     if (wanted != 0) reader.prepareRead();
-    const access = try store_core.enter(self, .none);
-    defer access.release();
-    try access.finish(Ordinary.none, readOwnedContentLocked(self, reader, start, destination[0..wanted]));
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    try entry.finish(Ordinary.none, readOwnedContentLocked(self, reader, start, destination[0..wanted]));
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
 }
@@ -198,7 +240,7 @@ pub fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, 
 }
 
 // Each reader owns its copied source window. Neither interleaved readers
-// nor another row at the same offset can borrow those bytes. Access still
+// nor another row at the same offset can borrow those bytes. Entry still
 // owns and closes the SQLite handle before callbacks or yields.
 fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: u64, end: u64, destination: []u8) !void {
     if (destination.len == 0) return;
@@ -223,7 +265,7 @@ fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: 
     }
 }
 
-// Called only inside one Access. Reuse avoids repeated overflow-page walks
+// Called only inside one Entry. Reuse avoids repeated overflow-page walks
 // within synchronous work, never across callbacks or preparation yields.
 fn readBlob(self: *Store, content_id: i64, start: u64, destination: []u8) !void {
     if (destination.len == 0) return;
@@ -257,30 +299,14 @@ pub fn importContent(self: *Store, content: *const protocol.ContentField, faults
     {
         return error.MissingContentCustody;
     }
-    const find = try store_core.cached(self, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=0");
-    defer sqlite.resetCached(find);
-    try sqlite.bindBlob(find, 1, &content.digest);
-    try sqlite.bindU64(find, 2, content.length);
-    const find_result = c.sqlite3_step(find);
-    if (find_result == c.SQLITE_ROW) {
-        const content_id = c.sqlite3_column_int64(find, 0);
-        if (content_id <= 0) return error.CorruptStore;
+    const slot = try contentSlot(self, &content.digest, content.length, false);
+    if (slot.existing) {
         if (content.file) |source| {
             try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
         }
-        return content_id;
+        return slot.id;
     }
-    if (find_result != c.SQLITE_DONE) return error.ContentReadFailed;
-
-    const insert = try store_core.cached(self, "INSERT INTO content(digest,byte_length,payload,private) VALUES(?1,?2,zeroblob(?2),0)");
-    defer sqlite.resetCached(insert);
-    try sqlite.bindBlob(insert, 1, &content.digest);
-    try sqlite.bindU64(insert, 2, content.length);
-    const insert_result = c.sqlite3_step(insert);
-    if (insert_result == c.SQLITE_FULL) return error.CanonicalStorageFull;
-    if (insert_result != c.SQLITE_DONE) return error.StatementFailed;
-    const content_id = c.sqlite3_last_insert_rowid(self.database);
-    if (content_id <= 0) return error.ContentWriteFailed;
+    const content_id = slot.id;
 
     if (content.length == 0) {
         if (content.file) |source| {
@@ -320,15 +346,11 @@ pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata
 }
 
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
-    const statement = try store_core.cached(self, content_lookup_sql);
+    const statement = try store_core.cachedTyped(self, lookup_content);
     defer sqlite.resetCached(statement);
-    try sqlite.bindBlob(statement, 1, &reference.digest);
-    try sqlite.bindU64(statement, 2, reference.length);
-    try sqlite.bindI64(statement, 3, @as(i64, if (private) 1 else 0));
+    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, null);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const content_id = c.sqlite3_column_int64(statement, 0);
-    if (content_id <= 0) return error.CorruptStore;
-    return content_id;
+    return @intCast((try sqlite.decodeRow(lookup_content.Row, statement)).content_id.get());
 }
 
 /// A content hash and one window of the bytes it hashes. Declared as

@@ -321,14 +321,14 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
     // The Store's one exclusive connection is held under its mutex, so the
     // row read above is still the selection inside the write transaction.
     std.debug.assert(c.sqlite3_get_autocommit(self.database) != 0);
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     const current = try configuration_domain.readSessionFacts(self, session_ref.slice(), null) orelse return error.CorruptStore;
     const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
     const purpose = try nextModelOperationKind(self, session_ref.slice(), first_admission, &current, policy);
     if (purpose == .compaction) selected = 0;
 
-    const turn_id = if (existing_turn) |value| @as(u64, @intCast(value)) else try store_core.nextIdentity(self, "turn", "turn_id");
-    const operation_id = try store_core.nextIdentity(self, "model_operation", "operation_id");
+    const turn_id = if (existing_turn) |value| @as(u64, @intCast(value)) else try store_core.takeIdentity(self, .turn_id);
+    const operation_id = try store_core.takeIdentity(self, .operation_id);
     if (existing_turn == null) {
         const insert = try store_core.cached(
             self,
@@ -448,7 +448,7 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
         try sqlite.expectDone(insert);
     }
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     const binding = AttemptBinding{
         .turn_id = turn_id,
         .operation_id = operation_id,
@@ -511,7 +511,7 @@ pub fn tryAdmitNextModelRetryLocked(
     // The held Store mutex excludes every other writer, so the candidate
     // read outside the transaction is still current inside it.
     const current = selected orelse return null;
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     if (current.attempt_ordinal >= retry_policy.maximum_attempts) return error.CorruptStore;
     const replacement_ordinal = current.attempt_ordinal + 1;
     const update = try store_core.cached(
@@ -531,7 +531,7 @@ pub fn tryAdmitNextModelRetryLocked(
         return null;
     }
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return .{ .permit = .{ .binding = .{
         .turn_id = current.turn_id,
         .operation_id = current.operation_id,

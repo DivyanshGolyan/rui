@@ -21,7 +21,8 @@ pub const Touched = struct {
     pub const max = 4;
 
     entries: [max]Entry = undefined,
-    count: usize = 0,
+    /// At most `max`; a byte keeps the Store within its size bound.
+    count: u8 = 0,
     /// Too many, an ID that is not a Session's, or a change that rolled
     /// back: every Session may have changed.
     everything: bool = false,
@@ -215,7 +216,7 @@ test "touching too many Sessions, or a non-Session, touches everything" {
     try std.testing.expect(many.everything);
     try std.testing.expect(touchedOf(1, &.{"short"}).everything);
     // The same Session twice is one touch.
-    try std.testing.expectEqual(@as(usize, 1), touchedOf(1, &.{ "k7m2qx", "k7m2qx" }).count);
+    try std.testing.expectEqual(@as(u8, 1), touchedOf(1, &.{ "k7m2qx", "k7m2qx" }).count);
     // Recording everything stops covering the generations before it.
     var ring: Ring = .{};
     recordAll(&ring, 1, 1, &.{"k7m2qx"});

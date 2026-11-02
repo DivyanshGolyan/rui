@@ -18,6 +18,7 @@ const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const rsql = @import("rsql.zig");
+const Access = @import("access.zig").Access;
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
@@ -78,10 +79,13 @@ pub const Store = struct {
     /// names generations this one never counted.
     instance: [16]u8 = undefined,
     statements: StatementCache = .{},
+    /// The Host hands out every id and sequence value, and each
+    /// transaction's second; see `HostValues`.
+    ids: HostValues,
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
-    // Access.release closes the read transaction before unlocking, including
+    // Entry.release closes the read transaction before unlocking, including
     // errors and yielded historical scans. Logical readers cannot pin the WAL.
     read_blob: ContentBlob = .{},
     // Source-level proof only: no counters/storage in the production Store.
@@ -241,7 +245,7 @@ pub const Store = struct {
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
-        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes };
+        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = .{ .next = undefined } };
         self.served = options.served;
         // The Store is in final storage, so the function may keep its address.
         if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
@@ -253,6 +257,7 @@ pub const Store = struct {
         errdefer self.statements.deinit();
         // Error paths then roll back without preparing or allocating.
         _ = try cached(self, "ROLLBACK");
+        try loadIdentities(self, .full);
     }
 
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
@@ -329,9 +334,9 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        const access = enter(self, .none) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, configuration_domain.configureLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .none) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, configuration_domain.configureLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -360,9 +365,9 @@ pub const Store = struct {
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
-        const access = enter(self, .none) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .none) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
     }
 
     pub fn stopSession(
@@ -370,9 +375,9 @@ pub const Store = struct {
         command: *const protocol.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
-        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     pub fn interruptModel(
@@ -380,9 +385,9 @@ pub const Store = struct {
         command: *const protocol.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
-        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     pub fn decidePermission(
@@ -390,27 +395,27 @@ pub const Store = struct {
         command: *const protocol.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
-        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
     }
 
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
     }
 
     // Reverse chronological, with call order breaking ties at a completed
@@ -418,24 +423,24 @@ pub const Store = struct {
     // The fixed end is the last committed position at the first read, not a
     // count of visible rows; a private-only append cannot become public later.
     pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
     }
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
     pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
     }
 
     pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
     }
 
     /// Records that a person has seen the Session's conversation through
@@ -444,39 +449,39 @@ pub const Store = struct {
     /// it touches nothing in the change ring: a list watching the Session
     /// does not read it again.
     pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.read_through, reads_domain.markReadLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.read_through, reads_domain.markReadLocked(self, request));
     }
 
     /// The Message with no Session sender next to `position` at `end`: one
     /// seek in the index of those Messages, then its content's metadata.
     pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
         try request.validate();
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
     }
 
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
     }
 
     pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
         try request.validate();
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
     }
 
     pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -484,9 +489,9 @@ pub const Store = struct {
     pub fn captureFailedResponse(self: *Store, request: *const protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
         const selection = request.failed_response.?;
         const binding = binding: {
-            const access = try enter(self, .none);
-            defer access.release();
-            break :binding try access.finish(Ordinary.content, report_domain.failedResponseBindingLocked(self, request.session.slice(), selection));
+            const entry = try enter(self, .none);
+            defer entry.release();
+            break :binding try entry.finish(Ordinary.content, report_domain.failedResponseBindingLocked(self, request.session.slice(), selection));
         };
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
@@ -504,9 +509,9 @@ pub const Store = struct {
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
-            const access = try enter(self, .none);
-            defer access.release();
-            try access.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
+            const entry = try enter(self, .none);
+            defer entry.release();
+            try entry.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
         }
         return capture.seal();
     }
@@ -519,9 +524,9 @@ pub const Store = struct {
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         {
-            const access = try enter(self, .none);
-            defer access.release();
-            try access.finishCapture(&capture, report_domain.renderSessionListLocked(self, request, &capture));
+            const entry = try enter(self, .none);
+            defer entry.release();
+            try entry.finishCapture(&capture, report_domain.renderSessionListLocked(self, request, &capture));
         }
         return capture.seal();
     }
@@ -541,9 +546,9 @@ pub const Store = struct {
     }
 
     pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, model_admission_domain.admitNextModelAttemptLocked(self, kind, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, model_admission_domain.admitNextModelAttemptLocked(self, kind, faults));
     }
 
     pub fn admitNextActionAttempt(
@@ -552,28 +557,28 @@ pub const Store = struct {
         faults: Faults,
     ) !?ActionAttemptAdmission {
         if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, action_domain.admitNextActionAttemptLocked(self, bash_timeout_ms, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, action_domain.admitNextActionAttemptLocked(self, bash_timeout_ms, faults));
     }
 
     /// `out` is valid only when this returns without error.
     pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.action_attempt, action_domain.readBashExecutionInputLocked(self, binding, out));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.action_attempt, action_domain.readBashExecutionInputLocked(self, binding, out));
     }
 
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, action_domain.revokeActionSenderLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, action_domain.revokeActionSenderLocked(self, binding));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, action_domain.actionSupersededByStopLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, action_domain.actionSupersededByStopLocked(self, binding));
     }
 
     pub fn withActionDispatchHandoff(
@@ -582,9 +587,9 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        try access.finish(Ordinary.action_dispatch, action_domain.validateActionDispatchLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatchLocked(self, binding));
         // Launch failures are effect outcomes, not canonical faults; the
         // caller settles or fences them. The handoff still runs under the lock.
         try handoff(context);
@@ -598,15 +603,17 @@ pub const Store = struct {
         faults: Faults,
     ) !ActionSettlement {
         if (result.len == 0) return error.InvalidActionResult;
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttemptLocked(self, binding, code, result, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, .{}, action_domain.recoverOneUncertainActionLocked(self, active));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, .{}, action_domain.recoverOneUncertainActionLocked(self, active));
     }
 
     pub fn tryAdmitNextModelRetry(
@@ -614,9 +621,9 @@ pub const Store = struct {
         active: ActiveOperationFilter,
         faults: Faults,
     ) !?AttemptAdmission {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, faults, model_admission_domain.tryAdmitNextModelRetryLocked(self, active, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, faults, model_admission_domain.tryAdmitNextModelRetryLocked(self, active, faults));
     }
 
     /// Opens the view in `out`, where it stays until it closes: a view
@@ -627,10 +634,10 @@ pub const Store = struct {
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
-        const access = try enter(self, .none);
-        defer access.release();
-        try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
-        return access.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        return entry.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
     }
 
     pub fn isFenced(self: *const Store) bool {
@@ -643,9 +650,9 @@ pub const Store = struct {
     }
 
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finish(Ordinary.none, model_settlement_domain.operationSupersededByControlLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finish(Ordinary.none, model_settlement_domain.operationSupersededByControlLocked(self, binding));
     }
 
     pub fn withDispatchHandoff(
@@ -654,9 +661,9 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        const access = try enter(self, .none);
-        defer access.release();
-        try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
         // As for Actions, dispatch failures belong to the caller.
         try handoff(context);
     }
@@ -667,9 +674,9 @@ pub const Store = struct {
     /// prevents a second refresh. Returns false when the Operation already
     /// claimed, or when no replacement allowance would remain.
     pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.attempt_binding, .{}, model_settlement_domain.claimModelAuthRefreshLocked(self, binding));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.attempt_binding, .{}, model_settlement_domain.claimModelAuthRefreshLocked(self, binding));
     }
 
     pub fn settleModelAttemptFailure(
@@ -688,18 +695,18 @@ pub const Store = struct {
         }
         const report = failure.report();
         std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.attempt_binding, faults, model_settlement_domain.settleModelAttemptFailureLocked(self, binding, failure, disposition, faults));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.attempt_binding, faults, model_settlement_domain.settleModelAttemptFailureLocked(self, binding, failure, disposition, faults));
     }
 
     pub fn recoverOneExhaustedModelAttempt(
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
-        const access = try enter(self, .none);
-        defer access.release();
-        return access.finishTransaction(Ordinary.none, .{}, model_settlement_domain.recoverOneExhaustedModelAttemptLocked(self, active));
+        const entry = try enter(self, .none);
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.none, .{}, model_settlement_domain.recoverOneExhaustedModelAttemptLocked(self, active));
     }
 
     pub fn settleModelSuccess(
@@ -708,9 +715,9 @@ pub const Store = struct {
         output: *const ValidatedOutput,
         faults: Faults,
     ) !void {
-        const access = try enter(self, .fromSettlement(faults.settlement_trace));
-        defer access.release();
-        return access.finishTransaction(Ordinary.model_success, faults, model_settlement_domain.settleModelSuccessLocked(self, binding, output, faults));
+        const entry = try enter(self, .fromSettlement(faults.settlement_trace));
+        defer entry.release();
+        return entry.finishTransaction(Ordinary.model_success, faults, model_settlement_domain.settleModelSuccessLocked(self, binding, output, faults));
     }
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
@@ -786,7 +793,8 @@ pub const SqliteDiagnostic = struct {
 
 // The frame that holds a Store keeps every byte of it resident, so a fixed
 // buffer belongs in memory of its own, like the change ring's. The production
-// Store is 688 bytes; the margin fits a few more scalars, never a buffer.
+// Store is 744 bytes; test builds add 24 bytes of counters and sit exactly at
+// 768, so a new field must come out of existing padding, or out of the Store.
 comptime {
     if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
@@ -849,20 +857,20 @@ pub const Ordinary = struct {
     }
 };
 
-const AccessTrace = union(enum) {
+const EntryTrace = union(enum) {
     none,
     control: ControlTrace,
     settlement: SettlementTrace,
 
-    fn fromControl(trace: ?ControlTrace) AccessTrace {
+    fn fromControl(trace: ?ControlTrace) EntryTrace {
         return if (trace) |value| .{ .control = value } else .none;
     }
 
-    fn fromSettlement(trace: ?SettlementTrace) AccessTrace {
+    fn fromSettlement(trace: ?SettlementTrace) EntryTrace {
         return if (trace) |value| .{ .settlement = value } else .none;
     }
 
-    fn mark(self: AccessTrace, phase: enum { requested, acquired, complete }) void {
+    fn mark(self: EntryTrace, phase: enum { requested, acquired, complete }) void {
         switch (self) {
             .none => {},
             .control => |trace| trace.mark(switch (phase) {
@@ -883,14 +891,14 @@ const AccessTrace = union(enum) {
 /// `release`. Errors leave through `finish` or `finishTransaction`, which
 /// return the entry point's declared ordinary errors and fence the rest.
 /// Only `lockAdmin` otherwise takes the mutex, for open/close diagnostics.
-const Access = struct {
+pub const Entry = struct {
     const max_result_bytes = 1024;
 
     store: *Store,
-    trace: AccessTrace,
+    trace: EntryTrace,
     changes: i64,
 
-    pub fn finish(self: Access, comptime Expected: type, result: anytype) @TypeOf(result) {
+    pub fn finish(self: Entry, comptime Expected: type, result: anytype) @TypeOf(result) {
         comptime Ordinary.produced(Expected, @TypeOf(result));
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
@@ -901,7 +909,7 @@ const Access = struct {
 
     /// Rolls back any open transaction first; a failed rollback fences
     /// and replaces the original error, including an ordinary one.
-    pub fn finishTransaction(self: Access, comptime Expected: type, faults: Faults, result: anytype) Transaction(@TypeOf(result)) {
+    pub fn finishTransaction(self: Entry, comptime Expected: type, faults: Faults, result: anytype) Transaction(@TypeOf(result)) {
         comptime Ordinary.produced(Expected, @TypeOf(result));
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
@@ -912,7 +920,7 @@ const Access = struct {
     }
 
     /// Report capture marks its own scratch failures ordinary.
-    fn finishCapture(self: Access, capture: *const SessionReportCapture, result: anytype) @TypeOf(result) {
+    fn finishCapture(self: Entry, capture: *const SessionReportCapture, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
             if (capture.ordinary_failure) return err;
@@ -920,7 +928,7 @@ const Access = struct {
         };
     }
 
-    pub fn release(self: Access) void {
+    pub fn release(self: Entry) void {
         const store = self.store;
         store.read_blob.close();
         if (@import("builtin").is_test) store.statements.assertIdle();
@@ -958,20 +966,20 @@ const Access = struct {
     }
 };
 
-pub fn enter(self: *Store, trace: AccessTrace) error{StoreFenced}!Access {
+pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
     if (self.isFenced()) return error.StoreFenced;
     trace.mark(.requested);
     self.mutex.lockUncancelable(self.io);
     self.touched = .{};
     // Rows a test changed outside any entry point belong to none.
     if (@import("builtin").is_test) clearTouchOracleForTesting(self);
-    const access: Access = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database) };
+    const entry: Entry = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database) };
     trace.mark(.acquired);
     if (self.isFenced()) {
-        access.release();
+        entry.release();
         return error.StoreFenced;
     }
-    return access;
+    return entry;
 }
 
 /// Administrative access without canonical classification.
@@ -988,11 +996,40 @@ pub fn touch(self: *Store, session_ref: []const u8) !void {
     self.touched.add(.{ .session = session_ref[0..change_ring.id_bytes].*, .workspace = workspace });
 }
 
+/// Opens an entry point's write transaction. Every entry point begins
+/// here; only opening the Store, in `schema.bootstrap`, issues a BEGIN of
+/// its own, before any entry point can run.
+pub fn begin(self: *Store) !void {
+    std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
+    try execute(self, "BEGIN IMMEDIATE");
+}
+
+/// Commits the open transaction; the identities it took stay taken.
+pub fn commit(self: *Store) !void {
+    try execute(self, "COMMIT");
+    self.ids.taken = .empty;
+    self.ids.second = 0;
+}
+
 /// Rolls back the open transaction. A Session it created no longer
 /// exists, so the entry point has touched everything.
 pub fn rollback(self: *Store) !void {
     self.touched.everything = true;
+    self.ids.second = 0;
     try execute(self, "ROLLBACK");
+    try loadIdentities(self, self.ids.taken);
+}
+
+/// The open transaction's second, bound to every `@now` in it: read from
+/// the clock at its first use, and held until commit or rollback, so a
+/// nested Access dates its rows with its caller's second. Outside a
+/// transaction (a read Access), each use reads the clock.
+pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
+    if (self.ids.second != 0) return self.ids.second;
+    const second = std.math.cast(u32, @divFloor(try readUnixMilliseconds(self.io), 1000)) orelse return error.ClockReadFailed;
+    if (second == 0) return error.ClockReadFailed;
+    if (c.sqlite3_get_autocommit(self.database) == 0) self.ids.second = second;
+    return second;
 }
 
 /// A Workspace's identity in the Store: SHA-256 of its canonical text.
@@ -1122,7 +1159,14 @@ pub inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt 
     return cachedStatic(self, sql);
 }
 
-/// Reached only through `cached`: a reused buffer would alias its key.
+/// A typed statement's prepared form, cached like `cached`'s. Its text was
+/// checked when the statement type was made.
+pub fn cachedTyped(self: *Store, comptime S: type) !*c.sqlite3_stmt {
+    return cachedStatic(self, S.sql);
+}
+
+/// Reached only through `cached` and `cachedTyped`: a reused buffer would
+/// alias its key.
 fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
     if (self.statements.find(sql.ptr)) |statement| {
         std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);
@@ -1152,24 +1196,78 @@ fn executeStatic(self: *Store, sql: [:0]const u8) !void {
     if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.SqliteExecFailed;
 }
 
-pub fn nextIdentity(self: *Store, comptime table: []const u8, comptime column: []const u8) !u64 {
-    const statement = try cached(self, "SELECT " ++ column ++ " FROM " ++ table ++ " ORDER BY " ++ column ++ " DESC LIMIT 1");
-    defer sqlite.resetCached(statement);
-    const result = c.sqlite3_step(statement);
-    if (result == c.SQLITE_DONE) return 1;
-    if (result != c.SQLITE_ROW) return error.IdentityReadFailed;
-    const prior = c.sqlite3_column_int64(statement, 0);
-    if (prior <= 0 or prior == std.math.maxInt(i64)) return error.IdentityExhausted;
-    return @intCast(prior + 1);
+/// A column whose values the Host hands out: a row's id, or its place in
+/// a Store-wide order.
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id };
+
+/// What the Host hands to transactions. The next value of each `Identity`
+/// is the Store's maximum plus one, read at open and again for each column
+/// a rolled-back transaction took from. Correct because one Host owns the
+/// Store; the primary or unique key still refuses a duplicate, and a
+/// refused write fences.
+const HostValues = struct {
+    next: std.EnumArray(Identity, u64),
+    /// The columns that handed out a value since `begin`.
+    taken: std.EnumSet(Identity) = .empty,
+    /// The open transaction's Unix second for `@now`, or 0 before its first
+    /// use. A u32 holds seconds until 2106 and fits the padding after
+    /// `taken`, so the Store does not grow.
+    second: u32 = 0,
+};
+
+/// The next value of `column`, inside the open transaction. The one place
+/// an identity is allocated, so a per-Host range can replace the counter.
+pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExhausted, IdentityOutsideTransaction }!u64 {
+    // Rollback is what gives an id back; outside a transaction nothing would.
+    if (c.sqlite3_get_autocommit(self.database) != 0) return error.IdentityOutsideTransaction;
+    const value = self.ids.next.get(column);
+    if (value > std.math.maxInt(i64)) return error.IdentityExhausted;
+    self.ids.next.set(column, value + 1);
+    self.ids.taken.insert(column);
+    return value;
+}
+
+/// Re-reads every id after a test wrote rows past the Host, as reopening
+/// would.
+pub fn reloadIdentitiesForTesting(self: *Store) !void {
+    try loadIdentities(self, .full);
+}
+
+/// Reads `columns`' next values from the committed rows: at open, and after
+/// a rollback, which gives back every value its transaction took. Re-reading
+/// max() rather than restoring a snapshot taken at BEGIN stays correct when
+/// a COMMIT's outcome is unknown, because only committed rows count: a
+/// value whose row committed is never handed out twice, and one whose row
+/// did not is handed out again.
+fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
+    inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
+        const table = switch (column) {
+            .turn_id => "turn",
+            .operation_id => "model_operation",
+            .action_id => "action_operation",
+            .content_id => "content",
+            .created_seq => "session",
+            .command_seq => "core_command",
+            .admission_id => "message_admission",
+        };
+        const statement = try cached(self, "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) FROM " ++ table);
+        defer sqlite.resetCached(statement);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.IdentityReadFailed;
+        self.ids.next.set(column, try sqlite.readCount(statement, 0) + 1);
+    };
+    self.ids.taken = .empty;
 }
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     // SQLite may already have rolled back what the entry point touched.
     self.touched.everything = true;
-    if (c.sqlite3_get_autocommit(self.database) != 0) return;
-    if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-    execute(self, "ROLLBACK") catch return error.CanonicalRollbackFailed;
-    if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
+    if (c.sqlite3_get_autocommit(self.database) == 0) {
+        if (faults.rollback_failure) return error.CanonicalRollbackFailed;
+        execute(self, "ROLLBACK") catch return error.CanonicalRollbackFailed;
+        if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
+    }
+    self.ids.second = 0;
+    loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {

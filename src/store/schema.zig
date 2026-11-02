@@ -198,7 +198,7 @@ pub const tables = [_]Table{
             // until one has.
             .{ .name = "read_through", .type = .int, .nullable = true, .check = "read_through IS NULL OR (read_through>0 AND read_through<next_position)" },
             // Creation order: list cursors and the Workspace key, allocated
-            // max+1 in the creating transaction.
+            // by the Host in the creating transaction.
             .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
             // SHA-256 of `workspace`. Workspace equality compares it, then the
             // text, so a collision never merges two Workspaces.
@@ -227,7 +227,7 @@ pub const tables = [_]Table{
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
-            // Command order, allocated max+1 in the recording transaction.
+            // Command order, allocated by the Host in the recording transaction.
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
         },
         .primary_key = &.{"command_key"},
@@ -637,6 +637,67 @@ pub const indexes = [_]Index{
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },
     .{ .name = "turn_outcome_position", .table = "turn", .columns = &.{ "session_ref", "outcome_position" } },
 };
+
+/// Whether `table`'s rows belong to Sessions: it has a `session_ref` or a
+/// `sender_session_ref`, except the command logs whose `session_ref` is the
+/// target text a command named, which need not be a Session (an invalid or
+/// unknown target is recorded with its rejection). The tests' touch oracle
+/// watches exactly these tables.
+pub fn carriesSessions(comptime table: []const u8) bool {
+    if (std.mem.eql(u8, table, "model_interruption_command")) return false;
+    return hasColumn(table, "session_ref") or hasColumn(table, "sender_session_ref");
+}
+
+/// The names of `table`'s columns.
+pub fn columnsOf(comptime table: []const u8) []const []const u8 {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            var names: []const []const u8 = &.{};
+            for (candidate.columns) |column| names = names ++ .{column.name};
+            return names;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// Whether `table` has a column named `column`.
+pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return true;
+            return false;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// The column sets that identify one row of `table`: its primary key, its
+/// unique constraints, and its unique indexes without a WHERE (a partial
+/// index identifies rows only under its predicate).
+pub fn keys(comptime table: []const u8) []const []const []const u8 {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            var found: []const []const []const u8 = &.{candidate.primary_key};
+            found = found ++ candidate.uniques;
+            for (indexes) |index| {
+                if (index.unique and index.where == null and std.mem.eql(u8, index.table, table)) found = found ++ .{index.columns};
+            }
+            return found;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// Whether the schema has an index named `name`.
+pub fn hasIndex(comptime name: []const u8) bool {
+    comptime {
+        for (objects(.sqlite)) |object| if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
+        return false;
+    }
+}
 
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {

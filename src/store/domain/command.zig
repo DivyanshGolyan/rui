@@ -138,7 +138,7 @@ pub fn submitMessageLocked(
     const command = request;
     // Only the Session changes: a creating Message answers with the one it created.
     var session = request.session;
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     const digest = command.semanticDigest();
     const supplied_content = ContentReference{
         .length = command.text.length,
@@ -213,7 +213,7 @@ pub fn submitMessageLocked(
             try sqlite.expectDone(statement);
         };
         if (faults.before_commit) return error.InjectedCommitFailure;
-        try store_core.execute(self, "COMMIT");
+        try store_core.commit(self);
         return .{ .rejected = .{ .replayed = false, .code = rejection, .content = supplied_content } };
     }
     const text_id = try content_domain.importContent(self, &command.text, faults);
@@ -231,7 +231,7 @@ pub fn submitMessageLocked(
         if (command.sender) |*sender| sender.session.slice() else null,
     );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     if (committed) |callback| callback.call(callback.context, .{
         .session = session.slice(),
         .admission_id = admission_id,
@@ -267,7 +267,7 @@ pub fn stopSessionLocked(
     command: *const protocol.SessionStopCommand,
     faults: Faults,
 ) !SessionStopReply {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     const digest = command.semanticDigest();
     switch (try classifyReplay(self, protocol.SessionStopRejection, .session_stop, command.key.slice(), command.session.slice(), &digest)) {
         .fresh => {},
@@ -368,7 +368,7 @@ pub fn stopSessionLocked(
         const unresolved_count = c.sqlite3_column_int64(unresolved_actions, 0);
         if (unresolved_count < 0) return error.CorruptStore;
         if (unresolved_count != 0) {
-            const cancellation_content_id = try content_domain.importBytesContent(self, "Cancelled by Session stop.", false, faults.content_import);
+            const cancellation_content_id = try content_domain.importBytesContent(self, content_domain.stop_cancellation_text, false, faults.content_import);
             const first_position = try turn_domain.claimSessionPositions(self, command.session.slice(), @intCast(unresolved_count));
             const cancel_actions = try store_core.cached(
                 self,
@@ -394,7 +394,7 @@ pub fn stopSessionLocked(
     };
     const completion = try sessionStopCompletion(self, selection);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{
         .replayed = false,
@@ -424,7 +424,7 @@ fn saveSessionStopRejection(
         answer,
     );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     return .{ .rejected = .{ .replayed = false, .code = code } };
 }
 
@@ -433,7 +433,7 @@ pub fn interruptModelLocked(
     command: *const protocol.ModelInterruptionCommand,
     faults: Faults,
 ) !ModelInterruptionReply {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     const digest = command.semanticDigest();
     const replay = try classifyReplay(self, protocol.ModelInterruptionRejection, .model_interruption, command.key.slice(), command.session.slice(), &digest);
     if (replay == .accepted or replay == .rejected) {
@@ -518,7 +518,7 @@ pub fn interruptModelLocked(
         if (!try turn_domain.closeTurn(self, command.turn_id, command.operation_id, .cancelled)) return error.InterruptionTargetChanged;
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{ .replayed = false } };
 }
@@ -549,7 +549,7 @@ fn saveModelInterruptionAnswer(
     try answer.code.set(code);
     try insertModelInterruptionCommand(self, command, digest, answer);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     if (accepted) return .{ .accepted = .{ .replayed = false } };
     return .{ .rejected = .{
         .replayed = false,
@@ -594,7 +594,7 @@ pub fn decidePermissionLocked(
     command: *const protocol.PermissionDecisionCommand,
     faults: Faults,
 ) !PermissionDecisionReply {
-    try store_core.execute(self, "BEGIN IMMEDIATE");
+    try store_core.begin(self);
     const digest = command.semanticDigest();
     switch (try classifyReplay(self, protocol.PermissionDecisionRejection, .permission_decision, command.key.slice(), command.session.slice(), &digest)) {
         .fresh => {},
@@ -660,12 +660,12 @@ pub fn decidePermissionLocked(
                 try sqlite.bindU64(update, 3, position);
                 try sqlite.expectDone(update);
                 if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-                try turn_domain.recordContinuation(self, turn_id.?);
+                try turn_domain.recordContinuation(self, turn_id.?, command.session.slice());
             },
         }
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.execute(self, "COMMIT");
+    try store_core.commit(self);
     if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{ .replayed = false } };
@@ -1053,7 +1053,7 @@ pub fn insertCommand(
     answer: StoredAnswer,
 ) !void {
     const statement = try store_core.cached(self, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
-        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,coalesce(max(command_seq),0)+1 FROM core_command");
+        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, key);
     const kind_value: i64 = switch (kind) {
@@ -1074,6 +1074,7 @@ pub fn insertCommand(
     try sqlite.bindU64(statement, 9, answer.revision);
     const created_value: i64 = if (answer.created) 1 else 0;
     try sqlite.bindI64(statement, 10, created_value);
+    try sqlite.bindU64(statement, 11, try store_core.takeIdentity(self, .command_seq));
     try sqlite.expectDone(statement);
 }
 
@@ -1084,18 +1085,7 @@ fn insertMessageAdmission(
     content_id: i64,
     sender: ?[]const u8,
 ) !u64 {
-    const latest = try store_core.cached(self, "SELECT admission_id FROM message_admission ORDER BY admission_id DESC LIMIT 1");
-    defer sqlite.resetCached(latest);
-    const latest_result = c.sqlite3_step(latest);
-    const admission_id: u64 = if (latest_result == c.SQLITE_DONE)
-        1
-    else if (latest_result == c.SQLITE_ROW) blk: {
-        const prior = c.sqlite3_column_int64(latest, 0);
-        if (prior <= 0 or prior == std.math.maxInt(i64)) {
-            return error.MessageAdmissionIdentityExhausted;
-        }
-        break :blk @intCast(prior + 1);
-    } else return error.MessageAdmissionReadFailed;
+    const admission_id = try store_core.takeIdentity(self, .admission_id);
     const position = try turn_domain.claimSessionPosition(self, session_ref);
     // The sender's own sequence orders the send among its other facts.
     const sender_position: ?u64 = if (sender) |ref| try turn_domain.claimSessionPosition(self, ref) else null;

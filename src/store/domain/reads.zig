@@ -446,7 +446,7 @@ pub const ContentSource = struct {
     count: usize = 0,
 
     /// Reads under the held lock, checking the digest at the end as
-    /// every content reader does; the caller's Access fences on error.
+    /// every content reader does; the caller's Entry fences on error.
     fn read(source: *ContentSource, start: u64, destination: []u8) !void {
         try content_domain.readOwnedContentLocked(source.store, &source.reader, start, destination);
         if (!source.reader.absorb(start, destination)) return error.CorruptStore;
