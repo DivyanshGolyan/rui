@@ -46,6 +46,12 @@ const Text = struct {
         self.cursor -= 1;
         while (self.cursor != 0 and self.bytes[self.cursor] & 0xc0 == 0x80) self.cursor -= 1;
     }
+
+    fn right(self: *Text) void {
+        if (self.cursor == self.len) return;
+        self.cursor += 1;
+        while (self.cursor != self.len and self.bytes[self.cursor] & 0xc0 == 0x80) self.cursor += 1;
+    }
 };
 
 fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
@@ -94,9 +100,9 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             };
             self.front.init.io = std.testing.io;
             self.front.input.init();
-            self.front.submission = .{ .io = std.testing.io, .store = self.front.store, .session = self.front.session, .directory = path, .input = &self.front.input };
+            self.front.submission = .{ .io = std.testing.io, .store = self.front.store, .session = self.front.session, .directory = path, .input = &self.front.input, .environment = .empty };
             try self.setPage("EARLIER PAGE\n");
-            try self.action.writePositionalAll(std.testing.io, "Run Bash\nprintf exact\nWorkspace: /model\n", 0);
+            try self.action.writePositionalAll(std.testing.io, "\n? Print exact\n  $ printf exact\n", 0);
             try ops.draw(self.front);
         }
 
@@ -139,30 +145,50 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             try ops.settleReader(self.front);
         }
 
-        fn checkText(self: *Self, draft: *const Text, choice: *const Text, choosing: bool) !void {
+        /// The draft's bytes and caret, then what the input row shows: the
+        /// draft with its caret, or the choice with none. As the run loop
+        /// does, a frame is drawn only when something changed.
+        fn checkText(self: *Self, draft: *const Text, choosing: ?[]const u8) !void {
             const actual = self.front.input.composition();
             try std.testing.expectEqualStrings(draft.slice(), actual.bytes);
             try std.testing.expectEqual(draft.cursor, actual.cursor);
-            try std.testing.expectEqualStrings(choice.slice(), self.screen.choiceText());
-            try std.testing.expectEqual(choice.cursor, self.screen.choice.cursor);
-            try ops.draw(self.front);
-            const shown = if (choosing) choice else draft;
+            if (self.front.dirty or self.screen.stale()) try ops.draw(self.front);
             const window = self.screen.vx.window();
+            if (choosing) |row| {
+                try std.testing.expect(!self.screen.vx.screen.cursor_vis);
+                var storage: [256]u8 = undefined;
+                for (0..window.height) |index| {
+                    if (std.mem.eql(u8, rowText(window, @intCast(index), &storage), row)) break;
+                } else return error.ChoiceRowMissing;
+                return;
+            }
+            try std.testing.expect(self.screen.vx.screen.cursor_vis);
             const row = self.screen.vx.screen.cursor.row;
-            try std.testing.expectEqualStrings(if (choosing) ">" else "›", window.readCell(0, row).?.char.grapheme);
+            try std.testing.expectEqualStrings("›", window.readCell(0, row).?.char.grapheme);
             var expected_column: u16 = 2;
             var column: u16 = 2;
             var index: usize = 0;
-            while (index < shown.len) {
-                const length: usize = try std.unicode.utf8ByteSequenceLength(shown.bytes[index]);
-                try std.testing.expectEqualStrings(shown.bytes[index..][0..length], window.readCell(column, row).?.char.grapheme);
-                if (index < shown.cursor) expected_column += 1;
+            while (index < draft.len) {
+                const length: usize = try std.unicode.utf8ByteSequenceLength(draft.bytes[index]);
+                try std.testing.expectEqualStrings(draft.bytes[index..][0..length], window.readCell(column, row).?.char.grapheme);
+                if (index < draft.cursor) expected_column += 1;
                 index += length;
                 column += 1;
             }
             try std.testing.expectEqual(expected_column, self.screen.vx.screen.cursor.col);
         }
     };
+}
+
+fn rowText(window: anytype, row: u16, storage: []u8) []const u8 {
+    var length: usize = 0;
+    for (0..window.width) |column| {
+        const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;
+        if (length + grapheme.len > storage.len) break;
+        @memcpy(storage[length..][0..grapheme.len], grapheme);
+        length += grapheme.len;
+    }
+    return std.mem.trimEnd(u8, storage[0..length], " ");
 }
 
 pub fn run(comptime Frontend: type, comptime ops: anytype, comptime suite: Suite) !void {
@@ -175,31 +201,61 @@ pub fn run(comptime Frontend: type, comptime ops: anytype, comptime suite: Suite
     }
 }
 
+/// The choice's input row with its highlighted option.
+fn choiceRow(picked: Consent.Choice) []const u8 {
+    return switch (picked) {
+        .allow_once => "  › Allow once      Deny",
+        .deny => "    Allow once    › Deny",
+    };
+}
+
 fn focus(comptime Frontend: type, comptime ops: anytype) !void {
-    const Event = enum { unicode, left, enter, pause, latest, receipt, allow, paste };
+    const Event = enum { unicode, left, enter, pause, latest, receipt, right, paste };
     const events = std.enums.values(Event);
-    // Same exhaustive base-eight, length-three words as session_consent.zig.
-    // Complete, preview and no-Action seeds exercise both displayed editors.
-    for (0..6) |seed| for (0..512) |sequence| {
+    // Exhaustive base-eight, length-three words. Complete, preview and
+    // no-Action seeds exercise both input rows. The first six runs adopt
+    // beside a line being written, which keeps the input row; the rest
+    // adopt beside an empty draft, so the Action arrives at its choice.
+    for (0..12) |run_index| for (0..512) |sequence| {
+        const seed = run_index % 6;
+        const written = run_index < 6;
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
         defer fixture.deinit();
         const front = fixture.front;
         var draft: Text = .{};
-        var choice: Text = .{};
-        draft.insert("ZX");
-        draft.left();
-        try fixture.bytes("ZX\x1b[D");
+        if (written) {
+            draft.insert("ZX");
+            draft.left();
+            try fixture.bytes("ZX\x1b[D");
+        }
         const blocked = seed == 3 or seed == 4;
         const unread = seed == 5;
         var alive = seed == 1 or seed == 2 or seed == 4 or unread;
         var visible = alive;
+        // The offer: the latest frame showed the choice, or the draft beside
+        // the Action as its reason, was delivered, and input then drained
+        // empty, with nothing since. Every input spends it and every other
+        // change retires it.
         var fresh = false;
-        // A choice line keeps its editor through Enter even if a page hides
-        // the Action. Discarding stale text does not transfer the line.
-        var choice_line = false;
+        // The input row is the draft: a line was being written when the
+        // Action arrived, or a key was typed beside it, until Esc, Ctrl-G,
+        // Ctrl-End or End on an empty draft returns to the choice.
+        var typing = alive and written;
+        // The highlighted option: Allow once until an arrow moves it on an
+        // offer.
+        var picked: Consent.Choice = .allow_once;
+        // Input goes to the row the latest frame drew. The first frame of an
+        // Action precedes its read receipt, so it draws the unread row; any
+        // later frame of a whole Action draws it read.
+        var drawn_read = false;
         var submitted: usize = 0;
         var decision = false;
+        // The Action a sent reason denies once its Message is accepted.
+        var denial: ?u64 = null;
+        // A letter's refusal took the line under the draft, so it does not
+        // say Enter denies: a frame drawn with it offers nothing.
+        var letter_refused = false;
         var sealed: Text = .{};
         if (blocked) {
             front.input.queueCommand("x");
@@ -209,9 +265,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 const line = "UNREAD ACTION ROW\n";
                 for (0..100) |row| try fixture.action.writePositionalAll(std.testing.io, line, row * line.len);
             }
-            try fixture.screen.adopt(std.testing.io, fixture.action, 913);
+            try fixture.screen.adopt(std.testing.io, fixture.action, 913, !written);
             // Seed 2 is an Action too large to approve here: export-only.
-            if (seed == 2) fixture.screen.consent.presentation = .preview;
+            if (seed == 2) fixture.screen.consent.?.presentation = .preview;
             try ops.draw(front);
         }
         var index = sequence;
@@ -219,104 +275,107 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             const event = events[index % events.len];
             index /= events.len;
             errdefer {
-                std.debug.print("TD1 focus seed={d} sequence={d} prefix={d}\n", .{ seed, sequence, prefix + 1 });
+                std.debug.print("TD1 focus seed={d} written={} sequence={d} prefix={d}\n", .{ seed, written, sequence, prefix + 1 });
                 printPrefix(Event, sequence, prefix + 1);
             }
-            const choosing = choice_line or (alive and visible and seed != 2);
-            // Text typed while an Action is still unread stays in its line;
-            // it cannot decide, and reading the Action clears it.
-            const keeps = fresh or (unread and alive and visible);
+            const choosing = alive and visible and seed != 2 and !typing;
+            // While a command runs, typing at the choice is ignored. A
+            // scalar completes after checkText drew a frame; a paste does not.
+            const held = choosing and blocked and !unread and (drawn_read or event == .unicode);
+            const shown: ?[]const u8 = if (!choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
             switch (event) {
                 .unicode => {
                     // Observe the incomplete UTF-8 prefix before completing it.
                     try fixture.byte(0xc3);
-                    try fixture.checkText(&draft, &choice, choosing);
+                    try fixture.checkText(&draft, shown);
                     try fixture.byte(0xa9);
-                    if (!choosing) draft.insert("é") else {
-                        choice_line = true;
-                        if (keeps) choice.insert("é");
-                    }
+                    if (!held) draft.insert("é");
                 },
                 .paste => {
-                    // Marked paste cannot authorize even beside a fresh Action.
+                    // Marked paste is typed text: it goes to the draft and
+                    // cannot authorize even beside a fresh Action.
                     try fixture.bytes("\x1b[200~a\x1b[201~");
-                    if (!choosing) draft.insert("a") else {
-                        // Rejection is reported at the unpasted line end,
-                        // not while the stream still owns paste custody.
-                        try fixture.byte(13);
-                        choice = .{};
-                        choice_line = false;
-                        fresh = false;
-                    }
+                    if (!held) draft.insert("a");
                 },
-                .left => {
-                    try fixture.bytes("\x1b[D");
-                    if (!choosing) draft.left() else if (keeps) choice.left();
+                .left, .right => {
+                    try fixture.bytes(if (event == .left) "\x1b[D" else "\x1b[C");
+                    if (!choosing) {
+                        if (event == .left) draft.left() else draft.right();
+                    } else if (fresh) picked = if (event == .left) .allow_once else .deny;
                 },
                 .enter => {
-                    const send = !blocked and !alive and !decision and draft.len != 0 and submitted == 0;
+                    // Beside a visible Action, only an offered draft is
+                    // sent, as its reason; one letter is never a reason.
+                    const trimmed = std.mem.trim(u8, draft.slice(), &std.ascii.whitespace);
+                    const letter = trimmed.len == 1 and std.mem.indexOfScalar(u8, "adynADYN", trimmed[0]) != null;
+                    const reason = alive and visible and typing and fresh and !letter;
+                    const send = !blocked and (!alive or reason) and !decision and draft.len != 0 and submitted == 0;
+                    letter_refused = alive and visible and typing and letter;
                     try fixture.byte(13);
-                    if (send) {
+                    if (choosing) {
+                        if (fresh and !blocked and !unread) {
+                            alive = false;
+                            visible = false;
+                            decision = true;
+                            const intent = front.submission.intent.?.decision;
+                            try std.testing.expectEqual(@as(u64, 913), intent.action);
+                            try std.testing.expectEqualStrings(@tagName(picked), @tagName(intent.decision));
+                        }
+                        fresh = false;
+                    } else if (send) {
                         submitted += 1;
                         sealed = draft;
-                        try std.testing.expectEqualStrings(draft.slice(), try front.input.message(front.submission.intent.?.message));
+                        try std.testing.expectEqualStrings(draft.slice(), try front.input.message(front.submission.intent.?.ticket().?));
                         draft = .{};
                         visible = false;
-                    } else if (choosing) {
-                        choice = .{};
-                        choice_line = false;
-                        fresh = false;
+                        if (reason) {
+                            alive = false;
+                            typing = false;
+                            denial = 913;
+                        }
                     }
                 },
                 .pause => {
                     try ops.showInspection(front);
                     visible = false;
-                    fresh = false;
-                    choice = .{};
                 },
                 .latest => {
                     try ops.navigation(front, .latest);
                     visible = alive;
+                    typing = false;
                 },
                 .receipt => {
                     try ops.draw(front);
+                    drawn_read = true;
                     const service = try ops.step(front, 0);
                     _ = ops.receipt(front, service);
-                    // An Action taller than the view stays unread: no prompt.
-                    if (alive and visible and seed != 2 and !blocked and !unread) fresh = true;
-                },
-                .allow => {
-                    try fixture.bytes("a\r");
-                    if (choosing) {
-                        if (fresh and !blocked and !unread and choice.len == 0) {
-                            alive = false;
-                            visible = false;
-                            decision = true;
-                            try std.testing.expectEqual(@as(u64, 913), front.submission.intent.?.decision.action);
-                        }
-                        choice = .{};
-                        choice_line = false;
-                        fresh = false;
-                    } else {
-                        draft.insert("a");
-                        if (!blocked and !alive and !decision and submitted == 0) {
-                            submitted += 1;
-                            sealed = draft;
-                            draft = .{};
-                        }
-                    }
+                    // An Action taller than the view stays unread: no choice,
+                    // but the draft beside it is still a reason.
+                    if (alive and visible and seed != 2 and !blocked and (typing or !unread) and !(typing and letter_refused)) fresh = true;
                 },
             }
-            // Paused input invalidates the choice and never submits the draft.
-            if (alive and !choosing and (event == .unicode or event == .paste or event == .left or event == .enter or event == .allow)) {
-                fresh = false;
-                choice = .{};
-            }
+            // Typing beside the Action moves the input row to the draft.
+            if (choosing and !held and (event == .unicode or event == .paste)) typing = true;
+            // Every input spends the offer, at the choice or in the draft,
+            // and a page or a return to the latest view retires it: only a
+            // delivered frame after the last change, then empty input,
+            // offers again. Beside a pending Action the draft submits only
+            // as an offered reason.
+            if (event != .receipt) fresh = false;
+            if (event != .receipt and event != .enter) letter_refused = false;
             try std.testing.expectEqual(submitted, front.admission.sent);
+            try std.testing.expectEqual(denial, if (front.submission.intent) |intent| switch (intent) {
+                .message_then_deny => |sent| sent.action,
+                else => null,
+            } else null);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
-            if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
-            try std.testing.expectEqual(fresh, fixture.screen.consent.acceptsInput());
-            try fixture.checkText(&draft, &choice, choice_line or (alive and visible and seed != 2));
+            if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.ticket().?));
+            try std.testing.expectEqual(fresh, fixture.screen.offered() != null);
+            if (fixture.screen.consent) |pending| try std.testing.expectEqual(picked, pending.highlight);
+            const now_choosing = alive and visible and seed != 2 and !typing;
+            const now_shown: ?[]const u8 = if (!now_choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
+            try fixture.checkText(&draft, now_shown);
+            drawn_read = true;
         }
     };
 }
@@ -375,7 +434,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         else => .activity,
                     };
                     front.admission.details_sent = front.admission.sent;
-                    front.job = ops.freeze(front, front.reading.phase);
+                    _ = ops.freeze(front, front.reading.phase);
                     front.job.result.history_cursor = next_cursor;
                     if (event == .status) {
                         front.inspection.status_requested = true;
@@ -407,7 +466,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                             try fixture.byte(0xa9);
                             draft.insert("é");
                             fragment = false;
-                            try fixture.checkText(&draft, &.{}, false);
+                            try fixture.checkText(&draft, null);
                         }
                         // Also keep the queued, not-yet-launched request in
                         // scope: send must retire both kinds of old read work.
@@ -439,7 +498,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
             try std.testing.expectEqual(selected, fixture.screen.view);
             try std.testing.expectEqual(sent, front.admission.sent);
             try std.testing.expectEqual(older, front.transcript.older);
-            try fixture.checkText(&draft, &.{}, false);
+            try fixture.checkText(&draft, null);
         }
     };
 }
@@ -520,7 +579,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     front.submission.store = store;
     front.submission.session = session;
     front.reading.phase = .activity;
-    front.job = ops.freeze(front, .activity);
+    _ = ops.freeze(front, .activity);
     var task: Task = .{ .io = std.testing.io };
     try ops.scan(&front.job, &task);
     try ops.showStaged(front);
@@ -531,7 +590,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     try std.testing.expect(std.c.read(release_file.handle, &byte, 1) == 1);
     try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
     for (0..16) |prefix| {
-        front.job = ops.freeze(front, .activity);
+        _ = ops.freeze(front, .activity);
         try ops.scan(&front.job, &task);
         try ops.showStaged(front);
         try ops.applyReader(front, .complete);
@@ -586,12 +645,41 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
         }
         cursor = page.continuation();
     } else return error.HistoryDidNotDrain;
+    // A Message still queued shows above the input until it is taken: its
+    // Admission, found by exact content identity, must be among the
+    // Messages the row shows, by admission ID.
+    for (messages, digests, &reachable) |text, digest, *found| if (!found.*) {
+        found.* = try queuedAbove(front, requests, text.len, digest);
+    };
     var all_reachable = true;
     for (reachable, 0..) |found, index| {
         if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.origin, front.transcript.older });
         all_reachable = all_reachable and found;
     }
     try std.testing.expect(all_reachable);
+}
+
+fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest: [32]u8) !bool {
+    var cursor: protocol_reply.ActivityCursor = .{};
+    for (0..64) |_| {
+        const page = switch (try requests.activityPage(front.store, front.session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
+            .admission => |message| if (message.sender == null and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
+                // The row shows the Messages the Host reports waiting, past
+                // those shown while they waited. This Message is among
+                // those it counts: admitted at or after the oldest, and not
+                // shown while it waited.
+                const row = front.queuedRow() orelse return false;
+                return message.state == .queued and front.live.drawn.admission < message.admission and
+                    message.admission <= row.newest and item.position >= front.live.queued.oldest_position;
+            },
+            else => {},
+        };
+        cursor = page.continuation() orelse return false;
+    } else return error.ActivityDidNotDrain;
 }
 
 fn publication(comptime Frontend: type, comptime ops: anytype) !void {
@@ -618,36 +706,36 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
         defer fixture.deinit();
-        try fixture.screen.adopt(std.testing.io, fixture.action, 913);
+        try fixture.screen.adopt(std.testing.io, fixture.action, 913, true);
         if (mode == 2) {
             // Success is distinct from both failed invocations and still
             // requires a post-write empty-input observation.
             try ops.draw(fixture.front);
             try std.testing.expect(fixture.screen.actionRead());
-            try std.testing.expect(!fixture.screen.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.offered() == null);
             // Reading completed after that frame; the decision prompt is the
-            // next one, and only its delivery can open freshness.
-            try std.testing.expect(!fixture.screen.decisionPromptDelivered());
+            // next one, and only its delivery can make the offer.
+            try std.testing.expect(!fixture.screen.awaitsOffer());
             try ops.draw(fixture.front);
-            try std.testing.expect(!fixture.screen.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.offered() == null);
             try std.testing.expect(fixture.screen.promptCompleted(try ops.step(fixture.front, 0), false, false));
-            try std.testing.expect(fixture.screen.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.offered() != null);
             continue;
         }
         const before = fixture.screen.action_seen;
         var empty: [0]u8 = .{};
         if (mode == 0) {
             var output = std.Io.Writer.fixed(&empty);
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, .{ .text = "" }, &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
         } else {
             // Every frame byte is accepted before flush fails. Publishing
             // between writeAll and flush must fail this independent control.
             var output: FlushFailure = .{ .writer = .{ .buffer = &empty, .vtable = &.{ .drain = FlushFailure.drain, .flush = FlushFailure.flush } } };
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, .{ .text = "" }, &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
             try std.testing.expect(output.accepted > 0 and output.flushed);
         }
         try std.testing.expectEqual(before, fixture.screen.action_seen);
         try std.testing.expect(!fixture.screen.actionRead());
-        try std.testing.expect(!fixture.screen.consent.acceptsInput());
+        try std.testing.expect(fixture.screen.offered() == null);
     }
 }

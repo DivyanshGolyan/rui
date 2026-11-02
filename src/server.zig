@@ -6,6 +6,8 @@ const HostDiagnostics = @import("HostDiagnostics.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const bash = @import("bash.zig");
+const environment = @import("environment.zig");
+const SessionEnvironments = @import("SessionEnvironments.zig");
 const descriptor_capacity = @import("descriptor_capacity.zig");
 const product_defaults = @import("product_defaults.zig");
 const model_capability = @import("model_capability.zig");
@@ -17,6 +19,7 @@ const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
@@ -114,6 +117,14 @@ const Intake = struct {
         reply: ?*Reply = null,
         retained_scratch: ?named_scratch.Owner = null,
         cleanup_retry_at: i128 = 0,
+        /// A Message's client environment: the body's first
+        /// `X-Rui-Environment-Bytes` bytes, read before the request straight
+        /// into the allocation the Session's register keeps. Admission
+        /// spends it.
+        environment: ?SessionEnvironments.Offer = null,
+        environment_received: usize = 0,
+        /// The checked environment, while `environment` holds it.
+        environment_value: ?environment.Value = null,
 
         fn retireUnhanded(self: *Exchange) void {
             // Capture handoff retains files, but grants no admission authority.
@@ -184,6 +195,7 @@ const Intake = struct {
             self.releaseIngress();
             self.input.deinit(host.allocator);
             self.input = .empty;
+            self.releaseEnvironment();
             if (self.retained_scratch) |*retained| {
                 const now: i128 = nowNs(host);
                 if (now < self.cleanup_retry_at) return false;
@@ -232,6 +244,7 @@ const Intake = struct {
                 error.ScratchCapacityExhausted => 507,
                 error.UnsupportedControl => 501,
                 error.RequestIdentityExhausted => 500,
+                error.EnvironmentTooLarge => 413,
                 else => 400,
             };
             const code = switch (err) {
@@ -241,6 +254,9 @@ const Intake = struct {
                 error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else "control_request_too_large",
                 error.RequestIdentityExhausted => "request_identity_exhausted",
                 error.UnsupportedControl => "control_surface_enters_in_later_slice",
+                error.EnvironmentRequired => "environment_required",
+                error.EnvironmentTooLarge => "environment_too_large",
+                error.InvalidEnvironment => "invalid_environment",
                 else => @errorName(err),
             };
             const kind: protocol.ErrorType = switch (err) {
@@ -256,9 +272,10 @@ const Intake = struct {
         }
 
         fn read(self: *Exchange) !void {
+            if (self.state == .body and self.environmentRemaining() != 0) return self.readEnvironment();
             var buffer: [protocol.content_window_bytes]u8 = undefined;
             const wanted = if (self.ingress) |ingress|
-                @min(buffer.len, ingress.options.content_length - ingress.received)
+                @min(buffer.len, self.environmentRemaining() + ingress.options.content_length - ingress.received)
             else
                 buffer.len;
             if (@as(i128, nowNs(self.host)) >= self.deadline) return error.TransferInactive;
@@ -322,10 +339,11 @@ const Intake = struct {
                         else => std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
+                    const request_length = try self.reserveEnvironment();
                     const ingress = try createUnfilled(self.host.allocator, protocol.Ingress);
                     ingress.init(self.host.allocator, .{
                         .io = self.host.io,
-                        .content_length = self.header.content_length,
+                        .content_length = request_length,
                         .scratch_path = self.host.lease.paths.scratch.slice(),
                         .request_number = self.number.?,
                         .content_faults = self.host.hooks.contentFaults(),
@@ -343,6 +361,12 @@ const Intake = struct {
             if (self.state != .body) return;
             if (self.route != .host_info)
                 self.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
+            if (self.route == .message) {
+                consumed += try self.receiveEnvironment(bytes[consumed..]);
+                // The environment alone arrived: the record, never empty,
+                // is still to come.
+                if (consumed == bytes.len) return;
+            }
             if (self.route == .configure or self.route == .message) {
                 // One bounded window is borrowed by local capture work. No
                 // socket read or peer wait runs on those shared stacks.
@@ -350,6 +374,68 @@ const Intake = struct {
                 self.job = .receive;
                 self.state = .ready;
             } else self.state = try self.receive(bytes[consumed..]);
+        }
+
+        /// A Message's body starts with its client environment; every other
+        /// route carries none. Returns the request's own length, which for a
+        /// Message is never zero, so its environment is always complete and
+        /// checked before its request is.
+        fn reserveEnvironment(self: *Exchange) !u64 {
+            const length = self.header.environment_bytes orelse {
+                if (self.route == .message) return error.EnvironmentRequired;
+                return self.header.content_length;
+            };
+            if (self.route != .message) return error.InvalidEnvironment;
+            if (length > protocol.max_environment_bytes) return error.EnvironmentTooLarge;
+            if (length >= self.header.content_length) return error.InvalidEnvironment;
+            self.environment = try .init(self.host.allocator, @intCast(length));
+            if (length == 0) try self.checkEnvironment();
+            return self.header.content_length - length;
+        }
+
+        /// Reads the rest of a Message's environment straight into the
+        /// allocation the register keeps.
+        fn readEnvironment(self: *Exchange) !void {
+            if (@as(i128, nowNs(self.host)) >= self.deadline) return error.TransferInactive;
+            const room = self.environment.?.room()[self.environment_received..];
+            const result = std.c.read(self.fd, room.ptr, room.len);
+            if (result < 0) switch (std.posix.errno(result)) {
+                .AGAIN, .INTR => return,
+                else => return error.ReadFailed,
+            };
+            if (result == 0) return error.UnexpectedEndOfBody;
+            self.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
+            self.environment_received += @intCast(result);
+            if (self.environmentRemaining() == 0) try self.checkEnvironment();
+        }
+
+        fn environmentRemaining(self: *const Exchange) usize {
+            const offer = if (self.environment) |*held| held else return 0;
+            if (offer.candidate == null) return 0;
+            return offer.room().len - self.environment_received;
+        }
+
+        /// Takes the environment's bytes from the front of `bytes` and checks
+        /// the whole once it has arrived. Returns how many it took.
+        fn receiveEnvironment(self: *Exchange, bytes: []const u8) !usize {
+            const wanted = @min(bytes.len, self.environmentRemaining());
+            if (wanted == 0) return 0;
+            @memcpy(self.environment.?.room()[self.environment_received..][0..wanted], bytes[0..wanted]);
+            self.environment_received += wanted;
+            if (self.environmentRemaining() == 0) try self.checkEnvironment();
+            return wanted;
+        }
+
+        fn checkEnvironment(self: *Exchange) !void {
+            const offer = &self.environment.?;
+            offer.settle((try environment.received(self.host.allocator, offer.room())).len);
+            self.environment_value = offer.value();
+        }
+
+        fn releaseEnvironment(self: *Exchange) void {
+            if (self.environment) |*offer| offer.deinit(self.host.allocator);
+            self.environment = null;
+            self.environment_value = null;
         }
 
         fn receive(self: *Exchange, bytes: []const u8) !State {
@@ -369,7 +455,9 @@ const Intake = struct {
             // longer borrowed, even when a peer holds acknowledgment delivery.
             defer self.releaseRequest();
             const reply = try self.ensureReply();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?);
+            // Admission spends the environment; nothing of it outlives this.
+            defer self.releaseEnvironment();
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -714,6 +802,11 @@ fn setNonblocking(fd: std.posix.fd_t) !void {
         std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SocketFlagsFailed;
 }
 
+fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.Transport {
+    if (!served.any()) return .none;
+    return if (served.modelListKey() != null) .requests_and_model_list else .requests;
+}
+
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
 pub fn serve(
@@ -723,9 +816,7 @@ pub fn serve(
     active_capacity: usize,
     limits: Limits,
     hooks: Hooks,
-    provider_endpoint: ?[]const u8,
-    provider_ca_file: ?[]const u8,
-    authentication: ?model_adapter.Authentication,
+    served: *const providers.Providers,
     bash_path: []const u8,
     bash_timeout_ms: u64,
     home: ?[]const u8,
@@ -744,8 +835,8 @@ pub fn serve(
         active_capacity,
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
-        provider_endpoint != null,
-        authentication != null,
+        descriptorTransport(served),
+        served.chatgpt() != null,
         os.tag,
     );
     if (descriptor_observation.soft_limit) |limit| {
@@ -782,8 +873,8 @@ pub fn serve(
         active_capacity,
         intake_capacity,
         3,
-        provider_endpoint != null,
-        authentication != null,
+        descriptorTransport(served),
+        served.chatgpt() != null,
         os.tag,
     );
     var descriptor_limit_buffer: [32]u8 = undefined;
@@ -823,7 +914,7 @@ pub fn serve(
         io,
         lease.paths.database.slice(),
         lease.paths.store.slice(),
-        .{ .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
+        .{ .served = served.routes(), .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
             try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
@@ -849,8 +940,12 @@ pub fn serve(
     const socket_z = try std.fmt.bufPrintSentinel(&socket_path, "{s}", .{lease.paths.socket.slice()}, 0);
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
 
-    var bash_environment = try bash.environment(io, allocator, home);
-    defer bash_environment.deinit();
+    const bash_facts = try bash.readHostFacts(io, allocator, home);
+    defer bash.freeHostFacts(allocator, bash_facts);
+    const environments = try allocator.create(SessionEnvironments);
+    defer allocator.destroy(environments);
+    try environments.init(io, allocator);
+    defer environments.deinit();
     // Zero bytes are an empty custody record and retention entry, so fresh
     // pages need no initializing pass and an unused one never becomes resident.
     const custody_records = try pages.mapZeroed(execution.CustodyRecord, active_capacity);
@@ -870,11 +965,10 @@ pub fn serve(
         .store = &storage,
         .hooks = hooks,
         .limits = limits,
-        .provider_endpoint = provider_endpoint,
-        .provider_ca_file = provider_ca_file,
-        .authentication = authentication,
+        .providers = served,
         .bash_path = bash_path,
-        .bash_environment = &bash_environment,
+        .bash_facts = bash_facts,
+        .environments = environments,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
@@ -897,15 +991,25 @@ pub fn serve(
     host.retention = &retention;
     defer retention.cleanupAll();
     host.failed_response_store = lease.store_dir;
-    if (provider_endpoint) |endpoint| {
-        try provider.validateEndpoint(endpoint);
-        if (authentication) |selected| try model_adapter.validateAuthenticationEndpoint(endpoint, provider_ca_file, selected);
+    if (served.any()) {
+        for (served.table.values) |entry| if (entry) |value| {
+            try provider.validateEndpoint(value.endpoint);
+            switch (value.credential) {
+                .none => {},
+                .chatgpt_device => |selected| try model_adapter.validateAuthenticationEndpoint(value.endpoint, served.ca_file, selected),
+                .key_file => |key| try model_adapter.validateKeyEndpoint(value.endpoint, served.ca_file, key.fixture),
+            }
+        };
         try provider.checkLibraries();
     }
     try std.Io.randomSecure(io, &host.instance);
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
     host.started_at = @intCast(started_at);
+    // Freed after intake and execution are joined: they read and fill it.
+    // Pending from the start: execution launches the fetch, or settles it.
+    host.model_lists = .{ .io = io, .allocator = allocator, .providers = served, .openai = if (served.modelListKey() != null) .pending else .table };
+    defer host.model_lists.deinit();
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
@@ -925,7 +1029,7 @@ pub fn serve(
         _ = host.advance(.draining);
         execution_thread.join();
     }
-    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, provider_endpoint != null);
+    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
     readiness_owned = false;
     if (diagnostic_open_error) |err|
@@ -1135,6 +1239,8 @@ const Route = enum {
     proposal_field,
     activity_page,
     activity_content,
+    person_message,
+    model_list,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -1155,11 +1261,40 @@ const DropMode = enum { none, before_admission, during_admission, after_commit }
 const Header = struct {
     route: Route,
     content_length: u64,
+    /// `X-Rui-Environment-Bytes`: how much of the body is client environment.
+    environment_bytes: ?u64 = null,
     drop: DropMode = .none,
     instance: ?protocol.InstanceId = null,
 };
 
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request) !void {
+/// Admits a Message and, in the same Store transaction's lock, offers its
+/// client environment to the Session's register, so execution never starts
+/// the Turn's Bash before the environment is in place. The register keeps
+/// `offer`'s allocation or leaves it, with what it released, to be freed
+/// right after admission.
+noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer) store_module.MessageReply {
+    std.debug.assert(offer.value() != null);
+    defer offer.deinit(host.allocator);
+    const faults = host.hooks.storeFaults(.command);
+    const environments = host.environments orelse return host.store.submitMessageWithModel(command, null, faults);
+    const Install = struct {
+        environments: *SessionEnvironments,
+        offer: *SessionEnvironments.Offer,
+
+        fn call(context: *anyopaque, admission: store_module.Store.MessageAdmission) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.environments.offer(admission.session, .{
+                .origin = if (admission.from_peer) .peer else .person,
+                .admission = admission.admission_id,
+            }, self.offer);
+        }
+    };
+    var install: Install = .{ .environments = environments, .offer = offer };
+    return host.store.submitMessageWithModel(command, .{ .context = &install, .call = Install.call }, faults);
+}
+
+/// `client_environment` holds a Message's checked environment.
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1180,14 +1315,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.provider_endpoint != null, host.provider_endpoint != null and host.authentication != null });
+            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.providers.routes() });
         },
         .host_stop => {
             if (host.advance(.stopping) != .stopping) wakeListener(host);
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = host.store.configure(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
+            const result = host.store.configure(command, host.hooks.storeFaults(.command));
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
@@ -1200,7 +1335,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = host.store.submitMessageWithModel(command, host.provider_endpoint != null, host.hooks.storeFaults(.command));
+            const result = submitMessage(host, command, client_environment.?);
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -1414,7 +1549,26 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
+        .person_message => |*command| {
+            const found = host.store.personMessage(command) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                else => {
+                    fenceDispatch(host, "person message", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.max_person_message_response_bytes, renderPersonMessage, .{&found});
+        },
+        // Host memory only: never SQLite or the network.
+        // Sized as written: the bound is tens of KiB, a reply mostly far less.
+        .model_list => try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host}),
     }
+}
+
+fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
+    out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
+    host.model_lists.render(out.writer) catch return error.BufferTooLarge;
+    out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
 /// One `T` on the heap whose bytes stay unwritten until its initializer or
@@ -1427,6 +1581,10 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
     page.writeJson(out.writer) catch return error.BufferTooLarge;
+}
+
+fn renderPersonMessage(out: protocol.JsonOut, found: *const protocol.PersonMessage) error{BufferTooLarge}!void {
+    found.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
@@ -1529,6 +1687,10 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/person-message"))
+            .person_message
+        else if (std.mem.eql(u8, path, "/v1/model-list"))
+            .model_list
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
@@ -1543,6 +1705,7 @@ const HeaderReader = struct {
         var content_type_ok = false;
         var drop: DropMode = .none;
         var instance: ?protocol.InstanceId = null;
+        var environment_bytes: ?u64 = null;
         while (lines.next()) |line| {
             if (line.len == 0) break;
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeader;
@@ -1555,6 +1718,9 @@ const HeaderReader = struct {
                 content_type_ok = std.ascii.eqlIgnoreCase(value, "application/json");
             } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
                 wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Environment-Bytes")) {
+                if (environment_bytes != null) return error.InvalidEnvironment;
+                environment_bytes = std.fmt.parseInt(u64, value, 10) catch return error.InvalidEnvironment;
             } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Host-Instance")) {
                 if (instance != null) return error.DuplicateHostInstance;
                 instance = try protocol.parseInstanceId(value);
@@ -1576,6 +1742,7 @@ const HeaderReader = struct {
         return .{
             .route = route,
             .content_length = content_length orelse return error.MissingContentLength,
+            .environment_bytes = environment_bytes,
             .drop = drop,
             .instance = instance,
         };
@@ -1602,7 +1769,7 @@ test "canonical failure classifier accepts every production mutation failure env
         const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
         var response = protocol.ResponseBuffer{};
         try response.render(render, .{ &Command{}, .infrastructure_failure });
-        try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
+        try std.testing.expectEqualStrings("{\"version\":\"4\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
         try std.testing.expectError(error.CanonicalStoreFailure, protocol_reply.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
     }
 }
@@ -1919,12 +2086,11 @@ fn renderHostInfo(
     descriptor_soft_limit: ?u64,
     started_at: u64,
     custody_occupied: u64,
-    model: bool,
-    managed_authentication: bool,
+    routes: protocol.Routes,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, model, managed_authentication });
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, routes.codex, routes.openai });
 }
 
 /// Nothing changed since the token: it comes back, with no rows.
@@ -2005,7 +2171,7 @@ const Reply = struct {
     }
 
     fn prepareHeader(self: *Reply, status: u16, content_type: []const u8, length: u64) !void {
-        const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ status, httpReason(status), content_type, length });
+        const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ status, httpReason(status), content_type, length });
         self.header_length = header.len;
         self.renew();
     }
@@ -2017,8 +2183,18 @@ const Reply = struct {
     /// retires unanswered: it cannot revoke an already saved semantic answer.
     /// Only the renderer's own failure, or outgrowing `max_bytes`, returns.
     fn json(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+        const body = std.Io.Writer.Allocating.initCapacity(self.allocator, max_bytes) catch return;
+        return self.jsonInto(body, status, max_bytes, render, args);
+    }
+
+    /// As `json`, growing from empty: for a bound far above most replies.
+    fn jsonGrowing(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+        return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
+    }
+
+    fn jsonInto(self: *Reply, initial: std.Io.Writer.Allocating, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
         std.debug.assert(self.body == .none);
-        var body = std.Io.Writer.Allocating.initCapacity(self.allocator, max_bytes) catch return;
+        var body = initial;
         defer body.deinit();
         try @call(.auto, render, .{protocol.JsonOut{ .writer = &body.writer }} ++ args);
         if (body.written().len > max_bytes) return error.BufferTooLarge;
@@ -2051,7 +2227,7 @@ const Reply = struct {
         self.end = start + length;
         if (public) {
             try self.fill();
-            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ length, location.reference.length, self.end });
+            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ length, location.reference.length, self.end });
             self.header_length = header.len;
             self.renew();
         } else try self.prepareHeader(200, "text/plain; charset=utf-8", length);
@@ -2184,7 +2360,7 @@ fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
     try reply.deliver(fd);
 }
 
-test "Conversation stream native delivery decodes once and closes on failed handoff" {
+test "Conversation stream native delivery reads each byte once and closes on failed handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -2238,7 +2414,7 @@ test "Conversation stream native delivery decodes once and closes on failed hand
         }
         try deliverConversationContent(&host, sockets[0], command);
     }
-    try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
     try std.testing.expect(!peer.failed);
@@ -2248,7 +2424,7 @@ test "Conversation stream native delivery decodes once and closes on failed hand
     // without traversing the rest of the content or keeping caller storage.
     storage.testing_content_work = .{};
     try deliverConversationContent(&host, -1, command);
-    try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
 }
@@ -2282,7 +2458,7 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     var sockets: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
     defer _ = std.c.close(sockets[1]);
-    const header = "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 0\r\n\r\n";
+    const header = "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 0\r\n\r\n";
     try writeAll(std.testing.io, sockets[1], header);
     Clock.fd = sockets[0];
     var vtable = std.testing.io.vtable.*;
@@ -2556,7 +2732,7 @@ test "message observation renders every closed queue state without fabricated re
     const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
     const full_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ zero_digest ++ "\"}";
-    const accepted_prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\"" ++ input;
+    const accepted_prefix = "{\"version\":\"4\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\"" ++ input;
     const binding = ",\"processing\":{\"turn\":\"2\",\"operation\":\"3\",\"attempt\":\"4\"}";
     const Expect = struct {
         fn rendered(observation: store_module.CommandObservation, expected: []const u8) !void {
@@ -2581,7 +2757,7 @@ test "message observation renders every closed queue state without fabricated re
     try rejected.code.set("unknown_session");
     try Expect.rendered(
         rejected,
-        "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ input ++ "}}",
+        "{\"version\":\"4\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ input ++ "}}",
     );
 
     var observation = rejected;
@@ -2722,7 +2898,7 @@ test "control response variants fit exact worst-case JSON bounds" {
     } }, protocol.shapeBytes(protocol.session_stop_reply.rejected));
     try Cases.expectStop(&stop_command, .conflict, protocol.shapeBytes(protocol.session_stop_reply.conflict));
     // Canonical faults use the fixed invocation error, not a command answer.
-    const canonical_error = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
+    const canonical_error = "{\"version\":\"4\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
     try Cases.expectStop(
         &stop_command,
         .infrastructure_failure,
@@ -2806,7 +2982,7 @@ test "an unchanged listing echoes its token with no rows, as a client reads it" 
     const since = try protocol.SinceToken.parse("abababababababababababababababab.42");
     var response: protocol.ResponseBuffer = .{};
     try response.render(renderSessionsNotModified, .{since});
-    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
+    try std.testing.expectEqualStrings("{\"version\":\"4\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42\",\"next\":null}", response.slice());
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
@@ -2904,7 +3080,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, false });
+    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, protocol.routesAll(.chatgpt_device) });
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
@@ -2991,7 +3167,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try key.set(&escaped_key);
     const peer: protocol.Peer = .{ .session = session };
     const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
-    const field: @typeInfo(@FieldType(protocol.ProposalMetadata, "fields")).array.child = .{ .length = max, .digest = content.digest };
+    const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{
         .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
         .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
@@ -3021,12 +3197,13 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     @memset(&facts.items, longest_item);
     facts.call_activity = .{ .total = max, .count = 3 };
     @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
+    facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max };
     // The work state's longest kind: every variant written, the longest kept.
     var longest_state: protocol.WorkState = undefined;
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{
         .{ .retrying = .{ .since = max, .due_at_ms = max, .cause = code, .attempt = max } },
-        .{ .bash = .{ .since = max, .description = description, .running = max, .approvals = max } },
+        .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } },
         .{ .failed = .{ .since = max, .code = code, .resets_at = max } },
         .{ .stopped = .{ .since = max, .cause = Worst.tag(protocol.session_work.StopCause) } },
         .{ .approval = .{ .since = max } },
@@ -3139,7 +3316,7 @@ test "disconnected reserved peers release classification while half-closed peers
                     try intake.accept(sockets[0]);
                     const peer = intake.exchanges.items[index];
                     try writeAll(host.io, sockets[1], line);
-                    if (body) try writeAll(host.io, sockets[1], "Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n{");
+                    if (body) try writeAll(host.io, sockets[1], "Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 2\r\n\r\n{");
                     try peer.read();
                     if (half_closed) {
                         try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(sockets[1], std.c.SHUT.WR));
@@ -3255,7 +3432,7 @@ test "retired ordinary capture still consumes its intake classification and reso
                 });
                 retained.ingress = ingress;
                 // Seal the content file, but leave request framing incomplete.
-                try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+                try ingress.feed("{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
             },
             .retained_scratch, .report => {
                 const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
@@ -3468,9 +3645,10 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
 
         fn send(fd: c_int, route: []const u8, body: []const u8, identity: bool) !void {
             var header: [512]u8 = undefined;
-            const bytes = try std.fmt.bufPrint(&header, "POST {s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n{s}Content-Length: {d}\r\n\r\n", .{ route, if (identity) "X-Rui-Host-Instance: 00000000000000000000000000000000\r\n" else "", body.len });
+            const message = std.mem.eql(u8, route, "/v1/message");
+            const bytes = try std.fmt.bufPrint(&header, "POST {s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n{s}{s}Content-Length: {d}\r\n\r\n", .{ route, if (identity) "X-Rui-Host-Instance: 00000000000000000000000000000000\r\n" else "", if (message) "X-Rui-Environment-Bytes: 0\r\n" else "", body.len });
             try writeAll(std.testing.io, fd, bytes);
-            if (phase == .cleanup and std.mem.eql(u8, route, "/v1/message")) {
+            if (phase == .cleanup and message) {
                 try writeAll(std.testing.io, fd, body[0 .. body.len - 3]);
                 try std.testing.expectEqual(socket_os.Shutdown.done, socket_os.shutdown(fd, std.c.SHUT.WR));
             } else try writeAll(std.testing.io, fd, body);
@@ -3508,7 +3686,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
     const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/rui-{s}.sock", .{std.fs.path.basename(root)});
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, socket_path) catch {};
     const address = try std.Io.net.UnixAddress.init(socket_path);
-    const message_template = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
+    const message_template = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
         @as([4097]u8, @splat('x')) ++ "\"}}";
     for (std.enums.values(Probe.Phase)) |phase| {
         Probe.phase = phase;
@@ -3536,7 +3714,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
-        const configured = storage.configure(&configure, true, .{});
+        const configured = storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
         const message = try std.mem.replaceOwned(u8, std.testing.allocator, message_template, "peer", session);
@@ -3557,7 +3735,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         // EOF later proves retirement rather than unconsumed input.
         for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }, [_][]const u8{
             "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\n",
-            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 1024\r\n\r\n{",
+            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 1024\r\n\r\n{",
         }, [_]Intake.Exchange.State{ .header, .body }) |peer, bytes, state| {
             try writeAll(std.testing.io, peer, bytes);
             const accepted = try intake.acceptSocket(listener.socket.handle);
@@ -3600,9 +3778,9 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try test_poll.waitUntil(std.testing.io, deadline, Uploads{ .host = &host, .expected = before_uploads + 2 }, Uploads.classified);
         try std.testing.expectEqual(before_uploads + 2, host.request_counter.load(.acquire));
         for ([_]struct { route: []const u8, body: []const u8, key: []const u8, kind: protocol.CommandKind, status: @FieldType(store_module.CommandObservation, "status") }{
-            .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
-            .{ .route = "/v1/control/model-interruption", .body = "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"s\",\"key\":\"interrupt\",\"target\":{\"session\":\"peer\",\"turn\":\"1\",\"operation\":\"1\"}}", .key = "interrupt", .kind = .model_interruption, .status = .rejected },
-            .{ .route = "/v1/control/permission-decision", .body = "{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":\"s\",\"key\":\"decision\",\"session\":\"peer\",\"action\":\"1\",\"decision\":\"deny\"}", .key = "decision", .kind = .permission_decision, .status = .rejected },
+            .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"4\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
+            .{ .route = "/v1/control/model-interruption", .body = "{\"version\":\"4\",\"kind\":\"model_interruption\",\"store\":\"s\",\"key\":\"interrupt\",\"target\":{\"session\":\"peer\",\"turn\":\"1\",\"operation\":\"1\"}}", .key = "interrupt", .kind = .model_interruption, .status = .rejected },
+            .{ .route = "/v1/control/permission-decision", .body = "{\"version\":\"4\",\"kind\":\"permission_decision\",\"store\":\"s\",\"key\":\"decision\",\"session\":\"peer\",\"action\":\"1\",\"decision\":\"deny\"}", .key = "decision", .kind = .permission_decision, .status = .rejected },
         }) |control| {
             const peer = try address.connect(std.testing.io);
             defer peer.socket.close(std.testing.io);
@@ -3617,11 +3795,11 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         }
         const discovery = try address.connect(std.testing.io);
         defer discovery.socket.close(std.testing.io);
-        try Probe.send(discovery.socket.handle, "/v1/host-info", "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":\"s\"}", false);
+        try Probe.send(discovery.socket.handle, "/v1/host-info", "{\"version\":\"4\",\"kind\":\"host_info\",\"store\":\"s\"}", false);
         try Probe.response(discovery.socket.handle);
         const stop = try address.connect(std.testing.io);
         defer stop.socket.close(std.testing.io);
-        try Probe.send(stop.socket.handle, "/v1/control/host-stop", "{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":\"s\"}", true);
+        try Probe.send(stop.socket.handle, "/v1/control/host-stop", "{\"version\":\"4\",\"kind\":\"host_stop\",\"store\":\"s\"}", true);
         try Probe.response(stop.socket.handle);
         try std.testing.expect(host.stopping());
         try std.testing.expect(!Probe.released.load(.acquire));
@@ -3669,9 +3847,9 @@ test "readable ingress cannot cross its header or body deadline" {
                 exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
                 defer std.debug.assert(exchange.destroy());
                 var body_buffer: [128]u8 = undefined;
-                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"1\",\"kind\":\"{s}\",\"store\":\"s\"}}", .{@tagName(route)});
+                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"4\",\"kind\":\"{s}\",\"store\":\"s\"}}", .{@tagName(route)});
                 var header_buffer: [256]u8 = undefined;
-                const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n", .{ if (route == .host_stop) "control/host-stop" else "host-info", body.len });
+                const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: {d}\r\n\r\n", .{ if (route == .host_stop) "control/host-stop" else "host-info", body.len });
                 if (body_only) {
                     try writeAll(std.testing.io, sockets[1], header);
                     try exchange.read();
@@ -3730,9 +3908,9 @@ test "ingress resumes its peer wait after local capture completion" {
     defer _ = std.c.close(sockets[1]);
     try setNonblocking(sockets[0]);
     const payload = @as([4097]u8, @splat('x'));
-    const body = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
+    const body = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
     var header_buffer: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n", .{body.len});
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nX-Rui-Environment-Bytes: 0\r\nContent-Length: {d}\r\n\r\n", .{body.len});
     try writeAll(std.testing.io, sockets[1], header);
     try writeAll(std.testing.io, sockets[1], body);
     const exchange = try std.testing.allocator.create(Intake.Exchange);
@@ -3763,6 +3941,137 @@ test "ingress resumes its peer wait after local capture completion" {
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest(&payload), &exchange.request.?.message.text.digest);
 }
 
+test "a Message's environment header and entries are checked before admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    // No Store: a check that reached admission would fault.
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    const request = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}";
+    const Case = struct { route: []const u8 = "message", header: []const u8, entries: []const u8 = "", record: bool = true, result: anyerror!?[]const u8 };
+    for ([_]Case{
+        .{ .header = "", .result = error.EnvironmentRequired },
+        .{ .header = "X-Rui-Environment-Bytes: 65537\r\n", .result = error.EnvironmentTooLarge },
+        .{ .header = "X-Rui-Environment-Bytes: 999999\r\n", .result = error.EnvironmentTooLarge },
+        .{ .header = "X-Rui-Environment-Bytes: -1\r\n", .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 0\r\nX-Rui-Environment-Bytes: 0\r\n", .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 3\r\n", .entries = "A=1", .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 8\r\n", .entries = "A=1\x00A=2\x00", .result = error.InvalidEnvironment },
+        .{ .route = "configure", .header = "X-Rui-Environment-Bytes: 0\r\n", .result = error.InvalidEnvironment },
+        // A record is never empty, so an environment is never the whole body.
+        .{ .header = "X-Rui-Environment-Bytes: 4\r\n", .entries = "A=1\x00", .record = false, .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 0\r\n", .record = false, .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 0\r\n", .result = "" },
+        .{ .header = "X-Rui-Environment-Bytes: 14\r\n", .entries = "A=1\x00RUI_X=2\x00C=", .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 14\r\n", .entries = "A=1\x00RUI_X=2\x00C\x00", .result = error.InvalidEnvironment },
+        .{ .header = "X-Rui-Environment-Bytes: 16\r\n", .entries = "A=1\x00RUI_X=2\x00C=3\x00", .result = "A=1\x00C=3\x00" },
+    }) |case| {
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[1]);
+        try setNonblocking(sockets[0]);
+        var header_buffer: [256]u8 = undefined;
+        const record: []const u8 = if (case.record) request else "";
+        const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n{s}Content-Length: {d}\r\n\r\n", .{ case.route, case.header, case.entries.len + record.len });
+        try writeAll(std.testing.io, sockets[1], header);
+        try writeAll(std.testing.io, sockets[1], case.entries);
+        try writeAll(std.testing.io, sockets[1], record);
+        const exchange = try std.testing.allocator.create(Intake.Exchange);
+        exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+        defer std.debug.assert(exchange.destroy());
+        const read = exchange.read();
+        if (case.result) |expected| {
+            try read;
+            try std.testing.expectEqualStrings(expected.?, exchange.environment_value.?);
+            // The request's own bytes follow, unchanged.
+            try std.testing.expectEqualStrings(request, exchange.input.items);
+        } else |expected| try std.testing.expectError(expected, read);
+    }
+}
+
+test "only a fresh Message changes its Session's environment; a replay or a rejection leaves the register as it was" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store.set("s");
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var configure: protocol.ConfigureCommand = .{};
+    try configure.key.set("config");
+    configure.configuration.workspace.state = .value;
+    try configure.configuration.workspace.value.set(root);
+    configure.configuration.provider.state = .value;
+    try configure.configuration.provider.value.set("codex");
+    configure.configuration.model.state = .value;
+    try configure.configuration.model.value.set("model-a");
+    const configured = storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session.slice();
+    var environments: SessionEnvironments = undefined;
+    try environments.init(std.testing.io, std.testing.allocator);
+    defer environments.deinit();
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .environments = &environments };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    const Send = struct {
+        fn message(owner: *Host, key: []const u8, to: []const u8, entries: []const u8) !void {
+            var request_buffer: [512]u8 = undefined;
+            const request = try std.fmt.bufPrint(&request_buffer, "{{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{ key, to });
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[0]);
+            var header_buffer: [256]u8 = undefined;
+            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nX-Rui-Environment-Bytes: {d}\r\nContent-Length: {d}\r\n\r\n", .{ entries.len, entries.len + request.len }));
+            try writeAll(std.testing.io, sockets[1], entries);
+            try writeAll(std.testing.io, sockets[1], request);
+            const exchange = try std.testing.allocator.create(Intake.Exchange);
+            exchange.* = .{ .owner = undefined, .host = owner, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+            defer std.debug.assert(exchange.destroy());
+            try exchange.read();
+            try std.testing.expectEqual(.ready, exchange.state);
+            exchange.state = try exchange.work();
+            try std.testing.expectEqual(.ready, exchange.state);
+            try exchange.prepare();
+            // Admission spent the environment.
+            try std.testing.expectEqual(null, exchange.environment);
+        }
+    };
+    const expectCopy = struct {
+        fn of(table: *SessionEnvironments, from: []const u8, expected: ?[]const u8) !void {
+            const copied = try table.copy(from, std.testing.allocator);
+            defer if (copied) |bytes| std.testing.allocator.free(bytes);
+            if (expected) |bytes| try std.testing.expectEqualStrings(bytes, copied.?) else try std.testing.expectEqual(null, copied);
+        }
+    }.of;
+    try Send.message(&host, "first", session, "A=1\x00");
+    try expectCopy(&environments, session, "A=1\x00");
+    const held = .{ environments.len, environments.value_count, environments.value_bytes };
+    // The same request again, from another terminal: a replay installs nothing.
+    try Send.message(&host, "first", session, "B=2\x00");
+    try expectCopy(&environments, session, "A=1\x00");
+    // A Message the Store rejects installs nothing, for its Session or another.
+    try Send.message(&host, "rejected", "zzzzzz", "C=3\x00");
+    try expectCopy(&environments, "zzzzzz", null);
+    try expectCopy(&environments, session, "A=1\x00");
+    try std.testing.expectEqual(held, .{ environments.len, environments.value_count, environments.value_bytes });
+    // A fresh Message does.
+    try Send.message(&host, "second", session, "D=4\x00");
+    try expectCopy(&environments, session, "D=4\x00");
+}
+
 test "exchange retirement retains failed ingress cleanup through retry" {
     const FailDelete = struct {
         fn delete(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
@@ -3783,7 +4092,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         .lease = &lease,
         .store = undefined, // Failed/incomplete captures never reach admission.
     };
-    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const payload = @as([8192]u8, @splat('x'));
     const suffix = "\"}}";
     for ([_]bool{ false, true }) |seal| {

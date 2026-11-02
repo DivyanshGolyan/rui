@@ -4,9 +4,8 @@
 //! table at compile time, so this module stays a functional core.
 const std = @import("std");
 const product_defaults = @import("product_defaults.zig");
+const provider_name = @import("provider_name.zig");
 const provider_selection = @import("provider_selection.zig");
-
-pub const provider_label = "codex";
 
 /// Codex identifier syntax admits 1 to this many bytes.
 pub const max_model_bytes = 256;
@@ -15,7 +14,7 @@ pub const max_model_bytes = 256;
 pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
 
 pub const CompactionPolicy = struct {
-    compaction_trigger: ?u64,
+    compaction_trigger: u64,
     output_reservation: u64,
 };
 
@@ -28,10 +27,6 @@ pub const Model = struct {
     /// Whether the catalog advertises `max`. Every row advertises low through
     /// xhigh, and none advertises `none`.
     max_effort: bool,
-    /// The effective request policy. The catalog advertises parallel support
-    /// for every row, but Codex client.rs disables it for Responses-lite
-    /// models. This is not a claim that Rui uses the lite route.
-    parallel_tool_calls: bool,
     /// Tokens; the automatic compaction trigger is a percentage of it.
     context_window: u64,
 };
@@ -40,16 +35,16 @@ pub const Model = struct {
 /// qualification. IDs are the visible models in OpenAI Codex's pinned catalog:
 /// https://github.com/openai/codex/blob/8531184b49bcb160175a84e140b659a83a426df7/codex-rs/models-manager/models.json
 /// The other columns are exact values from Codex 970111f6cb62cc02fe36a82ea7d71b37a2889c97
-/// models-manager/models.json and client.rs, not backend effective effort or entitlement.
+/// models-manager/models.json, not backend effective effort or entitlement.
 pub const models = [_]Model{
-    .{ .id = "gpt-6-luna", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-6.1-sol", .default_effort = .low, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-6-sol", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-6-astra", .default_effort = .low, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.6-sol", .default_effort = .low, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.6-terra", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.6-luna", .default_effort = .medium, .max_effort = true, .parallel_tool_calls = false, .context_window = 272000 },
-    .{ .id = "gpt-5.5", .default_effort = .medium, .max_effort = false, .parallel_tool_calls = true, .context_window = 272000 },
+    .{ .id = "gpt-6-luna", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-6.1-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-6-sol", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-6-astra", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.6-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.6-terra", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.6-luna", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
+    .{ .id = "gpt-5.5", .default_effort = .medium, .max_effort = false, .context_window = 272000 },
 };
 
 comptime {
@@ -84,11 +79,6 @@ pub const ids_without_max_effort = blk: {
     break :blk text;
 };
 
-/// Unknown models send `false`.
-pub fn parallelToolCalls(model: []const u8) bool {
-    return if (find(model)) |row| row.parallel_tool_calls else false;
-}
-
 /// Unknown bindings have no inferred default.
 pub fn defaultReasoningEffort(model: []const u8) ?ReasoningEffort {
     return if (find(model)) |row| row.default_effort else null;
@@ -105,13 +95,15 @@ pub fn supportsReasoningEffort(model: []const u8, effort: ReasoningEffort) bool 
     };
 }
 
+/// A model's context window: its row's, else the product's unlisted default.
+fn contextWindow(model: []const u8) u64 {
+    return if (find(model)) |row| row.context_window else product_defaults.unlisted_context_window;
+}
+
 /// No alias inference, account entitlement or live qualification is implied.
 /// Reservation is extra heuristic headroom, never a provider output limit.
 pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
-    const automatic: ?u64 = if (find(model)) |row|
-        row.context_window * product_defaults.compaction_trigger_percent / 100
-    else
-        null;
+    const automatic = contextWindow(model) * product_defaults.compaction_trigger_percent / 100;
     return .{
         .compaction_trigger = trigger_override orelse automatic,
         .output_reservation = reservation_override orelse product_defaults.output_reservation,
@@ -125,49 +117,58 @@ pub fn validModelSyntax(model: []const u8) bool {
     return true;
 }
 
+const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len;
+
+/// Every built-in provider, in declaration order. They share one catalog.
 /// Selection of a Session binding or saved pin admits any exact ID with valid
 /// syntax, including IDs this release does not list.
-pub fn capability(readiness: provider_selection.Readiness) provider_selection.Capability {
-    return .{ .name = provider_label, .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = readiness };
+pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
+    return withPolicy(readiness, validModelSyntax);
 }
 
 /// Selection as `rui defaults inspect` predicts it for the next new Session,
 /// which the CLI admits only with a release-supported model.
-pub fn supportedCapability(readiness: provider_selection.Readiness) provider_selection.Capability {
-    return .{ .name = provider_label, .recommended_model = product_defaults.recommended_model, .admits_model = supportsModel, .readiness = readiness };
+pub fn supportedCapabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
+    return withPolicy(readiness, supportsModel);
+}
+
+fn withPolicy(readiness: *const provider_selection.Readinesses, admits: *const fn ([]const u8) bool) [provider_count]provider_selection.Capability {
+    var out: [provider_count]provider_selection.Capability = undefined;
+    for (&out, std.enums.values(provider_name.Provider)) |*entry, provider|
+        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = admits, .readiness = readiness.get(provider) };
+    return out;
 }
 
 test "supported model compaction defaults and exact identifier boundary" {
     for (models) |row| {
         const policy = compactionPolicy(row.id, null, null);
-        try std.testing.expectEqual(@as(?u64, 244800), policy.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 244800), policy.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 0), policy.output_reservation);
         const overridden = compactionPolicy(row.id, 7, 3);
-        try std.testing.expectEqual(@as(?u64, 7), overridden.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 7), overridden.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 3), overridden.output_reservation);
     }
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other| {
-        try std.testing.expectEqual(@as(?u64, null), compactionPolicy(other, null, null).compaction_trigger);
+        // An unlisted model compacts at the same share of the smaller window.
+        try std.testing.expectEqual(@as(u64, 115200), compactionPolicy(other, null, null).compaction_trigger);
         try std.testing.expect(!supportsModel(other));
-        try std.testing.expect(!parallelToolCalls(other));
     }
-    try std.testing.expectEqual(@as(?u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
+    try std.testing.expectEqual(@as(u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
 }
 
 test "reasoning effort uses exact catalog defaults and model support without expanding grammar" {
-    for ([_]struct { model: []const u8, default: ReasoningEffort, max: bool, parallel: bool }{
-        .{ .model = "gpt-6-luna", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-6.1-sol", .default = .low, .max = true, .parallel = false },
-        .{ .model = "gpt-6-sol", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-6-astra", .default = .low, .max = true, .parallel = false },
-        .{ .model = "gpt-5.6-sol", .default = .low, .max = true, .parallel = false },
-        .{ .model = "gpt-5.6-terra", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-5.6-luna", .default = .medium, .max = true, .parallel = false },
-        .{ .model = "gpt-5.5", .default = .medium, .max = false, .parallel = true },
+    for ([_]struct { model: []const u8, default: ReasoningEffort, max: bool }{
+        .{ .model = "gpt-6-luna", .default = .medium, .max = true },
+        .{ .model = "gpt-6.1-sol", .default = .low, .max = true },
+        .{ .model = "gpt-6-sol", .default = .medium, .max = true },
+        .{ .model = "gpt-6-astra", .default = .low, .max = true },
+        .{ .model = "gpt-5.6-sol", .default = .low, .max = true },
+        .{ .model = "gpt-5.6-terra", .default = .medium, .max = true },
+        .{ .model = "gpt-5.6-luna", .default = .medium, .max = true },
+        .{ .model = "gpt-5.5", .default = .medium, .max = false },
     }, models) |case, row| {
         try std.testing.expectEqualStrings(case.model, row.id);
         try std.testing.expect(supportsModel(case.model));
-        try std.testing.expectEqual(case.parallel, parallelToolCalls(case.model));
         try std.testing.expectEqual(@as(?ReasoningEffort, case.default), defaultReasoningEffort(case.model));
         for ([_]ReasoningEffort{ .low, .medium, .high, .xhigh }) |effort|
             try std.testing.expect(supportsReasoningEffort(case.model, effort));
@@ -185,10 +186,22 @@ test "reasoning effort uses exact catalog defaults and model support without exp
 }
 
 test "selection syntax and release support stay distinct" {
-    const syntax = capability(.configured);
-    const supported = supportedCapability(.configured);
-    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&.{syntax}, null, "family=variant", null, null)).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&.{supported}, null, "family=variant", null, null));
-    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&.{supported}, null, null, null, null)).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&.{supported}, null, null, "codex", "stale-pin"));
+    var readiness: provider_selection.Readinesses = .initFill(.missing);
+    readiness.set(.codex, .configured);
+    const syntax = capabilities(&readiness);
+    const supported = supportedCapabilities(&readiness);
+    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&syntax, null, "family=variant", null, null)).selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&supported, null, "family=variant", null, null));
+    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&supported, null, null, null, null)).selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&supported, null, null, "codex", "stale-pin"));
+}
+
+test "every built-in provider is selectable by its label, and two ready ones ask for a choice" {
+    var readiness: provider_selection.Readinesses = .initFill(.configured);
+    const both = capabilities(&readiness);
+    try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(&both, null, null, null, null));
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&both, "openai", null, null, null)).selected.provider);
+    readiness.set(.codex, .missing);
+    const one = capabilities(&readiness);
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&one, null, null, null, null)).selected.provider);
 }

@@ -42,7 +42,7 @@ pub const Command = enum {
     fn definitionValue(self: Command) Definition {
         return switch (self) {
             .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print its new six-character ID, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help, .options = destination ++ capture ++ binding ++ start_settings, .mutation = true },
-            .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
+            .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
             .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ value("profile", "current|full"), value("failed-response", "body|metadata"), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ "profile", "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List configured Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), value("since", "TOKEN") } },
@@ -62,10 +62,10 @@ pub const Command = enum {
             .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets --active-capacity N, default {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports, and stderr says so when --active-capacity differs.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{value("active-capacity", "N")} },
             .host_stop => .{ .resource = .host, .name = "stop", .description = "Request whole-Host shutdown, affecting every Session in this Store. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
-            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
+            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model.", .options = destination ++ binding ++ &[_]Option{flag("clear-model")}, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model" }} },
-            .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
+            .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
 };
@@ -76,12 +76,12 @@ pub const compaction_policy =
     \\--output-reservation TOKENS|default sets nonnegative extra compaction headroom, not a guaranteed output budget.
     \\Omission preserves an existing Session's setting; default resets it to model policy.
     \\Changes apply to new model requests. Requests already accepted keep their original settings, even when retried.
-    \\Unknown models have no automatic threshold.
-;
+    \\
+++ std.fmt.comptimePrint("A model Rui does not list is assumed to have a {d}-token context.", .{product_defaults.unlisted_context_window});
 
 /// Shared by `session configure`, `session start` and the interactive /configure.
 pub const label_help =
-    \\--label TEXT sets a short description shown in lists: one line of at most 100 bytes. --label "" clears it.
+    \\--label TEXT names, renames or titles the Session, shown in lists and /status: one line of at most 100 bytes. --label "" clears it.
     \\A Label is display text only; it never addresses or selects a Session.
     \\
 ;
@@ -135,7 +135,7 @@ const destination = &[_]Option{ value("store", "PATH"), hex("store-hex", "store"
 const session = &[_]Option{value("session", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
-const binding = &[_]Option{ value("provider", "codex"), value("model", "MODEL") };
+const binding = &[_]Option{ value("provider", "codex|openai"), value("model", "MODEL") };
 const action = &[_]Option{value("action", "ID")};
 const need_session = &[_][]const []const u8{&.{"session"}};
 const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
@@ -151,15 +151,17 @@ const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settin
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
 /// The managed endpoint and development endpoints are exclusive.
 const endpoint_conflicts = &[_][2][]const u8{
-    .{ "codex", "provider-endpoint" },
-    .{ "codex", "provider-ca-file" },
-    .{ "codex", "test-codex-fixture-endpoint" },
+    .{ "provider", "provider-endpoint" },
+    .{ "provider", "provider-ca-file" },
+    .{ "provider", "test-codex-fixture-endpoint" },
     .{ "test-codex-fixture-endpoint", "provider-endpoint" },
+    .{ "test-openai-fixture-endpoint", "provider-endpoint" },
 };
 /// Host fault injection and observation, consumed only by host serve.
 const serve_test = &[_]Option{
     .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
     hiddenValue("test-codex-fixture-endpoint"),
+    hiddenValue("test-openai-fixture-endpoint"),
     hiddenValue("test-bash-scratch-limit-bytes"),
     hiddenValue("test-retention-entry-capacity"),
     hiddenFlag("test-retention-removal-failure"),
@@ -296,7 +298,15 @@ pub const Definition = struct {
             if (index == args.len) return error.MissingArgumentValue;
             if (option.repeated) {
                 if (parsed.repeat_count == parsed.repeats.len) return error.DuplicateArgument;
-                parsed.repeats[parsed.repeat_count] = args[index];
+                // Each option's values stay together, in order, so `all`
+                // answers a slice.
+                var at = parsed.repeat_count;
+                while (at > 0 and parsed.repeat_options[at - 1] != n) : (at -= 1) {}
+                if (at == 0) at = parsed.repeat_count;
+                std.mem.copyBackwards([]const u8, parsed.repeats[at + 1 .. parsed.repeat_count + 1], parsed.repeats[at..parsed.repeat_count]);
+                std.mem.copyBackwards(usize, parsed.repeat_options[at + 1 .. parsed.repeat_count + 1], parsed.repeat_options[at..parsed.repeat_count]);
+                parsed.repeats[at] = args[index];
+                parsed.repeat_options[at] = n;
                 parsed.repeat_count += 1;
                 continue;
             }
@@ -341,6 +351,8 @@ pub const Parsed = struct {
     /// Options spelled in the invocation, by index.
     seen: u64 = 0,
     repeats: [16][]const u8 = undefined,
+    /// The option index of each of `repeats`.
+    repeat_options: [16]usize = undefined,
     repeat_count: usize = 0,
     positional: ?[]const u8 = null,
     /// The positional followed `--`, so a lone dash is literal text.
@@ -362,8 +374,12 @@ pub const Parsed = struct {
 
     /// Every value of the repeatable option, in order.
     pub fn all(self: *const Parsed, name: []const u8) []const []const u8 {
-        const option = self.definition.optionNamed(name) orelse return &.{};
-        return if (option.repeated) self.repeats[0..self.repeat_count] else &.{};
+        const n = self.definition.indexOf(name) orelse return &.{};
+        if (!self.definition.options[n].repeated) return &.{};
+        const first = std.mem.indexOfScalar(usize, self.repeat_options[0..self.repeat_count], n) orelse return &.{};
+        var end = first;
+        while (end < self.repeat_count and self.repeat_options[end] == n) end += 1;
+        return self.repeats[first..end];
     }
 
     /// A decimal value of `name`, when given.
@@ -482,7 +498,7 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     // Resume is exact; there is no newest-Session guess.
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
-    try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--codex" }, false);
+    try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--provider", "codex" }, false);
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
 }
 
@@ -533,6 +549,12 @@ test "hidden test options belong to their operation and stay out of help" {
     const serve = try testParse(Command.host_serve.definition(), &.{ "--fault", "before-commit", "--test-phase-trace", "--fault", "content-read", "--test-retry-waits-ms", "1,1,1" }, &storage);
     try std.testing.expectEqual(@as(usize, 2), serve.all("fault").len);
     try std.testing.expectEqualStrings("content-read", serve.all("fault")[1]);
+    // Two repeatable options keep their own values, in order.
+    var mixed_storage: [1024]u8 = undefined;
+    const mixed = try testParse(Command.host_serve.definition(), &.{ "--fault", "a", "--provider", "p", "--fault", "b", "--provider", "q" }, &mixed_storage);
+    try std.testing.expectEqualSlices([]const u8, &.{ "a", "b" }, mixed.all("fault"));
+    try std.testing.expectEqualSlices([]const u8, &.{ "p", "q" }, mixed.all("provider"));
+    try std.testing.expectEqual(@as(usize, 0), mixed.all("store").len);
     try std.testing.expect(serve.has("test-phase-trace") and serve.get("test-phase-trace") == null);
     try std.testing.expectEqualStrings("1,1,1", serve.get("test-retry-waits-ms").?);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--test-phase-trace" }, error.DuplicateArgument);

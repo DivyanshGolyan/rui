@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Public one-shot caller recovery and exact Bash authorization."""
+import base64
 import errno
 import json
 import fcntl
@@ -12,6 +13,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -21,7 +23,7 @@ import threading
 import time
 
 import host_process
-from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process
+from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
 
 
 # From 60 columns a user Message's first row ends with its admission time.
@@ -31,6 +33,54 @@ TIMED_ROW = re.compile(r"^(.*?) +(\d\d:\d\d)$")
 def untimed(row):
     match = TIMED_ROW.match(row)
     return match.group(1) if match else row
+
+
+# What work under way says: the running call's row, "• Run tests · 42s", or
+# the conversation's last line, "• Waiting · 12s",
+# "! Rate limited · retry 2 in 18s", "Stopping…".
+LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
+# A waiting Action's input row while its choice is offered, and the key
+# that decides it: Enter confirms the highlighted option, Allow once at first.
+CHOICE = "› Allow once"
+ALLOW = b"\r"
+# The choice's input row at any width, picked or not.
+CHOICE_ROW = re.compile(r"^ *(?:› )?(?:Allow once|Allow|A) +(?:› )?(?:Deny|D) *$", re.M)
+# What the line under a draft beside an Action says once Enter there denies
+# the Action and sends the draft as the reason.
+REASON = "enter denies the command and sends this"
+# The refusal of an Enter there before such a frame was offered.
+REASON_NOT_READY = "! Not ready; nothing denied · " + REASON
+
+
+def reason_shown(shown):
+    return REASON in shown
+
+
+def pick_deny(master, ready):
+    """Move a ready choice to Deny; return once a delivered frame shows it ready.
+
+    An arrow spends readiness, so an Enter sent with it would decide nothing.
+    """
+    os.write(master, b"\x1b[C")
+    return read_terminal(master, "› Deny") + action_ready(ready, master)
+
+
+def send_reason(master, ready, description):
+    """Once a frame saying Enter denies is offered, press Enter in the draft
+    beside the Action; return the frames up to the Action's denial."""
+    shown = action_ready(ready, master, shows=reason_shown)
+    os.write(master, b"\r")
+    return shown + read_terminal(master, f"• {description} — Denied")
+
+
+def time_limit(milliseconds):
+    """A custom time limit as an Action's request block shows it."""
+    for unit, size in (("min", 60000), ("s", 1000)):
+        if milliseconds % size == 0:
+            return f"{milliseconds // size} {unit}"
+    return f"{milliseconds} ms"
+
+
 from terminal_process import open_pty, terminal_process
 import terminal_process as terminal_process_module
 import model_fixture as fixture
@@ -129,7 +179,7 @@ def defaults(home, *args, success=True, environment=None):
         return None
     assert result.returncode == 0, (args, result.stdout, result.stderr)
     value = json.loads(result.stdout)
-    assert value["version"] == "1" and value["type"] == "defaults", value
+    assert value["version"] == "4" and value["type"] == "defaults", value
     assert value["changed"] is bool(args), value
     if "--store" in args:
         assert result.stderr == (f"\nrui: saved {shell_word(value['store'])} as the global default Store; "
@@ -156,7 +206,7 @@ def help_case():
                 output = run(home, *command.split(), flag)
                 assert output.startswith(f"rui {command} ["), output
                 if command == "session configure":
-                    for phrase in ("Omission preserves", "default resets", "Unknown models",
+                    for phrase in ("Omission preserves", "default resets", "A model Rui does not list",
                                    "rui session inspect", "extra compaction headroom",
                                    "Changes apply to new model requests.",
                                    "Requests already accepted keep their original settings, even when retried."):
@@ -353,7 +403,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert "Reasoning effort: medium (catalog default)" in status, status
         assert "Extra compaction headroom: 0 tokens (model default); not a guaranteed output budget" in status, status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
-        assert "Unknown models have no automatic threshold" in usage, usage
+        assert "A model Rui does not list is assumed to have a 128000-token context." in usage, usage
         assert "Changes apply to new model requests." in usage, usage
         assert "Requests already accepted keep their original settings, even when retried." in usage, usage
         for flags, trigger, headroom, effort in (
@@ -368,6 +418,37 @@ def compaction_settings_case(home, store, workspace, socket_path):
             assert "Reasoning effort: " + effort in status, status
             assert "Output reservation:" not in status and "source unknown" not in status, status
             assert "not a guaranteed output budget" in status, status
+        # /effort and /rename are /configure's flags, with its checks and messages.
+        efforts = terminal_step(master, "/effort", "/effort LEVEL switches", composer=True)
+        assert "Efforts: low · [medium] · high · xhigh · max · /effort LEVEL switches" in efforts, efforts
+        configured_frame(master, "/effort high")
+        configured_frame(master, "/rename lane five")
+        status = flat(status_frame(master, session))
+        assert "Reasoning effort: high (Session override)" in status and "Label: lane five" in status, status
+        configured_frame(master, "/effort default")
+        assert "Reasoning effort: medium (catalog default)" in flat(status_frame(master, session))
+        configured_frame(master, '/rename "lane four"')
+        assert "Label: lane four" in flat(status_frame(master, session))
+        terminal_step(master, '/effort "high', "Usage: /effort [LEVEL]", composer=True)
+        told = lambda command, marker: [line for line in terminal_step(master, command, marker, composer=True).split("\n") if marker in line]
+        for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "unsupported_reasoning_effort"),
+                                       ("/rename " + "x" * 101, "/configure --label " + "x" * 101, "--label must be")):
+            assert told(short, marker) == told(spelled, marker), short
+        terminal_step(master, "/rename", "! Usage: /rename NAME", composer=True)
+        # Typing "/" lists the commands the word starts above the input; Tab
+        # completes, a space or Esc closes the list, and the input stays put.
+        listed = command_frame(master, "/c", lambda frame: "\n› /c" in frame, end="")
+        rows = listed.split("\n")
+        draft = rows.index("› /c")
+        assert rows[draft - 2].startswith("/configure [OPTIONS]") and rows[draft - 1].startswith("/copy [code|file]"), listed
+        assert "change this Session's settings" in rows[draft - 2], listed
+        bare = command_frame(master, "op", lambda frame: "\n› /cop\n" in frame or frame.endswith("\n› /cop"), end="")
+        assert "/configure [OPTIONS]" not in bare and "/copy [code|file]" in bare and bare.split("\n").index("› /cop") == draft, bare
+        completed = command_frame(master, "\t", lambda frame: "› /copy" in frame and "/copy [code|file]" not in frame, end="")
+        assert completed.split("\n").index("› /copy") == draft, completed
+        closed = command_frame(master, "\x15/ef\x1b", lambda frame: "› /ef" in frame and "/effort [LEVEL]" not in frame, end="")
+        assert "Esc returns to the overview" not in closed, closed
+        command_frame(master, "\x15", lambda frame: frame.split("\n")[draft] == "›", end="")
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
     records = set((home / ".config/rui/requests").glob("*.json"))
@@ -378,8 +459,8 @@ def compaction_settings_case(home, store, workspace, socket_path):
     report = json.loads(run(home, "session", "inspect", "--store", store, "--session", session))
     assert report["session"]["model"] == "gpt-6-luna", report
     # CLI creation accepts only release-supported models; the Host preserves
-    # exact bindings outside that list without inferring a context window.
-    body = {"version": "1", "kind": "configure", "store": str(store),
+    # exact bindings outside that list and gives them the unlisted window.
+    body = {"version": "4", "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
                    (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
@@ -393,10 +474,10 @@ def compaction_settings_case(home, store, workspace, socket_path):
         "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
         status = flat(terminal_step(master, "/status", "Work: ", composer=True))
-        assert "no automatic threshold (model default)" in status, status
+        # 90% of the 128000-token window assumed for an unlisted model.
+        assert "estimated context pressure threshold: 115200 tokens (assumed for a model Rui does not list)" in status, status
         assert "Reasoning effort: unknown (no catalog value; reasoning omitted)" in status, status
-        assert "Use /configure --compaction-trigger TOKENS to enable a threshold." in status, status
-        assert "Provider context-overflow recovery still applies." in status, status
+        assert "enable a threshold" not in status, status
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
 
@@ -473,6 +554,37 @@ def forget_terminal(master):
     _captures.pop(master, None)
 
 
+def draining(master, observe):
+    """`observe`, after reading what the terminal holds: a fixture waiting on
+    the Host still drains the PTY as a terminal does. Darwin's holds 1 KiB, so
+    a screen that stopped being read blocks mid-frame and runs no new work."""
+    capture = terminal_capture(master)
+
+    def drained():
+        while select.select([master], [], [], 0)[0]:
+            chunk = os.read(master, 65536)
+            if not chunk:
+                break
+            capture.feed(chunk)
+        return observe()
+    return drained
+
+
+def discard_terminal(master):
+    """Drop a reaped writer's queued output and its screen, so the next
+    caller's capture starts at that caller's first byte. A writer killed while
+    the PTY was full leaves a frame begun and never ended; it is no later
+    frame's start."""
+    discarded = 0
+    while select.select([master], [], [], 0)[0]:
+        chunk = os.read(master, 65536)
+        if not chunk:
+            break
+        discarded += len(chunk)
+        assert discarded < 1024 * 1024, "unbounded output from a reaped writer"
+    forget_terminal(master)
+
+
 def current_screen(master):
     """The latest committed frame: what the user sees now."""
     return terminal_capture(master).completed
@@ -483,9 +595,9 @@ def shown(text, screen):
     return wrapped(text, screen)
 
 
-def command_frame(master, command, accept, timeout=15):
-    """Send `command`; return the first committed frame after it that
-    `accept`s with the composer ready in that same frame. Page identity,
+def command_frame(master, command, accept, timeout=15, *, end="\n"):
+    """Send `command` and `end`; return the first committed frame after it
+    that `accept`s with the composer ready in that same frame. Page identity,
     readiness and any absence check then describe one shown frame."""
     capture = terminal_capture(master)
     found = []
@@ -496,7 +608,7 @@ def command_frame(master, command, accept, timeout=15):
 
     capture.listener = observe
     try:
-        os.write(master, (command + "\n").encode())
+        os.write(master, (command + end).encode())
         deadline = time.monotonic() + timeout
         while not found:
             remaining = deadline - time.monotonic()
@@ -911,24 +1023,12 @@ def terminal_wait_oracles():
     print("terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure", flush=True)
 
 
-def assert_permission_workspace(output, workspace, columns=80):
-    """Join only hanging-indent layout breaks; retain every exact path byte.
-
-    A path that fits a continuation row but not the label's row starts on
-    the next row, leaving the label at the end of its own.
-    """
-    fields = output.split("\n  Workspace:", 1)
-    assert len(fields) == 2 and "\n  Time limit:" in fields[1], ("Action fields missing", output)
-    shown = fields[1].split("\n  Time limit:", 1)[0]
-    assert re.sub(r"^ |\n {2,}", "", shown) == str(workspace), output
-    assert all(len(line) <= columns for line in ("  Workspace:" + shown).splitlines()), output
-
-
 def shown_bash_command(master):
     """The current Action's "$ " command, rejoined across wrapped rows.
 
-    Continuations are indented four columns. As in raw_export, a row filled
-    to the edge broke inside a word; any other soft break consumed a space.
+    A later line of the command starts with the content mark `│`; a wrapped
+    row starts with `┆`. As in raw_export, a row filled to the edge broke
+    inside a word; any other soft break consumed a space.
     """
     capture = terminal_capture(master)
     width = capture.screen.columns
@@ -937,9 +1037,12 @@ def shown_bash_command(master):
     command = rows[start][4:]
     previous = rows[start]
     for line in rows[start + 1:]:
-        if not line.startswith("    "):
+        if line.startswith("  │ "):
+            command += "\n" + line[4:]
+        elif line.startswith("  ┆ "):
+            command += ("" if len(previous) >= width else " ") + line[4:]
+        else:
             break
-        command += ("" if len(previous) >= width else " ") + line[4:]
         previous = line
     return command
 
@@ -1131,8 +1234,8 @@ def overview_cases():
     Esc returns; the composer starts one with /configure's settings;
     `session resume` opens inside the overview; a start the process never
     sent recovers from its saved request; Ctrl-X twice stops a working
-    Session."""
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-overview."))
+    Session, from its row and from its conversation."""
+    state = screen_fixture_root("rui-overview.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
     store = state / "store"
@@ -1140,10 +1243,12 @@ def overview_cases():
     workspace.mkdir()
     codex_fixture.credentials(home / ".config/rui/codex.json")
     held_release = threading.Event()
+    conversation_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([], {
         "Fix the flaky test": fixture.sse_answer("overview-answer", "overview-reason", "overview-message", "Flaky test fixed.")[0],
         "captured then killed": fixture.sse_answer("killed-answer", "killed-reason", "killed-message", "Recovered start answered.")[0],
         "Hold for a stop": (fixture.sse_answer("held-answer", "held-reason", "held-message", "Never shown.")[0], held_release),
+        "Hold in the conversation": (fixture.sse_answer("talk-answer", "talk-reason", "talk-message", "Never shown.")[0], conversation_release),
     })
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
@@ -1177,7 +1282,8 @@ def overview_cases():
         assert configuration["label"] == {"state": "value", "value": "lane four"}, saved
         started = fixture.observe(store, record.stem)["target"]
         status = status_frame(master, started)
-        assert "Model: gpt-6-luna" in status and permission_row(status, "ask"), status
+        # The Session line under the input names the label, model and ask mode.
+        assert "Label: lane four\n" in status and "lane four · gpt-6-luna" in status and "asks before Bash" in status and permission_row(status, "ask"), status
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
@@ -1201,6 +1307,22 @@ def overview_cases():
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
         assert len(endpoint.requests) == 1, "opening, returning or resuming submitted work"
+        # Enter on a row that needs approval opens its Session on the Action,
+        # with the choice already in the input row. The Action stays pending.
+        endpoint.responses_by_input["Propose an overview Action"] = fixture.sse_tool_calls("overview-action", [
+            ("bash", "overview-action-call", json.dumps({"cmd": "printf x > overview-effect", "description": "Write the overview effect", "timeout_ms": None}))])
+        admit(home, "session", "send", "--to", started, input="Propose an overview Action", cwd=workspace)
+        fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", started)["actionable_permissions"], "overview Action proposal")
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        overview_frame(master, lambda frame: "Needs approval" in frame and "lane four" in frame)
+        os.write(master, b"\n")
+        opened = read_terminal(master, CHOICE)
+        assert "? Write the overview effect\n" in opened and "←→ choose · enter confirms" in opened and "Approval paused" not in opened, opened
+        os.write(master, b"\x03")
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not errors, errors
+        assert not (workspace / "overview-effect").exists() and len(endpoint.requests) == 2, "opening an Action decided it"
         # A start captured and never sent is recovered from its saved request.
         before = set(records.glob("*.json"))
         gate = state / "overview-capture"
@@ -1208,26 +1330,26 @@ def overview_cases():
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, lambda frame: "lane four" in frame)
         os.write(master, b"captured then killed\n")
-        fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "overview start captured")
+        fixture.wait_for(draining(master, lambda: pathlib.Path(f"{gate}.ready").exists()), "overview start captured")
         killed, = set(records.glob("*.json")) - before
         assert json.loads(killed.read_bytes())["require_model"] is True
         caller.kill()
         caller.wait(timeout=5)
         caller.stderr.close()
+        discard_terminal(master)
         recovered = json.loads(run(home, "request", "recover", killed.stem))
         assert recovered["answer"]["status"] == "accepted" and not recovered["answer"]["replayed"], recovered
         allocated = recovered["answer"]["session"]
         assert recovered["context"]["session"] == allocated and allocated != started, recovered
-        fixture.wait_for(lambda: len(endpoint.requests) == 2, "recovered start's Turn")
+        fixture.wait_for(lambda: len(endpoint.requests) == 3, "recovered start's Turn")
         # Ctrl-X asks, a second Ctrl-X stops the selected working Session, and
         # its row turns stopped without leaving the overview.
         before = set(records.glob("*.json"))
-        forget_terminal(master)
         caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, lambda frame: "lane four" in frame)
         os.write(master, b"Hold for a stop\n")
-        fixture.wait_for(lambda: len(endpoint.requests) == 3, "held Turn sent")
+        fixture.wait_for(draining(master, lambda: len(endpoint.requests) == 4), "held Turn sent")
         record, = set(records.glob("*.json")) - before
         held = fixture.observe(store, record.stem)["target"]
         overview_frame(master, lambda frame: re.search(r"[●*] Hold for a stop", frame), keys=b"\x1b")
@@ -1235,14 +1357,35 @@ def overview_cases():
         overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
         work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
         assert work["kind"] == "stopped", work
+        # In a conversation the line under the input offers ctrl+x stop
+        # while there is work, and Ctrl-X twice stops its Session there.
+        before = set(records.glob("*.json"))
+        sent = len(endpoint.requests)
+        os.write(master, b"Hold in the conversation\n")
+        fixture.wait_for(draining(master, lambda: len(endpoint.requests) == sent + 1), "conversation Turn sent")
+        record, = set(records.glob("*.json")) - before
+        talking = fixture.observe(store, record.stem)["target"]
+        session_line = lambda screen: screen.rstrip("\n").rsplit("\n", 1)[-1]
+        keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
+        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen) == f"Stop {talking}? ctrl+x yes · esc no")
+        # Esc only cancels the ask; the conversation stays open.
+        keyed_frame(master, b"\x1b", lambda screen, x, y: composer_ready(screen, x, y) and session_line(screen).endswith(" · ctrl+x stop"))
+        keyed_frame(master, b"\x18", lambda screen, x, y: session_line(screen).startswith("Stop "))
+        os.write(master, b"\x18")
+        fixture.wait_for(draining(master, lambda: fixture.command("session", "inspect", "--store", store, "--session", talking)["work"]["state"]["kind"] == "stopped"), "conversation stop")
+        stopped = keyed_frame(master, b"", lambda screen, x, y: composer_ready(screen, x, y) and "Session stopped." in screen)
+        assert "ctrl+x stop" not in session_line(stopped), stopped
+        overview_frame(master, lambda frame: re.search(r"[■#] Hold in the conversation", frame), keys=b"\x1b")
         held_release.set()
+        conversation_release.set()
         leave_overview(master)
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
         completed = True
-        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop passed", flush=True)
+        print("Overview: empty Store hint, composer start with /configure settings, Enter and Esc, resume inside the overview, recovery of a start never sent and Ctrl-X stop from a row and a conversation passed", flush=True)
     finally:
         held_release.set()
+        conversation_release.set()
         dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: os.close(master), lambda: os.close(slave), lambda: forget_terminal(master),
                     lambda: fixture.stop_host(host) if host is not None else None,
@@ -1256,7 +1399,7 @@ def overview_cases():
 def command_entry_cases():
     """Familiar entry routes use the same captured intent and conversation."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-command-entry."))
+    state = screen_fixture_root("rui-command-entry.")
     home = state / "home"
     (home / ".config/rui").mkdir(parents=True, mode=0o700)
     store = state / "store"
@@ -1337,7 +1480,7 @@ def command_entry_cases():
             coloured = prompt_cell is not None and prompt_cell.fg in USER_COLOUR
             assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
             status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {initial_session}\n" in status, status
+            assert f"Session: {initial_session}\nLabel: not set\n" in status, status
             terminal_step(master, "/exit", "Resume: ")
             _, errors = terminal_exit(caller, master)
             assert caller.returncode == 0 and not errors, errors
@@ -1549,7 +1692,7 @@ def scroll_return_case():
     above it; the return must still count from the latest row. Scrolling
     never edits or sends the draft.
     """
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-scroll-return."))
+    state = screen_fixture_root("rui-scroll-return.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -1591,9 +1734,12 @@ def scroll_return_case():
             capture = terminal_capture(master)
             assert not shown.startswith("Browsing"), (context, "still browsing", shown)
             assert composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y), (context, shown)
-            # The status row (a notice, if any) may sit between them.
-            rows = shown.rstrip("\n").split("\n")
-            assert rows[-1] == "› keep" and latest in rows[-4:-1], (context, "latest row not last", shown)
+            # The draft keeps the row over the Session line, under the rule,
+            # and the latest text is the last written row above it.
+            rows = shown.split("\n")
+            y = capture.screen.cursor.y
+            written = [row for row in rows[:y - 1] if row.strip()]
+            assert y == len(rows) - 2 and rows[y] == "› keep" and set(rows[y - 1]) == {"─"} and latest in written[-3:], (context, "latest row not last", shown)
 
         def leave(saved):
             records_before, requests = saved
@@ -1651,7 +1797,7 @@ def scroll_return_case():
 def persistent_opening_case():
     """Frozen replay uses real content once and assistant-only formatting."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-opening."))
+    state = screen_fixture_root("rui-persistent-opening.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store'$(false)"
@@ -1687,6 +1833,10 @@ def persistent_opening_case():
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ", composer=True)
         output = current_screen(master)
+        # The last row is the Session line, which names this unlabelled
+        # Session by its first Message.
+        assert output.rsplit("\n", 1)[1].startswith("literal **user** é · "), output
+        output = output.rsplit("\n", 1)[0]
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert "\n› literal **user** é" in output, output
         assert "\nSaved heading\n" in output and "# Saved heading" not in output, output
@@ -1731,7 +1881,9 @@ def persistent_opening_case():
         assert not drawn.count(b"\x1b[?1049h") or drawn.endswith(b"\x1b[?1049l") or b"\x1b[?1049l" in drawn, drawn
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "late opening error left terminal configuration changed"
-        assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 2, "opening error retried or caused work"
+        # Three content reads: the Session line's first Message (this Session
+        # has no Label), the User row and the truncated answer.
+        assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 3, "opening error retried or caused work"
         proxy.close()
         proxy = None
         os.close(master)
@@ -1745,7 +1897,7 @@ def persistent_opening_case():
                 # incomplete span remain buffered after a visible bold prefix.
                 body = b"# " + b"x" * 5000 + b"\n*UNVERIFIED"
                 return (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                    b"X-Rui-Wire-Version: 1\r\nContent-Length: " + str(len(body) + 1).encode()
+                    b"X-Rui-Wire-Version: 4\r\nContent-Length: " + str(len(body) + 1).encode()
                     + b"\r\nConnection: close\r\n\r\n" + body)
 
             proxy = canonical.ReplyProxy(host, "/v1/read-result", truncate_result)
@@ -1810,7 +1962,13 @@ def persistent_opening_case():
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        # Each frame's last row is the Session line, named by this unlabelled
+        # Session's first Message; the checks below are about the rows above.
+        def above_line(frames):
+            return "\n".join(row for row in frames.split("\n") if not row.startswith("literal **user** é · "))
         output = read_terminal(master, "› ")
+        assert "\nliteral **user** é · " in output, output
+        output = above_line(output)
         assert "saved user 09" in output and "literal **user** é" not in output, output
         assert output.index("saved user 08") < output.index("saved answer 08") < output.index("saved user 09"), output
         message = admit(home, "session", "send", "--to", session, input="late input")
@@ -1824,7 +1982,7 @@ def persistent_opening_case():
             assert current_screen(master).startswith("Browsing · Esc returns"), ("details paging left browsing", details)
             os.write(master, b"\x1b[6~")
             details += read_terminal(master, "Browsing · Esc returns")
-        assert "literal **user** é" not in details, details
+        assert "literal **user** é" not in above_line(details), details
         return_to_live(master)
 
         history_held = threading.Event()
@@ -1849,10 +2007,10 @@ def persistent_opening_case():
         # Rows the held page would add must not appear before it is verified.
         staged = ("literal **user**", "Historical item omitted", "saved user 01", "saved user 02")
         composing = read_terminal(master, "› next cafXé!", timeout=5)
-        assert not history_release.is_set() and not any(row in composing for row in staged), composing
+        assert not history_release.is_set() and not any(row in above_line(composing) for row in staged), composing
         history_release.set()
         failed = read_terminal(master, "! Earlier messages unavailable; scroll up to retry. Draft retained.")
-        assert not any(row in failed for row in staged), "failed history exposed a staged prefix"
+        assert not any(row in above_line(failed) for row in staged), "failed history exposed a staged prefix"
         if "› next cafXé!" not in current_screen(master):
             read_terminal(master, "› next cafXé!")
         os.write(master, b"\x1b[CZ")
@@ -1862,7 +2020,7 @@ def persistent_opening_case():
         os.write(master, b"\x05\x15")
         read_terminal(master, "› ", composer=True)
         scroll_until(master, b"\x1b[5~", "Start of conversation")
-        recovered = current_screen(master)
+        recovered = above_line(current_screen(master))
         assert recovered.count("literal **user** é") == 1 and "Historical item omitted" in recovered, recovered
         assert "Saved heading" not in recovered and "OPENING-COMPLETE" not in recovered, "oversized historical content leaked"
         assert recovered.index("Start of conversation") < recovered.index("literal **user** é") < recovered.index("Historical item omitted") < recovered.index("saved user 01"), recovered
@@ -1926,9 +2084,9 @@ def persistent_opening_case():
 
 
 def persistent_pending_case():
-    """Opening counts the frozen queue beyond its newest Activity page."""
+    """Opening shows the queue beyond its newest Activity page as one row."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-pending."))
+    state = screen_fixture_root("rui-persistent-pending.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -1956,7 +2114,7 @@ def persistent_pending_case():
             return response
 
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_opening)
-        # Tall enough that the queue summary and every row are one frame.
+        # Tall enough that the queued row and every row are one frame.
         master, slave = open_pty(rows=160)
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             session], env={**os.environ, "HOME": str(home)},
@@ -1964,20 +2122,20 @@ def persistent_pending_case():
         startup = terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
         admit(home, "session", "send", "--to", session, input="late queued beyond snapshot")
         opening_release.set()
-        read_terminal(master, "› ")
+        # Every waiting Message, the one admitted after the opening's page
+        # included, is counted in the row above the input, and none shows
+        # in the conversation until it is taken.
+        frames = read_terminal(master, "25 queued")
         output = current_screen(master)
-        assert "24 queued messages" in output, ("opening counted only its newest page or fresh Current", output)
-        # The newest page shows its queued Messages whole and labelled; older
-        # ones are listed where a transcript reaches them, never previewed.
-        assert "Queued: " not in output and output.count("! Queued") == 16, output
-        assert all(f"queued-{i:02d} é" in output for i in range(9, 25)) and not any(f"queued-{i:02d} é" in output for i in range(1, 9)), output
+        assert any(row.startswith("› late queued beyond snapshot") and row.endswith(" 25 queued") for row in output.split("\n")), output
+        assert "queued behind" not in frames and "Queued" not in frames and "queued-" not in output, frames
         assert len(endpoint.requests) == 1, "opening dispatched queued work"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         completed = True
-        print("persistent pending: exact frozen 24 beyond newest 16, newest page labelled, late admission excluded passed", flush=True)
+        print("persistent pending: 24 waiting beyond the newest 16 and one admitted later are one counted row passed", flush=True)
     finally:
         dispose_all(
             opening_release.set,
@@ -1996,7 +2154,7 @@ def persistent_pending_case():
 def persistent_input_cases():
     """Real captured Admission, a next draft, original replay and input recovery."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-input."))
+    state = screen_fixture_root("rui-persistent-input.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -2112,6 +2270,9 @@ def persistent_input_cases():
         # composer under the same response budget before typing the next draft.
         diagnostic_deadline = time.monotonic() + 15
         os.write(master, b"/status\n")
+        read_terminal(master, "Session: ", timeout=diagnostic_deadline - time.monotonic(), composer=True)
+        # The page is taller than the screen, and the diagnostic ends it.
+        os.write(master, b"\x1b[6~")
         diagnostic = read_terminal(master, "Ctrl-R retries this exact original.",
             timeout=diagnostic_deadline - time.monotonic(), composer=True)
         reserved = diagnostic.split("Original reserved request: ", 1)[1].splitlines()[0]
@@ -2177,7 +2338,7 @@ def persistent_input_cases():
 
 def persistent_empty_answer_case():
     """An empty completed result leaves a usable composer, not a failure row."""
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-empty-answer."))
+    state = screen_fixture_root("rui-empty-answer.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store"
@@ -2227,15 +2388,101 @@ def persistent_empty_answer_case():
             retain_failure_state("empty answer failure state", state)
 
 
+def persistent_copy_case():
+    """/copy sends the last answer, and /copy code its last code block, to the
+    clipboard as one OSC 52 sequence of at most 75,000 bytes; /copy file saves
+    the answer where Rui runs, mode 0600 even over an earlier file, and replaces
+    a link at its name without following it."""
+    state = screen_fixture_root("rui-copy.")
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    here = state / "here"
+    here.mkdir()
+    answer = "Run:\n```sh\nzig build\n```\nThen:\n```py\nprint('é')\n```\nDone."
+    # The code block is the clipboard's limit exactly; the answer is over it.
+    limit = 75_000
+    block = ("x" * 99 + "\n") * 749 + "x" * 100
+    large = "```\n" + block + "\n```\nLarge done."
+    endpoint = fixture.SuccessEndpoint([fixture.sse_answer("copy-0", "r-0", "m-0", answer)[0],
+                                        fixture.sse_answer("copy-1", "r-1", "m-1", large)[0]])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        session = create_session(home, "--store", store,
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                env={**os.environ, "HOME": str(home)}, cwd=here) as (caller, master):
+            read_terminal(master, "› ")
+            capture = terminal_capture(master)
+            terminal_step(master, "/copy", "No answer to copy yet.", composer=True)
+            terminal_step(master, "/copy code", "No answer to copy yet.", composer=True)
+            assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
+            terminal_step(master, "Copy request", "Done.", composer=True)
+
+            def sent(command):
+                before = len(capture.clipboard)
+                frame = terminal_step(master, command, "Sent to clipboard", composer=True)
+                assert "Sent to clipboard" in frame.split("\n"), frame
+                assert len(capture.clipboard) == before + 1, capture.clipboard
+                return capture.clipboard[-1]
+
+            def osc52(text):
+                return "\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\x1b\\"
+
+            assert sent("/copy") == osc52(answer)
+            assert sent("/copy code") == osc52("print('é')")
+            name = f"rui-{session}-answer.md"
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            saved = here / name
+            assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            terminal_step(master, "Large request", "Large done.", composer=True)
+            before = len(capture.clipboard)
+            terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
+            assert len(capture.clipboard) == before, "an answer over the limit is never sent"
+            assert len(block) == limit
+            started = time.monotonic()
+            assert sent("/copy code") == osc52(block)
+            print(f"persistent copy: /copy code of {limit} bytes took {time.monotonic() - started:.3f}s to its frame", flush=True)
+            saved.chmod(0o644)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert saved.read_bytes() == large.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            # A link at the export name is replaced, never followed.
+            sentinel = state / "sentinel"
+            sentinel.write_bytes(b"sentinel")
+            sentinel.chmod(0o640)
+            saved.unlink()
+            saved.symlink_to(sentinel)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert sentinel.read_bytes() == b"sentinel" and sentinel.stat().st_mode & 0o777 == 0o640, sentinel
+            assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
+            assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
+            assert list(here.iterdir()) == [saved], list(here.iterdir())
+            terminal_step(master, "/exit", "Detached.")
+            assert caller.wait(timeout=5) == 0
+        completed = True
+        print("persistent copy: /copy and /copy code sent exact OSC 52 bytes; /copy file saved the exact answer", flush=True)
+    finally:
+        dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                    endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("copy failure state", state)
+
+
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
                                lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False, stdin=None):
     """Fresh inline choices retain draft custody and exact canonical targets."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
+    state = screen_fixture_root("rui-persistent-permission.")
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store'$(false)"
-    answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
+    answer = "after explicit approval" if decision == "allow-action" else "after explicit denial"
     description = "Inspect café output"
     command = f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
     if exit_code:
@@ -2277,7 +2524,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         opening = read_terminal(master, "› ")
-        assert all(noise not in opening for noise in ("gpt-6-sol", "Workspace:", "Session:", "Store:", "/help commands")), opening
+        assert all(noise not in opening for noise in ("Workspace:", "Session:", "Store:", "/help commands")), opening
+        # The model shows once, on the Session line, with the ask mode.
+        assert f"{reference} · gpt-6-sol · " in opening and "asks before Bash" in opening, opening
         def hold_arguments(response):
             if not arguments_held.is_set():
                 arguments_held.set()
@@ -2299,62 +2548,112 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert not select.select([ready_read], [], [], 1)[0], "unfinished chat paste opened consent scope"
             os.write(master, b"\x1b[201~\n")
         transcript = read_terminal(master, json.loads(arguments)["cmd"])
-        header = drawn_style(master, f"? Run Bash · {description}")
+        if fragmented_paste:
+            # The Enter after the paste may be read before or after the
+            # Action is adopted. Only a refusal beside the Action says what
+            # Enter there does, and only then is its frame offered.
+            while next_frame(master, 0.5) is not None:
+                pass
+            if REASON_NOT_READY in current_screen(master):
+                transcript += action_ready(ready_read, master, shows=lambda shown: REASON_NOT_READY in shown)
+        header = drawn_style(master, f"? {description}")
         assert header is not None and header.fg in ATTENTION_COLOUR, (header, current_screen(master))
+        # The Action arrived beside the line being written, which keeps the
+        # input row, so its Enter could not approve; Ctrl-G shows the choice.
+        assert "Allow once" not in current_screen(master), current_screen(master)
+        if decision == "reason":
+            # Enter there sends the line as the reason, then denies the Action.
+            reason = "next cafXaé!"
+            # A caret move clears the earlier notice, so the line under the
+            # draft says what Enter does.
+            os.write(master, b"\x1b[C")
+            read_terminal(master, REASON + " · esc back to the choice")
+            settled = send_reason(master, ready_read, description)
+            settled += await_screen(master, answer, composer=True)
+            assert not (state / "effect-count").exists(), "the denied Bash ran"
+            saved = [json.loads(path.read_text()) for path in set(records.glob("*.json")) - before_choice]
+            assert sorted(row["kind"] for row in saved) == ["message", "permission_decision"], saved
+            assert [row["decision"] for row in saved if row["kind"] == "permission_decision"] == ["deny"], saved
+            # One continuation carries the denial, then the reason.
+            assert len(endpoint.requests) == 2, endpoint.requests
+            continuation = json.loads(endpoint.requests[1])["input"]
+            assert continuation[-2:] == [
+                {"type": "function_call_output", "call_id": "persistent-call-id", "output": "Permission denied."},
+                {"role": "user", "content": [{"type": "input_text", "text": reason}]}], continuation
+            assert f"• {description} — Denied" in settled and reason in settled, settled
+            os.write(master, b"/exit\n")
+            assert caller.wait(timeout=5) == 0, caller.stderr.read()
+            assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
+            completed = True
+            return
+        os.write(master, b"\x07")
         transcript += action_ready(ready_read, master)
-        transcript += await_screen(master, "Type a + Enter to allow once · d + Enter to deny")
+        transcript += await_screen(master, CHOICE)
         assert "Capturing original" not in transcript and "Original reserved request" not in transcript, transcript
         assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
-        # One committed frame shows the whole Action once, as the user reads it.
+        # One committed frame shows the whole Action once, as the user reads
+        # it: what it is for, the exact command, then the custom time limit.
         shown = current_screen(master)
-        assert shown.count("Workspace:") == 1 and shown.count("? Run Bash") == 1, shown
-        assert f"\n? Run Bash · {description}\n" in "\n" + shown, ("Action heading lost its description", shown)
+        assert "Workspace:" not in shown and "Run Bash" not in shown and shown.count(f"? {description}") == 1, shown
+        assert f"\n? {description}\n" in "\n" + shown, ("Action heading lost its description", shown)
         assert f"\n  $ {json.loads(arguments)['cmd']}\n" in shown, shown
-        assert_permission_workspace(shown, state, 100)
-        assert shown.count(f"Time limit: {timeout_ms} ms") == 1, shown
+        assert shown.count(f"\n  Time limit: {time_limit(timeout_ms)}\n") == 1, shown
+        assert shown.index(f"? {description}") < shown.index("  $ ") < shown.index("  Time limit:"), shown
         assert shown.count(json.loads(arguments)["cmd"]) == 1, shown
+        # The request sits right above the rule, and the choice under it.
+        rows = shown.split("\n")
+        rule = next(index for index, row in enumerate(rows) if row.startswith("──"))
+        assert rows[rule - 1].strip() and rows[rule + 1].startswith("  › Allow once"), shown
         if stdin is not None:
-            assert "Standard input (literal; EOF after data):" in shown, shown
+            assert "\n  stdin:\n" in shown, shown
             assert all(line in shown for line in stdin.splitlines()), shown
         else:
-            assert "Standard input" not in shown, shown
+            assert "stdin:" not in shown, shown
         assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
         assert set(records.glob("*.json")) == before_choice, "queued chat created a record"
         assert not (state / "effect-count").exists(), "queued chat authorized an effect"
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, fragmented_paste, stale_target)):
             for rows, columns in ((3, 80), (4, 20), (8, 8)):
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-                os.write(master, b"\x01")  # Service input at the new size without granting authority.
+                os.write(master, b"\t")  # Service input at the new size without granting authority.
                 assert next_frame(master, 5) is not None, ("resize did not redraw", rows, columns)
                 while next_frame(master, 0.5) is not None:
                     pass
                 narrow = current_screen(master)
                 shown = " ".join(narrow.split())  # Word wrap consumes the breaking space.
-                assert len(narrow.split("\n")) == rows and narrow.split("\n")[-1].startswith(">"), narrow
-                # A clipped Action never offers the choice: it says to read on.
-                choice = any(text in shown for text in ("Type a + Enter to allow once · d + Enter to deny", "a Allow / d Deny Enter"))
-                assert choice or "PgDn reads the rest · then a/d + Enter" in shown, narrow
+                # The choice keeps the last row, or the row over the line
+                # under it. A clipped Action never offers it: it says to read on.
+                inputs = narrow.split("\n")[-2:]
+                choice = any("› A" in row for row in inputs)
+                assert len(narrow.split("\n")) == rows and (choice or any(row.startswith("  PgDn") for row in inputs)), narrow
                 if choice:
                     assert f"$ {json.loads(arguments)['cmd']}" in shown, ("choice offered for an unread Action", narrow)
                 assert caller.poll() is None and not (state / "effect-count").exists(), narrow
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
             os.write(master, b"\x01")
-            read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+            read_terminal(master, CHOICE)
             action_ready(ready_read, master)
-        for invalid in (b"Y\n", b"\x1b[200~a\x1b[201~\n"):
+        # A refused chord ends freshness, so the Enter after it decides nothing.
+        for invalid, notice in ((b"\x1bY\n", "! Not ready; nothing authorized."), (b"\x1b[1;3C", "! Key combination not recognized")):
             os.write(master, invalid)
-            rejected = read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+            rejected = read_terminal(master, notice)
             rejected += action_ready(ready_read, master)
-            assert current_screen(master).count("? Run Bash") == 1, ("invalid choice repeated command", current_screen(master))
+            assert current_screen(master).count(f"? {description}") == 1, ("invalid choice repeated command", current_screen(master))
             assert set(records.glob("*.json")) == before_choice, "invalid choice captured authority"
             assert not (state / "effect-count").exists()
-        for command, notice in (("/wait", "Work continues while you compose."),
-                                ("/login", "Login uses rui auth login codex in your shell.")):
-            os.write(master, (command + "\n").encode())
-            restricted = read_terminal(master, notice)
-            restricted += action_ready(ready_read, master)
-            assert current_screen(master).count("? Run Bash") == 1, ("notice repeated command", current_screen(master))
-            assert set(records.glob("*.json")) == before_choice, "nested prompt created intent"
+        # Typing beside the Action edits the retained draft at its caret; an
+        # Enter in the same burst finds no frame that offered the line as a
+        # reason, so it sends and denies nothing, and Esc returns to the choice.
+        os.write(master, b"Y\n")
+        typed = read_terminal(master, REASON_NOT_READY)
+        assert "› next cafXaYé!" in current_screen(master), current_screen(master)
+        # The refusal says what Enter there does, so its frame is offered.
+        typed += action_ready(ready_read, master, shows=reason_shown)
+        os.write(master, b"\x7f\x07")
+        typed += read_terminal(master, CHOICE)
+        typed += action_ready(ready_read, master)
+        assert current_screen(master).count(f"? {description}") == 1, ("typing repeated command", current_screen(master))
+        assert set(records.glob("*.json")) == before_choice, "typing beside the Action created intent"
         current = fixture.command("session", "inspect", "--store", store, "--session", reference)
         action = current["actionable_permissions"][0]["action"]
         proxy.exchanges.clear()
@@ -2363,7 +2662,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if stale_target:
             run(home, "action", "deny", "--store", store, "--session", reference, "--action", action)
             proxy.exchanges.clear()
-        os.write(master, b"d\n" if decision == "deny-action" and not stale_target else b"a\n")
+        if decision == "deny-action" and not stale_target:
+            # Move to Deny first, so what follows Enter shows only the outcome.
+            pick_deny(master, ready_read)
+        os.write(master, b"\r")
         settled = ""
         if lost_reply:
             settled = read_terminal(master, "Decision not confirmed")
@@ -2389,11 +2691,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             shown = read_terminal(master, second_command)
             shown += action_ready(ready_read, master)
             assert {path: path.read_bytes() for path in records.glob("*.json")} == before_rejected
-            if "Type a + Enter to allow once · d + Enter to deny" not in shown:
-                shown += read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+            if CHOICE not in shown:
+                shown += read_terminal(master, CHOICE)
             shown = current_screen(master)
             assert f"\n  $ {second_command}\n" in shown, shown
-            assert "? Run Bash · Write sibling effect" in shown, ("sibling identity reused the first label", shown)
+            assert "? Write sibling effect" in shown, ("sibling identity reused the first label", shown)
             os.write(master, b"/details\n")
             read_terminal(master, "Recent conversation — tool details")
             details = current_screen(master)
@@ -2530,8 +2832,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 live = read_terminal(master, "+1 more calls · /status", composer=True)
                 fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
                 assert live.index(f"• {bypass_description}") < live.index("• Inspect application settings"), live
+                assert re.search(rf"^• {bypass_description} · \d+s$", live, re.M), ("the running call's row carries the clock", live)
                 assert "Check final sibling" not in live, live
-                assert "? Run Bash" not in live and "allow once" not in live, live
+                assert "Allow once" not in live and "Approval" not in live, live
                 os.write(master, "live café!\x1b[D\x1b[DX".encode())
                 live += read_terminal(master, "› live cafXé!")
                 assert f"• {bypass_description}" in live and f"✓ {bypass_description}" not in live, live
@@ -2546,6 +2849,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 6, 32, 0, 0))
                 short = read_terminal(master, "+3 more calls · /status", composer=True)
                 assert "› live cafXé!" in short, short
+                # The running call's row is not shown, so the live line says it.
+                assert re.search(rf"^• {bypass_description} · \d+s$", short, re.M), short
                 assert "Inspect application" not in short, ("a clipped call hid its failure", short)
                 # Sizes below the required status and draft refuse the
                 # terminal instead (TerminalTooSmall); these must still fit.
@@ -2557,12 +2862,20 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     read_terminal(master, marker, composer=True)
                     narrow = current_screen(master)
                     shown = " ".join(narrow.split())  # Word wrap consumes the breaking space.
-                    # Every one of the four calls is either shown or counted.
+                    # Every one of the four calls is either shown above the
+                    # overflow row or counted by it. The running call's row
+                    # does not fit, so the live line under the overflow row
+                    # names it once more.
                     label = re.search(r"\+(\d+)(?: more calls)? · /status", shown)
-                    calls = sum(row.lstrip().startswith(("✓ ", "• ", "! ")) for row in narrow.splitlines())
-                    assert label and int(label[1]) + calls == 4, narrow
+                    assert label, narrow
+                    rows_shown = narrow.splitlines()
+                    overflow = next(at for at, row in enumerate(rows_shown) if re.match(r"\+\d", row))
+                    marked = [row.lstrip().startswith(("✓ ", "• ", "! ")) for row in rows_shown]
+                    assert int(label[1]) + sum(marked[:overflow]) == 4, narrow
+                    live_rows = [row for row, mark in zip(rows_shown[overflow:], marked[overflow:]) if mark]
+                    assert len(live_rows) == 1 and live_rows[0].startswith("• Wait"), narrow
                     if (rows, columns) == (6, 20):
-                        assert "Working…" in shown, ("optional spacing or wording hid status", narrow)
+                        assert LIVE_LINE.search(narrow), ("optional spacing or wording hid the live line", narrow)
                     assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
                     os.write(master, b"\x7f")
                     read_terminal(master, "› live", composer=True)
@@ -2715,7 +3028,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         # Action rightly shows that success; only the held
                         # stale page must change nothing.
                         held = settle_screen(master, quiet=0.5)
-                        assert "? Run Bash" not in held, held
+                        assert f"? {label}" not in held and "Allow once" not in held, held
                         requests_before = len(endpoint.requests)
                         run(home, "action", "allow", "--store", store, "--session", reference, "--action", selected[0])
                         fixture.wait_for(lambda: len(endpoint.requests) == requests_before + 1, "successful external approval continuation")
@@ -2739,7 +3052,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         # page separates the two successes, and the next page
                         # retires the stale page's approval.
                         assert f"✓ {prior_label}\n✓ {label}\n" in shown, ("stale permission scan separated successes", with_notice, shown)
-                        assert "? Run Bash" not in shown and f"? {label}" not in shown[start:], ("stale approval outlived the next page", shown)
+                        assert "Allow once" not in shown and f"? {label}" not in shown[start:], ("stale approval outlived the next page", shown)
                         answer_release.set()
                         read_terminal(master, answer, composer=True)
                     finally:
@@ -2912,14 +3225,15 @@ def store_selection_cases(state, workspace, valid_store):
                         lambda: os.close(slave), stop_created_host)
 
 
-def action_ready(descriptor, master, timeout=15, *, return_to_action=True):
+def action_ready(descriptor, master, timeout=15, *, return_to_action=True, shows=None):
     """Supply normal terminal credit until the actual fresh-input boundary.
 
     Read exactly one notification, never a future choice's byte. Return the
     distinct committed frames shown meanwhile. A selected inspection keeps
     the Action behind it; like a user, return to it once with Ctrl-G unless
     the caller is checking that paused state itself. Deliberately
-    withheld-credit controls must select the pipe directly.
+    withheld-credit controls must select the pipe directly. `shows` names
+    the offered frame awaited when it is not the choice, such as a reason's.
     """
     capture = terminal_capture(master)
     deadline = time.monotonic() + timeout
@@ -2955,12 +3269,9 @@ def action_ready(descriptor, master, timeout=15, *, return_to_action=True):
                     capture.feed(chunk)
                 # A notification from before a later invalidation (another
                 # page selected, or approval readiness redrawn) is stale:
-                # readiness is the visible Action with its choice prompt.
+                # readiness is the visible Action with its choice.
                 shown = capture.completed
-                choice = " ".join(shown.split())
-                if ("Approval paused" not in shown
-                        and capture.screen.display[capture.screen.cursor.y].startswith(">")
-                        and ("Type a + Enter to allow once · d + Enter to deny" in choice or "a Allow / d Deny Enter" in choice)):
+                if shows(shown) if shows else "Approval paused" not in shown and CHOICE_ROW.search(shown):
                     return "\n".join(frames)
     finally:
         capture.listener = None
@@ -3153,7 +3464,7 @@ int fsync(int fd) {
     stopped = "01234567-89ab-4cde-8012-3456789abcdf"
     (records / f"{invalid}.json").write_text("not a readable record")
     # Every mutation kind, including Session stop, is a recoverable capture.
-    stop = {"version": "1", "kind": "session_stop", "store": str(store.resolve()),
+    stop = {"version": "4", "kind": "session_stop", "store": str(store.resolve()),
         "key": stopped, "session": session}
     (records / f"{stopped}.json").write_text(json.dumps(stop, separators=(",", ":")))
     (records / "not-a-handle.json").write_text("not a record")
@@ -3180,7 +3491,7 @@ int fsync(int fd) {
 def silent_read_edit_cases():
     """Silent observation must not hide accepted draft edits with ECHO off."""
     import canonical_failure_integration as canonical
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-silent-edit."))
+    state = screen_fixture_root("rui-silent-edit.")
     home, store = state / "home", state / "store"
     home.mkdir(mode=0o700)
     host = caller = proxy = None
@@ -3239,7 +3550,7 @@ def silent_read_edit_cases():
 def opaque_session_commands_case():
     """Reject old identities and execute printed commands with the exact allocated ID."""
     from control_integration import raw_request
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-opaque-session."))
+    state = screen_fixture_root("rui-opaque-session.")
     home = state / "home"
     home.mkdir()
     store = state / "store'é$(false)"
@@ -3257,7 +3568,7 @@ def opaque_session_commands_case():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for key, session in (("prefix", "human/nul"), ("opaque", "human/nul\x00' é\n--last")):
-            body = {"version": "1", "kind": "configure", "store": str(store), "key": key,
+            body = {"version": "4", "kind": "configure", "store": str(store), "key": key,
                     "session": session, "configuration": {
                         **{name: {"state": "value", "value": value} for name, value in
                            (("workspace", str(state)), ("provider", "codex"), ("model", "gpt-6-sol"))},
@@ -3311,11 +3622,11 @@ def opaque_session_commands_case():
             print(json.dumps({"printed": printed, "decision": decision, "exact_session": True}), flush=True)
         fixture.wait_for(lambda: (state / "allowed-once").exists(), "printed Allow executed its exact Action")
         assert (state / "allowed-once").exists() and not (state / "must-not-run").exists()
-        # Type only once the decided choice has left the screen; a line begun
-        # at a choice withdrawn meanwhile is the separate defect #540.
+        # Type only once the decided choice has left the screen, so the
+        # keys reach the draft.
         capture = terminal_capture(master)
         deadline = time.monotonic() + 15
-        while "Opaque decisions complete." not in capture.completed or "Type a + Enter" in capture.completed:
+        while "Opaque decisions complete." not in capture.completed or "Allow once" in capture.completed:
             remaining = deadline - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], capture.completed
             chunk = os.read(master, 65536)
@@ -3406,7 +3717,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert "Bash runs without" not in greeting, ("bypass is quiet", greeting)
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", "Session: ", composer=True)
-        assert permission_row(binding, "bypass") and "Provider: codex" in binding and "Model: gpt-6-sol" in binding, binding
+        assert permission_row(binding, "bypass") and "Provider: codex" in binding and " · gpt-6-sol" in binding and "asks before Bash" not in binding, binding
         return_to_live(master)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
@@ -3566,8 +3877,8 @@ def renderer_cases():
     original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, original_limit[0]), original_limit[1]))
 
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-renderer."))
-    # Always wrap the Workspace, including on short Linux temporary roots.
+    state = screen_fixture_root("rui-renderer.")
+    # Always wrap the Workspace, whatever the temporary root.
     home, store, workspace = state / "home", state / "store", state / ("workspace-" + "w" * 80)
     home.mkdir(mode=0o700)
     workspace.mkdir()
@@ -3725,6 +4036,9 @@ def renderer_cases():
                 cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             terminal = Terminal(master, slave, caller)
+            # The capture matches the pty before the first frame: the input
+            # draws on the bottom row, past a default-sized capture's last.
+            terminal.capture.resize(columns, rows)
             if opening:
                 terminal.wait(predicate=lambda: terminal.capture.draft("", 2))
             yield terminal
@@ -3943,17 +4257,20 @@ def renderer_cases():
             with terminal(consent_session, ready_write) as tty:
                 tty.send("propose renderer action\n\x1b[200~a\x1b[201~", predicate=lambda: tty.capture.draft("a", 3))
                 release.set()
-                opened = shown = tty.wait("Action continues · PgDn")
+                opened = tty.wait("Action continues · PgDn")
+                # The Action arrived beside the pasted draft, which keeps the
+                # input row until Ctrl-G returns to the Action's own row. The
+                # line under it says Enter denies, so that frame is offered.
+                assert "Allow once" not in opened and "PgDn reads the rest" not in opened, opened
+                tty.ready(ready_read)
+                shown = tty.send("\x07", "PgDn reads the rest")
                 assert "printf approved > renderer-effect" not in shown, shown
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                # An unread Action takes choice text but never opens a fresh
-                # choice: readiness waits for its last row.
-                tty.send("/help\n", "Enter sends")
-                assert "Enter sends" in tty.capture.completed, tty.capture.completed
-                tty.send("\x07", "Action continues · PgDn")
-                tty.send("a\n", "Read the whole Action first")
+                # An unread Action offers no choice: its input row says to read
+                # on, and Enter there authorizes nothing.
+                assert "\n  PgDn reads the rest\n" in shown and "Allow once" not in shown, shown
+                tty.send("\n", "Read the whole Action first")
                 assert not (workspace / "renderer-effect").exists(), "unseen Action tail was approved"
-                tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
                 for _ in range(8):
                     tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
                     if "Action read" in tty.capture.completed:
@@ -3961,48 +4278,49 @@ def renderer_cases():
                 else:
                     raise AssertionError("complete Action never became ready after paging")
                 tty.ready(ready_read)
-                shown = tty.wait("Type a + Enter to allow once · d + Enter to deny")
-                assert tty.capture.draft("", 2, prompt="> "), "unread choice text survived readiness"
-                tty.send("\n", "Type a + Enter to allow once · d + Enter to deny")
-                # The empty Enter rejects the choice, which becomes fresh again.
-                tty.ready(ready_read)
+                shown = tty.wait(CHOICE)
                 assert "printf approved > renderer-effect" in shown, shown
-                # Paging hid the Action's heading, so the choice keeps where it
-                # runs beside it; the opening frame showed that heading instead.
-                assert "? Run Bash" not in shown and "Run Bash · Renderer consent\nWorkspace:" in shown, shown
-                kept = shown.split("Run Bash · Renderer consent\nWorkspace:", 1)[1].split("Type a + Enter", 1)[0]
-                assert "".join(kept.split()) == str(workspace) + "·Timelimit:Hostdefault", shown
-                assert "\nRun Bash · Renderer consent\nWorkspace:" not in opened, opened
-                # The header leads the Action: where and how long, then the command.
-                assert "? Run Bash · Renderer consent" in opened, opened
-                shown_workspace = opened.split("\n  Workspace:", 1)[1].split("\n  Time limit:", 1)[0]
-                assert "\n" in shown_workspace, "Workspace wrap witness did not wrap"
-                assert shown_workspace.replace("\n", "").replace(" ", "") == str(workspace), opened
-                assert "\n  Time limit: Host default\n  $ # exact command line 0\n    # exact command line 1\n" in opened, opened
+                # Paging hid the Action's ? row, so the choice keeps what it is
+                # for right above the rule; the opening frame showed that row.
+                rows = shown.split("\n")
+                rule = next(index for index, row in enumerate(rows) if row.startswith("──"))
+                assert rows[rule - 1] == "? Renderer consent" and shown.count("? Renderer consent") == 1, shown
+                assert "Workspace" not in shown and "Time limit" not in shown, shown
+                # The request leads with what it is for, then the exact command.
+                assert "\n? Renderer consent\n  $ # exact command line 0\n  │ # exact command line 1\n" in "\n" + opened, opened
+                assert "Workspace" not in opened and "Time limit" not in opened and "Run Bash" not in opened, opened
                 assert set((home / ".config/rui/requests").glob("*.json")) == records, "early a survived until approval readiness"
                 current = fixture.command("session", "inspect", "--store", store, "--session", consent_session)
                 action = current["actionable_permissions"][0]["action"]
                 exact = json.loads(run(home, "action", "inspect", "--store", store, "--session", consent_session, "--action", action))
                 assert exact["arguments"] == arguments
                 assert not (workspace / "renderer-effect").exists()
-                tty.send("\x1b[200~a\x1b[201~\n", "Type a + Enter to allow once · d + Enter to deny")
+                # A paste is typing: it joins the retained draft, whose Enter
+                # in the same burst was offered nothing, so it sends nothing.
+                tty.send("\x1b[200~a\x1b[201~\n", predicate=lambda: REASON_NOT_READY in tty.capture.completed and tty.capture.draft("aa", 4))
+                # The refusal says what Enter there does, so its frame is
+                # offered.
+                tty.ready(ready_read)
+                tty.send("\x7f\x07", CHOICE)
                 tty.ready(ready_read)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
                 assert not (workspace / "renderer-effect").exists(), "pasted consent authorized an Action"
-                # Beside a ready Action, Ctrl-R in any encoding is choice
-                # input: it rejects the choice, recovering and deciding nothing.
-                # A malformed key (bad modifier, event type or code) is a key
+                # Beside a ready Action, Ctrl-R in any encoding retries nothing
+                # and ends freshness, so the Enter after it decides nothing. A
+                # malformed key (bad modifier, event type or code) is a key
                 # whose meaning was lost: it fails closed the same way rather
-                # than being skipped so that the a before it decides.
+                # than being skipped so that the Enter after it decides.
                 for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[114;999u", "\x1b[13;0u", "\x1b[97;1:9u", "\x1b[27;2;13;1~", "\x1b[1114112u", "\x1b[+27;1;13~"):
-                    tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
-                    tty.send(recover + "\n", "Decision input rejected")
+                    # Another notice first, so each refusal draws its own.
+                    tty.send("\x12", "! Action needs a decision; nothing to retry.")
                     tty.ready(ready_read)
+                    os.write(tty.master, (recover + "\n").encode())
+                    tty.ready(ready_read)
+                    assert "! Not ready; nothing authorized." in tty.capture.completed, tty.capture.completed
                     assert set((home / ".config/rui/requests").glob("*.json")) == records and not proxy.exchanges
                     assert not (workspace / "renderer-effect").exists(), "Ctrl-R at the choice authorized an Action"
-                # A complete non-pasted line, not its first byte, authorizes.
-                tty.send("a", "Type a + Enter to allow once · d + Enter to deny")
-                assert not (workspace / "renderer-effect").exists()
+                # Enter confirms the highlighted Allow once.
+                assert "› Allow once" in tty.capture.completed, tty.capture.completed
                 tty.send("\n", marker)
                 assert (workspace / "renderer-effect").read_bytes() == b"approved"
                 decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
@@ -4047,16 +4365,16 @@ def renderer_cases():
             endpoint.responses.append(fixture.sse_tool_calls(f"renderer-elsewhere-{decision}", [("bash", f"elsewhere-{decision}-call", arguments)]))
             marker = answer(f"elsewhere {decision}")
             with terminal(session) as tty:
-                tty.send("propose an Action decided elsewhere\n", "Type a + Enter to allow once · d + Enter to deny")
+                tty.send("propose an Action decided elsewhere\n", CHOICE)
                 action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
-                # A line begun at the choice ends there (#540): `/` typed
-                # before the decision and `status` + Enter after it open
-                # /status, and never send `status` as a Message.
-                tty.send("/", predicate=lambda: tty.capture.draft("/", 3, prompt="> "))
+                # A key typed beside the Action moves to the draft, which
+                # outlives the decision: `/` before it and `status` + Enter
+                # after it open /status, and never send `status` as a Message.
+                tty.send("/", predicate=lambda: tty.capture.draft("/", 3))
                 generation = tty.capture.generation
                 run(home, "action", decision, "--store", store, "--session", session, "--action", action)
                 shown = tty.wait(marker, after=generation)
-                for pending in ("Type a + Enter", "PgDn reads", "? Run Bash"):
+                for pending in ("Allow once", "PgDn reads", "Approval"):
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
                 requests = len(endpoint.requests)
@@ -4067,15 +4385,15 @@ def renderer_cases():
                 # Paging and a /status round trip cannot bring the choice back.
                 tty.send("\x1b[6~/status\n", "Session: ")
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
-                assert "Type a + Enter" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
+                assert "Allow once" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
-        print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key; a line begun there stays there", flush=True)
+        print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key; a draft begun beside it stays the draft", flush=True)
 
-        # A line begun at one choice never decides the next (#540): `/` at the
-        # first of two Actions, decided elsewhere, then `a` + Enter is the
-        # command `/a`. The second Action waits for that Enter and is decided
-        # only by its own fresh line.
+        # Typing beside one Action never decides the next: `/` at the first
+        # of two, decided elsewhere, then `a` + Enter is the command `/a`.
+        # The line outlives the command until Esc, and the second Action is
+        # decided only at its own choice once input is fresh again.
         session = configure("ask")
         endpoint.responses.append(fixture.sse_tool_calls("renderer-successor", [
             ("bash", f"successor-{index}", json.dumps({"cmd": f"printf decided > renderer-successor-{index}", "description": f"Successor {index}", "timeout_ms": None}))
@@ -4084,23 +4402,26 @@ def renderer_cases():
         ready_read, ready_write = os.pipe()
         try:
             with terminal(session, ready_write) as tty:
-                tty.send("propose two Actions\n", "Type a + Enter to allow once · d + Enter to deny")
+                tty.send("propose two Actions\n", CHOICE)
                 tty.ready(ready_read)
                 first, second = [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
-                tty.send("/", predicate=lambda: tty.capture.draft("/", 3, prompt="> "))
+                tty.send("/", predicate=lambda: tty.capture.draft("/", 3))
                 generation = tty.capture.generation
                 run(home, "action", "deny", "--store", store, "--session", session, "--action", first)
                 tty.wait("Successor 1 — Denied", after=generation)
                 # The other client saved its own record in this HOME.
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                # Give the second Action the time it would take to be shown
-                # and ready; it must wait for the open line instead.
-                select.select([ready_read], [], [], 2)
+                # The typed line outlives the first Action and its command, so
+                # the second waits beside it with no prompt until Esc.
                 tty.send("a\r", "! Unknown command /a · /help")
-                tty.ready(ready_read)
+                assert CHOICE not in tty.capture.completed, tty.capture.completed
+                tty.send("\x07", CHOICE)
                 assert [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]] == [second]
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
-                tty.send("d\r", marker)
+                tty.ready(ready_read)
+                tty.send("\x1b[C", "› Deny")
+                tty.ready(ready_read)
+                tty.send("\r", marker)
                 decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
                 assert [(item["action"], item["decision"]) for item in decisions] == [(second, "deny")], decisions
                 assert not any((workspace / f"renderer-successor-{index}").exists() for index in (1, 2))
@@ -4108,11 +4429,11 @@ def renderer_cases():
                 tty.finish()
         finally:
             dispose_all(lambda: os.close(ready_read), lambda: os.close(ready_write))
-        print("renderer: a line begun at one choice never decides the next Action", flush=True)
+        print("renderer: typing beside one Action never decides the next", flush=True)
 
-        # A sequence the choice is decoding finishes there (#540): a /status
-        # page whose read joins between the two bytes of é waits for the
-        # second, so é stays the choice's line and is never sent.
+        # A sequence decoding beside the Action finishes in the draft: a
+        # /status page whose read joins between the two bytes of é waits for
+        # the second, so é stays the draft's and is never sent.
         session = configure("ask")
         endpoint.responses.append(fixture.sse_tool_calls("renderer-fragment", [
             ("bash", "fragment-call", json.dumps({"cmd": "printf never > renderer-fragment-effect", "description": "Fragment action", "timeout_ms": None}))]))
@@ -4127,7 +4448,7 @@ def renderer_cases():
         ready_read, ready_write = os.pipe()
         try:
             with terminal(session, ready_write) as tty:
-                tty.send("propose a fragment Action\n", "Type a + Enter to allow once · d + Enter to deny")
+                tty.send("propose a fragment Action\n", CHOICE)
                 tty.ready(ready_read)
                 action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
                 proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two_reads)
@@ -4149,21 +4470,22 @@ def renderer_cases():
                 tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, after=generation, timeout=20)
                 requests = len(endpoint.requests)
                 tty.send("\x07", marker)
-                assert tty.capture.draft("", 2, prompt="> "), tty.capture.completed
-                tty.send("\r", predicate=lambda: tty.capture.draft("", 2))
+                assert tty.capture.draft("é", 3), tty.capture.completed
                 assert len(endpoint.requests) == requests, endpoint.requests
-                assert "› é" not in tty.capture.completed, tty.capture.completed
+                # Only the draft row shows it: no Message row was sent.
+                assert tty.capture.completed.count("› é") == 1, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             dispose_all(*(event.set for event in released), lambda: os.close(ready_read), lambda: os.close(ready_write))
         proxy.close()
         proxy = None
-        print("renderer: a page opening mid-sequence at the choice keeps that sequence there", flush=True)
+        print("renderer: a page opening mid-sequence beside the Action keeps that sequence in the draft", flush=True)
 
-        # Reading a tall Action to its end clears earlier choice text, but a
-        # slash command begun while reading stays a command (#540): `/`, the
-        # final page, then `a` + Enter runs `/a` and authorizes nothing.
+        # A slash command begun while reading a tall Action stays a command:
+        # `/`, the final page, then `a` + Enter runs `/a` and authorizes
+        # nothing. Esc returns to the choice, which decides once input is
+        # fresh.
         session = configure("ask")
         command = "\n".join(f"# reading line {index}" for index in range(100)) + "\nprintf allowed > renderer-reading-effect"
         endpoint.responses.append(fixture.sse_tool_calls("renderer-reading", [
@@ -4173,22 +4495,24 @@ def renderer_cases():
         try:
             with terminal(session, ready_write) as tty:
                 # An unread Action draws no decision prompt, so no readiness.
-                tty.send("propose a tall Action\n", "Action continues · PgDn")
-                tty.send("/", predicate=lambda: tty.capture.draft("/", 3, prompt="> "))
+                tty.send("propose a tall Action\n", "PgDn reads the rest")
+                tty.send("/", predicate=lambda: tty.capture.draft("/", 3))
                 for _ in range(8):
                     tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
                     if "Action read" in tty.capture.completed:
                         break
                 else:
                     raise AssertionError("tall Action never became ready after paging")
-                tty.ready(ready_read)
-                tty.wait("Type a + Enter to allow once · d + Enter to deny")
-                assert tty.capture.draft("/", 3, prompt="> "), tty.capture.completed
+                assert tty.capture.draft("/", 3), tty.capture.completed
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 tty.send("a\r", "! Unknown command /a · /help")
-                tty.ready(ready_read)
+                assert CHOICE not in tty.capture.completed, tty.capture.completed
+                tty.send("\x07", CHOICE)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
-                tty.send("d\r", marker)
+                tty.ready(ready_read)
+                tty.send("\x1b[C", "› Deny")
+                tty.ready(ready_read)
+                tty.send("\r", marker)
                 assert not (workspace / "renderer-reading-effect").exists()
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
@@ -4208,7 +4532,7 @@ def renderer_cases():
         with terminal(session) as tty:
             frames = tty.every_frame()
             tty.send("run the tool demonstration\n", marker)
-            assert any("Working" in frame for frame in frames), frames
+            assert any(LIVE_LINE.search(frame) for frame in frames), frames
             for frame in frames:
                 for label in labels:
                     assert frame.count(label) <= 1, (label, frame)
@@ -4296,8 +4620,8 @@ def renderer_cases():
             frames = tty.every_frame()
             sent = len(proxy.mutations)
             def accepted():
-                rows = tty.capture.completed.rstrip("\n").split("\n")
-                return len(proxy.mutations) > sent and rows[-1].strip() == "›" and "Sending…" not in rows
+                rows = tty.capture.completed.split("\n")
+                return len(proxy.mutations) > sent and rows[tty.capture.screen.cursor.y].strip() == "›" and "Sending…" not in rows
             tty.send("BBB\n", predicate=accepted)
             gates[b"AAA"].set()
             tty.wait(predicate=lambda: holding[b"BBB"].is_set() and "› AAA" in tty.capture.completed)
@@ -4346,15 +4670,14 @@ def renderer_cases():
             ("bash", f"status-attention-{index}", json.dumps({"cmd": f"printf {index}", "description": f"Attention {index}", "timeout_ms": None}))
             for index in range(3)]))
         with terminal(session) as tty:
-            tty.send("propose three Actions\n", "Type a + Enter to allow once · d + Enter to deny")
+            tty.send("propose three Actions\n", CHOICE)
             actions = [row["action"] for row in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
             assert len(actions) == 3, actions
-            shown = tty.send("/status\n", "Session: ")
-            for action in actions:
-                assert f"Action requiring attention: {action}" in shown, shown
+            tty.send("/status\n", "Session: ")
             # The update replaces the page in place: what the user scrolled
             # to and was told stays, and nothing returns to the top.
-            tty.resize(80, 12)
+            # Thirteen rows: the rule above the input takes one of them.
+            tty.resize(80, 13)
             tty.wait(predicate=lambda: f"Action requiring attention: {actions[0]}" not in tty.capture.completed or "Session: " not in tty.capture.completed)
             # Line by line, so the last Action lands on the bottom row however
             # many rows the Store path wraps to.
@@ -4363,7 +4686,9 @@ def renderer_cases():
                     break
                 tty.send("\x1b[1;2B", predicate=lambda: True)
             scrolled = tty.capture.completed
-            assert "Session: " not in scrolled and f"Action requiring attention: {actions[0]}" in scrolled, scrolled
+            assert "Session: " not in scrolled, scrolled
+            for action in actions:
+                assert f"Action requiring attention: {action}" in scrolled, scrolled
             tty.send("/foo\n", "! Unknown command /foo · /help")
             frames = tty.every_frame()
             run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
@@ -4374,8 +4699,10 @@ def renderer_cases():
             tty.wait(predicate=updated, timeout=10)
             for frame in frames:
                 assert "Session: " not in frame and "! Unknown command /foo · /help" in frame, frame
-            # A command typed at the choice while another runs waits for it,
-            # rather than queueing behind it or replacing its page.
+            # Running a command returns to the Action. The /status line was
+            # typed beside it, so the draft keeps the input row until Esc
+            # returns to the choice, which the command holds: a command typed
+            # there meanwhile is ignored, never queued.
             reading, release_read = threading.Event(), threading.Event()
             missing = b"00000000-0000-4000-8000-000000000000"
             def hold_read(body):
@@ -4389,19 +4716,18 @@ def renderer_cases():
             frames = tty.every_frame()
             os.write(tty.master, b"/result " + missing + b"\n")
             assert reading.wait(10), tty.capture.completed
-            # Input goes to the editor the latest frame shows: type the next
-            # command once the held command has returned to the choice.
-            tty.wait(predicate=lambda: "then a/d + Enter" in tty.capture.completed)
-            tty.send("/requests\n", "! Command still running. Try again when it finishes.")
-            partial = [frame for frame in frames if "/result" in frame.rstrip("\n").split("\n")[-1]]
+            tty.send("\x07", "Command running…")
+            tty.send("/requests\n", "! Command still running.")
+            partial = [frame for frame in frames if any("/result" in row for row in frame.rstrip("\n").split("\n")[-2:])]
             assert len(partial) <= 1, (len(partial), partial[:2])
             release_read.set()
-            tty.wait(predicate=lambda: "Command still running" not in tty.capture.completed, timeout=10)
+            tty.wait(predicate=lambda: "Command running…" not in tty.capture.completed, timeout=10)
+            assert "Local recovery handles" not in tty.capture.completed, tty.capture.completed
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: an open /status page updates in place and a choice command waits for a running one", flush=True)
+        print("renderer: an open /status page updates in place and a command typed at a held choice is ignored", flush=True)
 
         # A page that spans several output windows still commits as one
         # capture: a running call never vanishes between footer and history.
@@ -4439,8 +4765,8 @@ def renderer_cases():
         proxy = None
         print("renderer: a page spanning several windows commits with its footer as one capture", flush=True)
 
-        # The composer status comes from the capture its history does: an
-        # ended Turn's answer never sits beside Working….
+        # The live line comes from the capture its history does: an ended
+        # Turn's answer never sits beside it.
         session = configure()
         endpoint.responses.append(fixture.sse_tool_calls("renderer-status-capture", [
             ("bash", "status-capture-call", json.dumps({"cmd": "sleep 1", "description": "Wait for the capture", "timeout_ms": None}))]))
@@ -4454,17 +4780,17 @@ def renderer_cases():
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "turn ended", timeout=20)
             release.set()
             tty.wait(marker, timeout=20)
-            tty.wait(predicate=lambda: "Working…" not in tty.capture.completed, timeout=5)
+            tty.wait(predicate=lambda: not LIVE_LINE.search(tty.capture.completed), timeout=5)
             for frame in frames:
-                assert not (marker in frame and "Working…" in frame), frame
+                assert not (marker in frame and LIVE_LINE.search(frame)), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: the composer status and history come from one capture", flush=True)
+        print("renderer: the live line and history come from one capture", flush=True)
 
-        # /status opens from the capture the composer status shows: a Turn
-        # that ended unseen never reads completed beside Working….
+        # /status opens from the capture the live line shows: a Turn that
+        # ended unseen never reads completed beside it.
         session = configure()
         endpoint.responses.append(fixture.sse_tool_calls("renderer-status-open", [
             ("bash", "status-open-call", json.dumps({"cmd": "sleep 1", "description": "Wait to open status", "timeout_ms": None}))]))
@@ -4481,12 +4807,12 @@ def renderer_cases():
             release.set()
             tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, timeout=20)
             for frame in frames:
-                assert not ("Session: " in frame and "Working…" in frame), frame
+                assert not ("Session: " in frame and LIVE_LINE.search(frame)), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: /status opens from the capture the composer status shows", flush=True)
+        print("renderer: /status opens from the capture the live line shows", flush=True)
 
         # A /status not yet shown yields to a later page request: the page
         # asked for last is the one that stays on screen, even when the read
@@ -4556,7 +4882,8 @@ def renderer_cases():
             ("bash", "paused-call", json.dumps({"cmd": "printf paused", "description": "Paused draft", "timeout_ms": None}))]))
         marker = answer("paused done")
         with terminal(session) as tty:
-            tty.send("propose paused\n", "Type a + Enter to allow once · d + Enter to deny")
+            tty.send("propose paused\n", CHOICE)
+            # `/` beside the Action moves to the draft, where commands run.
             tty.send("/details\n", "Approval paused · Esc returns to Action")
             tty.send("next draft", predicate=lambda: tty.capture.draft("next draft", 12))
             tty.send("\r", "! Action needs a decision; Esc returns to it. Draft retained.")
@@ -4576,12 +4903,11 @@ def renderer_cases():
             assert tty.capture.draft(draft + "?", len(draft) + 3), tty.capture.completed
             assert set((home / ".config/rui/requests").glob("*.json")) == records
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
-            tty.send("\x1b", "Type a + Enter to allow once · d + Enter to deny")
-            # Shift-Enter as Ghostty sends it (ESC CR) adds a line to the
-            # choice, so a, then it, then Enter decides nothing.
-            tty.send("a\x1b\r\r", "! Choose a or d. Nothing authorized.")
+            tty.send("\x1b", CHOICE)
+            # Shift-Enter as Ghostty sends it (ESC CR) is a chord, never Enter.
+            tty.send("\x1b\r", "! Key combination not recognized; nothing authorized.")
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
-            tty.send("a\r", marker)
+            tty.send(ALLOW.decode(), marker)
             tty.wait(predicate=lambda: tty.capture.draft(draft + "?", len(draft) + 3), timeout=10)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
@@ -4612,7 +4938,7 @@ def renderer_cases():
             release_reply.set()
             tty.wait(predicate=lambda: "Sending…" not in tty.capture.completed, timeout=10)
             time.sleep(1)
-            tty.wait(predicate=lambda: "Sent" not in tty.capture.completed.rstrip("\n").split("\n")[-3:], timeout=5)
+            tty.wait(predicate=lambda: "Sent" not in tty.capture.completed.rstrip("\n").split("\n")[-4:], timeout=5)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -4647,6 +4973,45 @@ def renderer_cases():
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: an unbound Alt chord is dropped as it arrives and the draft stays", flush=True)
+
+        # Ctrl-P on an empty draft brings back the Messages the person sent,
+        # newest first and never a peer's; Ctrl-N walks forward, and past
+        # the newest the draft is empty again. An edit makes it an ordinary
+        # draft. Up still scrolls throughout. Recalling sends nothing.
+        session = configure()
+        with terminal(session) as tty:
+            peer = 'printf %s RECALL-PEER | rui session send --to "$RUI_ADDRESS" > /dev/null'
+            endpoint.responses.append(fixture.sse_tool_calls("recall-peer", [("bash", "recall-peer-call", json.dumps(
+                {"cmd": peer, "description": "Send a Message to itself", "timeout_ms": None}))]))
+            tty.send("RECALL-ONE\r", answer("recall one"))
+            assert "RECALL-PEER" in endpoint.requests[-1].decode(), endpoint.requests[-1]
+            tty.send("RECALL-TWO\r", answer("recall two"))
+            # A script's Message the draft cannot hold as typed text.
+            marker = answer("recall control")
+            admit(home, "session", "send", "--store", store, "--to", session, input="RECALL-\x01-CONTROL")
+            tty.wait(marker)
+            tty.send("//RECALL-SLASH\r", answer("recall slash"))
+            submitted("/RECALL-SLASH")
+            requests = len(endpoint.requests)
+            older, newer = "\x10", "\x0e"
+            passed = "Passed over a sent message the draft cannot hold."
+            for step, (key, draft) in enumerate(((older, "//RECALL-SLASH"), ("\x1b[112;5u", "RECALL-TWO"), ("\x1b[27;5;112~", "RECALL-ONE"),
+                    (newer, "RECALL-TWO"), ("\x1b[110;5u", "//RECALL-SLASH"), (newer, ""), (older, "//RECALL-SLASH"))):
+                tty.send(key, predicate=lambda: tty.capture.draft(draft, 2 + len(draft)))
+                # Only a step over the control Message says it passed one, either way.
+                assert (passed in tty.capture.completed) == (step in (1, 4)), (step, tty.capture.completed)
+            # Up on a recalled draft scrolls, and the draft stays recalled.
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            tty.send("\x1b[B", predicate=lambda: "Browsing" not in tty.capture.completed and tty.capture.draft("//RECALL-SLASH", 16))
+            # Presses made while a step is read add up; Ctrl-P stops at the oldest.
+            tty.send(older * 4, predicate=lambda: "No earlier message." in tty.capture.completed and tty.capture.draft("RECALL-ONE", 12))
+            tty.send("!", predicate=lambda: tty.capture.draft("RECALL-ONE!", 13))
+            tty.send(older, predicate=lambda: "Ctrl-P recalls sent messages once the draft is empty." in tty.capture.completed)
+            assert tty.capture.draft("RECALL-ONE!", 13), tty.capture.completed
+            assert len(endpoint.requests) == requests, endpoint.requests
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: Ctrl-P and Ctrl-N recall only the person's sent Messages, and an edit ends recall", flush=True)
 
         # An ESC inside a marked paste rejects the paste, and the end marker
         # right after it still ends it: the keys typed next are the draft's,
@@ -4717,14 +5082,24 @@ def renderer_cases():
             proxy = None
         print("renderer: a page asked for before a Message never opens over it", flush=True)
 
-        # A Message's conversation row shows nothing live (its Admission did),
-        # so a later read cannot begin a transcript before it. Once eviction
-        # cuts the Admission, older pages still hold the Message, whether its
-        # row arrives alone (held reply) or with the reply.
+        # A Message sent while an answer runs waits above the input, then
+        # shows live as its conversation row. Once eviction cuts the row,
+        # older pages still hold the Message, whether its row arrives alone
+        # (held reply) or with the reply.
         # A long Message shows collapsed live, so the reply alone outgrows
         # the live view. Older pages show the Message as a bare fold row.
         reply = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(4400))
         omitted = "› ┄"
+
+        def message_once(shown, form, row=None):
+            # The long Message shows exactly once, in the form the case
+            # expects: `› ┄` where eviction cut its live row and older pages
+            # show it, or its live row's first characters. Never both.
+            other = (row or live_row) if form == omitted else omitted
+            assert shown.count(form) == 1 and other not in shown, (form, shown)
+            return shown.index(form)
+
+        live_row = "› " + "m" * 40
 
         def after_message(shown, reply="REPLY-00000"):
             # What follows the Message: its reply live, the long reply's own
@@ -4792,7 +5167,6 @@ def renderer_cases():
         heading = "Message · 301 lines · 16 KB"
         endpoint.responses.append(fixture.sse_answer("expand-answer", "reason", "message", "EXPAND-ANSWER")[0])
         with terminal(session, rows=40) as tty:
-            tty.capture.resize(80, 40)
             tty.send("\x1b[200~" + pasted + "\x1b[201~\r", "EXPAND-ANSWER")
             shown = tty.capture.completed
             assert "PASTE-0001" in shown and "PASTE-0002" not in shown and "┄ 299 more lines" in shown and "more lines ·" not in shown, shown
@@ -4805,8 +5179,9 @@ def renderer_cases():
                 assert "PASTE-END" in end and "PASTE-0299" in end, end
                 tty.send(return_key, predicate=lambda: "Message ·" not in tty.capture.completed)
                 assert tty.capture.completed == before, (return_key, before, tty.capture.completed)
-            # In the transcript the same block opens and returns to its rows.
-            tty.send("\x1b[A", "Browsing · Esc returns")
+            # In the transcript the same block opens and returns to its rows,
+            # once the transcript has loaded what precedes it.
+            tty.send("\x1b[A", predicate=lambda: "Browsing · Esc returns" in tty.capture.completed and "Start of conversation" in tty.capture.completed)
             browsing = tty.capture.completed
             tty.send("\x0f", heading)
             tty.send("\x1b", predicate=lambda: "Message ·" not in tty.capture.completed)
@@ -4849,7 +5224,14 @@ def renderer_cases():
                 if "┄ 299 more lines" in tty.capture.completed:
                     break
                 tty.send("\x1b[5~", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
-            assert "┄ 299 more lines" in tty.capture.completed, tty.capture.completed
+            # The older page the top asked for joins above the rows in view;
+            # a line down and a page up always draw, and show it once it has.
+            for _ in range(10):
+                if "Start of conversation" in tty.capture.completed:
+                    break
+                tty.send("\x1b[B", predicate=lambda: True)
+                tty.send("\x1b[5~", predicate=lambda: True)
+            assert "┄ 299 more lines" in tty.capture.completed and "Start of conversation" in tty.capture.completed, tty.capture.completed
             holding.set()
             held.clear()
             release.clear()
@@ -4878,6 +5260,11 @@ def renderer_cases():
             tty.finish()
         print("renderer: Ctrl-O shows a collapsed Message whole and returns to the same rows", flush=True)
 
+        def waiting(tty, text, label="queued"):
+            # The dimmed row above the input: the newest queued Message's
+            # first line, cut to fit, and how many wait at the right edge.
+            return any(row.startswith("› " + text) and row.endswith(" " + label) for row in tty.capture.completed.split("\n"))
+
         def traverse(tty, steps=10):
             tty.send("\x1b[A", "Browsing · Esc returns")
             # Each step loads one older page or one listed Message.
@@ -4885,19 +5272,20 @@ def renderer_cases():
                 tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
                 if "Start of conversation" in tty.capture.completed:
                     break
-            return tty.capture.completed
+            # The last row is the Session line, which can name an unlabelled
+            # Session by its first Message.
+            return tty.capture.completed.rsplit("\n", 1)[0]
 
-        def reachable(shown, before, reply="REPLY-00000"):
-            # Older pages reach the Message exactly once, after what preceded
-            # it and before its reply, or before the rows that left the view.
+        def reachable(shown, before, row, reply="REPLY-00000", form=omitted):
+            # The transcript reaches the Message exactly once, after what
+            # preceded it and before its reply, or before the rows that left
+            # the view.
             assert "Start of conversation" in shown, shown
-            assert shown.count(omitted) == 1, shown
-            assert shown.index(before) < shown.index(omitted) < after_message(shown, reply), shown
+            assert shown.index(before) < message_once(shown, form, row) < after_message(shown, reply), shown
 
-        # A Message sent while a tool runs shows as its Admission at once but
-        # gains its conversation row only after the tool's result shows. No
-        # transcript may start between them, and after eviction older pages
-        # still reach the Message.
+        # A Message sent while a tool runs waits above the input and gains its
+        # conversation row only after the tool's result shows; after
+        # eviction older pages still reach the Message.
         session = configure()
         gate = workspace / "steer-gate"
         endpoint.responses.append(fixture.sse_tool_calls("evicted-steer", [
@@ -4906,18 +5294,18 @@ def renderer_cases():
         endpoint.responses.append(fixture.sse_answer("evicted-steer", "reason", "message", reply)[0])
         with terminal(session) as tty:
             tty.send("start steering\n", "Wait for steer")
-            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "m" * 40))
             assert not gate.exists()
             gate.touch()
             tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "Wait for steer")
+            reachable(shown, "Wait for steer", live_row)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a Message steered into a running tool stays in the transcript after eviction", flush=True)
 
-        # A Message queued behind a running answer shows as its Admission
-        # before that answer, but its conversation row follows it.
+        # A Message queued behind a running answer waits above the input,
+        # and its conversation row follows the answer.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("evicted-first", "reason", "message", "FIRST-ANSWER-DONE")[0], first_release))
@@ -4926,19 +5314,18 @@ def renderer_cases():
             requests = len(endpoint.requests)
             tty.send("FIRST-SMALL-QUESTION\n", predicate=lambda: "› FIRST-SMALL-QUESTION" in tty.capture.completed)
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-            tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "q" * 40 in tty.capture.completed)
+            tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "q" * 40))
             first_release.set()
             tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "FIRST-ANSWER-DONE")
+            reachable(shown, "FIRST-ANSWER-DONE", "› " + "q" * 40)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a Message queued behind an answer stays in the transcript after eviction", flush=True)
 
         # One page holds a long answer, the conversation row of the Message
-        # queued behind it and that Message's reply. The page cannot begin a
-        # transcript at the answer, which the Message's Admission preceded,
-        # but can at the reply; older pages from there reach the Message.
+        # queued behind it and that Message's reply; the transcript reaches
+        # the Message once, after the answer.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("batched-first", "reason", "message", reply)[0], first_release))
@@ -4958,12 +5345,16 @@ def renderer_cases():
             release.set()
             tty.wait("SECOND-REPLY-DONE", timeout=30)
             shown = traverse(tty)
-            reachable(shown, "DRIVER-QUESTION", "SECOND-REPLY-DONE")
+            # Live output showed the Message as its own row, after the answer
+            # it waited behind, so the transcript reaches it there, once.
+            assert "Start of conversation" in shown, shown
+            assert shown.index("DRIVER-QUESTION") < shown.index("Historical item omitted: position") < message_once(shown, live_row), shown
+            tty.send("\x1b[6~", "SECOND-REPLY-DONE")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a Message whose row and reply share a page with a long answer stays reachable after eviction", flush=True)
+        print("renderer: a Message whose row and reply share a page with a long answer evicted before them shows once, as its row", flush=True)
 
         # The same page shape with an answer that live output shortens: its
         # styling is not kept and its oversized cluster is escaped. Eviction
@@ -4994,7 +5385,9 @@ def renderer_cases():
             tty.wait("REPLY-04099", timeout=30)
             shown = traverse(tty)
             assert "Earlier rows left this view." not in shown, shown
-            reachable(shown, "STYLED-END")
+            # The Message's row is the last row before the reply, so it stays
+            # live with it.
+            reachable(shown, "STYLED-END", live_row, form=live_row)
             # The reply starts whole, once, where older pages end.
             assert shown.count("REPLY-00000") == 1 and "\nREPLY-00000 " in shown, shown
             assert shown.count("STYLED-END") == 1 and shown.count("bold11") == 1, shown
@@ -5040,8 +5433,8 @@ def renderer_cases():
 
         # A Message queued behind a long answer gains its conversation row
         # once that answer ends, but its own answer is still held: the read
-        # that holds its row shows nothing. After eviction cuts its preview,
-        # older pages must still reach it.
+        # that holds its row shows only that row, after the answer evicted
+        # everything before it, and the transcript reaches it there, once.
         session = configure()
         first_release, second_release = threading.Event(), threading.Event()
         endpoint.responses.append((fixture.sse_answer("silent-first", "reason", "message", reply)[0], first_release))
@@ -5060,18 +5453,17 @@ def renderer_cases():
                 assert "SILENT-SECOND-DONE" not in tty.capture.completed
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count(omitted) == 1, shown
-                # Its row, after the omitted reply's row, not the live preview before it.
-                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index(omitted), shown
+                # Its row, after the omitted reply's row.
+                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < message_once(shown, live_row), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             second_release.set()
-        print("renderer: a Message whose row a silent read holds stays reachable after eviction", flush=True)
+        print("renderer: a Message whose row a read holds alone, after a long answer, shows once as its row", flush=True)
 
         # The same, with the Message's own turn waiting on an Action: a call
-        # is outstanding while reads hold the row, and once decided its
-        # result takes a later position and shows once.
+        # is outstanding after the row, and once decided its result takes a
+        # later position and shows once.
         session = configure("ask")
         first_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("asked-first", "reason", "message", reply)[0], first_release))
@@ -5082,33 +5474,32 @@ def renderer_cases():
             # The whole transcript must fit one screen; each raw export wraps
             # with the Store path's length, which is far longer on macOS.
             with terminal(session, ready_write, rows=40) as tty:
-                tty.capture.resize(80, 40)
                 requests = len(endpoint.requests)
                 tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
                 first_release.set()
-                tty.wait("Type a + Enter to allow once · d + Enter to deny", timeout=30)
+                tty.wait(CHOICE, timeout=30)
                 # A pending Action holds the screen until decided (/history waits).
                 tty.ready(ready_read)
-                tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
-                tty.send("\n", "ASKED-DONE")
+                tty.send(ALLOW.decode(), "ASKED-DONE")
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count(omitted) == 1 and shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index(omitted), shown
-                assert shown.count("✓ Rowed call") == 1 and shown.index(omitted) < shown.index("✓ Rowed call") < shown.index("ASKED-DONE"), shown
+                at = message_once(shown, live_row)
+                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < at, shown
+                assert shown.count("✓ Rowed call") == 1 and at < shown.index("✓ Rowed call") < shown.index("ASKED-DONE"), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             first_release.set()
             os.close(ready_read)
             os.close(ready_write)
-        print("renderer: a Message whose turn waits on an Action stays reachable, and its result shows once", flush=True)
+        print("renderer: a Message whose turn waits on an Action shows once as its row, and its result shows once", flush=True)
 
-        # Messages queued behind an answer that evicts their echoes, and
-        # still queued while its call runs: the gap lists each once, two with
-        # equal content included, labelled as queued; once they run, each is
-        # its row, never also listed.
+        # Messages queued behind an answer that evicts everything before it,
+        # and still queued while its call runs, wait above the input and no
+        # transcript lists them; once they run, each is its row, once, two
+        # with equal content included.
         def text_and_call(response_id, text, call_id, arguments):
             message = {"type": "message", "id": f"{response_id}-message", "status": "completed", "role": "assistant", "phase": "commentary",
                 "content": [{"type": "output_text", "text": text, "annotations": []}]}
@@ -5124,9 +5515,9 @@ def renderer_cases():
             return fixture.encode_sse(payloads)
 
         def queue_three(tty):
-            # Each admission shows before the next is sent.
-            for text, marker, count in (("EQUAL-CONTENT", "› EQUAL-CONTENT", 1), ("EQUAL-CONTENT", "› EQUAL-CONTENT", 2), (big, big_size, 1)):
-                tty.send("\x1b[200~" + text + "\x1b[201~\r", predicate=lambda: tty.capture.completed.count(marker) == count and tty.capture.draft("", 2))
+            # Each waits above the input before the next is sent.
+            for text, label in (("EQUAL-CONTENT", "queued"), ("EQUAL-CONTENT", "2 queued"), (big, "3 queued")):
+                tty.send("\x1b[200~" + text + "\x1b[201~\r", predicate=lambda: waiting(tty, text[:9], label) and tty.capture.draft("", 2))
 
         long_reply = "\n".join(f"LONG-{index:05d} " + "y" * 50 for index in range(4400))
         big = "BIG-START " + "é ñ ü " * 300 + "BIG-END"
@@ -5159,20 +5550,17 @@ def renderer_cases():
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
                 tty.wait("Held call", timeout=30)
+                assert waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
                 shown = traverse(tty)
-                assert "Start of conversation" in shown and "Earlier rows left this view." in shown, shown
-                listed = shown.split("Earlier rows left this view.", 1)[1]
-                assert shown.index("DRIVER-QUESTION") < shown.index("Earlier rows left this view."), shown
-                assert listed.count("! Queued") == 3 and listed.count("EQUAL-CONTENT") == 2, shown
-                assert shown.count("EQUAL-CONTENT") == 2 and shown.count("BIG-START") == 1 and shown.count(big_size) == 1, shown
-                assert big_whole(shown), shown
+                assert "Start of conversation" in shown and shown.count("DRIVER-QUESTION") == 1, shown
+                assert "EQUAL-CONTENT" not in shown and "BIG-START" not in shown and "Queued" not in shown, shown
                 assert "LONG-00000" not in shown, "the copy started before the front"
                 tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
                 (workspace / "listed-release").write_text("")
                 tty.wait("LISTED-DONE", timeout=30)
                 shown = traverse(tty)
                 # Now rows: each once, never also listed as queued.
-                assert "! Queued" not in shown and shown.count("EQUAL-CONTENT") == 2 and shown.count(big_size) == 1, shown
+                assert "Queued" not in shown and shown.count("EQUAL-CONTENT") == 2 and shown.count(big_size) == 1, shown
                 assert shown.count("BIG-START") == 1 and big_whole(shown), shown
                 assert shown.index("DRIVER-QUESTION") < shown.index("EQUAL-CONTENT") < shown.index("BIG-START"), shown
                 tty.caller.send_signal(signal.SIGINT)
@@ -5180,11 +5568,10 @@ def renderer_cases():
         finally:
             first_release.set()
             (workspace / "listed-release").write_text("")
-        print("renderer: queued Messages whose echoes left the view are listed once, then are their rows", flush=True)
+        print("renderer: queued Messages wait above the input, never listed, then are their rows once", flush=True)
 
-        # More queued echoes than the record keeps, wrapped twice, with no
-        # boundary between them: the dropped span is listed through Activity
-        # pages, the kept echoes from the record, each once.
+        # More queued Messages than one Activity page holds wait as one row
+        # that counts them; once they run, each is its row, once, in order.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(text_and_call("dropped-first", long_reply, "dropped-call", json.dumps({
@@ -5198,29 +5585,30 @@ def renderer_cases():
                 tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 for index in range(66):
-                    tty.send(f"DROPPED-QUEUED-{index:02d}\n", predicate=lambda index=index: f"› DROPPED-QUEUED-{index:02d}" in tty.capture.completed and tty.capture.draft("", 2))
+                    label = f"{index + 1} queued" if index else "queued"
+                    tty.send(f"DROPPED-QUEUED-{index:02d}\n", predicate=lambda index=index, label=label: waiting(tty, f"DROPPED-QUEUED-{index:02d}", label) and tty.capture.draft("", 2))
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
                 tty.wait("Held call", timeout=30)
-                shown = traverse(tty, 80)
-                assert all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
-                assert "Start of conversation" in shown and shown.count("! Queued") == 66, shown
-                order = [shown.index(f"DROPPED-QUEUED-{index:02d}") for index in range(66)]
-                assert order == sorted(order) and shown.index("DRIVER-QUESTION") < order[0], shown
-                tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+                assert waiting(tty, "DROPPED-QUEUED-65", "66 queued"), tty.capture.completed
                 (workspace / "dropped-release").write_text("")
                 tty.wait("DROPPED-DONE", timeout=30)
-                shown = traverse(tty)
-                assert "! Queued" not in shown and all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
+                assert "queued" not in tty.capture.completed, tty.capture.completed
+                shown = traverse(tty, 80)
+                assert "Start of conversation" in shown and "Queued" not in shown, shown
+                assert all(shown.count(f"DROPPED-QUEUED-{index:02d}") == 1 for index in range(66)), shown
+                order = [shown.index(f"DROPPED-QUEUED-{index:02d}") for index in range(66)]
+                assert order == sorted(order) and shown.index("DRIVER-QUESTION") < order[0], shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             first_release.set()
             (workspace / "dropped-release").write_text("")
-        print("renderer: queued echoes beyond the record's capacity are listed once, in order", flush=True)
+        print("renderer: many queued Messages wait as one counted row, then are their rows once, in order", flush=True)
 
-        # Messages a Stop excludes never gain rows: after later output evicts
-        # them, a transcript lists each once, labelled, at its seam.
+        # Messages a Stop excludes never gain rows: the stop shows each,
+        # labelled, before its own line, and after later output evicts them
+        # a transcript lists each once, at its seam.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
@@ -5233,12 +5621,18 @@ def renderer_cases():
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 queue_three(tty)
                 run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "listed-stop.json", "--key", "listed-stop")
-                tty.wait("Session stopped", timeout=30)
+                tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
+                live = tty.capture.completed
+                # Live, the stop shows each Message it excluded, labelled,
+                # before its own line, and the queued row is gone.
+                stopped = "! Stopped before it ran · send it again to run it"
+                assert live.count(stopped) == 3 and live.rindex(stopped) < live.index("! Session stopped."), live
+                assert live.index("› EQUAL-CONTENT") < live.index("› BIG-START") < live.index("! Session stopped."), live
+                assert not any(row.endswith("queued") for row in live.split("\n")), live
                 first_release.set()
                 tty.send("AFTER-STOP\n", predicate=lambda: "LONG-04399" in tty.capture.completed)
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                stopped = "! Stopped before it ran · send it again to run it"
                 assert shown.count(stopped) == 3 and shown.count("EQUAL-CONTENT") == 2, shown
                 assert shown.count("BIG-START") == 1 and shown.count(big_size) == 1 and shown.count("AFTER-STOP") == 1, shown
                 assert big_whole(shown), shown
@@ -5248,10 +5642,40 @@ def renderer_cases():
             first_release.set()
         print("renderer: Messages a Stop excluded are listed once, labelled, after later output evicts them", flush=True)
 
+        # A stop that excluded more Messages than one Activity page holds
+        # shows each once, oldest first, labelled, and its line follows the
+        # last.
+        session = configure()
+        first_release = threading.Event()
+        endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("many-stopped-first", "reason", "message", "NEVER-SHOWN")[0], held, gate_timeout=60), first_release))
+        try:
+            with terminal(session, rows=200) as tty:
+                tty.capture.resize(80, 200)
+                requests = len(endpoint.requests)
+                tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
+                fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
+                for index in range(40):
+                    label = f"{index + 1} queued" if index else "queued"
+                    tty.send(f"MANY-STOPPED-{index:02d}\n", predicate=lambda index=index, label=label: waiting(tty, f"MANY-STOPPED-{index:02d}", label) and tty.capture.draft("", 2))
+                run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "many-stop.json", "--key", "many-stop")
+                tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
+                live = tty.capture.completed
+                rows = [untimed(row) for row in live.split("\n")]
+                order = [rows.index(f"› MANY-STOPPED-{index:02d}") for index in range(40)]
+                assert all(rows.count(f"› MANY-STOPPED-{index:02d}") == 1 for index in range(40)), live
+                assert order == sorted(order) and order[-1] < rows.index("! Session stopped."), live
+                assert all(rows[at - 1] == stopped for at in order) and rows.count(stopped) == 40, live
+                assert not any(row.endswith("queued") for row in rows) and "NEVER-SHOWN" not in live, live
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            first_release.set()
+        print("renderer: a stop that excluded more Messages than a page holds labels each once, before its line", flush=True)
+
         # A queued Message older than the opening's page, which holds only
-        # its turn's commentary and held calls, is applied in the same read
-        # as their results. Its row shows nothing live, and the opening's
-        # mark left the view, so older pages must reach it.
+        # its turn's commentary and held calls, waits above the input and is
+        # applied in the same read as their results; its row then shows live,
+        # once, though the opening's mark left the view.
         session = configure()
         first_release, page_release, page_held = threading.Event(), threading.Event(), threading.Event()
         commentary = {"type": "message", "id": "opening-applied-message", "status": "completed", "role": "assistant", "phase": "commentary",
@@ -5282,7 +5706,7 @@ def renderer_cases():
             with terminal(session, rows=200, opening=False) as tty:
                 tty.capture.resize(80, 200)
                 opened = tty.wait(predicate=lambda: tty.capture.draft("", 2), timeout=30)
-                assert "HIDDEN-QUEUED-UNIQUE" not in opened and "OPENING-LONG-04499" in opened, opened
+                assert opened.count("HIDDEN-QUEUED-UNIQUE") == 1 and waiting(tty, "HIDDEN-QUEUED-UNIQUE") and "OPENING-LONG-04499" in opened, opened
                 # One read returns the calls' results and the Message's row.
                 proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_once)
                 assert page_held.wait(5), "no scan reached the held page"
@@ -5301,14 +5725,15 @@ def renderer_cases():
             page_release.set()
             first_release.set()
             (workspace / "opening-release").touch()
-        print("renderer: a queued Message the opening left out stays reachable once applied unseen", flush=True)
+        print("renderer: a queued Message older than the opening's page waits above the input, then is its row once", flush=True)
 
-        # An opening whose newest page holds only some queued Messages: the
-        # page shows those, and its seam lists the eight older ones, each
-        # once (more than any fixed preview count).
+        # More Messages wait at the opening than its page holds: they wait
+        # as one counted row, no transcript lists them, and once taken each
+        # is its row, once, in order.
         session = configure()
         first_release = threading.Event()
         endpoint.responses.append((fixture.ResponseSpec(fixture.sse_answer("opening-first", "reason", "message", "OPENING-DONE")[0], held, gate_timeout=60), first_release))
+        endpoint.responses.append(fixture.sse_answer("opening-second", "reason", "message", "OPENING-QUEUED-DONE")[0])
         try:
             requests = len(endpoint.requests)
             run(home, "session", "send", "--to", session, input="ACTIVE-ORIGINAL")
@@ -5317,18 +5742,25 @@ def renderer_cases():
                 run(home, "session", "send", "--to", session, input=f"OPENING-QUEUED-{index:02d}")
             with terminal(session, rows=200, opening=False) as tty:
                 tty.capture.resize(80, 200)
-                opened = tty.wait(predicate=lambda: tty.capture.draft("", 2))
+                opened = tty.wait(predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "OPENING-QUEUED-23", "24 queued"))
+                assert "queued behind" not in opened and "Queued" not in opened, opened
+                assert not any(f"OPENING-QUEUED-{index:02d}" in opened for index in range(23)), opened
                 shown = traverse(tty)
-                assert all(shown.count(f"OPENING-QUEUED-{index:02d}") == 1 for index in range(24)), shown
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count("! Queued") == 24 and shown.count("ACTIVE-ORIGINAL") == 1, shown
-                assert "Rui: 24 queued messages." in opened and "Queued: " not in opened, opened
-                assert opened.count("! Queued") == 16 and "OPENING-QUEUED-07" not in opened and "OPENING-QUEUED-08" in opened, opened
+                assert "OPENING-QUEUED-" not in shown and "Queued" not in shown and shown.count("ACTIVE-ORIGINAL") == 1, shown
+                tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+                first_release.set()
+                tty.wait("OPENING-QUEUED-DONE", timeout=30)
+                assert "queued" not in tty.capture.completed, tty.capture.completed
+                shown = traverse(tty)
+                assert all(shown.count(f"OPENING-QUEUED-{index:02d}") == 1 for index in range(24)) and "Queued" not in shown, shown
+                order = [shown.index(f"OPENING-QUEUED-{index:02d}") for index in range(24)]
+                assert order == sorted(order) and shown.index("OPENING-DONE") < order[0], shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             first_release.set()
-        print("renderer: an opening lists the queued Messages its page left out once, at its seam", flush=True)
+        print("renderer: Messages waiting at the opening beyond its page are one counted row, then their rows once, in order", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
@@ -5346,10 +5778,14 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers", "copy"), selected
     if selected in ("all", "callers", "caller-core", "empty-answers"):
         persistent_empty_answer_case()
     if selected == "empty-answers":
+        return
+    if selected in ("all", "callers", "caller-core", "copy"):
+        persistent_copy_case()
+    if selected == "copy":
         return
     if selected == "session-ids":
         help_case()
@@ -5393,6 +5829,7 @@ def main(selected="all"):
         persistent_permission_case("deny-action", lost_reply=True)
         persistent_permission_case(fragmented_paste=True)
         persistent_permission_case(stale_target=True)
+        persistent_permission_case("reason")
     if selected == "persistent-permission":
         return
     if selected == "all" and not split_callers:
@@ -5400,7 +5837,7 @@ def main(selected="all"):
         canonical_failure_integration.main()
     if selected == "caller-core":
         selected = "all"
-    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))
+    state = screen_fixture_root("rui-human-cli.")
     home = state / "home"
     home.mkdir()
     store = state / "store"
@@ -5510,10 +5947,10 @@ def main(selected="all"):
         assert saved.parent.stat().st_mode & 0o777 == 0o700
         missing_setup = defaults(preferences_home)
         assert (missing_setup["store"], missing_setup["store_source"]) == (str(store.resolve()), "saved"), missing_setup
-        assert missing_setup["local_credential"] == "missing" and missing_setup["next_session"] == {
+        assert missing_setup["local_credentials"]["codex"] == "missing" and missing_setup["next_session"] == {
             "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "missing"}, missing_setup
         assert missing_setup["host"]["status"] == "ready", missing_setup
-        assert missing_setup["host"]["capabilities"]["managed_authentication"] is False, missing_setup
+        assert missing_setup["host"]["capabilities"]["providers"]["codex"] != "chatgpt_device", missing_setup
         linked_home = state / "linked-home"
         (linked_home / ".config").mkdir(parents=True)
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)
@@ -5548,7 +5985,7 @@ def main(selected="all"):
         assert not credential.exists() and not lock.exists()
         codex_fixture.credentials(credential)
         configured_setup = defaults(preferences_home)
-        assert configured_setup["local_credential"] == "configured", configured_setup
+        assert configured_setup["local_credentials"]["codex"] == "configured", configured_setup
         assert configured_setup["next_session"]["local_credential"] == "configured", configured_setup
         assert not lock.exists(), "status must not create a credential lock"
         fresh_provider_home = state / "fresh-provider-home"
@@ -5563,14 +6000,14 @@ def main(selected="all"):
             blocked = subprocess.run([str(fixture.RUI), "defaults", "inspect"],
                 env={**os.environ, "HOME": str(preferences_home)},
                 capture_output=True, text=True, timeout=2)
-            assert blocked.returncode == 0 and json.loads(blocked.stdout)["local_credential"] == "credential_error", blocked
+            assert blocked.returncode == 0 and json.loads(blocked.stdout)["local_credentials"]["codex"] == "credential_error", blocked
         finally:
             dispose_all(credential.unlink)
         codex_fixture.credentials(credential, state="refresh_pending")
-        assert defaults(preferences_home)["local_credential"] == "refresh_required"
+        assert defaults(preferences_home)["local_credentials"]["codex"] == "refresh_required"
         assert "state=refresh_pending" in credential.read_text(), "status must not refresh"
         credential.chmod(0o644)
-        assert defaults(preferences_home)["local_credential"] == "credential_error"
+        assert defaults(preferences_home)["local_credentials"]["codex"] == "credential_error"
         credential.unlink()
         defaults(preferences_home, "--provider", "other", success=False)
         defaults(preferences_home, "--model", "gpt-5.5")
@@ -5601,7 +6038,7 @@ def main(selected="all"):
         codex_fixture.credentials(credential)
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         stale = defaults(preferences_home)
-        assert stale["local_credential"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
+        assert stale["local_credentials"]["codex"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--store", store)
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
@@ -5617,7 +6054,7 @@ def main(selected="all"):
         saved.rename(saved.parent / "preferences.backup")
         sole = defaults(preferences_home)
         assert sole["provider"] is None and sole["next_session"] == {
-            "status": "selected", "provider": "codex", "model": "gpt-6-luna", "local_credential": "configured"}, sole
+            "status": "selected", "provider": "codex", "model": "gpt-6.1-sol", "local_credential": "configured"}, sole
         (saved.parent / "preferences.backup").rename(saved)
         credential.unlink()
         saved.write_text("version=9\n")
@@ -5723,8 +6160,8 @@ def main(selected="all"):
                 ("cx\x7f\x08\x1b[127ud", "Rui: Login deferred.", None),
                 ("d\x1b.", "Rui: Login deferred.", "Rui: Key combination not recognized; choice unchanged."),
                 ("\u0301d", "Rui: Login deferred.", "Rui: Character not accepted; choice unchanged."),
-                ("d\x1b[114;999u", "Rui: Choose c or d. No login or preference change.", None),
-                ("d\x1b[27;2;13;1~", "Rui: Choose c or d. No login or preference change.", None)):
+                ("d\x1b[114;999u", "Rui: Choose c, o or d. No login or preference change.", None),
+                ("d\x1b[27;2;13;1~", "Rui: Choose c, o or d. No login or preference change.", None)):
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
@@ -5805,7 +6242,7 @@ def main(selected="all"):
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
-            assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credential"] == "renewal_due"
+            assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credentials"]["codex"] == "renewal_due"
             welcome = overview_frame(master, overview_title, keys=b"d\n")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             leave_overview(master)
@@ -5913,7 +6350,7 @@ def main(selected="all"):
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             # The composer's capture fails before any send: the draft stays.
             overview_frame(master, overview_title)
-            refused = overview_frame(master, lambda frame: "Could not start the Session. (NotDir)" in frame, keys=b"never captured\n")
+            refused = overview_frame(master, lambda frame: "Not started: NotDir" in frame, keys=b"never captured\n")
             assert "never captured" in refused, refused
             os.write(master, b"\x03")
             # Keep the slave alive until all output is collected: Darwin can
@@ -6041,13 +6478,13 @@ def main(selected="all"):
             assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
             binding = terminal_step(master, "/status", "Session: ", composer=True)
             assert f"Session: {session}" in binding and shown(f"Workspace (Bash cwd): {workspace.resolve()}", binding), binding
-            assert "Provider: codex" in binding and "Model: gpt-6-sol" in binding and "Permission: ask" in binding, binding
+            assert "Provider: codex" in binding and " · gpt-6-sol" in binding and "asks before Bash" in binding and "Permission: ask" in binding, binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
             # This Session asks: help must not describe the bypass default as its mode.
-            assert "without approval" not in help_text and "/status shows whether Bash asks first" in help_text, help_text
+            assert "without approval" not in help_text and "\nThat line ends with asks before Bash when Bash asks first\n" in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
@@ -6178,7 +6615,7 @@ def main(selected="all"):
             stdin=slave, stdout=slave, stderr=slave)
         try:
             deadline = time.monotonic() + 15
-            opening = read_terminal(master, "Type a + Enter to allow once · d + Enter to deny", timeout=deadline - time.monotonic())
+            opening = read_terminal(master, CHOICE, timeout=deadline - time.monotonic())
             opening += action_ready(ready_read, master, timeout=deadline - time.monotonic())
             deadline = time.monotonic() + 15
             os.write(master, b"/status\n")
@@ -6207,14 +6644,15 @@ def main(selected="all"):
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
         try:
-            waiting = read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+            waiting = read_terminal(master, CHOICE)
             waiting += action_ready(ready_read, master)
-            assert "\n? Run Bash · Write first effect\n" in waiting and "\n  $ printf x >> effect-count\n" in waiting, waiting
+            assert "\n? Write first effect\n" in waiting and "\n  $ printf x >> effect-count\n" in waiting, waiting
             assert counter.read_text() == "x" and not sibling_effect.exists(), "opening authorized pending sibling"
             run(home, "action", "deny", "--store", store, "--session", sibling_session,
                 "--action", pending)
             sibling_release.touch()
-            rejected = terminal_step(master, "a", "action_not_pending")
+            # Enter confirms the highlighted Allow once.
+            rejected = terminal_step(master, "", "action_not_pending")
             assert "Decision rejected" in rejected and counter.read_text() == "x", rejected
             if "› " not in rejected.split("action_not_pending", 1)[1]:
                 rejected += read_terminal(master, "› ")
@@ -6430,14 +6868,13 @@ def main(selected="all"):
             dispose_all(lambda: os.close(ready_write))
         try:
             assert "Permission:" not in read_terminal(master, "› ")
-            os.write(master, b"interactive request\na\n")
-            proposal = read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+            os.write(master, b"interactive request\n\n")
+            proposal = read_terminal(master, CHOICE)
             proposal += action_ready(ready_read, master)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
             assert "\n› interactive request" in proposal, proposal
-            assert "\n? Run Bash · Write interactive effect\n" in proposal, proposal
+            assert "\n? Write interactive effect\n" in proposal and "Workspace" not in proposal, proposal
             assert shown_bash_command(master) == json.loads(padded_arguments)["cmd"], proposal
-            assert_permission_workspace(proposal, workspace.resolve())
             assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal
             assert "é" in proposal and "\u202e" not in proposal and "hidden" not in proposal, proposal
             interactive_key = fixture.command("session", "inspect", "--store", store, "--session", interactive)["selected_message"]
@@ -6471,25 +6908,25 @@ def main(selected="all"):
             assert mismatch["admission"]["answer"]["code"] == "target_mismatch", mismatch
             records = home / ".config/rui/requests"
             before_choice = set(records.glob("*.json"))
-            for invalid in ("l", " a ", "\x1b[200~a\x1b[201~", ""):
-                # A repeated rejection redraws nothing; readiness is the boundary.
+            # A chord at the choice is refused and spends its freshness: the
+            # Enter right behind it decides nothing.
+            for invalid in ("\x01", "\x1ba", "\x1b[1;3C"):
                 os.write(master, (invalid + "\n").encode())
                 rejected_choice = action_ready(ready_read, master)
                 rejected_choice += "\n" + current_screen(master)
-                # The fresh explicit choice is the next action; a no-op need
-                # not add another notice to it. Durable effects are the oracle.
-                assert "Type a + Enter to allow once · d + Enter to deny" in rejected_choice, (invalid, rejected_choice)
-                assert counter.read_text() == "x", "non-exact choice approved an Action"
-                assert set(records.glob("*.json")) == before_choice, "no-op choice captured authorization"
-                assert current_screen(master).count("? Run Bash") == 1, "no-op repeated the command"
-            completed_turn = terminal_step(master, "a", "interactive complete", composer=True)
+                # Durable effects are the oracle.
+                assert CHOICE in rejected_choice, (invalid, rejected_choice)
+                assert counter.read_text() == "x", "refused chord approved an Action"
+                assert set(records.glob("*.json")) == before_choice, "refused chord captured authorization"
+                assert current_screen(master).count("? Write interactive effect") == 1, "refusal repeated the command"
+            completed_turn = terminal_step(master, "", "interactive complete", composer=True)
             assert "\ninteractive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
             decision_record, = set(records.glob("*.json")) - before_choice
             saved_decision = json.loads(decision_record.read_bytes())
             assert saved_decision["action"] == action_id and saved_decision["decision"] == "allow_once" and saved_decision["session"] == interactive, saved_decision
             assert json.loads(run(home, "request", "recover", decision_record.stem))["answer"]["replayed"] is True
-            # The pasted chat suffix remains a draft, not approval or another
-            # submission. Clear only that unsent draft before diagnostics.
+            # The typeahead Enter was neither approval nor another submission.
+            # Clear any unsent draft before diagnostics.
             result = terminal_step(master, "\x15/result " + interactive_key, "result: completed", composer=True)
             assert "result: completed\ninteractive complete" in result, result
             terminal_step(master, "/status", "Recent messages", composer=True)

@@ -33,6 +33,12 @@ if [[ -z $expected_zig || $actual_zig != "$expected_zig" ]]; then
     printf 'Zig %s is required; found %s. No installation changed.\n' "$expected_zig" "$actual_zig" >&2
     exit 1
 fi
+format=$(sed -n 's/^pub const schema_version: u32 = \([0-9][0-9]*\);$/\1/p' src/store.zig) || format=
+if [[ -z $format ]]; then
+    printf 'src/store.zig declares no schema_version. No installation changed.\n' >&2
+    exit 1
+fi
+. "$repo/release/publish.sh"
 
 prefix="$HOME/.local"
 if [[ -d "$prefix/bin/rui" ]]; then
@@ -96,31 +102,5 @@ test -f "$release/THIRD_PARTY_NOTICES.md"
 printf '%s\n' "$revision" >"$release/revision"
 
 # Keep each complete build: running processes may still use its files.
-# Publish with rename rather than modifying an executable already in use.
 published=1
-python3 - "$release" "$prefix/bin" <<'PY'
-import os
-import pathlib
-import sys
-import tempfile
-
-release, destination = map(pathlib.Path, sys.argv[1:])
-with tempfile.TemporaryDirectory(prefix=".rui-install.", dir=destination) as temporary:
-    link = pathlib.Path(temporary) / "rui"
-    link.symlink_to(release / "bin" / "rui")
-    os.replace(link, destination / "rui")
-PY
-printf '\nInstalled %s at %s/bin/rui.\n' "$revision" "$prefix"
-printf 'Previous builds, Stores and credentials were preserved.\n'
-resolved=$(command -v rui || true)
-if [[ $resolved != "$prefix/bin/rui" ]]; then
-    printf 'Your PATH currently selects: %s\n' "${resolved:-no rui command}"
-    printf 'For this shell, run: export PATH="$HOME/.local/bin:$PATH"\n'
-fi
-printf 'If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).\n'
-printf '\nSelected Store status (read only):\n'
-if ! "$prefix/bin/rui" host status; then
-    printf 'Host status could not be checked; the installation succeeded.\n' >&2
-fi
-printf 'A running Host keeps its old executable. After its work finishes, use rui host stop.\n'
-printf 'Start with: "%s/bin/rui"\n' "$prefix"
+rui_publish "$prefix" "$release" "$format"
