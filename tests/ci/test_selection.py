@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import CACHE_POLICY, RENDERER_HARNESSES, execution_batches, select, setup_requirements
+from select_tests import CACHE_POLICY, RENDERER_HARNESSES, execution_batches, matches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -88,6 +88,12 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(result["targets"], ["stack-frames", "test-pg"])
         result = select(["src/h2/tls.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["stack-frames", "test-h2", "test-pg"])
+
+    def test_store_rule_leaves_wire_clients_to_their_own_rules(self):
+        self.assertNotIn("dispatch-debug-integration", select(["src/store/wire/mysql.zig"], "review", AVAILABLE)["targets"])
+        self.assertIn("dispatch-debug-integration", select(["src/store/rsql.zig"], "review", AVAILABLE)["targets"])
+        self.assertFalse(matches("src/store/wire/pg.zig", ("src/store/*", "!src/store/wire/*")))
+        self.assertTrue(matches("src/store/domain/turn.zig", ("src/store/*", "!src/store/wire/*")))
 
     def test_portable_roots_keep_their_native_owner_checks(self):
         for path in ("src/SessionInput.zig", "src/tools.zig"):
