@@ -5,7 +5,7 @@ A cause is a signature: the failing fixture and its raising line, a Zig test,
 or a gate's own error, read from the jobs' full logs. Each signature has one
 `ci-red` issue that recurrences comment on. A later green run never closes it;
 the commit that fixes the fixture or its owner says `Fixes #N`, and a failure
-after that reopens the issue.
+on a commit containing that fix reopens the issue.
 """
 import argparse
 from dataclasses import dataclass, field
@@ -19,6 +19,7 @@ import time
 from run_selected import RETRIED
 
 LABEL = "ci-red"
+FIXED_BY = re.compile(r"Fixed by ([0-9a-f]{40})\b")
 STATE = re.compile(r"<!-- ci-signature: (\{.*?\}) -->")
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ", re.M)
 # The fixture is the first script after the case name, past any `env VAR=…`
@@ -201,6 +202,25 @@ def known_issues(repository):
     return [(row["number"], row["state"], state) for row in rows if (state := signature_state(row["body"]))]
 
 
+def fixing_commit(repository, number):
+    """The commit that last closed the issue: GitHub's close from a push, or Auto-land's comment."""
+    pages = json.loads(gh("api", f"repos/{repository}/issues/{number}/timeline?per_page=100",
+                          "--paginate", "--slurp"))
+    fix = None
+    for event in (event for page in pages for event in page):
+        named = FIXED_BY.match(event.get("body") or "") if event.get("event") == "commented" else None
+        if event.get("event") == "closed" and event.get("commit_id"):
+            fix = event["commit_id"]
+        elif named:
+            fix = named[1]
+    return fix
+
+
+def contains(repository, sha, ancestor):
+    status = json.loads(gh("api", f"repos/{repository}/compare/{ancestor}...{sha}"))["status"]
+    return status in ("ahead", "identical")
+
+
 def file_cause(repository, issues, cause, workflow, sha, url, retried, labels):
     """Comment on the signature's issue, reopening it after a claimed fix, or open one."""
     seen = "passed only on its automatic retry after failing" if retried else "failed"
@@ -210,6 +230,12 @@ def file_cause(repository, issues, cause, workflow, sha, url, retried, labels):
                      key=lambda row: (row[1] == "OPEN", row[0]))
     if matches:
         number, state, recorded = matches[-1]
+        fix = state != "OPEN" and fixing_commit(repository, number)
+        if fix and not contains(repository, sha, fix):
+            # A run that started before the fix landed proves nothing about it.
+            gh("issue", "comment", str(number), "--repo", repository,
+               "--body", f"{note}. This predates its fix `{fix}`, so the issue stays closed.")
+            return number
         recorded.update(last_sha=sha, workflows=sorted({*recorded["workflows"], workflow}))
         # A signature Daily Mac or a landing retry filed first still gains this
         # run's labels, such as stable-red.
