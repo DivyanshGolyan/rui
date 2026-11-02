@@ -85,7 +85,7 @@ pub const ItemKind = enum(u8) {
 /// Rui's closed effort grammar.
 pub const Effort = enum(u8) { none, low, medium, high, xhigh, max };
 pub const Author = enum(u8) { user, instruction };
-pub const OutputKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4 };
+pub const OutputKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4, web_search_call = 5 };
 pub const Phase = enum(u8) { unphased = 0, commentary = 1, final_answer = 2 };
 pub const PartKind = enum(u8) { opaque_block = 0, output_text = 1, refusal = 2, summary_text = 3, reasoning_text = 4 };
 pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };

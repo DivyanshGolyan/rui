@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 47;
+pub const schema_version: u32 = 48;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes needs a new row, and so a new schema_version.
 /// Review rule: a row, once merged, is never edited.
@@ -24,6 +24,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
     .{ .schema_version = 47, .digest = 0x51267b57c44099bc },
+    .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -453,7 +454,7 @@ pub const tables = [_]Table{
             .{ .name = "item_ordinal", .type = .int, .check = "item_ordinal>=0" },
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "session_position", .type = .int, .check = "session_position>0" },
-            .{ .name = "item_kind", .type = .int, .check = "item_kind BETWEEN 1 AND 4" },
+            .{ .name = "item_kind", .type = .int, .check = "item_kind BETWEEN 1 AND 5" },
             // A message's text: its text parts back to back, stored once.
             .{ .name = "message_content_id", .type = .int, .nullable = true, .check = "(message_content_id IS NOT NULL)=(item_kind=2)" },
             .{ .name = "attempt_ordinal", .type = .int, .check = "attempt_ordinal>0" },
