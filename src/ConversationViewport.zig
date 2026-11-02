@@ -17,7 +17,8 @@ pub const widest_cluster = 8;
 pub const longest_cluster = 64;
 
 /// A row of laid-out text: the logical line starting at origin-relative byte
-/// `offset`, and the row within that line's wrapping.
+/// `offset`, and the row within that line's wrapping. A row names other text
+/// in another layout: what outlives a frame is kept in bytes (`rowStart`).
 pub const Position = struct {
     offset: usize = 0,
     row: u16 = 0,
@@ -83,7 +84,8 @@ pub const DraftPieces = struct {
 /// distinguish user text where the terminal shows no attributes. `quoted`:
 /// the marker begins an Action's description (`?`), its command (`$`) or a
 /// later line of it or its stdin (`│`).
-fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16, quoted: bool = false } {
+const Hanging = struct { bytes: usize, cells: u16, quoted: bool = false };
+fn hanging(line: []const u8, width: u16, user: bool) Hanging {
     var bytes: usize = 0;
     while (bytes < line.len and line[bytes] == ' ') bytes += 1;
     var cells: usize = bytes;
@@ -133,6 +135,15 @@ pub fn cellStyle(value: u8, colour: bool) CellStyle {
         .foreground = if (colour and index != 0) foregrounds[index - 1] else null,
     };
 }
+
+/// A logical line's extent and the parts of it that do not wrap.
+const LineShape = struct {
+    end: usize,
+    single: bool,
+    note: ?struct { start: usize, end: usize },
+    margin: u16,
+    split: Hanging,
+};
 
 /// Collapsed blocks' summaries in a range of text: see `collapsed`.
 pub const Summaries = struct { count: usize = 0, last: ?usize = null };
@@ -303,16 +314,14 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.lastIndexOfScalar(u8, self.bytes[0 .. offset - 1], '\n')) |line| line + 1 else 0;
         }
 
-        /// Prints one logical line with its first row at window row `row`
-        /// (negative rows are clipped), or only measures it. Returns its rows.
-        /// Measuring and drawing segment identically, so they wrap identically.
-        pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style) u16 {
+        /// How the line starting at `offset` lays out at `width`.
+        fn lineShape(self: *const Self, offset: usize, width: u16) LineShape {
             const end = self.lineEnd(offset);
             var user = false;
             // A line of summary text alone (a peer Message's line) keeps one
             // row, ending in `…` when it does not fit.
             var single = styled and end != offset;
-            var note: ?struct { start: usize, end: usize } = null;
+            var note: @FieldType(LineShape, "note") = null;
             if (styled) for (self.styles[offset..end], offset..) |value, index| {
                 if (value & user_bit != 0) user = true;
                 if (!isSidenote(value)) {
@@ -321,14 +330,48 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 if (note == null) note = .{ .start = index, .end = index + 1 } else if (note.?.end == index) note.?.end += 1;
             };
+            const margin: u16 = if (styled and self.sidenotes and width >= sidenote_width) sidenote_margin else 0;
+            return .{
+                .end = end,
+                .single = single,
+                .note = note,
+                .margin = margin,
+                .split = if (single) .{ .bytes = 0, .cells = 0 } else hanging(self.bytes[offset..end], width - margin, user),
+            };
+        }
+
+        /// The first byte that row `position` draws: every byte of its line
+        /// before it drew on an earlier row. Null when that row starts with
+        /// no byte of the text, as a space a style change began can.
+        pub fn rowStart(self: *const Self, layout: Layout, position: Position) ?usize {
+            if (position.row == 0) return position.offset;
+            const shape = self.lineShape(position.offset, layout.width);
+            if (shape.single) return null;
+            // A screen of one cell keeps only the row's first column.
+            var cell: [1]vaxis.Cell = .{.{}};
+            var screen: vaxis.Screen = .{ .width = 1, .height = 1, .width_method = layout.method, .buf = &cell };
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = -@as(i17, position.row), .parent_x_off = 0, .parent_y_off = 0, .width = layout.width - shape.margin - shape.split.cells, .height = position.row + 1, .screen = &screen };
+            const from = position.offset + shape.split.bytes;
+            _ = self.printRange(window, from, shape.end, .word, false, true, false, .{});
+            const at = @intFromPtr(cell[0].char.grapheme.ptr) -% @intFromPtr(&self.bytes);
+            return if (at >= from and at < shape.end) at else null;
+        }
+
+        /// Prints one logical line with its first row at window row `row`
+        /// (negative rows are clipped), or only measures it. Returns its rows.
+        /// Measuring and drawing segment identically, so they wrap identically.
+        pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style) u16 {
+            const shape = self.lineShape(offset, window.width);
+            const end = shape.end;
+            const note = shape.note;
             // A single row's text ends where its trailing sidenote begins.
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
-            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
+            const margin = shape.margin;
             const body = window.child(.{ .width = window.width - margin });
             if (commit and margin != 0) if (note) |range| {
                 _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain);
             };
-            if (single) {
+            if (shape.single) {
                 if (commit) {
                     // Whole clusters measured by this view's width method:
                     // a wide last cluster never crosses the body's edge.
@@ -352,7 +395,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 return 1;
             }
-            const split = hanging(self.bytes[offset..end], body.width, user);
+            const split = shape.split;
             if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain);
             const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
             if (commit and self.quotes and split.quoted) for (1..rows) |index| {
@@ -618,6 +661,31 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
             var field = false;
             for (0..drawn.rows) |index| field = field or std.mem.eql(u8, test_screen.row(@intCast(index), &storage), "  Time limit: 5 s");
             try std.testing.expect(field);
+        }
+    }
+}
+
+test "each wrapped row starts at the byte drawn first in it, at every width" {
+    var view: Sized(256, true) = .{ .sidenotes = true };
+    try view.append("intro\n• one two three four five six \x1b[1mseven\x1b[0m eight 0123456789abcdefghij nine\n");
+    try view.prepare();
+    const line = std.mem.indexOfScalar(u8, view.text(), '\n').? + 1;
+    var test_screen: TestScreen = undefined;
+    var storage: [64]u8 = undefined;
+    for ([_]u16{ 10, 12, 17, 40 }) |width| {
+        errdefer std.debug.print("width={}\n", .{width});
+        const layout: Layout = .{ .width = width, .method = .unicode };
+        const rows = view.lineRows(layout, line);
+        try std.testing.expect(rows > 1);
+        _ = view.draw(test_screen.window(width, 14), .{ .offset = line }, true, false, .{});
+        var previous: usize = line;
+        for (0..rows) |row| {
+            const at = view.rowStart(layout, .{ .offset = line, .row = @intCast(row) }).?;
+            const shown = std.mem.trimStart(u8, test_screen.row(@intCast(row), &storage), " ");
+            // Past the hanging indent, the row shows the text from `at`.
+            try std.testing.expect(std.mem.startsWith(u8, view.text()[at..], shown[0..@min(shown.len, 3)]));
+            try std.testing.expect(row == 0 or at > previous);
+            previous = at;
         }
     }
 }

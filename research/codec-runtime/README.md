@@ -1,5 +1,8 @@
 # Codec sandbox measurements (U0)
 
+The sandbox code this measured was removed after user-written codecs were
+dropped. Check out 2f7ba3d to build and rerun it.
+
 Can WAMR run user-supplied codecs cheaply and safely enough for the
 provider-plugin plan? `src/codec_runtime.zig` wraps WAMR 2.4.5's fast
 interpreter. Nothing in the shipped binary calls it yet.
