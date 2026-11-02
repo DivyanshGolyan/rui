@@ -916,6 +916,38 @@ const TestingSteps = struct {
     }
 };
 
+test "creating a Session takes the same work however many Sessions exist" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const Creation = struct {
+        fn steps(store: *Store, key: []const u8) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
+            _ = try configureTestSession(store, key);
+            return counter.steps;
+        }
+    };
+    _ = try configureTestSession(&storage, "creation-steps-prepare");
+    const few = try Creation.steps(&storage, "creation-steps-few");
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    // Above the Host's next created_seq, which these rows bypass.
+    try sqlite.exec(
+        storage.database,
+        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
+            "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+            "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+            "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence",
+    );
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    // Changing foreign_keys expires prepared statements: prepare them again.
+    _ = try configureTestSession(&storage, "creation-steps-prepare-again");
+    try std.testing.expectEqual(few, try Creation.steps(&storage, "creation-steps-many"));
+}
+
 test "a Workspace's changed page reads only its own Sessions, however many others changed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7516,7 +7548,7 @@ test "fresh Store uses current schema and rejects the prior version" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database}), .{}));
 }
 
-test "existing Store rejects a format or schema digest that store_meta does not hold" {
+test "existing Store rejects a format that store_meta does not hold" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -7531,8 +7563,6 @@ test "existing Store rejects a format or schema digest that store_meta does not 
     const cases = [_]Case{
         .{ .sql = "UPDATE store_meta SET meta_value='45' WHERE meta_key='format'", .refusal = error.WrongStoreVersion },
         .{ .sql = "DELETE FROM store_meta WHERE meta_key='format'", .refusal = error.WrongStoreVersion },
-        .{ .sql = "UPDATE store_meta SET meta_value='0000000000000000' WHERE meta_key='schema_digest'", .refusal = error.WrongStoreSchema },
-        .{ .sql = "DELETE FROM store_meta WHERE meta_key='schema_digest'", .refusal = error.WrongStoreSchema },
     };
     for (cases) |case| {
         var raw: ?*c.sqlite3 = null;
@@ -7548,12 +7578,62 @@ test "existing Store rejects a format or schema digest that store_meta does not 
         defer std.testing.allocator.free(after);
         try std.testing.expectEqualSlices(u8, before, after);
         try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
-        try sqlite.exec(raw.?, "DELETE FROM store_meta WHERE meta_key IN ('format','schema_digest')");
-        try sqlite.exec(raw.?, std.fmt.comptimePrint("INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('schema_digest','{s}')", .{ schema_version, store_schema.digest_text }));
+        try sqlite.exec(raw.?, "DELETE FROM store_meta WHERE meta_key='format'");
+        try sqlite.exec(raw.?, std.fmt.comptimePrint("INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}')", .{schema_version}));
         _ = c.sqlite3_close(raw);
     }
     try storage.open(std.testing.io, database, root);
     try storage.close();
+}
+
+test "existing Store rejects a table rebuilt without one of its CHECKs, and stays unmodified" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+    const original = comptime for (store_schema.objects(.sqlite)) |object| {
+        if (std.mem.eql(u8, object.name, "content")) break object.sql;
+    } else unreachable;
+    // The same text without its first CHECK clause.
+    const unchecked = comptime blk: {
+        const start = std.mem.indexOf(u8, original, " CHECK(").?;
+        var depth: usize = 0;
+        var end = start + " CHECK".len;
+        while (true) : (end += 1) {
+            if (original[end] == '(') depth += 1;
+            if (original[end] == ')') depth -= 1;
+            if (depth == 0) break;
+        }
+        break :blk original[0..start] ++ original[end + 1 ..];
+    };
+    const Rebuild = struct {
+        fn run(path: []const u8, comptime create: []const u8) !void {
+            var raw: ?*c.sqlite3 = null;
+            var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+            try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{path}, 0), &raw));
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw.?, "PRAGMA foreign_keys=OFF");
+            try sqlite.exec(raw.?, "BEGIN; CREATE TEMP TABLE kept AS SELECT * FROM content; DROP TABLE content; " ++
+                create ++ "; INSERT INTO content SELECT * FROM kept; DROP TABLE kept; COMMIT");
+        }
+    };
+    // Rebuilt from its own text, the Store still opens.
+    try Rebuild.run(database, original);
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+    try Rebuild.run(database, unchecked);
+    const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(before);
+    var refused: Store = undefined;
+    try std.testing.expectError(error.WrongStoreSchema, refused.open(std.testing.io, database, root));
+    const after = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 test "a Workspace is matched by its digest and then its text" {

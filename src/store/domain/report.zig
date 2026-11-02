@@ -350,9 +350,7 @@ fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, 
         try sqlite.bindU64(statement, 2, ceiling);
         var digest: [32]u8 = undefined;
         if (request.workspace) |*workspace| {
-            digest = store_core.workspaceDigest(workspace.slice());
-            try sqlite.bindBlob(statement, 3, &digest);
-            try sqlite.bindText(statement, 4, workspace.slice());
+            try store_core.bindWorkspace(statement, 3, 4, workspace.slice(), &digest);
         }
         while (true) {
             const step = c.sqlite3_step(statement);

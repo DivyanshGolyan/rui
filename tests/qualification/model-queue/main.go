@@ -210,6 +210,7 @@ func initializeTemplate(binary, sqliteBinary, directory, store string, deadline 
 	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance), e.server.Close()); err != nil {
 		return nil, err
 	}
+	// This sqlite3 shell leaves foreign keys off, so turn may go before message_admission, which references it.
 	_, err = sql(deadline, sqliteBinary, store, "BEGIN; DELETE FROM conversation_entry; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM message_admission; DELETE FROM core_command WHERE command_key='template-message'; COMMIT;")
 	return eligible, err
 }
