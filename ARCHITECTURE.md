@@ -2284,12 +2284,12 @@ A ready existing Host retains its actual capacity/capabilities; no model capabil
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
-A row's mark pulses when the mark changes, so when the row starts, finishes, fails, stops or begins waiting; a state change under the same mark, such as working to Bash and back, holds still.
-Each row keeps the second its mark last changed, carried across listings while the mark is the same.
-Until three seconds after that second, which shows as about two seconds once the listing reports it, the mark steps through itself and `· ∙ •`, one frame per 140 ms of the monotonic clock, then holds still.
-The change second sets each pulse's phase, so marks that changed apart pulse apart.
-Only a Unicode, colour screen pulses, and a row faded while the Host does not answer holds still.
-The core ticks as each pulse ends, the overview wakes for frames only while a pulsing mark is on screen, and each frame writes only the cells that changed.
+Marks hold still: `●` active, `◌` queued, `○` idle or waiting on approval, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
+Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
+Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
+The overview wakes for frames only while a spinner is on screen, and each frame writes only the cells that changed.
+Beside its title a row says only what its mark and group leave out: approval, a retry and its countdown, the running command, stopping, and the Session that started a failed or stopped one.
+Divyansh chose this on 2026-11-02, replacing the 2026-10-30 pulse on every mark change.
 Enter on a row opens that Session's conversation; Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
 Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
 In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
@@ -2723,7 +2723,7 @@ The time counts from the state's `since`, against the terminal's clock.
 A browsed page or transcript keeps the line under its shown text, so above the status when the page is full.
 The line takes a row after the input, status and overflow rows and before call rows, which the overflow row then counts; with no row left it is dropped rather than refusing the terminal.
 While a permission prompt is open the Action's instructions speak instead.
-An overview row of work under way says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
+An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
 The overview groups its rows as Yours, Active (thinking, running a tool, waiting on approval, retrying or stopping), Queued (waiting for a model slot), Idle, Finished, and Stopped or failed; a Session the person spoke in is in Yours only.
 Each group heading ends in its count, folded rows included, `Active · 3`, and the Queued heading says its rows' state, so they show only how long they have waited.
 Divyansh asked for the counts and chose Active and Queued on 2026-11-02, replacing the 2026-10-31 headings without counts.
