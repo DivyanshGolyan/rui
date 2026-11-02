@@ -2247,6 +2247,8 @@ Captured requests retain their recorded Store across preference edits.
 `rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/provider/model edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
 Interactive `/setup` keeps the same future-default capability.
+After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; that conversation's `/status` shows the saved defaults themselves.
+The overview's `/setup`, which has no such page, keeps the full report.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](#desktop-notifications); it is on by default and changes no Session.
 `--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
 A new Session that takes the saved defaults (its start leaves out `--provider` or `--model`) and whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
@@ -2426,7 +2428,7 @@ The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal; `/inspect-action` also prints executable `rui action allow`/`deny` commands.
 `/configure` changes settings for this Session (including its immutable Workspace check).
 Instructions require a separate one-shot `session configure --instructions -`; schema input uses a file path rather than terminal stdin.
-`/status` and `/requests` retain diagnostics and recovery handles; `/setup` edits only future defaults.
+`/status` shows the Session's settings, its Store and the defaults new Sessions start from, the work with its current message and the recent messages whose answers `/result KEY` shows; `/requests` lists this machine's local recovery handles; `/setup` edits only future defaults.
 `/wait` and `/login` are unsupported within the conversation; explicit operator authentication remains separate.
 Re-entry uses Host facts, not local saved-request guesses.
 An unknown Session requires explicit configuration before entry.
@@ -2745,7 +2747,7 @@ Opening adds no configuration banner or command tutorial.
 Bash bypass mode retains its safety warning.
 Routine capture, reserved keys, proposal fields, resize notices and repeated attention prose stay out of the transcript.
 Unconfirmed or rejected submissions retain actionable notices.
-Explicit `/status` and `/requests` retain detailed diagnostics, including the current reserved recovery key even before publication; reservation does not prove capture or acceptance.
+Explicit `/status` keeps the current reserved recovery key under the page, even before publication, and `/requests` lists recovery handles; reservation does not prove capture or acceptance.
 
 The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
 This trade-off is accepted for one library-owned renderer.
@@ -2804,6 +2806,18 @@ Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab
 While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
 A live read's failure is the same failure with or without `/status`.
 A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later `/history`, `/details` or inspection request replaces it.
+`/status` is also where settings change.
+Divyansh approved the page on 2026-11-02 (mock at 12:44Z, changes through #814's list at 13:23Z).
+Its title names the Session and its ID; a row for each of this Session's settings follows (effort, permissions, tools, name, Folder, compaction trigger, headroom, and the fixed model, Store and instructions, `none` or `set from a shell`), then a row for each default new Sessions start from (model, effort, notifications, Store), then the work: its state and Actions awaiting approval, its current message, every Action awaiting approval by ID, any indeterminate Action, and the recent messages with their outcomes, whose answers `/result KEY` shows.
+Each row is one line, its value followed by a quiet note on where the value comes from.
+A default that cannot be read says why on its row (`unreadable · ` and the error's name), never a blank; with no saved provider, the defaults' model row shows the provider and model a new Session gets from Rui's defaults, with the note `Rui default`.
+With no automatic threshold the compaction row reads `off`, and its own change sets one; the page names no separate command for it.
+The read takes the Session's facts from its Current capture into one of two slots that alternate between the shown page and the next read, so no read copies them, and lists the Actions awaiting approval in that slot's file; it replaces the page only when those facts differ from the shown ones.
+The saved defaults are read when the page opens and again after a command run over it finishes, not on every read.
+The page is text rendered from those facts and the selected row, so moving `›` renders it again with no read.
+Up and Down move `›` over the rows that can change from the page (the Session's model, Store and instructions cannot), while the draft is empty and no list shows; Page Up and Page Down still scroll, and each `/status` starts at the first row.
+Enter on an empty draft puts the row's own command in the draft: `/configure` or `/setup` with the option, whose list then offers a fixed choice (the compaction trigger and headroom offer `default` and take a typed number, so Enter never turns a model default into an override of the same number), or with the current value to edit.
+The page has no second way to change a setting; the command runs as typed over the page, which stays shown: a saved change replies in one line as a notice, and the page's next read shows the new value with `›` on the same row, while a longer reply, such as a failure with its usage, opens as any command's does.
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
 Approval requires every Action row to have been displayed since adoption or the last resize or width-mode change.
 A tall Action pages from its top and shows `Action continues · PgDn`, and the input row reads `PgDn reads the rest` in place of the choice, until that condition holds.
@@ -3422,7 +3436,7 @@ Attention does not create a Session phase or imply that progressing siblings are
 
 On permission return, an adapter caller can read every actionable ID through a separate bounded-memory Current snapshot.
 Later hints/results may reflect newer commits; only a decision revalidated against the Host's exact target authorizes an Action.
-`/status` likewise shows every actionable ID and flags indeterminate resolved Actions in the active Turn.
+`/status` likewise lists every actionable ID, one line each, and flags indeterminate resolved Actions in the active Turn.
 Such commands may have run and were not replayed.
 Older Turns require historical inspection.
 
@@ -3502,7 +3516,7 @@ Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
 Bash and `bypass`, the default, stay quiet: no notice or banner announces them, and the Session line says `asks before Bash` only in `ask` mode.
-`/status` states the mode with the exact binding as `Permission: bypass (Bash runs without asking)`, `session list` JSON shows it, and `/help` describes the Session line.
+`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash runs without asking` or `ask · Bash asks first`, `session list` JSON shows it, and `/help` describes the Session line.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).

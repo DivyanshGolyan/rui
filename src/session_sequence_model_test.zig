@@ -9,6 +9,7 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
+const status_page = @import("status_page.zig");
 
 pub const Suite = enum { focus, pages, acknowledgement, retention, publication };
 
@@ -64,6 +65,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
         tmp: std.testing.TmpDir,
         page: std.Io.File,
         action: std.Io.File,
+        actions: std.Io.File,
         output: std.Io.File,
         input: [2]c_int,
         saved_stdin: c_int,
@@ -73,6 +75,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             self.tmp = std.testing.tmpDir(.{});
             self.page = try self.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
             self.action = try self.tmp.dir.createFile(std.testing.io, "action", .{ .read = true });
+            self.actions = try self.tmp.dir.createFile(std.testing.io, "actions", .{ .read = true });
             self.output = try std.Io.Dir.openFileAbsolute(std.testing.io, "/dev/null", .{ .mode = .write_only });
             self.saved_stdin = std.c.dup(0);
             try std.testing.expect(self.saved_stdin >= 0);
@@ -91,7 +94,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 .store = "td1-no-host",
                 .session = "k7m2qx",
                 .directory = path,
-                .files = .{ .scratch = self.page, .inspection = self.page, .status = self.page, .action = self.action },
+                .files = .{ .scratch = self.page, .inspection = self.page, .status = self.page, .action = self.action, .actions = .{ self.actions, self.actions } },
                 .command = undefined,
                 .colour = false,
                 .reading = .{ .opening = false },
@@ -117,6 +120,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             for ([_]c_int{ self.saved_stdin, self.input[0], self.input[1] }) |fd| std.debug.assert(std.c.close(fd) == 0);
             self.output.close(std.testing.io);
             self.action.close(std.testing.io);
+            self.actions.close(std.testing.io);
             self.page.close(std.testing.io);
             self.tmp.cleanup();
         }
@@ -442,6 +446,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         front.inspection.status_requested = true;
                         front.job.open_status = true;
                         front.job.result = .{ .status = true };
+                        status_page.sample(front.job.status_taken);
                     }
                 },
                 .complete => if (request) |pending| {

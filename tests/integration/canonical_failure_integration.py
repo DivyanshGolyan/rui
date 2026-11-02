@@ -479,7 +479,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         timeout=deadline - time.monotonic(), composer=True)
                     while True:
                         os.write(master, b"/status\n")
-                        status = human.read_terminal(master, f"Session: {session}",
+                        status = human.read_terminal(master, f" Status · {session}",
                             timeout=deadline - time.monotonic(), composer=True)
                         # /status exposes unresolved frontend custody, independently
                         # of the accepted backend reply and canonical database.
@@ -504,7 +504,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     deadline = time.monotonic() + 15
                     output = human.read_terminal(master, marker, timeout=deadline - time.monotonic(),
                         composer=True)
-                    assert "other/session" not in output and "Session: 000000" not in output and "Session: 111111" not in output and '"answer"' not in output, output
+                    assert "other/session" not in output and " Status · 000000" not in output and " Status · 111111" not in output and '"answer"' not in output, output
                     original = proxy.exchanges[0][0]
                     key = json.loads(original)["key"]
                     record = home / ".config/rui/requests" / f"{key}.json"

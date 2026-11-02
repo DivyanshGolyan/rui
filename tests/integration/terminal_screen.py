@@ -19,8 +19,9 @@ RESTORE = "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 
 def shown(text, screen):
     """`text` appears on `screen` even where rows broke it: inside a long word
-    the frame breaks between characters; at a space, word wrap drops it."""
-    pattern = "\n?".join("[ \n]" if c == " " else re.escape(c) for c in text)
+    the frame breaks between characters; at a space, word wrap drops it. A
+    row continued under an indented line's text starts with that indent."""
+    pattern = "(?:\n *)?".join("(?: |\n *)" if c == " " else re.escape(c) for c in text)
     return re.search(pattern, screen) is not None
 
 
