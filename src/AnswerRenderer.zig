@@ -469,6 +469,9 @@ fn linkByte(self: *Renderer, byte: u8) !void {
                 if (byte != ':' and std.ascii.toLower(byte) != 's') return self.dropLink(byte);
             } else if (self.link_len < scheme.len) {
                 if (std.ascii.toLower(byte) != scheme[self.link_len]) return self.dropLink(byte);
+            } else if (self.link_len == scheme.len and (byte == '/' or addressEnds(byte))) {
+                // No host: what the scheme held was never an address.
+                return self.dropLink(byte);
             } else if (addressEnds(byte)) {
                 try self.showBare();
                 return self.prose(byte);
@@ -541,15 +544,15 @@ fn dropHeld(self: *Renderer) !void {
 /// sentence's, and before a `)` it did not open.
 fn showBare(self: *Renderer) !void {
     var end = self.link_len;
+    // Unopened `)`s: a trimmed `)` closes one fewer, a trimmed `(` one more.
+    var unopened = @as(isize, @intCast(std.mem.count(u8, self.held[0..end], ")"))) - @as(isize, @intCast(std.mem.count(u8, self.held[0..end], "(")));
     while (end > "http://".len) : (end -= 1) {
         const last = self.held[end - 1];
-        if (std.mem.indexOfScalar(u8, ".,:;!?'\"*_~]", last) != null) continue;
-        if (last == ')') {
-            const opened = std.mem.count(u8, self.held[0..end], "(");
-            const closed = std.mem.count(u8, self.held[0..end], ")");
-            if (closed > opened) continue;
+        if (last == ')' and unopened > 0) {
+            unopened -= 1;
+            continue;
         }
-        break;
+        if (std.mem.indexOfScalar(u8, ".,:;!?'\"*_~]", last) == null) break;
     }
     const address = self.held[0..end];
     if (!TerminalText.linkTarget(address)) return self.dropHeld();
@@ -1370,10 +1373,11 @@ fn visible(output: []const u8, shown: *std.Io.Writer) !void {
 
 test "text that is not a complete web link shows every byte as written" {
     inline for (.{
-        .{ "[a](src/a.zig)", false },  .{ "[a](ftp://x)", false },           .{ "[a](javascript:alert(1))", false },
-        .{ "xhttps://y.dev", false },  .{ "http:/x https:// httpx", false }, .{ "[a] (https://x)", true },
-        .{ "[](https://x)", true },    .{ "[a](https://x y)", true },        .{ "[a](https://x\nnext", true },
-        .{ "[a\n](https://x)", true }, .{ "[[a]](https://x)", true },        .{ "\\[a](https://x)", true },
+        .{ "[a](src/a.zig)", false },        .{ "[a](ftp://x)", false },           .{ "[a](javascript:alert(1))", false },
+        .{ "xhttps://y.dev", false },        .{ "http:/x https:// httpx", false }, .{ "[a] (https://x)", true },
+        .{ "[](https://x)", true },          .{ "[a](https://x y)", true },        .{ "[a](https://x\nnext", true },
+        .{ "[a\n](https://x)", true },       .{ "[[a]](https://x)", true },        .{ "\\[a](https://x)", true },
+        .{ "https:/// https://. x", false },
     }) |case| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
@@ -1400,4 +1404,7 @@ test "text that is not a complete web link shows every byte as written" {
 test "a bare address longer than a link may carry stays plain text" {
     const long = "https://" ++ @as([TerminalText.max_link_bytes]u8, @splat('a'));
     try expectRendered(long ++ " ok", long ++ " ok");
+    // Each `)` past the host is trimmed in constant time.
+    const closers = "https://a" ++ @as([2000]u8, @splat(')'));
+    try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
 }

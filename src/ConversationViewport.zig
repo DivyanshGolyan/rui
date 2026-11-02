@@ -221,13 +221,66 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             try self.appendText(input[start..]);
         }
 
-        /// Room for the longest address, contiguous in the ring, so a cell
-        /// can borrow it whole. Links whose addresses it covers leave.
         fn beginUri(self: *Self) void {
+            self.uri = .{ .at = self.reserveUri() };
+        }
+
+        /// Room for the longest address, contiguous in the ring, so a cell
+        /// can borrow it whole. A link whose address it covers keeps its
+        /// text and loses its address.
+        fn reserveUri(self: *Self) u64 {
             var at = self.uri_end;
             if (at % uri_limit + TerminalText.max_link_bytes > uri_limit) at = std.mem.alignForward(u64, at, uri_limit);
-            while (self.link_first != self.link_next and self.links[self.link_first % link_slots].uri + uri_limit < at + TerminalText.max_link_bytes) self.link_first += 1;
-            self.uri = .{ .at = at };
+            const slot = at % uri_limit;
+            for (self.link_first..self.link_next) |index| {
+                const link = &self.links[index % link_slots];
+                const from = link.uri % uri_limit;
+                if (from < slot + TerminalText.max_link_bytes and slot < from + link.length) link.length = 0;
+            }
+            return at;
+        }
+
+        /// After `prepend` moved this text to follow `older`'s: this text's
+        /// links move with it, and `older`'s retained links go before them.
+        fn prependLinks(self: *Self, older: anytype, front: u64, trimmed: bool) void {
+            const moved = older.origin + older.length;
+            const end = self.origin + self.length;
+            while (self.link_first != self.link_next) {
+                const link = self.links[self.link_first % link_slots];
+                if (link.end == open or link.end > front) break;
+                self.link_first += 1;
+            }
+            for (self.link_first..self.link_next) |index| {
+                const link = &self.links[index % link_slots];
+                link.start = @max(link.start, front) - front + moved;
+                if (link.end != open) link.end = link.end - front + moved;
+            }
+            while (self.link_first != self.link_next and self.links[(self.link_next - 1) % link_slots].start >= end) self.link_next -= 1;
+            if (trimmed) {
+                if (self.link_first != self.link_next) {
+                    const last = &self.links[(self.link_next - 1) % link_slots];
+                    last.end = @min(last.end, end);
+                }
+                // A pending address went with the trimmed text.
+                self.link_open = false;
+                self.uri = null;
+            }
+            var index = older.link_next;
+            while (index != older.link_first and self.link_next - self.link_first != link_slots) {
+                index -= 1;
+                const link = older.links[index % @TypeOf(older.*).link_slots];
+                if (link.end != open and link.end <= older.origin) break;
+                if (link.length == 0 or link.start >= moved) continue;
+                const at = self.reserveUri();
+                @memcpy(self.uris[at % uri_limit ..][0..link.length], older.address(link));
+                self.uri_end = at + link.length;
+                if (self.link_first == 0) {
+                    self.link_first += link_slots;
+                    self.link_next += link_slots;
+                }
+                self.link_first -= 1;
+                self.links[self.link_first % link_slots] = .{ .start = @max(link.start, older.origin), .end = @min(link.end, moved), .uri = at, .length = link.length };
+            }
         }
 
         fn uriByte(self: *Self, byte: u8) void {
@@ -718,7 +771,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 keep = limit - older.length;
                 keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..keep], '\n')) |line| line + 1 else 0;
             }
-            const trimmed = keep != self.text().len or self.control_length != 0;
+            const trimmed = keep != self.text().len or self.control_length != 0 or (styled and self.uri != null);
+            const front = self.origin;
             std.mem.copyBackwards(u8, self.bytes[older.length..][0..keep], self.bytes[0..keep]);
             @memcpy(self.bytes[0..older.length], older.bytes[0..older.length]);
             if (styled) {
@@ -728,6 +782,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.length = older.length + keep;
             if (trimmed) self.control_length = 0;
             self.origin = older.origin;
+            if (styled) self.prependLinks(older, front, trimmed);
             self.dirty = true;
             try self.prepare();
             // Older text ends at a line boundary, so its lines precede ours.
@@ -1214,4 +1269,20 @@ test "the oldest links leave when links or their addresses fill, newer ones stay
     try std.testing.expectEqualStrings("", test_screen.screen.readCell(0, 0).?.link.uri);
     view.clear();
     try std.testing.expectEqual(view.link_first, view.link_next);
+}
+
+test "older text placed before linked text keeps each link on its own text" {
+    const a = "https://a.dev";
+    const b = "https://b.dev";
+    var view: Sized(256, true) = .{};
+    try view.append("See " ++ TerminalText.link_open ++ a ++ TerminalText.link_end ++ "docs" ++ TerminalText.link_close ++ "\n");
+    var older: Sized(64, true) = .{};
+    try older.append(TerminalText.link_open ++ b ++ TerminalText.link_end ++ "old" ++ TerminalText.link_close ++ " page\n");
+    const layout: Layout = .{ .width = 16, .method = .unicode };
+    try std.testing.expect(!try view.prepend(&older, layout, 2));
+    try std.testing.expectEqualStrings("old page\nSee docs\n", view.text());
+    try expectLinks(&view, 16, &.{ b, b, b, "-", "-" });
+    var test_screen: TestScreen = undefined;
+    _ = view.draw(test_screen.window(16, 1), .{ .offset = 9 }, true, true, .{});
+    for (0..8, [_][]const u8{ "", "", "", "", a, a, a, a }) |column, uri| try std.testing.expectEqualStrings(uri, test_screen.screen.readCell(@intCast(column), 0).?.link.uri);
 }
