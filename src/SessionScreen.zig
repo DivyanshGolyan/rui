@@ -54,6 +54,9 @@ pub const Shown = union(enum) {
     newer_end,
 };
 
+/// A delivered frame's choice, offered to the next input.
+pub const Offer = struct { frame: u64, scope: u64, decision: ConsentPolicy.Decision };
+
 /// What a frame encoded: its Action rows and the option Enter would decide.
 pub const Ticket = struct {
     frame: u64,
@@ -121,12 +124,14 @@ action_view: ?struct { io: std.Io, file: std.Io.File } = null,
 // The exact adopted Action awaiting its decision, with its highlighted option
 // and input row. Only this owner changes it.
 consent: ?ConsentPolicy.Pending = null,
-// The frame whose choice Enter may confirm: delivered, then input serviced
-// empty with no key since. Only promptCompleted sets it, and only
-// spendOffer, the entry of every input, clears it. It stands for a decision
-// only while that frame is the latest and nothing changed since: any later
-// frame or change retires it, so it needs no other clearing.
-offer: ?u64 = null,
+// The choice Enter may confirm: a frame delivered, then input serviced empty
+// with no key since. Only promptCompleted sets it, and only spendOffer, the
+// entry of every input, clears it. It stands for its decision while nothing
+// changed since and the latest frame shows that same decision, so a redraw
+// that changes nothing about the choice (the clock) keeps it. A change of
+// scope retires it, and render retires it at a frame showing another
+// decision or none.
+offer: ?Offer = null,
 // Counts inputs, so a ticket knows whether any arrived after its frame.
 inputs: u64 = 0,
 // Advances whenever view, layout, Action or the shown choice is
@@ -282,7 +287,7 @@ pub fn interruptConsent(self: *Self) void {
 
 /// The entry of every input: returns the offer it may use and spends it, so
 /// the next key counts only after a later frame is offered.
-pub fn spendOffer(self: *Self) ?u64 {
+pub fn spendOffer(self: *Self) ?Offer {
     defer {
         self.offer = null;
         self.inputs +%= 1;
@@ -321,12 +326,18 @@ fn joinShown(self: *Self, conversation: Conversation) Shown {
     };
 }
 
-/// The decision an offer of `frame` stands for: the choice that frame
-/// showed, while it is the latest frame and nothing changed since it.
-fn standing(self: *const Self, frame: ?u64) ?ConsentPolicy.Decision {
-    const ticket = self.ticket orelse return null;
-    if ((frame orelse return null) != ticket.frame or ticket.scope != self.scope) return null;
+/// The decision a frame's choice shows, while nothing changed since it.
+fn showing(self: *const Self, ticket: Ticket) ?ConsentPolicy.Decision {
+    if (ticket.scope != self.scope) return null;
     return .{ .action = ticket.action orelse return null, .choice = ticket.shown orelse return null };
+}
+
+/// The decision an offer stands for: the choice its frame showed, while
+/// nothing changed since. Every later frame showed that same decision, or
+/// render retired the offer.
+fn standing(self: *const Self, offer: ?Offer) ?ConsentPolicy.Decision {
+    const made = offer orelse return null;
+    return if (made.scope == self.scope) made.decision else null;
 }
 
 /// The decision Enter would confirm now, if it were the next input.
@@ -339,7 +350,8 @@ pub fn offered(self: *const Self) ?ConsentPolicy.Decision {
 /// see whether it may be.
 pub fn awaitsOffer(self: *const Self) bool {
     const ticket = self.ticket orelse return false;
-    return ticket.delivered and ticket.inputs == self.inputs and self.offer != ticket.frame and self.standing(ticket.frame) != null;
+    const offered_frame = if (self.offer) |made| made.frame == ticket.frame else false;
+    return ticket.delivered and ticket.inputs == self.inputs and !offered_frame and self.showing(ticket) != null;
 }
 
 /// The one place an offer is made: the latest frame, once input after its
@@ -347,7 +359,8 @@ pub fn awaitsOffer(self: *const Self) bool {
 /// draw. Returns whether this made the offer.
 pub fn promptCompleted(self: *Self, service: ConsentPolicy.Service, decoder_pending: bool, blocked: bool) bool {
     if (!self.awaitsOffer() or service != .empty or decoder_pending or blocked) return false;
-    self.offer = self.ticket.?.frame;
+    const ticket = self.ticket.?;
+    self.offer = .{ .frame = ticket.frame, .scope = ticket.scope, .decision = self.showing(ticket).? };
     return true;
 }
 
@@ -363,7 +376,7 @@ pub const ChoiceOutcome = union(enum) { picked, decision: ConsentPolicy.Decision
 /// this key. It acts only when that offer is the latest frame, unchanged
 /// since, and the decision it showed is the Action's current one. A live
 /// probe of geometry and command comes first.
-pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize, command_blocked: bool) ChoiceOutcome {
+pub fn choose(self: *Self, key: ChoiceKey, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ChoiceOutcome {
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
         self.invalidateLayout();
         return .{ .blocked = .layout };
@@ -395,7 +408,7 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize,
 /// for this key: the denial the draft is sent with, when that offer is the
 /// latest frame, unchanged since, and it showed this draft as the reason.
 /// A probe: nothing changes until `decide`.
-pub fn reasonOffered(self: *const Self, offer: ?u64, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
+pub fn reasonOffered(self: *const Self, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
     const shown = self.standing(offer) orelse return null;
     if (self.liveApproval(command_blocked) != .reason) return null;
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) return null;
@@ -1003,6 +1016,11 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .first = layout.first,
         .next = layout.action_seen,
         .conversation = conversation,
+    };
+    // A frame that shows another decision, or none, retires the offer for
+    // good, so a choice hidden and shown again needs a new one.
+    if (self.offer) |made| if (!std.meta.eql(self.showing(self.ticket.?), made.decision)) {
+        self.offer = null;
     };
     try out.writeAll(frame.written());
     try out.flush();
@@ -2395,6 +2413,61 @@ test "a decision prompt is offered only after its own delivered frame" {
     try std.testing.expect(press(screen, .enter, size, false) != .decision);
 }
 
+test "a redraw that leaves the choice unchanged keeps its offer; one that hides the choice retires it" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(io, &environ, false);
+    defer screen.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    var fixture = try ActionFixture.init(4);
+    defer fixture.deinit();
+    var buffer: [256]u8 = undefined;
+    var held: HeldWriter = .init(screen, &buffer);
+    try screen.adopt(io, fixture.file, 0xa, true);
+    for (0..2) |_| {
+        _ = screen.select(false);
+        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    }
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    // A key read while a redraw showing the same choice is written acts on
+    // the choice the delivered frame showed.
+    const pending = try screen.render(&held.writer, size, "", 0, .{}, &.{});
+    const decided = press(screen, .enter, size, false);
+    try std.testing.expect(decided == .decision);
+    try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .allow_once }, decided.decision);
+    _ = screen.presented(pending);
+    try screen.adopt(io, fixture.file, 0xb, true);
+    for (0..2) |_| {
+        _ = screen.select(false);
+        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    }
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    // A clock tick redraws the screen, issued and delivered, before the key
+    // is read: the key still picks the choice it was shown.
+    for (0..2) |_| {
+        _ = screen.select(false);
+        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    }
+    try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xb, .choice = .allow_once }, screen.offered().?);
+    try std.testing.expect(press(screen, .{ .pick = .deny }, size, false) == .picked);
+    // A redraw that shows no decision, such as a command holding the
+    // choice, retires the offer even once the choice is shown again.
+    _ = screen.select(false);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    _ = screen.select(true);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{ .command = true }, &.{}));
+    try std.testing.expect(screen.offered() == null);
+    _ = screen.select(false);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    try std.testing.expect(screen.offered() == null);
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xb, .choice = .deny }, screen.offered().?);
+}
+
 test "an offer is spent by any input after its frame, even one that arrives while the frame is written" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
@@ -2434,7 +2507,7 @@ fn deliver(screen: *Self, held: *HeldWriter, size: std.posix.winsize) !void {
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
 }
 
-test "an offer stands only for its own frame: no Enter decides on a later frame until that frame is offered" {
+test "a change to the screen retires the offer: no Enter decides on a later frame until that frame is offered" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -2448,7 +2521,7 @@ test "an offer stands only for its own frame: no Enter decides on a later frame 
     defer fixture.deinit();
     var buffer: [256]u8 = undefined;
     var held: HeldWriter = .init(screen, &buffer);
-    const Change = enum { resize, width, readopted, successor, held_write, redraw };
+    const Change = enum { resize, width, readopted, successor };
     for (std.enums.values(Change)) |change| {
         errdefer std.debug.print("change={s}\n", .{@tagName(change)});
         screen.withdrawAction();
@@ -2478,16 +2551,6 @@ test "an offer stands only for its own frame: no Enter decides on a later frame 
                 try screen.adopt(io, fixture.file, if (change == .successor) 0xb else 0xa, true);
                 try deliver(screen, &held, now);
             },
-            .held_write => {
-                // A frame that shows the same choice is issued; an Enter read
-                // while its bytes are written finds it not yet delivered.
-                const pending = try screen.render(&held.writer, now, "", 0, .{}, &.{});
-                try expectBlocked(.not_ready, press(screen, .enter, now, false));
-                _ = screen.presented(pending);
-                try std.testing.expect(screen.consent != null);
-                continue;
-            },
-            .redraw => {},
         }
         // Whatever changed, the next delivered frame shows the choice again,
         // yet no empty service has offered it.

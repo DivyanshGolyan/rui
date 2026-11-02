@@ -3014,12 +3014,13 @@ One rule decides when it acts.
 Each frame records the option Enter would decide on it: the highlighted option its choice shows, Deny when it shows the draft beside the Action as a reason and the line under the draft says `enter denies the command and sends this`, or none.
 A notice that takes that line without saying so offers nothing; the refusal of an early Enter there says it: `! Not ready; nothing denied · enter denies the command and sends this`.
 Once that frame is delivered and input is then serviced empty, with no key since it was issued, no pending decoder state, no command and nothing left to draw, that frame is offered; this is the only place an offer is made.
-The offer names the frame, not a decision: it stands only while that frame is the latest one and nothing has changed since.
+The offer is the decision that frame showed: it stands while nothing has changed since and every later frame shows that same decision.
+A redraw that leaves the choice as it was, such as the clock's minute, keeps it, since the key was sent at the choice it still shows.
 Every input spends the offer first, whatever it does.
-Left, Right and Enter act only when the offer they spent is the latest frame, unchanged since, and the option that frame showed is the Action's current decision; Enter in the draft acts only when that frame showed the draft as the reason and said Enter denies.
-So Enter never confirms an option that is not on screen: an Enter read while a later frame's write is held finds that frame undelivered and decides nothing, and after an arrow Enter waits for a frame that shows the move.
+Left, Right and Enter act only when the offer they spent still stands and the option it showed is the Action's current decision; Enter in the draft acts only when that frame showed the draft as the reason and said Enter denies.
+So Enter never confirms an option that is not on screen: a frame that shows another decision, or none, retires the offer even before it is delivered, and after an arrow Enter waits for a frame that shows the move.
 An arrow or Enter that cannot act says why, as does a refused key; a key the choice has no use for, such as Tab, Home, Backspace, Delete or Ctrl-X, does nothing and says nothing.
-A redraw, page, resize, width change, completed reading, or a withdrawn, successor or re-adopted Action spends nothing but retires the offer: no Enter decides until a frame drawn after that change is delivered and input is then serviced empty.
+A page, resize, width change, completed reading, or a withdrawn, successor or re-adopted Action spends nothing but retires the offer: no Enter decides until a frame drawn after that change is delivered and input is then serviced empty.
 The run loop does that for every frame it draws, so a quick second Enter after a refused one may decide.
 Spending never revokes or forces a frame, so a paste costs no frame per byte.
 There are no letter shortcuts.
@@ -3052,7 +3053,7 @@ The Host still requires the exact explicit decision and revalidates its applicab
 `SessionFrontend` owns decoding and I/O, distinguishing actual empty input from decoder expiry, pending input and exhausted service budget.
 A queued or running command, pending decoder state or a frame left to draw prevents an offer.
 Prompt completion uses post-write state because terminal writes may service input.
-Any input spends the offer, a moved highlight included, and any later frame or change retires it, an unchanged redraw included; a new or re-entered Action starts at Allow once.
+Any input spends the offer, a moved highlight included, and any change, or a frame showing another decision or none, retires it, while an unchanged redraw keeps it; a new or re-entered Action starts at Allow once.
 A confirmed choice, or a sent reason, consumes the target before starting Admission.
 
 The existing Admission owner captures and sends the Permission Decision through `/v1/control/permission-decision`, pinning Store, Session, Action, decision and reserved key.

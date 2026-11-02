@@ -1513,7 +1513,7 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 
 /// One input at an Action's Allow once / Deny choice. Only arrows and Enter
 /// act on it, and only with the offer this input spent.
-fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
+fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     switch (Editor.select(conversation_keys, decoded)) {
         .none => {},
@@ -1542,7 +1542,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
 
 /// An arrow or Enter at the choice, probed against current geometry,
 /// command and the offer; one that cannot act says why.
-fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?u64) !void {
+fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     switch (screen.choose(key, offer, self.terminal.geometry(), self.commandActive())) {
         .picked => {},
@@ -1582,7 +1582,7 @@ fn reasonNotice(self: *const Self, letter: bool) []const u8 {
 /// One input in the draft, with the offer this input spent. Beside an Action
 /// whose latest frame offered the draft as the reason, Enter sends it and
 /// denies the Action.
-fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
+fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     const submission = self.submission.view();
     // Only the first key after an offered frame carries an offer, so the
