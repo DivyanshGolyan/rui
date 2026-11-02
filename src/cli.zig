@@ -546,7 +546,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     // A saved OpenAI key makes the Host serve openai too. One the Host could
     // not read is left to `rui host serve --provider openai` to report.
     const openai: provider_selection.Readiness = if (readiness) |known| known.get(.openai) else providerReadiness(init, .openai) catch .credential_error;
-    if (openai.usable()) {
+    if (openai.usable() and openAiBaseUrlUsable(init)) {
         argv[argc] = "--provider";
         argv[argc + 1] = "openai";
         argc += 2;
@@ -1276,6 +1276,19 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     }
 }
 
+const invalid_base_url = "rui: " ++ providers.openai_base_url_variable ++ " must be an https:// URL with a host and no credentials, query or fragment";
+
+/// Whether an auto-started Host can serve OpenAI at its base URL. A bad one
+/// is OpenAI's alone to fail, so the Host still starts and serves Codex.
+fn openAiBaseUrlUsable(init: std.process.Init) bool {
+    _ = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
+        if (err != error.InvalidBaseUrl) return true; // `host serve` reports it.
+        stderr.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{});
+        return false;
+    };
+    return true;
+}
+
 /// The OpenAI key a served `openai` presents; a Host never starts serving
 /// it without one.
 noinline fn readServedKey(init: std.process.Init, key: *api_key.Key) ![]const u8 {
@@ -1470,10 +1483,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             return error.UnsupportedProvider;
         };
         if (served.serves(named)) return error.DuplicateArgument;
-        served.table.set(named, .{ .endpoint = providers.endpoint(named), .credential = switch (named) {
-            .codex => .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } },
-            .openai => .{ .key_file = .{ .key = try readServedKey(init, &openai_key) } },
-        } });
+        served.table.set(named, switch (named) {
+            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } } },
+            .openai => .{ .endpoint = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
+                if (err == error.InvalidBaseUrl) stderr.diagnostic(invalid_base_url ++ "; the Host did not start.\n", .{});
+                return err;
+            }, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key) } } },
+        });
     }
     if (openai_fixture) |endpoint| {
         if (served.serves(.openai)) return error.ConflictingArguments;

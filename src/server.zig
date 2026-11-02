@@ -987,12 +987,12 @@ pub fn serve(
     defer retention.cleanupAll();
     host.failed_response_store = lease.store_dir;
     if (served.any()) {
-        for (served.table.values, std.enums.values(protocol.Provider)) |entry, label| if (entry) |value| {
+        for (served.table.values) |entry| if (entry) |value| {
             try provider.validateEndpoint(value.endpoint);
             switch (value.credential) {
                 .none => {},
                 .chatgpt_device => |selected| try model_adapter.validateAuthenticationEndpoint(value.endpoint, served.ca_file, selected),
-                .key_file => |key| try model_adapter.validateKeyEndpoint(value.endpoint, providers.endpoint(label), served.ca_file, key.fixture),
+                .key_file => |key| try model_adapter.validateKeyEndpoint(value.endpoint, served.ca_file, key.fixture),
             }
         };
         try provider.checkLibraries();

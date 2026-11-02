@@ -338,12 +338,11 @@ pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8
         return error.InvalidCodexFixtureEndpoint;
 }
 
-/// An API key goes only to its provider's own endpoint, or for a fixture to
-/// a loopback one.
-pub fn validateKeyEndpoint(endpoint: []const u8, own_endpoint: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
+/// An API key goes over https, or to a loopback fixture when `fixture`.
+pub fn validateKeyEndpoint(endpoint: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
     if (fixture) {
         if (!fixtureEndpoint(endpoint, ca_file)) return error.InvalidKeyFixtureEndpoint;
-    } else if (!std.mem.eql(u8, endpoint, own_endpoint)) return error.KeyEndpointMismatch;
+    } else if (!std.mem.startsWith(u8, endpoint, "https://")) return error.InsecureKeyEndpoint;
 }
 
 /// The fields the credential path writes after the codec's headers:
@@ -395,10 +394,10 @@ pub const Headers = struct {
         }
     }
 
-    /// An API key's fields: the key and user-agent. The key goes only to
-    /// `own_endpoint`, its provider's own, or for a fixture to a loopback one.
-    pub fn initKey(self: *Headers, endpoint: []const u8, own_endpoint: []const u8, ca_file: ?[]const u8, key: []const u8, fixture: bool, shared_credentials: *provider.Credentials) !void {
-        try validateKeyEndpoint(endpoint, own_endpoint, ca_file, fixture);
+    /// An API key's fields: the key and user-agent. The key goes only over
+    /// https, or for a fixture to a loopback endpoint.
+    pub fn initKey(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, key: []const u8, fixture: bool, shared_credentials: *provider.Credentials) !void {
+        try validateKeyEndpoint(endpoint, ca_file, fixture);
         if (!api_key.valid(key)) return error.InvalidCredentialHeader;
         const shared = try shared_credentials.share(key, "");
         self.credentials = shared_credentials;
@@ -646,13 +645,13 @@ test "Codex turn state owner changes invalidate paused Turns and stale completio
     }
 }
 
-test "an API key goes only to its own endpoint or a loopback fixture, with no account" {
+test "an API key goes only over https or to a loopback fixture, with no account" {
     var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
     const own = "https://api.openai.com/v1/responses";
     {
         var headers: Headers = .{};
         defer headers.deinit();
-        try headers.initKey(own, own, null, "sk-test", false, &credentials);
+        try headers.initKey(own, null, "sk-test", false, &credentials);
         const entries = headers.fields();
         try std.testing.expectEqual(@as(usize, 2), entries.len);
         try std.testing.expectEqualStrings("authorization", entries[0].name);
@@ -664,13 +663,12 @@ test "an API key goes only to its own endpoint or a loopback fixture, with no ac
     {
         var headers: Headers = .{};
         defer headers.deinit();
-        try headers.initKey("http://127.0.0.1:9/responses", own, null, "sk-test", true, &credentials);
+        try headers.initKey("http://127.0.0.1:9/responses", null, "sk-test", true, &credentials);
     }
     var refused: Headers = .{};
-    try std.testing.expectError(error.KeyEndpointMismatch, refused.initKey(managed_endpoint, own, null, "sk-test", false, &credentials));
-    try std.testing.expectError(error.KeyEndpointMismatch, refused.initKey("http://127.0.0.1:9/responses", own, null, "sk-test", false, &credentials));
-    try std.testing.expectError(error.InvalidKeyFixtureEndpoint, refused.initKey(own, own, null, "sk-test", true, &credentials));
-    try std.testing.expectError(error.InvalidCredentialHeader, refused.initKey(own, own, null, "sk test", false, &credentials));
+    try std.testing.expectError(error.InsecureKeyEndpoint, refused.initKey("http://127.0.0.1:9/responses", null, "sk-test", false, &credentials));
+    try std.testing.expectError(error.InvalidKeyFixtureEndpoint, refused.initKey(own, null, "sk-test", true, &credentials));
+    try std.testing.expectError(error.InvalidCredentialHeader, refused.initKey(own, null, "sk test", false, &credentials));
     try std.testing.expectEqual(@as(?*provider.SharedCredential, null), credentials.head);
 }
 

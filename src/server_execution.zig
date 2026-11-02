@@ -1651,7 +1651,7 @@ fn launchPreparedRequest(
             return;
         };
     } else if (host.providers.get(request.provider)) |served| switch (served.credential) {
-        .key_file => |key| headers.initKey(served.endpoint, providers.endpoint(request.provider), host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
+        .key_file => |key| headers.initKey(served.endpoint, host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot);
