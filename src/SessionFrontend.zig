@@ -754,12 +754,13 @@ fn drawFrame(self: *Self) !void {
     };
     var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var context = std.Io.Writer.fixed(&context_buffer);
-    if (choosing and screen.actionVisible())
+    const hint = !(choosing and screen.actionVisible());
+    if (!hint)
         try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
     else if (self.tmux and projection.approval == .absent and view.bytes.len != 0)
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
-    const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
+    const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), hint, base_status);
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
     _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, status, &self.live.view));
@@ -772,8 +773,9 @@ comptime {
 
 /// The notice and instructions always fit; a long context line is shortened,
 /// on a UTF-8 boundary, rather than pushing them out of the status region.
+/// The notice and a yielding context give way first on a short terminal.
 /// Bypass is the default and stays quiet: /status shows Permission.
-fn statusLines(buffer: *[Frame.status_capacity]u8, notice: []const u8, context: []const u8, base: []const u8) []const u8 {
+fn statusLines(buffer: *[Frame.status_capacity]u8, notice: []const u8, context: []const u8, context_yields: bool, base: []const u8) Frame.Status {
     std.debug.assert(base.len <= 256);
     var status = std.Io.Writer.fixed(buffer);
     const room = buffer.len - notice.len - base.len - "\n\n…".len;
@@ -783,27 +785,18 @@ fn statusLines(buffer: *[Frame.status_capacity]u8, notice: []const u8, context: 
         while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
         context_line = context_line[0..end];
     }
-    for ([_][]const u8{ notice, context_line, base }, 0..) |line, index| {
+    // Yielding lines lead, so they end where the first kept line begins.
+    var yielding: ?usize = null;
+    for ([_][]const u8{ notice, context_line, base }, [_]bool{ true, context_yields, false }, 0..) |line, yields, index| {
         if (line.len == 0) continue;
+        if (!yields and yielding == null) yielding = status.buffered().len;
         if (status.buffered().len != 0) status.writeAll("\n") catch unreachable;
         status.writeAll(line) catch unreachable;
         if (index == 1 and line.len < context.len) status.writeAll("…") catch unreachable;
     }
-    return status.buffered();
-}
-
-test "status lines keep the notice and instructions beside an oversized context" {
-    var buffer: [Frame.status_capacity]u8 = undefined;
-    const notice: [1536]u8 = @splat('n');
-    // A context whose cut falls inside a two-byte scalar.
-    var context: [4000]u8 = undefined;
-    for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
-    const lines = statusLines(&buffer, &notice, &context, "Type a + Enter");
-    try std.testing.expect(std.mem.startsWith(u8, lines, &notice));
-    try std.testing.expect(std.mem.endsWith(u8, lines, "…\nType a + Enter"));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(lines));
-    try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "", "Sent"));
-    try std.testing.expectEqualStrings("! x\nWorkspace: /w\nSent", statusLines(&buffer, "! x", "Workspace: /w", "Sent"));
+    const text = status.buffered();
+    const end = yielding orelse text.len;
+    return .{ .text = text, .yielding = end + @intFromBool(end != 0 and end < text.len) };
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.

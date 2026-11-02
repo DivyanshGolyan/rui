@@ -5,6 +5,7 @@ const Input = @import("TerminalInput.zig");
 const Text = @import("TerminalText.zig");
 const View = @import("session_view.zig");
 const Screen = @import("SessionScreen.zig");
+const Frame = @import("TerminalFrame.zig");
 const protocol = @import("protocol.zig");
 const termios = @import("posix");
 const Self = @This();
@@ -274,7 +275,7 @@ pub fn permanent(self: *Self, bytes: []const u8) !void {
 
 /// Writes the screen's selected frame. The receipt exists only after every
 /// byte and the final flush succeeded; a failure returns no receipt.
-pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, live: *const View.Live) !Screen.Delivered {
+pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: Frame.Status, live: *const View.Live) !Screen.Delivered {
     const Output = struct {
         terminal: *Self,
         writer: std.Io.Writer,

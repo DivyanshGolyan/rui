@@ -41,13 +41,20 @@ caret_column: u16,
 action_seen: Position,
 approval_ready: bool,
 
+/// Status text whose leading `yielding` bytes, whole lines, give way top line
+/// first when the frame cannot otherwise fit.
+pub const Status = struct {
+    text: []const u8,
+    yielding: usize = 0,
+};
+
 pub const Input = struct {
     width: u16,
     height: u16,
     method: Viewport.Method = .wcwidth,
     draft: []const u8 = "",
     cursor: usize,
-    status: []const u8,
+    status: Status,
     approval: bool,
     calls: []const []const u8,
     total_calls: u64,
@@ -68,6 +75,21 @@ fn rows(text: anytype, layout: Viewport.Layout) !u16 {
 /// and draft; the shell consumes the plan before pumping input or changing them.
 pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     try validateGeometry(input.width, input.height);
+    var attempt = input;
+    while (true) {
+        self.planFixed(document, attempt) catch |err| {
+            const status = &attempt.status;
+            if (err != error.TerminalTooSmall or status.yielding == 0) return err;
+            const line = if (std.mem.indexOfScalar(u8, status.text[0..status.yielding], '\n')) |end| end + 1 else status.yielding;
+            status.text = status.text[line..];
+            status.yielding -= line;
+            continue;
+        };
+        return;
+    }
+}
+
+fn planFixed(self: *Self, document: *Viewport.Document, input: Input) !void {
     const layout: Viewport.Layout = .{ .width = input.width, .method = input.method };
     self.* = .{
         .status = .{ .width_method = input.method },
@@ -91,10 +113,10 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         .action_seen = input.action_seen,
         .approval_ready = false,
     };
-    try self.status.append(input.status);
+    try self.status.append(input.status.text);
     const reserve: u16 = if (input.approval) 2 else 1;
     var status_rows = try rows(&self.status, layout);
-    if (input.approval and status_rows > input.height - reserve and std.mem.eql(u8, input.status, approval_choice)) {
+    if (input.approval and status_rows > input.height - reserve and std.mem.eql(u8, input.status.text, approval_choice)) {
         self.status.clear();
         try self.status.append("a Allow / d Deny\nEnter");
         status_rows = try rows(&self.status, layout);
@@ -189,7 +211,7 @@ test "compact frame keeps exact-fit transcript and multiline caret without botto
     var document: Viewport.Document = .{};
     try document.append("› inspect\n  Done.\n");
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = .{ .text = "" }, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 3), frame.draft_top);
     try std.testing.expectEqual(@as(u16, 4), frame.caret_row);
@@ -206,7 +228,7 @@ test "compact frame keeps exact-fit transcript and multiline caret without botto
 test "a transcript's final blank row already supplies the prompt spacer" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = .{ .text = "" }, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
     for ([_][]const u8{ "Done.", "Done.\n", "Done.\n\n", "Done.\n  \n", "Done.\n  " }) |text| {
         document.clear();
         try document.append(text);
@@ -226,7 +248,7 @@ test "a transcript's final blank row already supplies the prompt spacer" {
     // already that separation, whether the footer has status or tool rows.
     input.height = 24;
     input.selected = false;
-    input.status = "Working…";
+    input.status = .{ .text = "Working…" };
     input.calls = &.{"• Inspect layout"};
     input.total_calls = 1;
     for ([_][]const u8{ "Done.\n", "Done.\n\n" }) |text| {
@@ -243,7 +265,7 @@ test "an exactly filled draft row puts the caret on the next row" {
     var frame: Self = undefined;
     // Eight columns leave six for the draft: "abcdef" fills its row.
     for ([_][]const u8{ "abcde", "abcdef" }, [_]u16{ 1, 2 }, [_]u16{ 7, 2 }) |draft, height, column| {
-        try frame.plan(&document, .{ .width = 8, .height = 12, .draft = draft, .cursor = draft.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+        try frame.plan(&document, .{ .width = 8, .height = 12, .draft = draft, .cursor = draft.len, .status = .{ .text = "" }, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
         try std.testing.expectEqual(height, frame.draft_height);
         try std.testing.expectEqual(frame.draft_top + height - 1, frame.caret_row);
         try std.testing.expectEqual(column, frame.caret_column);
@@ -257,7 +279,7 @@ test "a fitting multiline draft uses free terminal rows without scrolling" {
     var frame: Self = undefined;
     for ([_]u16{ 20, 24 }) |height| {
         for ([_]usize{ 0, draft.len / 2, draft.len }) |cursor| {
-            try frame.plan(&document, .{ .width = 100, .height = height, .draft = draft, .cursor = cursor, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+            try frame.plan(&document, .{ .width = 100, .height = height, .draft = draft, .cursor = cursor, .status = .{ .text = "" }, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
             // Twelve logical lines, with the Peer line wrapping once.
             try std.testing.expectEqual(@as(u16, 13), frame.draft_height);
             try std.testing.expectEqual(@as(u16, 0), frame.draft_first);
@@ -271,7 +293,7 @@ test "a fitting multiline draft uses free terminal rows without scrolling" {
     var tall: [200]u8 = undefined;
     for (0..40) |index| @memcpy(tall[index * 5 ..][0..5], "line\n");
     for ([_]u16{ 8, 24 }) |height| {
-        try frame.plan(&document, .{ .width = 100, .height = height, .draft = &tall, .cursor = tall.len, .status = "Working…", .approval = false, .calls = &.{ "• Inspect\n  continued", "• Compare" }, .total_calls = 3, .selected = false, .action_visible = false, .preview_complete = true });
+        try frame.plan(&document, .{ .width = 100, .height = height, .draft = &tall, .cursor = tall.len, .status = .{ .text = "Working…" }, .approval = false, .calls = &.{ "• Inspect\n  continued", "• Compare" }, .total_calls = 3, .selected = false, .action_visible = false, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 2), frame.used);
         try std.testing.expectEqualStrings("+1 more calls · /status", frame.heading.text());
         try std.testing.expectEqual(height - 5, frame.draft_height);
@@ -281,7 +303,7 @@ test "a fitting multiline draft uses free terminal rows without scrolling" {
     // Browsing and Action pages must remain readable beside an oversized draft.
     document.top = .{};
     for ([_]bool{ false, true }) |action| {
-        try frame.plan(&document, .{ .width = 100, .height = 24, .draft = &tall, .cursor = tall.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = action, .preview_complete = true });
+        try frame.plan(&document, .{ .width = 100, .height = 24, .draft = &tall, .cursor = tall.len, .status = .{ .text = "" }, .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = action, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 1), frame.document_rows);
         try std.testing.expectEqualStrings(if (action) "Action continues · PgDn" else "Browsing · Esc returns", frame.heading.text());
         try std.testing.expect(!frame.approval_ready);
@@ -291,7 +313,7 @@ test "a fitting multiline draft uses free terminal rows without scrolling" {
 test "complete approval and overflow survive short layouts or fail before rendering" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    var input: Input = .{ .width = 24, .height = 3, .cursor = 0, .status = "Idle", .approval = false, .calls = &.{}, .total_calls = 100, .selected = false, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 24, .height = 3, .cursor = 0, .status = .{ .text = "Idle" }, .approval = false, .calls = &.{}, .total_calls = 100, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
     try std.testing.expectEqualStrings("+100 · /status", frame.heading.text());
     try std.testing.expectEqual(@as(u16, 2), frame.draft_top);
@@ -300,14 +322,38 @@ test "complete approval and overflow survive short layouts or fail before render
     input.height = 3;
     input.width = 12;
     input.approval = true;
-    input.status = approval_choice ++ "\n! Original retained";
+    input.status = .{ .text = approval_choice ++ "\n! Original retained" };
+    try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
+}
+
+test "a notice that does not fit yields before the frame fails" {
+    var document: Viewport.Document = .{};
+    var frame: Self = undefined;
+    const notice = "! Read the whole Action first; nothing authorized.\n";
+    var input: Input = .{ .width = 20, .height = 4, .cursor = 0, .status = .{ .text = notice ++ approval_choice, .yielding = notice.len }, .approval = true, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings("a Allow / d Deny\nEnter", frame.status.text());
+    // A taller terminal keeps the notice above the full instructions.
+    input.height = 12;
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings(notice ++ approval_choice, frame.status.text());
+    // Yielding lines go top first, and a status of only yielding lines can empty.
+    input = .{ .width = 20, .height = 4, .cursor = 0, .status = .{ .text = "! Decision input rejected.\nIn tmux, Shift-Enter sends\nWorking…", .yielding = "! Decision input rejected.\nIn tmux, Shift-Enter sends\n".len }, .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings("In tmux, Shift-Enter sends\nWorking…", frame.status.text());
+    input.status = .{ .text = "! Decision input rejected; nothing authorized. Type a or d.", .yielding = "! Decision input rejected; nothing authorized. Type a or d.".len };
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings("", frame.status.text());
+    // Required instructions never yield.
+    input.status = .{ .text = notice ++ approval_choice ++ "\nWorkspace: /w", .yielding = notice.len };
+    input.approval = true;
     try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
 }
 
 test "inspection navigation names its actual return target at narrow widths" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    var input: Input = .{ .width = 20, .height = 16, .cursor = 0, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = false, .preview_complete = true };
+    var input: Input = .{ .width = 20, .height = 16, .cursor = 0, .status = .{ .text = "" }, .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = false, .preview_complete = true };
     for ([_]bool{ false, true }) |pending| {
         input.action_pending = pending;
         for ([_]u16{ 20, 8 }) |width| {
@@ -322,7 +368,7 @@ test "Action approval requires contiguous displayed rows and resets after resize
     var document: Viewport.Document = .{};
     for (0..100) |_| try document.append("command line\n");
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = approval_choice, .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
+    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = .{ .text = approval_choice }, .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
     const layout: Viewport.Layout = .{ .width = 80, .method = .wcwidth };
     document.top = .{};
     try frame.plan(&document, input);
