@@ -906,15 +906,21 @@ fn drawFrame(self: *Self) !void {
     var facts = self.line.facts(&self.hint, self.session);
     if (facts) |*shown| shown.stop = said.stoppable;
     self.dirty = false;
+    // The conversation as this frame encodes it: its write can pump keys
+    // and output before the receipt.
+    const caught_up = !self.reading.opening and self.live.cursor.end == null;
+    const position = self.live.cursor.position;
+    const through = if (self.transcript.newer) |newer| newer.through else null;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
-    // What this frame showed of the conversation.
-    if (screen.view == .live and !self.reading.opening and self.live.cursor.end == null)
-        self.seen.live(if (self.seen.live_from) |at| screen.liveShows(at) else false, self.live.cursor.position, try screen.liveEnd());
-    if (self.transcript.newer) |newer| if (try screen.drewNewer()) self.seen.transcript(newer.through);
-    // A copy of live output can show rows no live frame did: more than a
-    // screen arrived between frames.
-    if (try screen.transcriptLiveSpan()) |span| self.seen.drew(span.start, span.end);
+    const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+    switch (change.shown) {
+        .none => {},
+        .live => |span| if (caught_up) self.seen.live(if (self.seen.live_from) |at| at >= span.start else false, position, span.end),
+        // A copy of live output can show rows no live frame did: more than
+        // a screen arrived between frames.
+        .copy => |span| self.seen.drew(span.start, span.end),
+        .newer_end => if (through) |newer| self.seen.transcript(newer),
+    }
 }
 
 /// The commands the draft's command word starts, unless Esc closed the
@@ -2046,7 +2052,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         try std.testing.expectEqual(ConsentPolicy.Projection{ .row = .selector, .approval = .choice }, screen.selected);
         // A delivered frame that showed the choice, then offered.
         screen.frames +%= 1;
-        screen.ticket = .{ .frame = screen.frames, .scope = screen.scope, .action = 7, .shown = .allow_once, .inputs = screen.inputs, .first = .{}, .next = .{}, .delivered = true };
+        screen.ticket = .{ .frame = screen.frames, .scope = screen.scope, .action = 7, .shown = .allow_once, .inputs = screen.inputs, .first = .{}, .next = .{}, .conversation = .none, .delivered = true };
         try std.testing.expect(screen.promptCompleted(.empty, false, false));
         try std.testing.expect(screen.offered() != null);
         // The first key typed is the draft's, and the choice is no longer fresh.

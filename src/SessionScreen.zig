@@ -25,6 +25,32 @@ pub const ViewKind = enum { live, transcript, inspection, action, message };
 /// What a reason's line under the input says, as its hint or a notice.
 pub const deny_words = "enter denies the command and sends this";
 
+/// Live offsets from the first row a frame drew whole to where its rows end.
+pub const Span = struct { start: u64, end: u64 };
+
+/// What a frame encoded of the conversation. Keys its write pumps can move
+/// the view, and pages can join it, before the receipt.
+pub const Conversation = union(enum) {
+    none,
+    /// The latest view.
+    live: Span,
+    /// A transcript copied from live output: the live rows it drew.
+    copy: Span,
+    /// A transcript of newer pages: from its row `first` to `next`, the
+    /// first it left undrawn, at absolute offsets. `end`: it drew the last.
+    newer: struct { first: Position, next: Position, end: bool },
+};
+
+/// What a delivered frame showed of the conversation.
+pub const Shown = union(enum) {
+    none,
+    live: Span,
+    copy: Span,
+    /// With the frames before it, every row of a transcript of newer pages
+    /// from its top through its end.
+    newer_end,
+};
+
 /// What a frame encoded: its Action rows and the option Enter would decide.
 pub const Ticket = struct {
     frame: u64,
@@ -39,6 +65,7 @@ pub const Ticket = struct {
     inputs: u64,
     first: Position,
     next: Position,
+    conversation: Conversation,
     delivered: bool = false,
 };
 
@@ -48,7 +75,7 @@ pub const Delivered = struct { frame: u64 };
 
 /// What a receipt changed. Completed reading revokes the frame, so the next
 /// one draws the choice.
-pub const PresentationChange = struct { read_completed: bool = false };
+pub const PresentationChange = struct { read_completed: bool = false, shown: Shown = .none };
 
 vx: vaxis.Vaxis = undefined,
 memory: Memory = .{},
@@ -71,8 +98,8 @@ copy_shift: ?i64 = null,
 // The live offset the copy starts at: rows above it are older pages and
 // labels, not live rows.
 copy_front: u64 = 0,
-// For a transcript of newer pages, the first row no frame drew in the run
-// frames drew from its top, at an absolute offset; null otherwise.
+// For a transcript of newer pages, the first row no delivered frame drew in
+// the run frames drew from its top, at an absolute offset; null otherwise.
 newer_drawn: ?Position = null,
 // Rows asked for above the transcript's top while an older page loads; the
 // page applies them, so holding PgUp or the wheel keeps moving.
@@ -265,14 +292,34 @@ pub fn presented(self: *Self, delivered: Delivered) PresentationChange {
     const ticket = &(self.ticket orelse return .{});
     if (ticket.frame != delivered.frame or ticket.delivered) return .{};
     ticket.delivered = true;
+    if (ticket.scope != self.scope) return .{};
+    var change: PresentationChange = .{ .shown = self.joinShown(ticket.conversation) };
     const action = if (self.consent) |pending| pending.action else null;
-    if (ticket.scope != self.scope or ticket.action != action or ticket.action == null or !self.actionVisible() or !self.preview_complete) return .{};
+    if (ticket.action != action or ticket.action == null or !self.actionVisible() or !self.preview_complete) return change;
     const was_read = self.actionRead();
     // Only rows delivered contiguously from the top count as read.
     if (ticket.first.order(self.action_seen) != .gt and ticket.next.order(self.action_seen) == .gt) self.action_seen = ticket.next;
-    if (was_read or !self.actionRead()) return .{};
+    if (was_read or !self.actionRead()) return change;
     self.invalidateScope();
-    return .{ .read_completed = true };
+    change.read_completed = true;
+    return change;
+}
+
+/// Joins a delivered frame's rows of a transcript of newer pages to those
+/// frames drew from its top. Rows that moves between two frames passed over
+/// never join.
+fn joinShown(self: *Self, conversation: Conversation) Shown {
+    return switch (conversation) {
+        .none => .none,
+        .live => |span| .{ .live = span },
+        .copy => |span| .{ .copy = span },
+        .newer => |rows| {
+            const drawn = &self.newer_drawn.?;
+            if (rows.first.order(drawn.*) == .gt) return .none;
+            if (rows.next.order(drawn.*) == .gt) drawn.* = rows.next;
+            return if (rows.end) .newer_end else .none;
+        },
+    };
 }
 
 /// The decision an offer of `frame` stands for: the choice that frame
@@ -430,27 +477,6 @@ pub fn appendFile(self: *Self, io: std.Io, file: std.Io.File) !bool {
     return document.origin <= self.newer_drawn.?.offset;
 }
 
-/// Joins the rows the latest frame drew to those frames drew from the top
-/// of a transcript of newer pages, and says whether they reach its end.
-/// Rows that moves between two frames passed over never join.
-pub fn drewNewer(self: *Self) !bool {
-    if (self.view != .transcript) return false;
-    const drawn = &(self.newer_drawn orelse return false);
-    const document = &self.browsing;
-    try document.prepare();
-    const layout = self.textLayout();
-    const first = document.first(layout, self.height);
-    if ((Position{ .offset = @intCast(document.origin + first.offset), .row = first.row }).order(drawn.*) == .gt) return false;
-    if (document.atBottom(layout, self.height)) {
-        drawn.* = .{ .offset = @intCast(document.origin + document.text().len) };
-        return true;
-    }
-    const next = document.down(layout, first, self.height);
-    const reached: Position = .{ .offset = @intCast(document.origin + next.offset), .row = next.row };
-    if (reached.order(drawn.*) == .gt) drawn.* = reached;
-    return false;
-}
-
 /// The transcript shows its last row.
 pub fn transcriptAtBottom(self: *const Self) bool {
     return self.view == .transcript and self.browsing.atBottom(self.textLayout(), self.height);
@@ -520,26 +546,40 @@ fn prependBrowsing(self: *Self, older: anytype) !void {
     if (self.copy_shift) |*shift| shift.* += @as(i64, @intCast(front)) - @as(i64, @intCast(self.browsing.origin + older.length));
 }
 
-/// The live offsets of the rows the latest transcript frame draws, from
-/// its top row to the first row it leaves undrawn, for a transcript copied
-/// from live output; null otherwise.
-pub fn transcriptLiveSpan(self: *Self) !?struct { start: u64, end: u64 } {
-    if (self.view != .transcript) return null;
-    const shift = self.copy_shift orelse return null;
+/// What the frame being encoded shows of the conversation.
+fn drawnConversation(self: *Self) !Conversation {
+    const layout = self.textLayout();
+    switch (self.view) {
+        .live => {
+            const document = &self.live;
+            try document.prepare();
+            const first = document.first(layout, self.height);
+            // A partly drawn line is not drawn.
+            const start = document.origin + first.offset + @intFromBool(first.row != 0);
+            return .{ .live = .{ .start = start, .end = document.origin + document.length } };
+        },
+        .transcript => {},
+        else => return .none,
+    }
     const document = &self.browsing;
     try document.prepare();
-    const layout = self.textLayout();
     const first = document.first(layout, self.height);
-    // A partly drawn line is not drawn.
+    const bottom = document.atBottom(layout, self.height);
+    const next = if (bottom) Position{ .offset = document.text().len } else document.down(layout, first, self.height);
+    if (self.newer_drawn != null) return .{ .newer = .{
+        .first = .{ .offset = @intCast(document.origin + first.offset), .row = first.row },
+        .next = .{ .offset = @intCast(document.origin + next.offset), .row = next.row },
+        .end = bottom,
+    } };
+    const shift = self.copy_shift orelse return .none;
     const start = if (first.row == 0) first.offset else document.nextLine(first.offset) orelse document.text().len;
-    const end = if (document.atBottom(layout, self.height)) document.text().len else document.down(layout, first, self.height).offset;
     // Text prepended above the copy sits before its live offsets, so only
     // the rows drawn from the copy itself map to live ones.
     const base = @as(i64, @intCast(document.origin)) + shift;
     const from = @max(base + @as(i64, @intCast(start)), @as(i64, @intCast(self.copy_front)));
-    const to = base + @as(i64, @intCast(@max(start, end)));
-    if (to <= from) return null;
-    return .{ .start = @intCast(from), .end = @intCast(to) };
+    const to = base + @as(i64, @intCast(@max(start, next.offset)));
+    if (to <= from) return .none;
+    return .{ .copy = .{ .start = @intCast(from), .end = @intCast(to) } };
 }
 
 /// Collapsed blocks an older page kept, its newest, and those newer rows
@@ -913,6 +953,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         error.WriteFailed => return error.OutOfMemory, // Not a terminal I/O failure: frame allocation failed.
         else => return err,
     };
+    const conversation = try self.drawnConversation();
     // Issue the ticket before output can pump input. A width report, resize
     // or any other invalidation during the write advances the scope, so the
     // receipt then credits nothing; redrawing those rows is safe.
@@ -925,6 +966,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .inputs = self.inputs,
         .first = layout.first,
         .next = layout.action_seen,
+        .conversation = conversation,
     };
     try out.writeAll(frame.written());
     try out.flush();
@@ -1741,12 +1783,10 @@ test "a transcript of live output names the live rows its frame drew, across old
         var buffer: [16]u8 = undefined;
         try screen.append(try std.fmt.bufPrint(&buffer, "live {d:0>2}\n", .{line}));
     }
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-    try std.testing.expect(try screen.transcriptLiveSpan() == null);
+    try std.testing.expect(screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{})).shown != .copy);
     try screen.beginTranscript(0);
     for (0..20) |_| _ = screen.browse(false, false);
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-    const drawn = (try screen.transcriptLiveSpan()).?;
+    const drawn = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{})).shown.copy;
     // From the top row drawn, whole rows only.
     const top = try std.testing.allocator.dupe(u8, rowText(screen, 1, &storage));
     defer std.testing.allocator.free(top);
@@ -1760,15 +1800,15 @@ test "a transcript of live output names the live rows its frame drew, across old
     try older.writePositionalAll(io, "older 1\nolder 2\nolder 3\n", 0);
     _ = try screen.prependFile(io, older);
     _ = try screen.markGap();
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    const frame = try screen.render(&out.writer, size, "", 0, .{}, &.{});
     try std.testing.expectEqualStrings(top, rowText(screen, 1, &storage));
-    const moved = (try screen.transcriptLiveSpan()).?;
-    try std.testing.expectEqual(drawn.start, moved.start);
-    try std.testing.expectEqual(drawn.end, moved.end);
+    // Keys its write pumps move the view; the receipt names the rows it drew.
+    for (0..3) |_| _ = screen.browse(false, false);
+    try std.testing.expectEqual(drawn, screen.presented(frame).shown.copy);
     // A transcript of pages alone names no live rows.
     try screen.latest();
     screen.beginNewer();
-    try std.testing.expect(try screen.transcriptLiveSpan() == null);
+    try std.testing.expect(screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{})).shown != .copy);
 }
 
 test "an unchanged frame writes nothing" {
