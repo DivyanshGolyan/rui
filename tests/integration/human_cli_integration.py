@@ -179,7 +179,7 @@ def defaults(home, *args, success=True, environment=None):
         return None
     assert result.returncode == 0, (args, result.stdout, result.stderr)
     value = json.loads(result.stdout)
-    assert value["version"] == "4" and value["type"] == "defaults", value
+    assert value["version"] == host_process.WIRE_VERSION and value["type"] == "defaults", value
     assert value["changed"] is bool(args), value
     if "--store" in args:
         assert result.stderr == (f"\nrui: saved {shell_word(value['store'])} as the global default Store; "
@@ -460,7 +460,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
     assert report["session"]["model"] == "gpt-6-luna", report
     # CLI creation accepts only release-supported models; the Host preserves
     # exact bindings outside that list and gives them the unlisted window.
-    body = {"version": "4", "kind": "configure", "store": str(store),
+    body = {"version": host_process.WIRE_VERSION, "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
                    (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
@@ -1658,7 +1658,7 @@ def command_entry_cases():
         assert fresh["admission"]["context"]["session"] == selected, fresh
         settings = fixture.command("session", "inspect", "--store", store, "--session", selected)["session"]
         assert (settings["workspace"], settings["provider"], settings["model"], settings["tools"],
-            settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash"], "bypass"), settings
+            settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash", "web_search"], "bypass"), settings
         # Fresh Configure selects like a new Session: a saved model pin for the
         # selected provider wins over the recommendation; explicit --model wins
         # over the pin; a saved unsupported provider is refused before capture.
@@ -2163,7 +2163,7 @@ def persistent_opening_case():
                 # incomplete span remain buffered after a visible bold prefix.
                 body = b"# " + b"x" * 5000 + b"\n*UNVERIFIED"
                 return (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                    b"X-Rui-Wire-Version: 4\r\nContent-Length: " + str(len(body) + 1).encode()
+                    b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nContent-Length: " + str(len(body) + 1).encode()
                     + b"\r\nConnection: close\r\n\r\n" + body)
 
             proxy = canonical.ReplyProxy(host, "/v1/read-result", truncate_result)
@@ -3751,7 +3751,7 @@ int fsync(int fd) {
     stopped = "01234567-89ab-4cde-8012-3456789abcdf"
     (records / f"{invalid}.json").write_text("not a readable record")
     # Every mutation kind, including Session stop, is a recoverable capture.
-    stop = {"version": "4", "kind": "session_stop", "store": str(store.resolve()),
+    stop = {"version": host_process.WIRE_VERSION, "kind": "session_stop", "store": str(store.resolve()),
         "key": stopped, "session": session}
     (records / f"{stopped}.json").write_text(json.dumps(stop, separators=(",", ":")))
     (records / "not-a-handle.json").write_text("not a record")
@@ -3855,7 +3855,7 @@ def opaque_session_commands_case():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for key, session in (("prefix", "human/nul"), ("opaque", "human/nul\x00' é\n--last")):
-            body = {"version": "4", "kind": "configure", "store": str(store), "key": key,
+            body = {"version": host_process.WIRE_VERSION, "kind": "configure", "store": str(store), "key": key,
                     "session": session, "configuration": {
                         **{name: {"state": "value", "value": value} for name, value in
                            (("workspace", str(state)), ("provider", "codex"), ("model", "gpt-6-sol"))},
@@ -6607,7 +6607,8 @@ def main(selected="all"):
             assert rejected.returncode != 0 and "UnknownTool" in rejected.stderr, (tools, rejected)
             assert not record.exists(), ("invalid tool selection published a capture", tools)
         for tools, mode in (("none", "bypass"), ("none", "ask"),
-                            ("bash", "bypass"), ("bash", "ask")):
+                            ("bash", "bypass"), ("bash", "ask"),
+                            ("web_search", "ask"), ("bash,web_search", "bypass")):
             warning_ref = create_session(preferences_home, "--store", store,
                   "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
                   "--tools", tools, "--permission-mode", mode)

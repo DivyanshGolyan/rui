@@ -408,7 +408,7 @@ pub fn settleModelSuccessLocked(
             if (record.length == 0) return error.InvalidProviderEnvelope;
             compaction_count += 1;
         }
-        if (purpose == .compaction and record.kind == .function_call) return error.InvalidProviderEnvelope;
+        if (purpose == .compaction and (record.kind == .function_call or record.kind == .web_search_call)) return error.InvalidProviderEnvelope;
     }
     if (purpose == .compaction) {
         if (compaction_count != 1 or output.call_count != 0) return error.InvalidProviderEnvelope;

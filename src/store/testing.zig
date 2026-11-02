@@ -175,6 +175,7 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
             .reasoning => ",\"summary\":[],\"encrypted_content\":\"opaque\"",
             .function_call => ",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"",
             .compaction => ",\"encrypted_content\":\"opaque\"",
+            .web_search_call => ",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"q\"}",
             .message => ",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"\"}]",
         };
         var item_buffer: [256]u8 = undefined;
