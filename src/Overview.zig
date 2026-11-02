@@ -3105,10 +3105,10 @@ test "every key does what the overview's table says, through the editor, in ever
         }
         try std.testing.expect(ending == null);
         switch (action) {
-            .previous, .next, .first, .last => {
+            .previous, .next, .select_previous, .select_next, .first, .last => {
                 const row: usize = switch (action) {
-                    .previous => 1,
-                    .next => 3,
+                    .previous, .select_previous => 1,
+                    .next, .select_next => 3,
                     .first => 0,
                     .last => listed_references.len - 1,
                     else => unreachable,

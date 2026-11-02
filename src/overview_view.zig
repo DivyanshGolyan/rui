@@ -138,8 +138,9 @@ pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: 
 });
 
 /// What a key does in the overview. `clear` empties the draft, else the
-/// held start settings.
-pub const Action = enum { previous, next, first, last, clear, exit, stop };
+/// held start settings. `select_*` choose a Session even while the picker
+/// is open; `previous` and `next` move the picker's highlight there.
+pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop };
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -154,8 +155,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_x = .stop,
     .up = .previous,
     .down = .next,
-    .shift_up = .previous,
-    .shift_down = .next,
+    .shift_up = .select_previous,
+    .shift_down = .select_next,
     .page_up = null,
     .page_down = null,
     .home = .first,
@@ -1723,6 +1724,8 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             .previous, .next, .first, .last => if (state.picker) |*picker| {
                 if (picker.step == .models) pickerMove(state, picker, pressed);
             } else move(state, pressed),
+            .select_previous => move(state, .previous),
+            .select_next => move(state, .next),
             // Esc steps back: from the sign-in choice to the models, then
             // out of the picker.
             .clear => if (prompt != null) {} else if (state.picker) |*picker| switch (picker.step) {
@@ -6227,6 +6230,27 @@ test "the Session row's highlight stays in view while the picker is open, even o
         // key that must never act on what the screen does not show.
         try std.testing.expectEqual(@as(usize, if (height > 8) 2 else 1), highlighted);
     }
+}
+
+test "Shift-Up and Shift-Down choose a Session in both picker steps, and leave the picker as it was" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    const draft = try typeText(&state, "");
+    try openPicker(&state, &both);
+    for (0..2) |_| {
+        const chosen = state.selected.?;
+        const highlight = state.picker.?.highlight;
+        const picker_step = state.picker.?.step;
+        try expectEffects(&.{}, try press(&state, draft, .select_next));
+        try std.testing.expect(!std.mem.eql(u8, &chosen, &state.selected.?));
+        try expectEffects(&.{}, try press(&state, draft, .select_previous));
+        try std.testing.expectEqualSlices(u8, &chosen, &state.selected.?);
+        try std.testing.expect(state.picker.?.highlight.eql(highlight.slice()));
+        try std.testing.expectEqual(std.meta.activeTag(picker_step), std.meta.activeTag(state.picker.?.step));
+        // gpt-6-luna is offered by both sign-ins: Enter asks which.
+        if (state.picker.?.step == .models) try expectEffects(&.{}, try submit(&state, draft));
+    }
+    try std.testing.expect(state.choosingSignIn());
 }
 
 test "with no sign-in served, the picker shows each login line instead of models" {
