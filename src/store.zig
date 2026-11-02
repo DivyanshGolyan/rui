@@ -4292,12 +4292,9 @@ pub const Store = struct {
         try capture.appendJsonString(current.model.slice());
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         try capture.append(",\"compaction_trigger\":");
-        if (policy.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
+        try capture.appendFmt("\"{d}\"", .{policy.compaction_trigger});
         try capture.append(",\"context_estimate\":");
-        const pressure = if (policy.compaction_trigger != null)
-            turn_policy.comparedPressure(try self.compactionFacts(session_ref, null, current.next_position, current.provider, current.model.slice(), policy))
-        else
-            null;
+        const pressure = turn_policy.comparedPressure(try self.compactionFacts(session_ref, null, current.next_position, current.provider, current.model.slice(), policy));
         if (pressure) |value| try capture.appendFmt("\"{d}\"", .{@min(value, std.math.maxInt(i64))}) else try capture.append("null");
         try capture.appendFmt(",\"output_reservation\":\"{d}\",\"compaction_trigger_override\":", .{policy.output_reservation});
         if (current.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");

@@ -1795,7 +1795,12 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
         else => |mode| @tagName(mode),
     });
     {
-        const origin = if (work.settings.compaction_trigger_override != null) "Session override" else "model default";
+        const origin = if (work.settings.compaction_trigger_override != null)
+            "Session override"
+        else if (model_capability.supportsModel(work.settings.model.slice()))
+            "model default"
+        else
+            "assumed for a model Rui does not list";
         var buffer: [160]u8 = undefined;
         const policy = policy: {
             const tokens = work.settings.compaction_trigger orelse

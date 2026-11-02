@@ -87,7 +87,7 @@ To remove the saved default instead, run `rui defaults configure --clear-model`.
 
 ## Context compaction
 
-When model context grows too large, Rui compacts it. Compaction never deletes saved conversation history. All eight release-supported Codex model IDs start compaction at an estimated 244,800 tokens. Unknown model names have no automatic threshold unless you set one. A context-overflow error from the provider can still start compaction.
+When model context grows too large, Rui compacts it. Compaction never deletes saved conversation history. All eight release-supported Codex model IDs start compaction at an estimated 244,800 tokens. A model Rui does not list is assumed to have a 128,000-token context, so it starts compaction at an estimated 115,200 tokens unless you set a threshold. A context-overflow error from the provider can still start compaction.
 
 To change the threshold for the current Session, enter:
 

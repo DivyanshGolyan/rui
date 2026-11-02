@@ -14,7 +14,7 @@ pub const max_model_bytes = 256;
 pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
 
 pub const CompactionPolicy = struct {
-    compaction_trigger: ?u64,
+    compaction_trigger: u64,
     output_reservation: u64,
 };
 
@@ -95,13 +95,15 @@ pub fn supportsReasoningEffort(model: []const u8, effort: ReasoningEffort) bool 
     };
 }
 
+/// A model's context window: its row's, else the product's unlisted default.
+pub fn contextWindow(model: []const u8) u64 {
+    return if (find(model)) |row| row.context_window else product_defaults.unlisted_context_window;
+}
+
 /// No alias inference, account entitlement or live qualification is implied.
 /// Reservation is extra heuristic headroom, never a provider output limit.
 pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
-    const automatic: ?u64 = if (find(model)) |row|
-        row.context_window * product_defaults.compaction_trigger_percent / 100
-    else
-        null;
+    const automatic = contextWindow(model) * product_defaults.compaction_trigger_percent / 100;
     return .{
         .compaction_trigger = trigger_override orelse automatic,
         .output_reservation = reservation_override orelse product_defaults.output_reservation,
@@ -140,17 +142,18 @@ fn withPolicy(readiness: *const provider_selection.Readinesses, admits: *const f
 test "supported model compaction defaults and exact identifier boundary" {
     for (models) |row| {
         const policy = compactionPolicy(row.id, null, null);
-        try std.testing.expectEqual(@as(?u64, 244800), policy.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 244800), policy.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 0), policy.output_reservation);
         const overridden = compactionPolicy(row.id, 7, 3);
-        try std.testing.expectEqual(@as(?u64, 7), overridden.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 7), overridden.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 3), overridden.output_reservation);
     }
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other| {
-        try std.testing.expectEqual(@as(?u64, null), compactionPolicy(other, null, null).compaction_trigger);
+        // An unlisted model compacts at the same share of the smaller window.
+        try std.testing.expectEqual(@as(u64, 115200), compactionPolicy(other, null, null).compaction_trigger);
         try std.testing.expect(!supportsModel(other));
     }
-    try std.testing.expectEqual(@as(?u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
+    try std.testing.expectEqual(@as(u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
 }
 
 test "reasoning effort uses exact catalog defaults and model support without expanding grammar" {
