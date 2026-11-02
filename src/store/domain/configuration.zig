@@ -610,24 +610,6 @@ pub fn applyConfiguration(
     } };
 }
 
-/// `prepareConfiguration` and `applyConfiguration` for unconverted code,
-/// inside its transaction.
-pub fn applyConfigurationLocked(
-    self: *Store,
-    session: []const u8,
-    configuration: *const protocol.Configuration,
-    faults: Faults,
-) !Application {
-    var a = Access(.nested, error{SessionUpdateFailed}).within(self);
-    defer a.deinit();
-    var reads: ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-    prepareConfiguration(&a, session, configuration, &reads);
-    try a.run();
-    const application = try applyConfiguration(&a, self.io, session, configuration, faults, &reads);
-    try a.apply();
-    return application;
-}
-
 fn saveConfigurationRejection(
     a: anytype,
     command: *const protocol.ConfigureCommand,
@@ -652,26 +634,6 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const protocol.Configu
     else
         saved orelse return true;
     return protocol.routeOf(served, provider) != .unserved;
-}
-
-/// `servesProviderOf` for unconverted code, which reads the Session's
-/// provider only when the Host does not serve every provider.
-pub fn servesProvider(self: *Store, configuration: ?*const protocol.Configuration, session_ref: []const u8) !bool {
-    var all_served = true;
-    inline for (@typeInfo(protocol.Provider).@"enum".field_names) |name| all_served = all_served and @field(self.served, name) != .unserved;
-    if (all_served) return true;
-    var saved: ?protocol.Provider = null;
-    if (configuration == null or configuration.?.provider.state != .value) {
-        const statement = try store_core.cached(self, "SELECT provider FROM session WHERE session_ref=?1");
-        defer sqlite.resetCached(statement);
-        try sqlite.bindText(statement, 1, session_ref);
-        switch (c.sqlite3_step(statement)) {
-            c.SQLITE_DONE => {},
-            c.SQLITE_ROW => saved = try sqlite.readProvider(statement, 0),
-            else => return error.SessionReadFailed,
-        }
-    }
-    return servesProviderOf(self.served, configuration, saved);
 }
 
 /// The Session facts turn work binds to, without the workspace or label
@@ -712,23 +674,6 @@ pub fn queueConfiguredCommand(
 ) !void {
     try command_domain.queueCommand(a, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
     a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated });
-}
-
-/// `queueConfiguredCommand` for unconverted code, inside its transaction.
-pub fn insertConfiguredCommand(
-    self: *Store,
-    applied: *const Applied,
-    key: []const u8,
-    kind: protocol.CommandKind,
-    digest: *const [32]u8,
-    primary_content_id: ?i64,
-    secondary_content_id: ?i64,
-    answer: StoredAnswer,
-) !void {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    try queueConfiguredCommand(&a, applied, key, kind, digest, if (primary_content_id) |id| @intCast(id) else null, if (secondary_content_id) |id| @intCast(id) else null, &answer);
-    try a.apply();
 }
 
 /// Whether `supplied` canonicalizes to `existing`. Its canonical path

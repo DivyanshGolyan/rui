@@ -370,7 +370,9 @@ pub const Store = struct {
     ) MessageReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, faults))) catch .infrastructure_failure;
     }
 
     pub fn stopSession(
@@ -1096,7 +1098,7 @@ pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
     };
 }
 
-pub const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";
+const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";
 
 /// The key of `session_ref`'s Workspace, or null when no such Session
 /// exists.

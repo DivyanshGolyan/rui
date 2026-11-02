@@ -301,18 +301,6 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
     return id;
 }
 
-/// `importSealed` for unconverted code, inside its transaction.
-pub fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var value = sealedIdentity(content);
-    lookup(&a, &value);
-    try a.run();
-    const id = try importSealed(&a, self.io, content, &value, faults);
-    try a.apply();
-    return @intCast(id);
-}
-
 pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
 pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {

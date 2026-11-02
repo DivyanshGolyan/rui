@@ -1047,10 +1047,11 @@ test "a failed Workspace-key read fails and fences the entry point that touched 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
-        // A configure reads the key with the Session's saved configuration.
+        // A configure reads the key with the Session's saved configuration,
+        // a Message with the head and provider it names.
         var fault: TestingStatementFault = .{ .sql = switch (route) {
             .configure => configuration_domain.saved_session_sql,
-            .message => store_core.session_workspace_key_sql,
+            .message => command_domain.target_session_sql,
         } };
         switch (route) {
             .configure => {
@@ -1095,7 +1096,13 @@ test "a Session creation that rolls back never reaches a since listing" {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        try std.testing.expect(try configuration_domain.applyConfigurationLocked(&storage, "", &create.configuration, .{}) == .accepted);
+        var a = store_access.Access(.nested, error{SessionUpdateFailed}).within(&storage);
+        defer a.deinit();
+        var reads: configuration_domain.ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+        configuration_domain.prepareConfiguration(&a, "", &create.configuration, &reads);
+        try a.run();
+        try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, .{}, &reads) == .accepted);
+        try a.apply();
         try store_core.rollbackAfterError(&storage, .{});
     }
     // The rolled-back insert still moved the commit counter. The hint

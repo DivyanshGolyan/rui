@@ -130,137 +130,285 @@ const MessageProjection = struct {
     },
 };
 
-pub fn submitMessageLocked(
-    self: *Store,
-    request: *const protocol.MessageCommand,
-    committed: ?MessageCommitted,
-    faults: Faults,
-) !MessageReply {
-    const command = request;
-    // Only the Session changes: a creating Message answers with the one it created.
-    var session = request.session;
-    try store_core.begin(self);
-    const digest = command.semanticDigest();
-    const supplied_content = ContentReference{
-        .length = command.text.length,
-        .digest = command.text.digest,
-    };
-    switch (try classifyReplay(self, protocol.MessageRejection, .message, command.key.slice(), session.slice(), &digest)) {
-        .fresh => {},
-        .conflict => return .conflict,
+/// The Session of the attempted, unresolved Action that holds
+/// `sender_handle`, while no stop selected its Turn. The partial unique
+/// index action_operation_sender_handle holds one row per handle, so
+/// LIMIT 1 drops nothing.
+const message_sender = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN session s ON s.session_ref=action.session_ref WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) LIMIT 1",
+    .Args = struct { handle: []const u8 },
+    .Row = struct { session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+
+/// A saved Message's admission and the identity of its text.
+const message_replay = rsql.Read(.{
+    .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
+        "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { admission_id: rsql.Positive, session_ref: protocol.Bounded(protocol.max_session_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
+    .cardinality = .one,
+});
+
+/// A person's Message.
+const admit_message = rsql.Write(.{
+    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
+    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// A peer's Message: the sender's own position orders the send among its
+/// other facts.
+const admit_sent_message = rsql.Write(.{
+    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
+        "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)",
+    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64, sender: rsql.SessionHead, sender_position: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// A peer's rejected Message, at its sender's next position.
+const reject_sent = rsql.Write(.{
+    .sql = "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,@session(?2),?3,@now)",
+    .Args = struct { key: []const u8, sender: rsql.SessionHead, position: u64 },
+    // A replay was classified first, so the key is free.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// What every Message reads in round 1, besides its Session or its
+/// creation, and keeps until commit.
+const MessageReads = struct {
+    digest: [32]u8,
+    saved: saved_command.Result = undefined,
+    sender: message_sender.Result = null,
+    /// The text's identity, and the row its lookup found.
+    text: content_domain.Import,
+};
+
+/// The handle a peer Message's sender claims, when its address names this
+/// Store: only then can an Action of this Store hold it.
+fn claimedHandle(command: *const protocol.MessageCommand, selector: []const u8) ?[]const u8 {
+    const handle = if (command.sender_handle) |*value| value else return null;
+    const claimed = if (command.sender) |*value| value else return null;
+    if (!claimed.store.eql(selector)) return null;
+    return handle.slice();
+}
+
+/// Whether the Message's sender is what its handle proves: no sender and
+/// no handle, or the Session of the Action `found` holds the handle.
+fn senderValid(command: *const protocol.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
+    if (command.sender_handle == null) return command.sender == null;
+    if (claimedHandle(command, selector) == null) return false;
+    const row = found orelse return false;
+    return command.sender.?.session.eql(&row.session.ref);
+}
+
+fn readMessage(a: anytype, selector: []const u8, command: *const protocol.MessageCommand, reads: *MessageReads) void {
+    lookupCommand(a, command.key.slice(), &reads.saved);
+    if (claimedHandle(command, selector)) |handle| a.read(message_sender, .{ .handle = handle }, &reads.sender);
+}
+
+/// A Message's answer when round 1 found it saved, or null for a fresh
+/// one. An accepted replay reads its admission and text in a round of its
+/// own.
+fn replayMessage(a: anytype, command: *const protocol.MessageCommand, reads: *const MessageReads) !?MessageReply {
+    switch (try classify(protocol.MessageRejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
+        .fresh => return null,
+        .conflict => {
+            try a.abandon(.{});
+            return .conflict;
+        },
+        .rejected => |code| {
+            try a.abandon(.{});
+            return .{ .rejected = .{ .replayed = true, .code = code, .content = .{ .length = command.text.length, .digest = command.text.digest } } };
+        },
         .accepted => |existing| {
             const content_id = existing.primary_content_id orelse return error.CorruptStore;
-            const metadata = try content_domain.readContentMetadata(self, content_id);
-            const admission_id = try readMessageAdmission(
-                self,
-                command.key.slice(),
-                existing.target.slice(),
-                content_id,
-            );
+            var row: message_replay.Result = undefined;
+            a.read(message_replay, .{ .key = command.key.slice() }, &row);
+            try a.run();
+            if (row.content_id.get() != content_id or !existing.target.eql(row.session_ref.slice())) return error.CorruptStore;
+            try a.abandon(.{});
             return .{ .accepted = .{
                 .replayed = true,
-                .admission_id = admission_id,
-                .content = .{ .length = metadata.length, .digest = metadata.digest },
+                .admission_id = row.admission_id.get(),
+                .content = .{ .length = row.length, .digest = row.digest },
                 .session = existing.target,
             } };
         },
-        .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } },
     }
-    // Only an authenticated Action can acquire a sender position.
-    // A committed exact replay above needs no still-live launch handle.
-    const sender_valid = try messageSenderMatchesLocked(self, command);
-    const sender_known = command.sender != null and sender_valid;
-    const creating = command.configuration != null;
-    var code: ?protocol.MessageRejection = if (creating and session.len != 0 or
-        !creating and !protocol.validSessionId(session.slice()))
-        .invalid_session_reference
-    else if (!sender_valid)
-        .invalid_sender_handle
-    else if (!creating and try turn_domain.sessionNextPosition(self, session.slice()) == null)
-        .unknown_session
-    else if (command.require_model and !try configuration_domain.servesProvider(self, if (command.configuration) |*value| value else null, session.slice()))
-        .model_capability_unavailable
-    else
-        null;
-    var configured: ?configuration_domain.Applied = null;
-    if (code == null) if (command.configuration) |*configuration| {
-        switch (try configuration_domain.applyConfigurationLocked(self, "", configuration, faults)) {
-            .rejected => |rejection| code = std.meta.stringToEnum(protocol.MessageRejection, @tagName(rejection)).?,
-            .accepted => |value| {
-                session = value.session;
-                configured = value;
-            },
-        }
-    };
-    if (code) |rejection| {
-        var answer = StoredAnswer{ .accepted = false };
-        try answer.code.set(@tagName(rejection));
-        try insertCommand(
-            self,
-            command.key.slice(),
-            .message,
-            session.slice(),
-            &digest,
-            null,
-            null,
-            answer,
-        );
-        if (sender_known) if (command.sender) |*sender| {
-            const statement = try store_core.cached(self, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,?2,?3,unixepoch())");
-            defer sqlite.resetCached(statement);
-            try sqlite.bindText(statement, 1, command.key.slice());
-            try sqlite.bindText(statement, 2, sender.session.slice());
-            try sqlite.bindU64(statement, 3, try turn_domain.claimSessionPosition(self, sender.session.slice()));
-            try sqlite.expectDone(statement);
-        };
-        if (faults.before_commit) return error.InjectedCommitFailure;
-        try store_core.commit(self);
-        return .{ .rejected = .{ .replayed = false, .code = rejection, .content = supplied_content } };
+}
+
+/// Saves a rejected Message; a peer's rejection takes its sender's next
+/// position. Then commits.
+fn rejectMessage(
+    a: anytype,
+    command: *const protocol.MessageCommand,
+    reads: *const MessageReads,
+    sender_known: bool,
+    code: protocol.MessageRejection,
+    faults: Faults,
+) !MessageReply {
+    var answer = StoredAnswer{ .accepted = false };
+    try answer.code.set(@tagName(code));
+    try queueCommand(a, command.key.slice(), .message, command.session.slice(), &reads.digest, null, null, &answer);
+    if (sender_known) {
+        const sender = reads.sender.?.session;
+        a.write(reject_sent, .{ .key = command.key.slice(), .sender = sender, .position = try (try a.positions(sender)).take(1) });
     }
-    const text_id = try content_domain.importContent(self, &command.text, faults);
-    const metadata = try content_domain.readContentMetadata(self, text_id);
-    if (configured) |*applied| {
-        try configuration_domain.insertConfiguredCommand(self, applied, command.key.slice(), .message, &digest, text_id, null, .{ .accepted = true });
-    } else {
-        try insertCommand(self, command.key.slice(), .message, session.slice(), &digest, text_id, null, .{ .accepted = true });
-    }
-    const admission_id = try insertMessageAdmission(
-        self,
-        session.slice(),
-        command.key.slice(),
-        text_id,
-        if (command.sender) |*sender| sender.session.slice() else null,
-    );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
+    return .{ .rejected = .{ .replayed = false, .code = code, .content = .{ .length = command.text.length, .digest = command.text.digest } } };
+}
+
+/// After the text's lookup round: imports the text and saves the command
+/// (with the Session revision `configured` wrote, when it created the
+/// Session) and the admission at `head`'s next position, then commits.
+fn admitMessage(
+    a: anytype,
+    io: std.Io,
+    command: *const protocol.MessageCommand,
+    reads: *MessageReads,
+    head: rsql.SessionHead,
+    session: protocol.Bounded(protocol.max_session_bytes),
+    configured: ?*const configuration_domain.Applied,
+    committed: ?MessageCommitted,
+    faults: Faults,
+) !MessageReply {
+    const text_id = try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
+    const answer: StoredAnswer = .{ .accepted = true };
+    if (configured) |applied| {
+        try configuration_domain.queueConfiguredCommand(a, applied, command.key.slice(), .message, &reads.digest, text_id, null, &answer);
+    } else {
+        try queueCommand(a, command.key.slice(), .message, session.slice(), &reads.digest, text_id, null, &answer);
+    }
+    const admission_id = try a.identity(.admission_id);
+    const position = try (try a.positions(head)).take(1);
+    if (command.sender != null) {
+        const sender = reads.sender.?.session;
+        a.write(admit_sent_message, .{
+            .admission_id = admission_id,
+            .session = head,
+            .key = command.key.slice(),
+            .content_id = text_id,
+            .position = position,
+            .sender = sender,
+            .sender_position = try (try a.positions(sender)).take(1),
+        });
+    } else {
+        a.write(admit_message, .{ .admission_id = admission_id, .session = head, .key = command.key.slice(), .content_id = text_id, .position = position });
+    }
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
     if (committed) |callback| callback.call(callback.context, .{
         .session = session.slice(),
         .admission_id = admission_id,
         .from_peer = command.sender != null,
     });
-    return .{ .accepted = .{
-        .replayed = false,
-        .admission_id = admission_id,
-        .content = .{ .length = metadata.length, .digest = metadata.digest },
-        .session = session,
-    } };
+    return .{
+        .accepted = .{
+            .replayed = false,
+            .admission_id = admission_id,
+            // The text's row was found or written under exactly this identity.
+            .content = .{ .length = command.text.length, .digest = command.text.digest },
+            .session = session,
+        },
+    };
 }
 
-fn messageSenderMatchesLocked(self: *Store, command: *const protocol.MessageCommand) !bool {
-    const handle = command.sender_handle orelse return command.sender == null;
-    const claimed = if (command.sender) |*sender| sender else return false;
-    if (!claimed.store.eql(self.selector.slice())) return false;
-    const statement = try store_core.cached(self, "SELECT action.session_ref FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-        "WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id)");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, handle.slice());
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return false;
-    if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-    var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(statement, 0, &sender);
-    return sender.eql(claimed.session.slice());
+/// A Message to an existing Session, or one that creates its Session.
+/// Only an authenticated Action can acquire a sender position; an exact
+/// replay needs no still-live handle.
+pub fn submitMessage(
+    a: anytype,
+    io: std.Io,
+    served: anytype,
+    selector: []const u8,
+    command: *const protocol.MessageCommand,
+    committed: ?MessageCommitted,
+    faults: Faults,
+) !MessageReply {
+    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, faults);
+    var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
+    return submitTo(a, io, served, selector, command, committed, faults, &reads);
+}
+
+/// Round 1 reads the saved answer, the sender's Action, the Session and
+/// the text's content row. The decision is plain; the write round imports
+/// the text and saves the command and the admission, then commits.
+fn submitTo(
+    a: anytype,
+    io: std.Io,
+    served: anytype,
+    selector: []const u8,
+    command: *const protocol.MessageCommand,
+    committed: ?MessageCommitted,
+    faults: Faults,
+    reads: *MessageReads,
+) !MessageReply {
+    const session = command.session.slice();
+    readMessage(a, selector, command, reads);
+    var target: target_session.Result = null;
+    readTarget(a, session, &target);
+    content_domain.lookup(a, &reads.text);
+    try a.run();
+    if (try replayMessage(a, command, reads)) |reply| return reply;
+    const sender_valid = senderValid(command, selector, reads.sender);
+    const rejection: ?protocol.MessageRejection = if (!protocol.validSessionId(session))
+        .invalid_session_reference
+    else if (!sender_valid)
+        .invalid_sender_handle
+    else if (target == null)
+        .unknown_session
+    else if (command.require_model and !configuration_domain.servesProviderOf(served, null, target.?.provider))
+        .model_capability_unavailable
+    else
+        null;
+    if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
+    return admitMessage(a, io, command, reads, target.?.session, command.session, null, committed, faults);
+}
+
+/// Round 1 reads the saved answer, the sender's Action and the content
+/// rows the configuration needs. `configuration.applyConfiguration` adds
+/// its own rounds (a created Session's reference, an output schema). The
+/// text's lookup is a round of its own, as the lookup statement is in
+/// round 1; that round also runs the creation's writes. Kept out of
+/// `submitMessage`'s frame: only a creation holds a whole configuration.
+noinline fn submitCreating(
+    a: anytype,
+    io: std.Io,
+    served: anytype,
+    selector: []const u8,
+    command: *const protocol.MessageCommand,
+    committed: ?MessageCommitted,
+    faults: Faults,
+) !MessageReply {
+    const configuration = &command.configuration.?;
+    var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
+    var creation: configuration_domain.ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    readMessage(a, selector, command, &reads);
+    configuration_domain.prepareConfiguration(a, "", configuration, &creation);
+    try a.run();
+    if (try replayMessage(a, command, &reads)) |reply| return reply;
+    const sender_valid = senderValid(command, selector, reads.sender);
+    var rejection: ?protocol.MessageRejection = if (command.session.len != 0)
+        .invalid_session_reference
+    else if (!sender_valid)
+        .invalid_sender_handle
+    else if (command.require_model and !configuration_domain.servesProviderOf(served, configuration, null))
+        .model_capability_unavailable
+    else
+        null;
+    if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, faults, &creation)) {
+        .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
+        .accepted => |applied| {
+            content_domain.lookup(a, &reads.text);
+            try a.run();
+            return admitMessage(a, io, command, &reads, applied.head, applied.session, &applied, committed, faults);
+        },
+    };
+    return rejectMessage(a, command, &reads, command.sender != null and sender_valid, rejection.?, faults);
 }
 
 /// The Session a stop names, and the last Message admitted to it: the
@@ -537,8 +685,9 @@ fn cancelActions(
 
 /// A Session a command names, as a round reads it: its head, and the
 /// provider a Message's model check needs.
+pub const target_session_sql = "SELECT session_ref,workspace_key,next_position,provider FROM session WHERE session_ref=?1";
 const target_session = rsql.Read(.{
-    .sql = "SELECT session_ref,workspace_key,next_position,provider FROM session WHERE session_ref=?1",
+    .sql = target_session_sql,
     .Args = struct { session: []const u8 },
     .Row = struct { session: rsql.SessionHead, provider: protocol.Provider },
     .cardinality = .optional,
@@ -1042,25 +1191,6 @@ pub fn classify(
     return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse return error.CorruptStore };
 }
 
-/// `lookupCommand` and `classify` for unconverted code, inside the
-/// transaction it opened, which any saved answer rolls back.
-pub fn classifyReplay(
-    self: *Store,
-    comptime Rejection: type,
-    kind: protocol.CommandKind,
-    key: []const u8,
-    target: []const u8,
-    digest: *const [32]u8,
-) !Replay(Rejection) {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var saved: saved_command.Result = undefined;
-    lookupCommand(&a, key, &saved);
-    try a.run();
-    if (saved != null) try store_core.rollback(self);
-    return classify(Rejection, &saved, kind, target, digest);
-}
-
 /// `lookupCommand` for unconverted code.
 fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
     var a = Access(.read, error{}).within(self);
@@ -1069,28 +1199,6 @@ fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
     lookupCommand(&a, key, &saved);
     try a.run();
     return savedAnswer(&saved);
-}
-
-fn readMessageAdmission(
-    self: *Store,
-    command_key: []const u8,
-    session_ref: []const u8,
-    content_id: i64,
-) !u64 {
-    const statement = try store_core.cached(self, "SELECT admission_id,session_ref,content_id FROM message_admission WHERE command_key=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, command_key);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const admission_id = c.sqlite3_column_int64(statement, 0);
-    var stored_session: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(statement, 1, &stored_session);
-    if (admission_id <= 0 or
-        !stored_session.eql(session_ref) or
-        c.sqlite3_column_int64(statement, 2) != content_id)
-    {
-        return error.CorruptStore;
-    }
-    return @intCast(admission_id);
 }
 
 pub fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
@@ -1230,47 +1338,6 @@ pub fn queueCommand(
         .created = answer.created,
         .command_seq = try a.identity(.command_seq),
     });
-}
-
-/// `queueCommand` for unconverted code, inside its transaction.
-pub fn insertCommand(
-    self: *Store,
-    key: []const u8,
-    kind: protocol.CommandKind,
-    target: []const u8,
-    digest: *const [32]u8,
-    primary_content_id: ?i64,
-    secondary_content_id: ?i64,
-    answer: StoredAnswer,
-) !void {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    try queueCommand(&a, key, kind, target, digest, if (primary_content_id) |id| @intCast(id) else null, if (secondary_content_id) |id| @intCast(id) else null, &answer);
-    try a.apply();
-}
-
-fn insertMessageAdmission(
-    self: *Store,
-    session_ref: []const u8,
-    command_key: []const u8,
-    content_id: i64,
-    sender: ?[]const u8,
-) !u64 {
-    const admission_id = try store_core.takeIdentity(self, .admission_id);
-    const position = try turn_domain.claimSessionPosition(self, session_ref);
-    // The sender's own sequence orders the send among its other facts.
-    const sender_position: ?u64 = if (sender) |ref| try turn_domain.claimSessionPosition(self, ref) else null;
-    const statement = try store_core.cached(self, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) VALUES(?1,?2,?3,?4,?5,unixepoch(),?6,?7)");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, admission_id);
-    try sqlite.bindText(statement, 2, session_ref);
-    try sqlite.bindText(statement, 3, command_key);
-    try sqlite.bindI64(statement, 4, content_id);
-    try sqlite.bindU64(statement, 5, position);
-    if (sender) |ref| try sqlite.bindText(statement, 6, ref) else try sqlite.bindNullableI64(statement, 6, null);
-    try sqlite.bindNullableU64(statement, 7, sender_position);
-    try sqlite.expectDone(statement);
-    return admission_id;
 }
 
 pub fn readMessageProjectionRow(statement: *c.sqlite3_stmt, excluding_stop: ?[]const u8) !MessageProjection {
