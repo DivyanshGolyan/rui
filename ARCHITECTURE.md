@@ -2815,7 +2815,7 @@ It goes on the first space, on Enter and when nothing matches.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes; otherwise they do what they always did.
 Tab adds the matching names' common start, and a space after a whole name that takes an argument; in any other draft, or over a partial character or a rejected draft, Tab does what it always did.
 The arrows keep scrolling the conversation.
-The overview lists and completes its own commands, `/configure`, `/exit` and `/model`, the same way, giving the list rows the Sessions above can spare; there Esc and Ctrl-G clear the draft and the list with it, as its hint says.
+The overview lists, completes and closes its own commands, `/configure`, `/exit` and `/model`, the same way, in rows the Sessions above can spare, because the agreed design has the two screens behave the same (Divyansh, 2026-10-31); the line under its input says what Enter and Esc do to the draft.
 `/effort` alone shows `Efforts: low · [medium] · high · xhigh · /effort LEVEL switches`, the efforts the Session's model supports with the one in force bracketed, from the Session line's facts.
 `/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.

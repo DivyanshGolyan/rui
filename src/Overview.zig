@@ -444,7 +444,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .terminal = undefined,
         .interrupted = interrupted,
     };
-    self.composer = self.emptyComposer();
+    self.composer = self.emptyComposer(0);
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     errdefer self.closePipes();
@@ -571,7 +571,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
         .open => |reference| next = .{ .open = reference },
-        .clear_draft => self.composer = self.emptyComposer(),
+        .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
         .notify => |alert| self.terminal.notify(alert.name, alert.kind, alert.more),
         .exit => return .leave,
     };
@@ -614,7 +614,7 @@ fn sendStatuses(self: *Self) void {
 }
 
 fn composerDraft(self: *const Self) view.Draft {
-    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor };
+    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits };
 }
 
 /// Takes the queued job at `index` out of the queue.
@@ -935,9 +935,10 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
-/// An empty draft, whose Tab completes the overview's commands.
-fn emptyComposer(self: *Self) TerminalEditor {
-    return .{ .buffer = &self.draft, .completion = view.commands.complete };
+/// An empty draft, whose Tab completes the overview's commands. `edits`
+/// continues the count, so no two drafts share one.
+fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
+    return .{ .buffer = &self.draft, .completion = view.commands.complete, .edits = edits };
 }
 
 /// One input through `mode`'s route, with the overview's one key table.
@@ -3124,7 +3125,7 @@ test "Shift-Up and Shift-Down select the row above and below, whatever the draft
             .{ .bytes = "\x1b[1;2:1B", .row = 3 },
         }) |case| {
             errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
-            rig.overview.composer = rig.overview.emptyComposer();
+            rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
             try std.testing.expect(try rig.press(draft) == null);
             rig.overview.state.selected = shownRow(rig, 2);
             try std.testing.expect(try rig.press(case.bytes) == null);

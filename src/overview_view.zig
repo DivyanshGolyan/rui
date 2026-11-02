@@ -169,8 +169,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 /// The composer's text and caret, as the shell's line editor holds them,
 /// and the draft line the previous frame showed first.
 /// `anchor` is the byte that started the composer's first shown line last
-/// frame.
-pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0 };
+/// frame. `edits` counts changes to its bytes and never repeats for a new
+/// draft.
+pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0, edits: u32 = 0 };
 
 /// Where the next input goes, which the shell's route and `render` both
 /// read: the composer, the composer frozen while a start waits, or the
@@ -756,6 +757,9 @@ pub const State = struct {
     /// Open from /model until a pick, Esc or typing; it acts only while
     /// `layout` shows it.
     picker: ?Picker = null,
+    /// The draft `edits` at which Esc or Enter closed the command list: it
+    /// stays closed until the draft changes, as in a conversation.
+    commands_closed: ?u32 = null,
     /// The open picker's latest model lists, freed when it closes.
     menu: model_picker.Menu = .{},
     /// How the open picker's latest model-list read ended.
@@ -1816,9 +1820,12 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             .select_next => move(state, .next),
             // Esc steps back: from the sign-in choice to the models, then
             // out of the picker.
+            // A shown command list closes first, keeping the draft.
             .clear => if (prompt != null) {} else if (picker) |shown| switch (shown.step) {
                 .sign_in => shown.step = .models,
                 .models => state.closePicker(),
+            } else if (commandsShown(state, value.draft)) {
+                state.commands_closed = value.draft.edits;
             } else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
@@ -1829,7 +1836,11 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             },
         },
         .none, .append, .redraw => {},
-        .submit => if (picker != null) pick(state, effects) else enter(state, value.draft.bytes, effects),
+        .submit => if (picker != null) pick(state, effects) else {
+            // Enter closes the list over a draft it keeps.
+            state.commands_closed = value.draft.edits;
+            enter(state, value.draft.bytes, effects);
+        },
         .refused => |why| {
             if (why.endsLine()) effects.add(.clear_draft);
             switch (why) {
@@ -2567,8 +2578,15 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
 /// one; null for any other draft or when none matches.
 pub fn commandList(state: *const State, draft: Draft) ?commands.Matches {
     if (state.inputMode() != .compose) return null;
+    if (state.commands_closed) |closed| if (closed == draft.edits) return null;
     const matches = commands.Matches.of(draft.bytes) orelse return null;
     return if (matches.count != 0) matches else null;
+}
+
+/// The screen shows the draft's command list: a command word is one row.
+fn commandsShown(state: *const State, draft: Draft) bool {
+    const matches = commandList(state, draft) orelse return false;
+    return layout(state, 1, matches.count).commands.len() != 0;
 }
 
 /// One row per command, as a conversation lists them: its usage, then its
@@ -3065,9 +3083,11 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
         const used = try painter.put(1, text.written(), room -| painter.measure(suffix), .{ .colour = .quiet });
         _ = try painter.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
     } else if (draft.bytes.len != 0) {
-        // As Enter reads it: a draft that opens with one slash is a command.
-        const enter_does = if (draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//")) "run" else "start";
-        const text = try std.fmt.allocPrint(painter.arena, "enter {s} {s} esc clear", .{ enter_does, dot });
+        // What Enter and Esc do to this draft, as `enter` and `compose` read it.
+        const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
+        const enter_does: []const u8 = if (!slashed) "enter start " else if (commands.parse(draft.bytes) == .command) "enter run " else "";
+        const esc_does: []const u8 = if (commandsShown(state, draft)) "esc close" else "esc clear";
+        const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
         const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(painter.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
@@ -3567,10 +3587,14 @@ fn sizedRender(state: *State, draft: Draft, width: u16, height: u16, caps: Caps,
     return render(std.testing.allocator, state, draft, caps, frame);
 }
 
+var test_edits: u32 = 0;
+
 /// Types `text` as the whole draft, its caret at the end, as the shell's
 /// line editor reports an edit, and returns that draft.
 fn typeText(state: *State, text: []const u8) !Draft {
-    const draft: Draft = .{ .bytes = text, .cursor = text.len };
+    // Each typed draft is a new edit, as the line editor counts them.
+    test_edits +%= 1;
+    const draft: Draft = .{ .bytes = text, .cursor = text.len, .edits = test_edits };
     try expectEffects(&.{}, try step(state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
     return draft;
 }
@@ -4213,7 +4237,7 @@ test "typing / lists the overview's commands between the rule and the draft, as 
         " /exit                 leave; Host work continues",
         " /model                choose the model new Sessions use",
         " › /",
-        " enter run · esc clear",
+        " esc close",
     });
     // Typing narrows the list; Tab completes the one left.
     const narrowed = try draftLines(&state, try typeText(&state, "/m"), 80, 24);
@@ -4249,6 +4273,31 @@ test "Enter runs a command by the overview's table and names its usage when misu
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "/exit now")));
     try expectNotice(&state, "! Usage: /exit");
     try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit ")));
+}
+
+test "Esc closes a shown command list and keeps the draft; Enter closes it too; a change opens it again" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
+    var draft: Draft = .{ .bytes = "/m", .cursor = 2, .edits = 2 };
+    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
+    try std.testing.expect(commandList(&state, draft) != null);
+    try expectEffects(&.{}, try press(&state, draft, .clear));
+    try std.testing.expect(commandList(&state, draft) == null);
+    const shown = try draftLines(&state, draft, 80, 24);
+    defer std.testing.allocator.free(shown);
+    try expectLines(shown, 22, &.{ " › /m", " esc clear" });
+    // With the list closed, Esc clears the draft.
+    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
+    // An edit opens it again; Enter on a name no command is closes it.
+    draft = .{ .bytes = "/mo", .cursor = 3, .edits = 3 };
+    try std.testing.expect(commandList(&state, draft) != null);
+    try expectEffects(&.{}, try submit(&state, draft));
+    try std.testing.expect(commandList(&state, draft) == null);
+    // The hint says what Enter does to each slash draft.
+    const runs = try draftLines(&state, try typeText(&state, "/exit "), 80, 24);
+    defer std.testing.allocator.free(runs);
+    try expectLines(runs, 23, &.{" enter run · esc clear"});
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {
