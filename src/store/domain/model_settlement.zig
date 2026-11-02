@@ -457,8 +457,8 @@ pub fn settleModelSuccessLocked(
         const neutral = try importNeutralItem(self, binding, output, record, item_records_start, metadata.offset, faults);
         const insert = try store_core.cached(
             self,
-            "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,message_content_id) " ++
-                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,message_content_id,description,call_failed) " ++
+                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         );
         defer sqlite.resetCached(insert);
         try sqlite.bindU64(insert, 1, binding.operation_id);
@@ -473,6 +473,8 @@ pub fn settleModelSuccessLocked(
         try sqlite.bindI64(insert, 10, neutral.bag);
         try sqlite.bindU64(insert, 11, neutral.part_count);
         try sqlite.bindNullableI64(insert, 12, neutral.text);
+        try sqlite.bindOptionalText(insert, 13, if (neutral.description) |*description| description.slice() else "");
+        try sqlite.bindI64(insert, 14, @intFromBool(neutral.call_failed));
         try sqlite.expectDone(insert);
         imported_items += 1;
         // Items own stream positions. Each visible message is a
@@ -620,7 +622,9 @@ noinline fn importOutputCall(self: *Store, binding: AttemptBinding, output: *con
     try sqlite.bindNullableI64(insert_call, 8, rejection_content_id);
     try sqlite.bindNullableU64(insert_call, 9, acceptance_position);
     if (rejection_code == null) try sqlite.bindI64(insert_call, 10, 1) else try sqlite.bindNullableI64(insert_call, 10, null);
-    try sqlite.bindOptionalText(insert_call, 11, if (bash_arguments) |*args| args.description.slice() else "");
+    // A call the catalog did not accept has no description.
+    const description: ?tool_catalog.Description = if (bash_arguments) |*args| tool_catalog.describe(.{ .bash = args }) else null;
+    try sqlite.bindOptionalText(insert_call, 11, if (description) |*line| line.slice() else "");
     // The call's certificate: (little-endian length, SHA-256) for its
     // name, call_id and arguments, in ProposalField order.
     var field_metadata: [120]u8 = undefined;
@@ -710,6 +714,9 @@ noinline fn importNeutralItem(self: *Store, binding: AttemptBinding, output: *co
     // The open part: its record's offset and its own text row. Every
     // part closes with its bag, so one INSERT writes the whole row.
     var part: ?struct { record: OutputMetadataRecord, start: u64, text: ?i64 } = null;
+    // A hosted call's action record, and its pattern record if any.
+    var action: ?OutputMetadataRecord = null;
+    var pattern: ?OutputMetadataRecord = null;
     while (try metadata.next()) |record| {
         if (record.tag == .item) break;
         if (record.ordinal != item.ordinal or record.kind != item.kind) return error.CorruptOutputMetadata;
@@ -763,16 +770,51 @@ noinline fn importNeutralItem(self: *Store, binding: AttemptBinding, output: *co
                 if (item_bag == null or text != null or record.decoded_length != text_length) return error.CorruptOutputMetadata;
                 text = try importMessageText(self, output, record, metadata_start, metadata.offset, faults);
             },
+            .action => {
+                if (item.kind != .web_search_call or action != null) return error.CorruptOutputMetadata;
+                action = record;
+            },
+            .pattern => {
+                if (action == null or pattern != null) return error.CorruptOutputMetadata;
+                pattern = record;
+            },
             .member, .name, .call_id, .arguments => {},
             .usage => return error.CorruptOutputMetadata,
             .item => unreachable,
         }
     }
-    if (part != null or (text != null) != (item.kind == .message)) return error.CorruptOutputMetadata;
-    return .{ .bag = item_bag orelse return error.CorruptOutputMetadata, .part_count = part_count, .text = text };
+    if (part != null or (text != null) != (item.kind == .message) or
+        (action != null) != (item.kind == .web_search_call)) return error.CorruptOutputMetadata;
+    var description: ?tool_catalog.Description = null;
+    if (action) |call| {
+        var target: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
+        var found: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
+        description = tool_catalog.describe(.{ .web_search = .{
+            .action = @fromBackingInt(@backingInt(call.action)),
+            .target = try excerpt(self.io, output.source, call, &target),
+            .pattern = if (pattern) |field| try excerpt(self.io, output.source, field, &found) else "",
+        } });
+    }
+    return .{
+        .bag = item_bag orelse return error.CorruptOutputMetadata,
+        .part_count = part_count,
+        .text = text,
+        .description = description,
+        .call_failed = if (action) |call| call.call_failed else false,
+    };
 }
 
-const ImportedNeutral = struct { bag: i64, part_count: u64, text: ?i64 };
+/// The first decoded bytes of a certified string `record`, as many as
+/// `buffer` holds.
+fn excerpt(io: std.Io, source: std.Io.File, record: OutputMetadataRecord, buffer: []u8) ![]const u8 {
+    var reader: output_format.NameReader = .{ .io = io, .file = source, .position = record.start, .end = try record.end() };
+    var length: usize = 0;
+    while (length < buffer.len) : (length += 1) buffer[length] = try reader.next() orelse break;
+    return buffer[0..length];
+}
+
+/// An item in Rui's own form; a hosted call's description and outcome.
+const ImportedNeutral = struct { bag: i64, part_count: u64, text: ?i64, description: ?tool_catalog.Description, call_failed: bool };
 
 /// Decodes a message's text parts among the records in `[start, end)`
 /// into one public row, checked against the message's `text` record.

@@ -153,6 +153,13 @@ pub noinline fn nextMember(codec: protocol.Codec, data: []const u8, cursor: *cod
     };
 }
 
+/// What an accepted hosted tool call item did, read from its bytes.
+pub fn hostedCall(codec: protocol.Codec, data: []const u8, item: *const codec_abi.OutputItem) codec_abi.HostedCall {
+    return switch (codec) {
+        inline else => |tag| module(tag).hostedCall(data, item),
+    };
+}
+
 /// The stream ended between events: its verdict, if it fails.
 pub fn finish(stream: *const Stream) ?codec_abi.Reason {
     return switch (stream.*) {

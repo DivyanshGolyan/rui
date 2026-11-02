@@ -27,7 +27,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
     .{ .schema_version = 47, .digest = 0x51267b57c44099bc },
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
-    .{ .schema_version = 49, .digest = 0xeebe0b0c9cfaa50f },
+    .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -468,6 +468,10 @@ pub const tables = [_]Table{
             .{ .name = "phase", .type = .int, .default = "0", .check = "phase IN (0,1,2) AND (phase=0 OR item_kind=2)" },
             .{ .name = "extras_content_id", .type = .int },
             .{ .name = "part_count", .type = .int, .check = "part_count>=0 AND (part_count=0 OR item_kind IN (1,2))" },
+            // A hosted tool call's description and outcome: every tool
+            // call is shown by its description.
+            .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
+            .{ .name = "call_failed", .type = .flag, .default = "0", .check = "(call_failed=0 OR item_kind=5)" },
         },
         .primary_key = &.{ "operation_id", "item_ordinal" },
         .uniques = &.{ &.{ "session_ref", "session_position" }, &.{ "operation_id", "item_id_digest" } },
@@ -627,6 +631,7 @@ pub const indexes = [_]Index{
     .{ .name = "conversation_entry_history", .table = "conversation_entry", .columns = &.{ "session_ref", "session_position" } },
     .{ .name = "model_output_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" } },
     .{ .name = "model_output_call_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" }, .where = "item_kind=3" },
+    .{ .name = "model_output_hosted_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" }, .where = "item_kind=5" },
     .{ .name = "model_output_compaction_anchor", .table = "model_output_item", .columns = &.{ "operation_id", "item_ordinal" }, .where = "item_kind=4" },
     .{ .name = "turn_session_latest", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" } },
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },
