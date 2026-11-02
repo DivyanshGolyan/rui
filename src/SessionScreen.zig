@@ -1573,8 +1573,9 @@ test "a description's controls read escaped alike on its call row and on the liv
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     var calls: View.Live = .{ .count = 1, .total = 1 };
     calls.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
-    try calls.entries[0].presentation.description.?.set("Run\t\x1b[2J\u{202e}tests");
-    const shown = "• Run\\t\\x1b[2J\\u202etests · 42s";
+    // A quote is prose in a description, so it shows as written.
+    try calls.entries[0].presentation.description.?.set("Run\t\x1b[2J\u{202e}\"tests\"");
+    const shown = "• Run\\t\\x1b[2J\\u202e\"tests\" · 42s";
     var buffer: [256]u8 = undefined;
     // On its call row.
     const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };

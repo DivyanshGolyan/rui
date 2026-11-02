@@ -15,6 +15,7 @@ pub const Name = enum {
     history,
     @"inspect-action",
     login,
+    model,
     recover,
     rename,
     requests,
@@ -56,6 +57,7 @@ pub const table = std.enums.EnumArray(Name, Command).init(.{
     .history = .{ .description = "older conversation" },
     .@"inspect-action" = .{ .description = "exact one-shot diagnostics" },
     .login = .{ .description = null },
+    .model = .{ .description = "this Session's model and sign-in" },
     .recover = .{ .argument = .{ .required = "KEY" }, .description = "the original request" },
     .rename = .{ .argument = .{ .required = "NAME" }, .description = "name this Session" },
     .requests = .{ .description = "recovery handles" },
@@ -248,7 +250,7 @@ test "a command admits exactly the arguments its shape names" {
 
 test "the list names the listed commands a command word starts, and Tab completes their common start" {
     const Case = struct { draft: []const u8, shown: ?[]const Name, completion: ?[]const u8 };
-    const all = [_]Name{ .configure, .copy, .details, .discard, .effort, .exit, .help, .history, .@"inspect-action", .recover, .rename, .requests, .result, .setup, .status };
+    const all = [_]Name{ .configure, .copy, .details, .discard, .effort, .exit, .help, .history, .@"inspect-action", .model, .recover, .rename, .requests, .result, .setup, .status };
     const cases = [_]Case{
         .{ .draft = "/", .shown = &all, .completion = "" },
         .{ .draft = "/c", .shown = &.{ .configure, .copy }, .completion = "o" },

@@ -677,7 +677,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
-    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
     try indented.feed(state.suffix);
@@ -715,7 +715,7 @@ pub const Live = struct {
         const state = toolState(entry.presentation.code);
         var writer = std.Io.Writer.fixed(buffer);
         try writer.print("{s} ", .{state.glyph});
-        var text: Text = .{ .mode = .line };
+        var text: Text = .{ .mode = .label };
         try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
         try text.finish(&writer);
         try writer.writeAll(state.suffix);
@@ -879,7 +879,7 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !Actio
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     if (arguments.description.len != 0) {
         try indented.feed(" ");
-        var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+        var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
         try label.feed(arguments.description.slice());
         try label.finish();
     }
@@ -1363,11 +1363,11 @@ fn ending(code: []const u8) Ending {
     return switch (failure_class.of(code)) {
         .policy => .{ .reason = "OpenAI refused this request", .next = "Rephrase it, or start a new Session; sending more here will likely be refused again." },
         .quota => .{ .reason = "the OpenAI account is out of quota", .next = "Add credit or wait for the limit to reset, then send a message to continue." },
-        .plan => .{ .reason = "the OpenAI plan does not include this Session's model", .next = "Choose another with /configure --model, then send a message to continue." },
-        .model => .{ .reason = "OpenAI cannot serve this Session's model", .next = "Choose another with /configure --model, then send a message to continue." },
-        .sign_in => .{ .reason = "sign-in expired", .next = "Run rui auth login codex, then send a message to continue." },
+        .plan => .{ .reason = "the OpenAI plan does not include this Session's model", .next = "Use /model in the overview to start a new Session." },
+        .model => .{ .reason = "OpenAI cannot serve this Session's model", .next = "Use /model in the overview to start a new Session." },
+        .sign_in => .{ .reason = "sign-in expired", .next = "Run " ++ comptime protocol.Provider.codex.login() ++ ", then send a message to continue." },
         // A running Host keeps the key it started with.
-        .api_key => .{ .reason = "the OpenAI API key was rejected", .next = "Save a new one with rui auth login openai, restart the Host with rui host stop, then send a message to continue." },
+        .api_key => .{ .reason = "the OpenAI API key was rejected", .next = "Save a new one with " ++ comptime protocol.Provider.openai.login() ++ ", restart the Host with rui host stop, then send a message to continue." },
         .overflow => .{ .reason = "the conversation no longer fits the model's context", .next = "Start a new Session; more here will not fit either." },
         .refused => .{ .reason = null, .next = "Sending this again will likely fail the same way; change what the error names, or start a new Session." },
         .unreachable_provider => .{ .reason = "OpenAI could not be reached", .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
@@ -1420,7 +1420,7 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
         .{ .code = "provider_cyber_policy", .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity.", .shown = "\n! Work ended: OpenAI refused this request (cyber_policy: This request has been flagged for potentially high-risk cyber activity.).\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
         .{ .code = "provider_invalid_prompt", .report = null, .shown = "\n! Work ended: OpenAI refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
         .{ .code = "provider_insufficient_quota", .report = "insufficient_quota: You exceeded your current quota.", .shown = "\n! Work ended: the OpenAI account is out of quota (insufficient_quota: You exceeded your current quota.).\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
-        .{ .code = "provider_model_not_found", .report = "model_not_found: The model `gpt-x` does not exist.", .shown = "\n! Work ended: OpenAI cannot serve this Session's model (model_not_found: The model `gpt-x` does not exist.).\n  Choose another with /configure --model, then send a message to continue.\n" },
+        .{ .code = "provider_model_not_found", .report = "model_not_found: The model `gpt-x` does not exist.", .shown = "\n! Work ended: OpenAI cannot serve this Session's model (model_not_found: The model `gpt-x` does not exist.).\n  Use /model in the overview to start a new Session.\n" },
         .{ .code = "provider_http_401", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
         .{ .code = "provider_api_key_rejected", .report = "Incorrect API key provided", .shown = "\n! Work ended: the OpenAI API key was rejected (Incorrect API key provided).\n  Save a new one with rui auth login openai, restart the Host with rui host stop, then send a message to continue.\n" },
         .{ .code = "ResourceExceeded", .report = null, .shown = "\n! Work ended: the conversation no longer fits the model's context.\n  Start a new Session; more here will not fit either.\n" },
@@ -1429,7 +1429,7 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
         .{ .code = "cancelled", .report = null, .shown = "\n! Work ended: it was interrupted.\n  Send a message to continue.\n" },
         // Any other code shows itself, beside whatever the provider said.
         .{ .code = "provider_http_400", .report = "invalid_request_error: Unsupported \"x\"\x1b[2J", .shown = "\n! Work ended: provider_http_400 (invalid_request_error: Unsupported \"x\"\\x1b[2J).\n  Sending this again will likely fail the same way; change what the error names, or start a new Session.\n" },
-        .{ .code = "provider_usage_not_included", .report = null, .shown = "\n! Work ended: the OpenAI plan does not include this Session's model.\n  Choose another with /configure --model, then send a message to continue.\n" },
+        .{ .code = "provider_usage_not_included", .report = null, .shown = "\n! Work ended: the OpenAI plan does not include this Session's model.\n  Use /model in the overview to start a new Session.\n" },
         .{ .code = "provider_tls_verification_failed", .report = null, .shown = "\n! Work ended: OpenAI could not be reached.\n  Check the network, proxy or provider endpoint, then send a message to continue.\n" },
         // The provider's words for an overflow say how far over it went.
         .{ .code = "ResourceExceeded", .report = "context_length_exceeded: Your input exceeds the context window.", .shown = "\n! Work ended: the conversation no longer fits the model's context (context_length_exceeded: Your input exceeds the context window.).\n  Start a new Session; more here will not fit either.\n" },

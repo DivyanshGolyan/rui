@@ -111,7 +111,7 @@ fn run(init: std.process.Init) !void {
         // Pre-admission refusals have one diagnostic, with no recovery handle.
         // A saved rejection or conflict already named its replay.
         // A stopped Host already said how to start it and resume.
-        if (err == error.UnsupportedModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted or err == error.HostStopped) return err;
+        if (err == error.InvalidModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted or err == error.HostStopped) return err;
         if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
         stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
@@ -244,7 +244,7 @@ fn createConfigDirectory(io: std.Io, home: []const u8) !void {
 }
 
 fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bool) !void {
-    if (parsed.get("model")) |model| try requireSupportedModel(model);
+    if (parsed.get("model")) |model| try admitModel(model);
     const home = init.environ_map.get("HOME") orelse {
         stderr.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
@@ -258,18 +258,9 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     const readiness = localReadiness(init);
     const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null;
     const values = (if (changed) preferences.update(home, edit, &readiness) else preferences.load(home)) catch |err| {
-        if (err == error.PreferenceDirectorySyncFailed) {
-            stderr.diagnostic("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
-        } else if (err == error.UnsupportedPreferenceProvider) {
-            stderr.diagnostic("rui: setup supports --provider " ++ provider_choices ++ "; no preferences saved.\n", .{});
-        } else if (err == error.PreferenceProviderRequired) {
-            stderr.diagnostic("rui: setup needs --provider " ++ provider_choices ++ " with --model; no preferences saved.\n", .{});
-        } else if (err == error.UnsupportedPreferenceModel) {
-            stderr.diagnostic("rui: setup model is unsupported; no preferences saved.\n" ++ model_capability.model_help, .{});
-        } else if (err == error.InvalidPreferenceModel) {
-            stderr.diagnostic("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
-        } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
-            stderr.diagnostic("rui: setup Store must be an existing private, canonicalizable absolute directory; no alternate Store selected.\n", .{});
+        const said = preferences.failure(err);
+        if (said.reason) |reason| {
+            stderr.diagnostic("rui: setup: {s}; {s}\n", .{ reason, if (said.saved) "no Session changed." else "no preferences saved." });
         } else stderr.diagnostic("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @errorName(err) });
         return err;
     };
@@ -315,10 +306,10 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.openai)) {
         .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
         .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `rui auth login openai`.\n",
+        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login() ++ "`.\n",
     });
-    const supported = model_capability.supportedCapabilities(&readiness);
-    const selection: ?provider_selection.Selection = provider_selection.resolve(&supported, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
+    const selectable = model_capability.capabilities(&readiness);
+    const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
         const advice: []const u8 = switch (err) {
             error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
             error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
@@ -327,7 +318,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         break :blk null;
     };
     if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `rui auth login codex`; OpenAI key: `rui auth login openai`.\n"),
+        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `" ++ comptime protocol.Provider.codex.login() ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login() ++ "`.\n"),
         .selected => |selected| {
             const note: []const u8 = switch (selected.readiness) {
                 .configured => "local credential configured; remote acceptance not checked",
@@ -379,7 +370,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     for (std.enums.values(protocol.Provider), 0..) |provider, index|
         try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
     try writer.writeAll("},\"next_session\":");
-    if (provider_selection.resolve(&model_capability.supportedCapabilities(facts.readiness), null, null, facts.provider, facts.model)) |choice| switch (choice) {
+    if (provider_selection.resolve(&model_capability.capabilities(facts.readiness), null, null, facts.provider, facts.model)) |choice| switch (choice) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {
             try writer.print("{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":", .{selected.provider});
@@ -1123,8 +1114,8 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
     outcome catch |err| {
         const advice: []const u8 = switch (err) {
             error.LoginInterrupted => "Rui: Login interrupted. No provider preference changed; check credentials before retrying.\n",
-            error.LoginDenied => "Rui: Login denied. No provider preference changed; use rui auth login codex if intended.\n",
-            error.LoginExpired => "Rui: Login expired. No provider preference changed; use rui auth login codex for a fresh code.\n",
+            error.LoginDenied => "Rui: Login denied. No provider preference changed; use " ++ comptime protocol.Provider.codex.login() ++ " if intended.\n",
+            error.LoginExpired => "Rui: Login expired. No provider preference changed; use " ++ comptime protocol.Provider.codex.login() ++ " for a fresh code.\n",
             else => "Rui: Login failed or credential save unconfirmed. Use rui defaults inspect before retrying; no Session binding changed.\n",
         };
         try std.Io.File.stdout().writeStreamingAll(init.io, advice);
@@ -1207,7 +1198,7 @@ const OverviewEntry = struct {
 /// Selects the Store and the new-Session binding, offering login when no
 /// provider is ready, and starts the Host. False when the person deferred.
 fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *OverviewEntry) !bool {
-    if (options.model) |model| try requireSupportedModel(model);
+    if (options.model) |model| try admitModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
     defer cwd.close(init.io);
@@ -1230,21 +1221,20 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         const destination = try snapshot.destination(home, &fallback);
         selected_store = destination.path;
         try preflightNewSession(init.io, selected_store, destination.saved);
-        // Check the prospective pin before credential lookup or login. Local
-        // identifier syntax and release support are separate policies.
+        // Check the prospective pin's syntax before credential lookup or
+        // login. A model Rui does not list runs with default limits.
         const usable: provider_selection.Readinesses = .initFill(.configured);
-        const prospective = snapshot.resolve(&usable) catch |err| {
+        _ = snapshot.resolve(&usable) catch |err| {
             if (after_choice) {
                 stderr.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
             } else stderr.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@errorName(err)});
             return err;
         };
-        if (prospective) |binding| try requireSupportedModel(binding.model.slice());
         readiness = localReadiness(init);
         const selection = try snapshot.resolve(&readiness);
         if (selection) |binding| break binding;
         if (after_choice) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui defaults inspect, rui auth login codex or rui auth login openai when ready; existing work is unchanged.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui defaults inspect, " ++ comptime protocol.Provider.codex.login() ++ " or " ++ protocol.Provider.openai.login() ++ " when ready; existing work is unchanged.\n");
             return false;
         }
         const any_ready = for (readiness.values) |state| {
@@ -1304,7 +1294,7 @@ fn openAiBaseUrlUsable(init: std.process.Init) bool {
 noinline fn readServedKey(init: std.process.Init, key: *api_key.Key) ![]const u8 {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (try api_key.read(try openAiKeyPath(init, &path_buffer), key) == null) {
-        stderr.diagnostic("rui: no OpenAI API key; save one with `rui auth login openai`, then start the Host again.\n", .{});
+        stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login() ++ "`, then start the Host again.\n", .{});
         return error.ApiKeyMissing;
     }
     return key.slice();
@@ -1379,7 +1369,7 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
     };
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
     for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved)
-        line.print("; to add {s}, stop and restart it after `rui auth login {s}`", .{ providerPresentation(provider).name, @tagName(provider) }) catch unreachable;
+        line.print("; to add {s}, stop and restart it after `{s}`", .{ providerPresentation(provider).name, provider.login() }) catch unreachable;
     line.writeAll(".\n") catch unreachable;
     return line.buffered();
 }
@@ -1566,13 +1556,22 @@ test "a Label argument sets, clears or refuses before capture" {
     try std.testing.expectEqual(@as(usize, 100), (try labelArgument(&longest)).value.?.len);
 }
 
-fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
+/// Admits a typed model ID with valid syntax. One Rui does not list runs
+/// with default limits, and one line says so.
+fn admitModel(model: []const u8) error{InvalidModel}!void {
     if (model_capability.supportsModel(model)) return;
     // Optional diagnostics stay bounded and cannot retain a restored terminal
     // on stderr credit. Spell arbitrary bytes safely, without changing input.
     var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 256]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
-    out.writeAll("\nrui: unsupported model ") catch unreachable;
+    if (model_capability.validModelSyntax(model)) {
+        out.writeAll("rui: Rui does not list ") catch unreachable;
+        writeSafeTextTo(&out, model) catch unreachable;
+        out.writeAll("; it uses default limits.\n") catch unreachable;
+        _ = @import("stderr.zig").write(out.buffered());
+        return;
+    }
+    out.writeAll("\nrui: invalid model ") catch unreachable;
     if (model.len <= protocol.max_model_bytes) {
         out.writeByte('"') catch unreachable;
         writeSafeTextTo(&out, model) catch unreachable;
@@ -1580,9 +1579,9 @@ fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
     } else {
         out.print("ID ({d} bytes exceeds the {d}-byte limit)", .{ model.len, protocol.max_model_bytes }) catch unreachable;
     }
-    out.writeAll(". Nothing captured or changed.\n" ++ model_capability.model_help ++ "See rui session configure --help.\n") catch unreachable;
+    out.writeAll(": a model ID is 1–256 printable non-space ASCII bytes. Nothing captured or changed.\n" ++ model_capability.model_help ++ "See rui session configure --help.\n") catch unreachable;
     _ = @import("stderr.zig").write(out.buffered());
-    return error.UnsupportedModel;
+    return error.InvalidModel;
 }
 
 fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !void {
@@ -1596,7 +1595,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
-        try requireSupportedModel(model);
+        try admitModel(model);
         input.model = .{ .present = true, .value = model };
     }
     if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
@@ -1624,7 +1623,6 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             break :blk try preferences.load(home);
         } else .{} };
         binding = try snapshot.resolveUnprompted();
-        try requireSupportedModel(binding.model.slice());
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
         if (!input.workspace.present) {
@@ -1901,8 +1899,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const home = init.environ_map.get("HOME");
     const binding: ?new_session_selection.Binding = blk: {
         const snapshot: new_session_selection.Snapshot = .{ .intent = .{}, .defaults = preferences.load(home orelse break :blk null) catch break :blk null };
-        const resolved = snapshot.resolveUnprompted() catch break :blk null;
-        break :blk if (model_capability.supportsModel(resolved.model.slice())) resolved else null;
+        break :blk snapshot.resolveUnprompted() catch null;
     };
     return openOverview(init, .{
         .store = destination,
@@ -1959,7 +1956,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             };
             if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             setup(init, &parsed, true) catch |err| {
-                if (err != error.UnsupportedModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+                if (err != error.InvalidModel) stderr.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
             };
         },
         .result => {
@@ -2064,7 +2061,7 @@ fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live
     for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
         return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
     configure(init, requests_context, &parsed, live, false) catch |err| {
-        if (err == error.UnsupportedModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
+        if (err == error.InvalidModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
         stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
         if (err == error.CanonicalStoreFailure) return err;
     };

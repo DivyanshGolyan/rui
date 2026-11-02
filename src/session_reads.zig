@@ -69,6 +69,7 @@ pub const Line = struct {
     label: ?Bounded(protocol.max_label_bytes) = null,
     first_position: ?u64 = null,
     model: Bounded(protocol.max_model_bytes) = .{},
+    provider: ?protocol.Provider = null,
     effort: ?protocol.ReasoningEffort = null,
     left: ?u8 = null,
     asks: bool = false,
@@ -89,6 +90,7 @@ pub const Line = struct {
             .label = if (settings.label) |label| plain(protocol.max_label_bytes, label.slice()) else null,
             .first_position = if (first) |message| message.value.position else null,
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
+            .provider = settings.provider.value,
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
             .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
             .asks = settings.permission_mode.value == .ask,
@@ -1665,7 +1667,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAn Action takes a or d + Enter\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands · Tab completes one\n\n" ++ slash_commands.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAn Action takes a or d + Enter\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands · Tab completes one\n\n" ++ slash_commands.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: " ++ comptime protocol.Provider.codex.login() ++ " in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);

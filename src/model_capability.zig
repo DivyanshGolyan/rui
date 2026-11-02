@@ -57,8 +57,8 @@ pub fn find(model: []const u8) ?*const Model {
     return null;
 }
 
-/// Release support, which the CLI checks before new-Session creation or an
-/// explicit default-model save. Selection syntax is `validModelSyntax`.
+/// Whether Rui's table lists the model, which then runs with its row's
+/// limits; any other model with valid syntax runs with default limits.
 pub fn supportsModel(model: []const u8) bool {
     return find(model) != null;
 }
@@ -121,21 +121,12 @@ const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len
 
 /// Every built-in provider, in declaration order. They share one catalog.
 /// Selection of a Session binding or saved pin admits any exact ID with valid
-/// syntax, including IDs this release does not list.
+/// syntax, including IDs this release does not list, which run with default
+/// limits.
 pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
-    return withPolicy(readiness, validModelSyntax);
-}
-
-/// Selection as `rui defaults inspect` predicts it for the next new Session,
-/// which the CLI admits only with a release-supported model.
-pub fn supportedCapabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
-    return withPolicy(readiness, supportsModel);
-}
-
-fn withPolicy(readiness: *const provider_selection.Readinesses, admits: *const fn ([]const u8) bool) [provider_count]provider_selection.Capability {
     var out: [provider_count]provider_selection.Capability = undefined;
     for (&out, std.enums.values(provider_name.Provider)) |*entry, provider|
-        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = admits, .readiness = readiness.get(provider) };
+        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = readiness.get(provider) };
     return out;
 }
 
@@ -185,15 +176,14 @@ test "reasoning effort uses exact catalog defaults and model support without exp
     try std.testing.expectEqualStrings("Supported model IDs: gpt-6-luna, gpt-6.1-sol, gpt-6-sol, gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5\n", model_help);
 }
 
-test "selection syntax and release support stay distinct" {
+test "selection admits any ID with valid syntax, listed or not" {
     var readiness: provider_selection.Readinesses = .initFill(.missing);
     readiness.set(.codex, .configured);
-    const syntax = capabilities(&readiness);
-    const supported = supportedCapabilities(&readiness);
-    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&syntax, null, "family=variant", null, null)).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&supported, null, "family=variant", null, null));
-    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&supported, null, null, null, null)).selected.model);
-    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&supported, null, null, "codex", "stale-pin"));
+    const selectable = capabilities(&readiness);
+    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&selectable, null, "family=variant", null, null)).selected.model);
+    try std.testing.expectEqualStrings("stale-pin", (try provider_selection.resolve(&selectable, null, null, "codex", "stale-pin")).selected.model);
+    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&selectable, null, null, null, null)).selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&selectable, null, "bad model", null, null));
 }
 
 test "every built-in provider is selectable by its label, and two ready ones ask for a choice" {

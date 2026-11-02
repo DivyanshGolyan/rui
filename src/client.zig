@@ -347,7 +347,8 @@ pub const Requests = struct {
     }
 
     /// Each served provider's models, parsed into `arena`, which owns them.
-    pub fn modelList(self: Requests, store_path: []const u8, arena: std.mem.Allocator) !protocol_reply.ModelList {
+    /// The Host's `model_list` reply, owned by `gpa`.
+    pub fn modelList(self: Requests, store_path: []const u8, gpa: std.mem.Allocator) ![]u8 {
         try self.check();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
@@ -356,16 +357,17 @@ pub const Requests = struct {
         defer closeSocket(self.io, fd);
         const Sink = struct {
             bytes: std.ArrayList(u8) = .empty,
-            arena: std.mem.Allocator,
+            gpa: std.mem.Allocator,
             pub fn feed(s: *@This(), bytes: []const u8) !void {
                 if (s.bytes.items.len + bytes.len > protocol.model_list_reply.max_bytes) return error.ResponseTooLarge;
-                try s.bytes.appendSlice(s.arena, bytes);
+                try s.bytes.appendSlice(s.gpa, bytes);
             }
         };
-        var sink: Sink = .{ .arena = arena };
+        var sink: Sink = .{ .gpa = gpa };
+        errdefer sink.bytes.deinit(gpa);
         var buffer: ReplyBuffer = .{};
         return switch (try readReportResponse(self, fd, &sink, &buffer)) {
-            .report => try protocol_reply.parseModelList(arena, sink.bytes.items),
+            .report => try sink.bytes.toOwnedSlice(gpa),
             .command => error.InvalidResponse,
         };
     }
@@ -2262,14 +2264,12 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
 }
 
 test "a model list without a Host to answer it fails before any parse" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const store = path[0..try tmp.dir.realPath(std.testing.io, &path)];
     const requests: Requests = .{ .io = std.testing.io };
-    try std.testing.expect(if (requests.modelList(store, arena.allocator())) |_| false else |_| true);
+    try std.testing.expect(if (requests.modelList(store, std.testing.allocator)) |_| false else |_| true);
 }
 
 test "client capture rejects noncanonical Session references before publication" {
