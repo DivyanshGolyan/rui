@@ -56,17 +56,13 @@ pub const fold_rows = 5;
 pub const max_requests = 8;
 /// The least time between two list requests.
 pub const list_interval_ms = 1000;
-/// How long each frame of a mark's pulse shows.
-pub const pulse_interval_ms = 140;
-/// A row's mark pulses until this long after the second it changed.
-/// The overview hears of a change up to a listing later, so a pulse shows
-/// for about two seconds.
-pub const pulse_window_ms = 3000;
+/// How long each frame of the spinner shows: one turn in two seconds.
+pub const spin_interval_ms = 200;
 /// A generated request handle, as `rui request recover` takes it.
 pub const max_handle_bytes = 36;
 
 pub const Group = enum { yours, active, queued, idle, finished, ended };
-pub const Mark = enum { active, waiting, finished, failed, stopped };
+pub const Mark = enum { active, queued, waiting, finished, failed, stopped };
 /// Text roles. Each skin's `palettes` entry gives each its colour; without
 /// colour every role draws in the terminal's own.
 pub const Colour = enum {
@@ -87,9 +83,9 @@ pub const Colour = enum {
 /// Cell grounds. The overview paints `ground` under every cell it owns.
 pub const Background = enum { ground, bar, selection, band };
 
-/// How one work state looks and what Ctrl-X may do to it. Work under way
-/// says what `work_line` says, in its tone; `word` names an idle or ended
-/// state, which has no work line.
+/// How one work state looks and what Ctrl-X may do to it. A row that
+/// `says` its work says what `work_line` says, in its tone; `word` names an
+/// idle or ended state, which has no work line.
 pub const Rule = struct {
     group: Group,
     mark: Mark,
@@ -97,9 +93,9 @@ pub const Rule = struct {
     /// or quiet.
     colour: Colour,
     word: ?[]const u8 = null,
-    /// The group heading already says the state, so rows under it omit
-    /// their word.
-    said_by_group: bool = false,
+    /// The row says its work line beside its title: what needs the person
+    /// or explains a wait. The mark and the group say the rest.
+    says: bool = false,
     /// A failed or stopped row names the Session that sent its first
     /// Message, by Label, else reference.
     starter: bool = false,
@@ -109,28 +105,29 @@ pub const Rule = struct {
 
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
-    .idle = .{ .group = .idle, .mark = .waiting, .colour = .normal, .word = "idle", .said_by_group = true, .stoppable = false },
-    .pending = .{ .group = .queued, .mark = .waiting, .colour = .normal, .said_by_group = true, .stoppable = true },
+    .idle = .{ .group = .idle, .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
+    .pending = .{ .group = .queued, .mark = .queued, .colour = .normal, .stoppable = true },
     .working = .{ .group = .active, .mark = .active, .colour = .ink, .stoppable = true },
-    .retrying = .{ .group = .active, .mark = .active, .colour = .ink, .stoppable = true },
-    .bash = .{ .group = .active, .mark = .active, .colour = .ink, .stoppable = true },
-    .approval = .{ .group = .active, .mark = .waiting, .colour = .normal, .stoppable = true },
-    .stopping = .{ .group = .active, .mark = .active, .colour = .ink, .stoppable = false },
-    .finished = .{ .group = .finished, .mark = .finished, .colour = .mark, .word = "finished", .said_by_group = true, .stoppable = false },
+    .retrying = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = true },
+    .bash = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = true },
+    .approval = .{ .group = .active, .mark = .waiting, .colour = .normal, .says = true, .stoppable = true },
+    .stopping = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = false },
+    .finished = .{ .group = .finished, .mark = .finished, .colour = .mark, .word = "finished", .stoppable = false },
     .failed = .{ .group = .ended, .mark = .failed, .colour = .failure, .word = "failed", .starter = true, .stoppable = false },
     .stopped = .{ .group = .ended, .mark = .stopped, .colour = .normal, .word = "stopped", .starter = true, .stoppable = false },
 });
 
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8 }).init(.{
     .active = .{ .unicode = "●", .ascii = "*" },
+    .queued = .{ .unicode = "◌", .ascii = ":" },
     .waiting = .{ .unicode = "○", .ascii = "o" },
     .finished = .{ .unicode = "✓", .ascii = "+" },
     .failed = .{ .unicode = "×", .ascii = "x" },
     .stopped = .{ .unicode = "■", .ascii = "#" },
 });
 
-/// A pulsing mark steps through its steady mark and these, one per frame.
-pub const pulse_dots = [_][]const u8{ "·", "∙", "•" };
+/// Your own Session's active mark turns through these, one per frame.
+pub const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
 /// `under_way`: its rows' work is under way, so the headline says "Running."
 pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: []const u8 = "", folds: bool, under_way: bool = false }).init(.{
@@ -680,9 +677,6 @@ pub const Row = struct {
     /// The earliest Action awaiting a decision: which wait for approval the
     /// row shows.
     first_action: ?u64,
-    /// The `since` of the state that brought the row's mark: the second the
-    /// mark last changed. A state change under the same mark keeps it.
-    mark_since: u64,
     first: ?First,
     from_person_at: ?u64,
     line: Line = .unread,
@@ -694,10 +688,6 @@ pub const Row = struct {
 
     pub fn group(self: *const Row) Group {
         return if (self.from_person_at != null) .yours else rules.get(self.state).group;
-    }
-
-    fn mark(self: *const Row) Mark {
-        return rules.get(self.state).mark;
     }
 };
 
@@ -871,7 +861,7 @@ pub const State = struct {
     }
 
     /// When the overview next needs a `tick`, in Unix milliseconds: the next
-    /// listing, a retry falling due, a mark's pulse ending, or the shown
+    /// listing, a retry falling due, or the shown
     /// quota reset passing. Null while nothing falls due before the listing
     /// in flight answers. A time already past means at once. The shell keeps
     /// no timer of its own.
@@ -879,8 +869,6 @@ pub const State = struct {
         var at: ?u64 = if (self.listing) null else self.next_list_ms;
         for (self.rows.items) |*row| {
             if (row.state == .retrying) at = @min(at orelse row.state.retrying.due_at_ms, row.state.retrying.due_at_ms);
-            const ends = pulseEnd(row);
-            if (ends > self.now_ms) at = @min(at orelse ends, ends);
         }
         if (band(self.rows.items, self.now_ms, self.login_at)) |trouble| if (trouble.resets_at) |resets| {
             at = @min(at orelse resets *| 1000, resets *| 1000);
@@ -1497,10 +1485,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         const next = row.state.asOf(now_ms);
         if (std.meta.activeTag(next) == std.meta.activeTag(row.state)) continue;
         changed = true;
-        // A retry falling due changes the mark without a listing.
-        const was = row.mark();
         row.state = next;
-        if (row.mark() != was) row.mark_since = next.since();
     }
     if (changed) try arrange(state);
     if (!state.listing and now_ms >= state.next_list_ms) {
@@ -1541,7 +1526,6 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             .state = shown,
             .turn = listed.turn,
             .first_action = listed.first_action,
-            .mark_since = shown.since(),
             .first = listed.first,
             .from_person_at = listed.from_person_at,
         });
@@ -1625,7 +1609,6 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
 
 /// What a listing's row keeps of the row it replaces.
 fn carry(state: *State, incoming: *Row, old: *const Row) void {
-    keepMark(incoming, old);
     // What the overview knows of the same first Message's first line, read,
     // unreadable or asked for, still holds.
     const same = if (incoming.first) |first| if (old.first) |known| first.admission == known.admission else false else false;
@@ -1638,12 +1621,6 @@ fn carry(state: *State, incoming: *Row, old: *const Row) void {
 fn retitle(state: *State, row: *const Row, was: []const u8) void {
     if (std.mem.eql(u8, title(state, row).text, was)) return;
     if (state.entryOf(row.reference)) |entry| state.want(entry, entry.status, true);
-}
-
-/// The same mark keeps the second it last changed, so a state change under
-/// it does not pulse.
-fn keepMark(incoming: *Row, old: *const Row) void {
-    if (incoming.mark() == old.mark()) incoming.mark_since = old.mark_since;
 }
 
 /// Rebuilds `by_reference`. A reference listed twice keeps its later row.
@@ -2349,9 +2326,9 @@ pub const Screen = struct {
     /// The byte the composer's first shown line starts at, for the next
     /// frame's `Draft.anchor`.
     draft_anchor: usize = 0,
-    /// A mark it drew changes with the frame: the shell draws the next one
-    /// in `pulse_interval_ms`.
-    pulses: bool = false,
+    /// It drew the spinner, which changes with the frame: the shell draws
+    /// the next one in `spin_interval_ms`.
+    spins: bool = false,
     depth: Caps.Depth = .none,
     skin: Skin = .night,
 
@@ -2592,7 +2569,7 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
     }
     if (at.picker.len() != 0) try pickerLines(&painter, state, &state.picker.?, lines[at.picker.start..at.picker.end]);
     if (at.list.len() != 0) try list(&painter, state, lines[at.list.start..at.list.end]);
-    screen.pulses = painter.pulsed;
+    screen.spins = painter.spun;
     return screen;
 }
 
@@ -2638,8 +2615,8 @@ const Painter = struct {
     glyphs: Glyphs,
     width: u16,
     frame: u64,
-    /// It drew a mark that changes with `frame`.
-    pulsed: bool = false,
+    /// It drew the spinner, which changes with `frame`.
+    spun: bool = false,
     spans: [24]Span = undefined,
     count: usize = 0,
     column: usize = 0,
@@ -3418,13 +3395,12 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const line = workLine(&words, state, row);
     const faded = state.unreachable_since_ms != null;
     const mark = marks.get(rule.mark);
-    // A mark pulses while its change is fresh, from a phase its change
-    // second sets, so marks that changed apart pulse apart. Only Unicode in
-    // colour pulses, and a faded row's state is stale, so it holds still.
-    const pulses = !faded and painter.caps.unicode and painter.caps.depth != .none and state.now_ms < pulseEnd(row);
-    painter.pulsed = painter.pulsed or pulses;
-    const phase = if (pulses) (painter.frame +% row.mark_since) % (pulse_dots.len + 1) else 0;
-    const glyph = if (phase != 0) pulse_dots[phase - 1] else if (painter.caps.unicode) mark.unicode else mark.ascii;
+    // Your own Session at work turns the spinner, every one in step; any
+    // other mark holds still. Only Unicode in colour spins, and a faded
+    // row's state is stale, so it holds still.
+    const spins = !faded and painter.caps.unicode and painter.caps.depth != .none and rule.mark == .active and row.group() == .yours;
+    painter.spun = painter.spun or spins;
+    const glyph = if (spins) spinner[painter.frame % spinner.len] else if (painter.caps.unicode) mark.unicode else mark.ascii;
     _ = try painter.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
 
     // Yours in the brightest ink, then named work; unnamed and ended grey.
@@ -3461,11 +3437,6 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     return painter.finish();
 }
 
-/// When a row's mark stops pulsing, in Unix milliseconds.
-fn pulseEnd(row: *const Row) u64 {
-    return row.mark_since *| 1000 +| pulse_window_ms;
-}
-
 /// The row title: its Label, else the first line of its first Message (a
 /// greyed hint), else its reference.
 fn title(state: *const State, row: *const Row) session_line.Name {
@@ -3492,18 +3463,20 @@ const max_word_bytes = max: {
     break :max @max(work_line.max_words_bytes + work_line.max_clock_bytes, starter);
 };
 
-/// What the row says beside its title, unless its group heading says it:
-/// work under way in the conversation's words, else the state's word.
+/// What the row says beside its title, only where the mark and the group
+/// leave something out: work that needs the person or explains a wait, in
+/// the conversation's words, or the Session that started a failed or
+/// stopped one. Otherwise nothing.
 fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) []const u8 {
-    if (rule.said_by_group and row.group() == rule.group) return "";
     if (line) |shown| {
+        if (!rule.says) return "";
         var clock: [work_line.max_clock_bytes]u8 = undefined;
         return std.fmt.bufPrint(buffer, "{s}{s}", .{ shown.words, work_line.clockText(&clock, shown.clock, .row, script) }) catch unreachable;
     }
+    if (!rule.starter) return "";
     const said = rule.word.?;
-    if (!rule.starter) return said;
     const dot = work_line.glyphs.get(script).dot;
-    const sender = (row.first orelse return said).sender orelse return said;
+    const sender = (row.first orelse return "").sender orelse return "";
     if (state.find(sender)) |starter| if (starter.label) |*text| return std.fmt.bufPrint(buffer, "{s} {s} for \"{s}\"", .{ said, dot, text.slice() }) catch unreachable;
     return std.fmt.bufPrint(buffer, "{s} {s} for {s}", .{ said, dot, &sender }) catch unreachable;
 }
@@ -3743,15 +3716,15 @@ const mixed = [_]Listed{
 /// One row of each kind, its group heading and its row in Unicode and ASCII.
 const kind_cases = [_]struct { state: WorkState, heading: []const u8, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .heading = " Idle", .unicode = "  ○ Write the notes                                                          2h", .ascii = "  o Write the notes                                                          2h", .colour = .normal, .stoppable = false },
-    .{ .state = .{ .pending = ago(5) }, .heading = " Queued", .unicode = "  ○ Write the notes                                                          5s", .ascii = "  o Write the notes                                                          5s", .colour = .normal, .stoppable = true },
-    .{ .state = .{ .working = ago(40) }, .heading = " Active", .unicode = "  ● Write the notes                                  Waiting                40s", .ascii = "  * Write the notes                                  Waiting                40s", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .pending = ago(5) }, .heading = " Queued", .unicode = "  ◌ Write the notes                                                          5s", .ascii = "  : Write the notes                                                          5s", .colour = .normal, .stoppable = true },
+    .{ .state = .{ .working = ago(40) }, .heading = " Active", .unicode = "  ● Write the notes                                                         40s", .ascii = "  * Write the notes                                                         40s", .colour = .ink, .stoppable = true },
     .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .heading = " Active", .unicode = "  ● Write the notes                        Provider error · retry 2 in 12s  30s", .ascii = "  * Write the notes                        Provider error - retry 2 in 12s  30s", .colour = .attention, .stoppable = true },
     .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .heading = " Active", .unicode = "  ● Write the notes                                  Run the logic tests     1m", .ascii = "  * Write the notes                                  Run the logic tests     1m", .colour = .ink, .stoppable = true },
     .{ .state = .{ .approval = ago(3 * 60) }, .heading = " Active", .unicode = "  ○ Write the notes                                  Needs approval          3m", .ascii = "  o Write the notes                                  Needs approval          3m", .colour = .attention, .stoppable = true },
     .{ .state = .{ .stopping = ago(8) }, .heading = " Active", .unicode = "  ● Write the notes                                  Stopping…               8s", .ascii = "  * Write the notes                                  Stopping.               8s", .colour = .quiet, .stoppable = false },
     .{ .state = .{ .finished = ago(12 * 60) }, .heading = " Finished", .unicode = "  ✓ Write the notes                                                         12m", .ascii = "  + Write the notes                                                         12m", .colour = .mark, .stoppable = false },
-    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                  failed                  3h", .ascii = "  x Write the notes                                  failed                  3h", .colour = .failure, .stoppable = false },
-    .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed", .unicode = "  ■ Write the notes                                  stopped                 2d", .ascii = "  # Write the notes                                  stopped                 2d", .colour = .normal, .stoppable = false },
+    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                                          3h", .ascii = "  x Write the notes                                                          3h", .colour = .failure, .stoppable = false },
+    .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed", .unicode = "  ■ Write the notes                                                          2d", .ascii = "  # Write the notes                                                          2d", .colour = .normal, .stoppable = false },
 };
 
 test "every work state follows the rules table, in Unicode and ASCII" {
@@ -3814,7 +3787,7 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     const at = std.mem.indexOf(u8, text, "Write the notes").?;
     const start = std.mem.lastIndexOfScalar(u8, text[0..at], '\n').? + 1;
     const end = std.mem.indexOfScalarPos(u8, text, at, '\n').?;
-    try std.testing.expectEqualStrings("  ○ Write the notes                                                          2s", text[start..end]);
+    try std.testing.expectEqualStrings("  ◌ Write the notes                                                          2s", text[start..end]);
     try std.testing.expect(std.mem.indexOf(u8, text, " Queued · 1\n") != null);
     var screen = try sizedRender(&state, .{}, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
@@ -3835,19 +3808,28 @@ test "each heading counts its group, and Yours takes a Session from the group it
     inline for (.{ " Yours · 1\n", " Active · 2\n", " Queued · 1\n", " Finished · 1\n" }) |heading_line| {
         try std.testing.expect(std.mem.indexOf(u8, text, heading_line) != null);
     }
-    // A queued row under Yours says so; under Queued its heading does.
-    try std.testing.expect(std.mem.indexOf(u8, text, "Mine, waiting                                    Queued                  9s\n") != null);
+    // A queued row shows its own mark, under Yours too, and no word.
+    try std.testing.expect(std.mem.indexOf(u8, text, "  ◌ Mine, waiting                                                            9s\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Waiting for a slot                                                       5s\n") != null);
 }
 
-/// Rows whose state changed 0, 1 and 2 seconds ago, so their marks pulse,
-/// beside two whose changes are older and hold still.
+/// Rows whose state changed in the last few seconds, beside two older.
 const fresh = [_]Listed{
     session("s0rt00", .{ .working = ago(0) }, .{ .label = "Started just now" }),
     session("f1n1sh", .{ .finished = ago(1) }, .{ .label = "Finished a second ago" }),
     session("a5k1ng", .{ .approval = ago(2) }, .{ .label = "Asked two seconds ago" }),
     session("f4iled", .{ .failed = .{ .since = test_now_s - 3, .code = bounded(session_work.max_code_bytes, "provider_error"), .resets_at = null } }, .{ .label = "Failed three seconds ago" }),
     session("w0rk00", .{ .working = ago(40) }, .{ .label = "Working a while" }),
+};
+
+/// Your Sessions at work and waiting, beside others' work and ends.
+const spinning = [_]Listed{
+    session("y0urs1", .{ .working = ago(40) }, .{ .label = "Mine, thinking", .yours = true }),
+    session("y0urs2", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Mine, running", .yours = true }),
+    session("y0urs3", .{ .approval = ago(2) }, .{ .label = "Mine, asking", .yours = true }),
+    session("y0urs4", .{ .pending = ago(3) }, .{ .label = "Mine, queued", .yours = true }),
+    session("w0rk00", .{ .working = ago(0) }, .{ .label = "Theirs, thinking" }),
+    session("f1n1sh", .{ .finished = ago(1) }, .{ .label = "Theirs, finished" }),
 };
 
 /// The glyph that the row titled `label` shows on `text`.
@@ -3857,124 +3839,75 @@ fn markOf(text: []const u8, label: []const u8) []const u8 {
     return std.mem.trim(u8, line, " ");
 }
 
-test "a mark pulses out of step with others for a moment after its row changes, then holds still" {
-    var state = try opened(&fresh);
+test "your Sessions at work turn the spinner in step, and every other mark holds still" {
+    var state = try opened(&spinning);
     defer state.deinit();
     state.selected = null;
-    const still = try screenText(&state, 80, 24, .{ .depth = .none });
-    defer std.testing.allocator.free(still);
-    const pulsing = [_]struct { []const u8, u64 }{
-        .{ "Started just now", test_now_s },
-        .{ "Finished a second ago", test_now_s - 1 },
-        .{ "Asked two seconds ago", test_now_s - 2 },
-    };
-    for (0..pulse_dots.len + 1) |frame| {
+    for (0..spinner.len + 1) |frame| {
         const text = try frameText(&state, 80, 24, .{}, frame);
         defer std.testing.allocator.free(text);
-        // A fresh row steps through its steady mark and the dots from a
-        // phase its change second sets.
-        for (pulsing) |row| {
-            const phase = (frame + row[1]) % (pulse_dots.len + 1);
-            const wanted = if (phase == 0) markOf(still, row[0]) else pulse_dots[phase - 1];
-            try std.testing.expectEqualStrings(wanted, markOf(text, row[0]));
-        }
-        // Rows that changed apart do not pulse together.
-        try std.testing.expect(!std.mem.eql(u8, markOf(text, "Started just now"), markOf(text, "Finished a second ago")));
-        // Older changes hold still.
-        try std.testing.expectEqualStrings("×", markOf(text, "Failed three seconds ago"));
-        try std.testing.expectEqualStrings("●", markOf(text, "Working a while"));
+        const turn = spinner[frame % spinner.len];
+        try std.testing.expectEqualStrings(turn, markOf(text, "Mine, thinking"));
+        try std.testing.expectEqualStrings(turn, markOf(text, "Mine, running"));
+        try std.testing.expectEqualStrings("○", markOf(text, "Mine, asking"));
+        try std.testing.expectEqualStrings("◌", markOf(text, "Mine, queued"));
+        try std.testing.expectEqualStrings("●", markOf(text, "Theirs, thinking"));
+        try std.testing.expectEqualStrings("✓", markOf(text, "Theirs, finished"));
         var screen = try sizedRender(&state, .{}, 80, 24, .{}, frame);
         defer screen.deinit();
-        try std.testing.expect(screen.pulses);
-        // A pulsing mark keeps its rule's colour.
-        const asked = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Asked two seconds ago").?], "\n");
-        try std.testing.expectEqual(Style{ .colour = .attention }, screen.styleAt(asked, 2).?);
+        try std.testing.expect(screen.spins);
+        // The spinner keeps its rule's colour.
+        const mine = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Mine, thinking").?], "\n");
+        try std.testing.expectEqual(Style{ .colour = .ink }, screen.styleAt(mine, 2).?);
     }
     // ASCII, NO_COLOR and a faded screen hold still on every frame.
     for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
         if (at == 3) state.unreachable_since_ms = state.now_ms;
         const first = try screenText(&state, 80, 24, caps);
         defer std.testing.allocator.free(first);
-        for (1..pulse_dots.len + 1) |frame| {
+        for (1..spinner.len + 1) |frame| {
             const text = try frameText(&state, 80, 24, caps, frame);
             defer std.testing.allocator.free(text);
             try std.testing.expectEqualStrings(first, text);
             var screen = try sizedRender(&state, .{}, 80, 24, caps, frame);
             defer screen.deinit();
-            try std.testing.expect(!screen.pulses);
+            try std.testing.expect(!screen.spins);
         }
     }
 }
 
-test "a state change under the same mark holds still, and a new mark pulses" {
-    const Pulses = struct {
-        fn at(state: *State) !bool {
-            var screen = try sizedRender(state, .{}, 80, 24, .{}, 1);
-            defer screen.deinit();
-            return screen.pulses;
-        }
-    };
-    for ([_]Delta{ .changed, .full }) |delta| {
-        var state = try opened(&.{session("k7m2qx", .{ .working = ago(40) }, .{ .label = "Keep working" })});
-        defer state.deinit();
-        // Working, then Bash, then working again: each refresh's state is
-        // new, but the mark stays ●.
-        const bash: WorkState = .{ .bash = .{ .since = state.now_ms / 1000 + 1, .call = 0, .description = null, .running = 1, .approvals = 0 } };
-        _ = try refresh(&state, delta, testToken(2), &.{session("k7m2qx", bash, .{ .label = "Keep working" })});
-        try std.testing.expect(!try Pulses.at(&state));
-        const working: WorkState = .{ .working = .{ .since = state.now_ms / 1000 + 1 } };
-        _ = try refresh(&state, delta, testToken(3), &.{session("k7m2qx", working, .{ .label = "Keep working" })});
-        try std.testing.expect(!try Pulses.at(&state));
-        // No pulse end to tick for: the next listing is the next wake.
-        try std.testing.expectEqual(@as(?u64, state.next_list_ms), state.wakeAt());
-        const finished: WorkState = .{ .finished = .{ .since = state.now_ms / 1000 + 1 } };
-        _ = try refresh(&state, delta, testToken(4), &.{session("k7m2qx", finished, .{ .label = "Keep working" })});
-        try std.testing.expect(try Pulses.at(&state));
-    }
-}
-
-test "the overview ticks as each pulse ends, and once every change is old nothing pulses" {
-    var state = try opened(&fresh);
-    defer state.deinit();
-    // The listing falls due first; while it is in flight, the next pulse to
-    // end wakes the overview.
-    try std.testing.expectEqual(@as(?u64, (test_now_s + 1) * 1000), state.wakeAt());
-    _ = try step(&state, .{ .tick = (test_now_s + 1) * 1000 });
-    try std.testing.expect(state.listing);
-    try std.testing.expectEqual(@as(?u64, (test_now_s + 2) * 1000), state.wakeAt());
-    _ = try step(&state, .{ .tick = (test_now_s + 2) * 1000 });
-    try std.testing.expectEqual(@as(?u64, (test_now_s + 3) * 1000), state.wakeAt());
-    _ = try step(&state, .{ .tick = (test_now_s + 3) * 1000 });
-    try std.testing.expectEqual(@as(?u64, null), state.wakeAt());
-    for (0..pulse_dots.len + 1) |frame| {
-        var screen = try sizedRender(&state, .{}, 80, 24, .{}, frame);
-        defer screen.deinit();
-        try std.testing.expect(!screen.pulses);
-    }
-}
-
-test "the screen asks for frames only while a pulsing mark shows" {
+test "the screen asks for frames only while a spinner shows" {
     var rows: [31]Listed = undefined;
-    rows[0] = session("w0rk00", .{ .working = ago(0) }, .{ .label = "Write the notes" });
+    rows[0] = session("w0rk00", .{ .working = ago(0) }, .{ .label = "Write the notes", .yours = true });
     for (rows[1..], 1..) |*row, at| {
         var ref: [6]u8 = "idle00".*;
         _ = std.fmt.bufPrint(ref[4..], "{d:0>2}", .{at}) catch unreachable;
         row.* = session(&ref, .{ .idle = ago(7200 + at) }, .{ .label = "Wait for a reply" });
     }
-    var state = try opened(&rows);
-    defer state.deinit();
-    const Pulses = struct {
+    const Spins = struct {
         fn at(from: *State, height: u16) !bool {
             var screen = try sizedRender(from, .{}, 80, height, .{}, 1);
             defer screen.deinit();
-            return screen.pulses;
+            return screen.spins;
         }
     };
-    try std.testing.expect(try Pulses.at(&state, 24));
-    // Scrolled out of sight, the pulsing row needs no frames.
-    _ = try press(&state, .{}, .last);
-    try std.testing.expect(!try Pulses.at(&state, 24));
-    try std.testing.expect(try Pulses.at(&state, 60));
+    {
+        var state = try opened(&rows);
+        defer state.deinit();
+        try std.testing.expect(try Spins.at(&state, 24));
+        // Scrolled out of sight, the spinning row needs no frames.
+        _ = try press(&state, .{}, .last);
+        try std.testing.expect(!try Spins.at(&state, 24));
+        try std.testing.expect(try Spins.at(&state, 60));
+        // Its work ending stops the frames.
+        _ = try refresh(&state, .changed, testToken(2), &.{session("w0rk00", .{ .finished = ago(0) }, .{ .label = "Write the notes", .yours = true })});
+        try std.testing.expect(!try Spins.at(&state, 60));
+    }
+    // Others' work holds still, so it needs no frames.
+    rows[0] = session("w0rk00", .{ .working = ago(0) }, .{ .label = "Write the notes" });
+    var state = try opened(&rows);
+    defer state.deinit();
+    try std.testing.expect(!try Spins.at(&state, 60));
 }
 
 fn frameBytes(screen: *const Screen, shown: ?*const Screen) ![]u8 {
@@ -3985,10 +3918,9 @@ fn frameBytes(screen: *const Screen, shown: ?*const Screen) ![]u8 {
 }
 
 test "a frame writes only what changed on the screen the terminal shows" {
-    // Two rows changed this second, so their marks pulse in step.
+    // Two of your Sessions work, so their marks spin in step.
     var rows = mixed;
-    rows[0].state = .{ .working = ago(0) };
-    rows[4].state = .{ .working = ago(0) };
+    rows[1].state = .{ .working = ago(0) };
     // In colour too: a cleared line takes the ground first, and a span
     // ends in the next one's SGR instead of a reset.
     for ([_]Caps{ .{ .depth = .none }, .{} }) |caps| {
@@ -3998,8 +3930,8 @@ test "a frame writes only what changed on the screen the terminal shows" {
         const plain = caps.depth == .none;
         var still = try sizedRender(&state, .{}, 80, 24, caps, 0);
         defer still.deinit();
-        var pulsed = try sizedRender(&state, .{}, 80, 24, caps, 1);
-        defer pulsed.deinit();
+        var turned = try sizedRender(&state, .{}, 80, 24, caps, 1);
+        defer turned.deinit();
         var wider = try sizedRender(&state, .{}, 81, 24, caps, 1);
         defer wider.deinit();
         // Unknown contents, or another size, clear and draw every line.
@@ -4011,16 +3943,16 @@ test "a frame writes only what changed on the screen the terminal shows" {
         const unchanged = try frameBytes(&still, &still);
         defer std.testing.allocator.free(unchanged);
         try std.testing.expectEqualStrings("", unchanged);
-        // The next pulse frame writes the two pulsing marks and nothing
-        // else; without colour nothing pulses.
-        const pulse = try frameBytes(&pulsed, &still);
-        defer std.testing.allocator.free(pulse);
+        // The next frame writes the two spinners and nothing else; without
+        // colour nothing spins.
+        const spun = try frameBytes(&turned, &still);
+        defer std.testing.allocator.free(spun);
         if (plain) {
-            try std.testing.expectEqualStrings("", pulse);
+            try std.testing.expectEqualStrings("", spun);
         } else {
-            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, pulse, "\x1b[2K"));
-            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, pulse, "H\x1b[0"));
-            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, pulse, "m·"));
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, spun, "\x1b[2K"));
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, spun, "H\x1b[0"));
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, spun, "m" ++ spinner[1]));
         }
         // A line laid out anew is cleared and drawn whole; the others stay.
         const draft = try typeText(&state, "hi");
@@ -4659,7 +4591,7 @@ test "a first line arriving titles its unlabelled row" {
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
-    try expectScreenLine(&state, 7, "  ✓ summarize yesterday's CI failures                finished               12m");
+    try expectScreenLine(&state, 7, "  ✓ summarize yesterday's CI failures                                       12m");
     // Lines in flight or unreadable are not asked for again, and a refresh
     // that replaces a row keeps the line of its unchanged first Message.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
@@ -5027,10 +4959,7 @@ test "the overview says when it next needs a tick" {
     _ = try step(&state, .{ .list = .failed });
     _ = try step(&state, .{ .tick = start + 12_000 });
     try std.testing.expect(state.find("r1r1r1".*).?.state == .pending);
-    // Falling due changed the row, so its mark's pulse ends next, then the
-    // quota resets.
-    try std.testing.expectEqual(@as(?u64, start + 12_000 + pulse_window_ms), state.wakeAt());
-    _ = try step(&state, .{ .tick = start + 12_000 + pulse_window_ms });
+    // Then the quota resets.
     try std.testing.expectEqual(@as(?u64, (test_now_s + 300) * 1000), state.wakeAt());
     _ = try respond(&state, .full, testToken(2), &.{failedRow("q1q1q1", 60, "provider_usage_limit_reached", std.math.maxInt(i64))});
     _ = try step(&state, .{ .tick = start + 16_000 });
@@ -5068,7 +4997,7 @@ test "a tick moves a retry that fell due to pending" {
     try std.testing.expectEqual(WorkState{ .pending = .{ .since = test_now_s + 12 } }, row.state);
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  ○ Audit permission paths                                                   0s\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  ◌ Audit permission paths                                                   0s\n") != null);
 }
 
 fn failedRow(ref: *const [6]u8, seconds_ago: u64, code: []const u8, resets_at: ?u64) Listed {
@@ -5184,7 +5113,7 @@ test "render draws each band" {
         \\  ✓ Summarize the CI failures                                               10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                    failed                  1m
+        \\  × Ask the model                                                            1m
         \\
         \\
         \\
@@ -5210,7 +5139,7 @@ test "render draws each band" {
         \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
         \\
         \\.IIIIIIIIIIIIIIIIIqqqq
-        \\..f.qqqqqqqqqqqqq....................................ffffff..................qq
+        \\..f.qqqqqqqqqqqqq............................................................qq
         \\
         \\
         \\
@@ -5236,7 +5165,7 @@ test "render draws each band" {
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                                                                                                                    failed                                          1m
+        \\  × Ask the model                                                                                                                                                                                    1m
         \\
         \\
         \\
@@ -5299,7 +5228,7 @@ test "render draws each band" {
         \\  ✓ Summarize the CI failures                                               10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                    failed                  1m
+        \\  × Ask the model                                                            1m
         \\
         \\
         \\
@@ -5325,7 +5254,7 @@ test "render draws each band" {
         \\.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
         \\
         \\.IIIIIIIIIIIIIIIIIqqqq
-        \\..f.qqqqqqqqqqqqq....................................ffffff..................qq
+        \\..f.qqqqqqqqqqqqq............................................................qq
         \\
         \\
         \\
@@ -5351,7 +5280,7 @@ test "render draws each band" {
         \\  ✓ Summarize the CI failures                                                                                                                                                                       10m
         \\
         \\ Stopped or failed · 1
-        \\  × Ask the model                                                                                                                                    failed                                          1m
+        \\  × Ask the model                                                                                                                                                                                    1m
         \\
         \\
         \\
@@ -5651,19 +5580,19 @@ test "render draws twenty mixed rows" {
         \\
         \\
         \\ Yours · 3
-        \\  ● Fix the flaky resize test                        Waiting                40s
+        \\  ⠋ Fix the flaky resize test                                               40s
         \\  ○ Review PR 412                                    Needs approval          3m
-        \\  ✓ h8q2mz                                           finished               12m
+        \\  ✓ h8q2mz                                                                  12m
         \\
         \\ Active · 5
         \\  ● List unused build steps                          Stopping…               8s
         \\  ● Audit permission paths                 Provider error · retry 2 in 12s  30s
         \\  ● Find why store tests fail                        Run the logic tests     1m
-        \\  ● f6g7h8                             ~/code/other  Waiting                 1m
-        \\  ● Profile the curl send queue                      Waiting                 2m
+        \\  ● f6g7h8                             ~/code/other                          1m
+        \\  ● Profile the curl send queue                                              2m
         \\
         \\ Queued · 1
-        \\  ○ Trace Host shutdown order                                                5s
+        \\  ◌ Trace Host shutdown order                                                5s
         \\
         \\ Idle · 1
         \\  ○ Check macOS socket cleanup                                               2h
@@ -5679,14 +5608,14 @@ test "render draws twenty mixed rows" {
         \\.IIIIIqqqq
         \\.rrRRRRRRRRRRRRRRRRRRRRRRRRRRrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
         \\..a.SSSSSSSSSSSSS....................................aaaaaaaaaaaaaa..........qq
-        \\..m.SSSSSS...........................................nnnnnnnn...............qqq
+        \\..m.SSSSSS..................................................................qqq
         \\
         \\.IIIIIIqqqq
         \\..q.iiiiiiiiiiiiiiiiiiiiiii..........................qqqqqqqqq...............qq
         \\..a.iiiiiiiiiiiiiiiiiiiiii.................aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..qqq
         \\..i.iiiiiiiiiiiiiiiiiiiiiiiii........................nnnnnnnnnnnnnnnnnnn.....qq
-        \\..i.qqqqqq.............................nnnnnnnnnnnn..nnnnnnn.................qq
-        \\..i.iiiiiiiiiiiiiiiiiiiiiiiiiii......................nnnnnnn.................qq
+        \\..i.qqqqqq.............................nnnnnnnnnnnn..........................qq
+        \\..i.iiiiiiiiiiiiiiiiiiiiiiiiiii..............................................qq
         \\
         \\.IIIIIIqqqq
         \\..n.iiiiiiiiiiiiiiiiiiiiiiiii................................................qq
@@ -5703,19 +5632,19 @@ test "render draws twenty mixed rows" {
         \\
         \\
         \\ Yours · 3
-        \\  ● Fix the flaky resize test                                                                                                                        Waiting                                        40s
+        \\  ⠋ Fix the flaky resize test                                                                                                                                                                       40s
         \\  ○ Review PR 412                                                                                                                                    Needs approval                                  3m
-        \\  ✓ h8q2mz                                                                                                                                           finished                                       12m
+        \\  ✓ h8q2mz                                                                                                                                                                                          12m
         \\
         \\ Active · 5
         \\  ● List unused build steps                                                                                                                          Stopping…                                       8s
         \\  ● Audit permission paths                                                                                                                           Provider error · retry 2 in 12s                30s
         \\  ● Find why store tests fail                                                                                                                        Run the logic tests                             1m
-        \\  ● f6g7h8                                                                                                                             ~/code/other  Waiting                                         1m
-        \\  ● Profile the curl send queue                                                                                                                      Waiting                                         2m
+        \\  ● f6g7h8                                                                                                                             ~/code/other                                                  1m
+        \\  ● Profile the curl send queue                                                                                                                                                                      2m
         \\
         \\ Queued · 1
-        \\  ○ Trace Host shutdown order                                                                                                                                                                        5s
+        \\  ◌ Trace Host shutdown order                                                                                                                                                                        5s
         \\
         \\ Idle · 1
         \\  ○ Check macOS socket cleanup                                                                                                                                                                       2h
@@ -5731,7 +5660,7 @@ test "render draws twenty mixed rows" {
         \\ Stopped or failed · 3
         \\  × Bisect the WAL regression                                                                                                                        failed · for "Fix the flaky resize test"       15m
         \\  ■ Rename the session tables                                                                                                                        stopped · for zzzzzz                           30m
-        \\  × Retry the flaky upload                                                                                                                           failed                                         50m
+        \\  × Retry the flaky upload                                                                                                                                                                          50m
         \\
         \\
         \\
@@ -5773,19 +5702,19 @@ test "render draws ASCII without colour" {
         \\
         \\
         \\ Yours - 3
-        \\  * Fix the flaky resize test                        Waiting                40s
+        \\  * Fix the flaky resize test                                               40s
         \\  o Review PR 412                                    Needs approval          3m
-        \\  + r?sum? the na?ve caf? ? notes                    finished               12m
+        \\  + r?sum? the na?ve caf? ? notes                                           12m
         \\
         \\ Active - 5
         \\  * List unused build steps                          Stopping.               8s
         \\  * Audit permission paths                 Provider error - retry 2 in 12s  30s
         \\  * Find why store tests fail                        Run the logic tests     1m
-        \\  * f6g7h8                             ~/code/other  Waiting                 1m
-        \\  * Profile the curl send queue                      Waiting                 2m
+        \\  * f6g7h8                             ~/code/other                          1m
+        \\  * Profile the curl send queue                                              2m
         \\
         \\ Queued - 1
-        \\  o Trace Host shutdown order                                                5s
+        \\  : Trace Host shutdown order                                                5s
         \\
         \\ Idle - 1
         \\  o Check macOS socket cleanup                                               2h
@@ -5801,14 +5730,14 @@ test "render draws ASCII without colour" {
         \\.NNNNNnnnn
         \\rrrRRRRRRRRRRRRRRRRRRRRRRRRRRrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
         \\..n.NNNNNNNNNNNNN....................................nnnnnnnnnnnnnn..........nn
-        \\..n.NNNNNNNNNNNNNNNNNNNNNNNNNNNNN....................nnnnnnnn...............nnn
+        \\..n.NNNNNNNNNNNNNNNNNNNNNNNNNNNNN...........................................nnn
         \\
         \\.NNNNNNnnnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnn..........................nnnnnnnnn...............nn
         \\..n.nnnnnnnnnnnnnnnnnnnnnn.................nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn..nnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn........................nnnnnnnnnnnnnnnnnnn.....nn
-        \\..n.nnnnnn.............................nnnnnnnnnnnn..nnnnnnn.................nn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnn......................nnnnnnn.................nn
+        \\..n.nnnnnn.............................nnnnnnnnnnnn..........................nn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnnn..............................................nn
         \\
         \\.NNNNNNnnnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn................................................nn
@@ -5825,19 +5754,19 @@ test "render draws ASCII without colour" {
         \\
         \\
         \\ Yours - 3
-        \\  * Fix the flaky resize test                                                                                                                        Waiting                                        40s
+        \\  * Fix the flaky resize test                                                                                                                                                                       40s
         \\  o Review PR 412                                                                                                                                    Needs approval                                  3m
-        \\  + r?sum? the na?ve caf? ? notes                                                                                                                    finished                                       12m
+        \\  + r?sum? the na?ve caf? ? notes                                                                                                                                                                   12m
         \\
         \\ Active - 5
         \\  * List unused build steps                                                                                                                          Stopping.                                       8s
         \\  * Audit permission paths                                                                                                                           Provider error - retry 2 in 12s                30s
         \\  * Find why store tests fail                                                                                                                        Run the logic tests                             1m
-        \\  * f6g7h8                                                                                                                             ~/code/other  Waiting                                         1m
-        \\  * Profile the curl send queue                                                                                                                      Waiting                                         2m
+        \\  * f6g7h8                                                                                                                             ~/code/other                                                  1m
+        \\  * Profile the curl send queue                                                                                                                                                                      2m
         \\
         \\ Queued - 1
-        \\  o Trace Host shutdown order                                                                                                                                                                        5s
+        \\  : Trace Host shutdown order                                                                                                                                                                        5s
         \\
         \\ Idle - 1
         \\  o Check macOS socket cleanup                                                                                                                                                                       2h
@@ -5853,7 +5782,7 @@ test "render draws ASCII without colour" {
         \\ Stopped or failed - 3
         \\  x Bisect the WAL regression                                                                                                                        failed - for "Fix the flaky resize test"       15m
         \\  # Rename the session tables                                                                                                                        stopped - for zzzzzz                           30m
-        \\  x Retry the flaky upload                                                                                                                           failed                                         50m
+        \\  x Retry the flaky upload                                                                                                                                                                          50m
         \\
         \\
         \\
@@ -5978,10 +5907,9 @@ test "bidi controls in a title or a starter's Label cannot reorder a row" {
 }
 
 test "untrusted text cannot reach the terminal as control bytes" {
-    // Older than a pulse, so the mark is steady.
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 5, "  ● Bell? and ?[31mred                               Waiting                 5s");
+    try expectScreenLine(&state, 5, "  ● Bell? and ?[31mred                                                       5s");
 }
 
 test "only the finished and the failed or stopped groups fold" {
