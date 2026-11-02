@@ -1,5 +1,6 @@
-//! The Store: its open database, locking and fencing, statement cache, and
-//! every public entry point. Entry points take the lock and call into the domain files.
+//! The Store type and its public entry points, then what the domain files share
+//! and nothing outside src/store/ reaches: locking and fencing, statement execution,
+//! identities and traces. The facade re-exports only the Store type and its value types.
 
 const std = @import("std");
 const attempt = @import("../attempt.zig");
@@ -7,7 +8,6 @@ const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
-const Store = @This();
 const action_domain = @import("domain/action.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
@@ -56,35 +56,656 @@ const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
 const workspace_key_sql = sqlite.workspace_key_sql;
 
-io: std.Io,
-database: *c.sqlite3,
-selector: protocol.Bounded(protocol.max_store_bytes),
-mutex: std.Io.Mutex = .init,
-fenced: std.atomic.Value(bool) = .init(false),
-/// Advances before `release` of any entry point that changed rows, so
-/// after every successful COMMIT. An unchanged value proves no canonical
-/// fact changed since it was read; a rolled-back change also advances it.
-commit_generation: std.atomic.Value(u64) = .init(0),
-/// The Sessions the current entry point changed. Every writer touches
-/// each Session whose rows it changes, and `release` records them under
-/// the generation the commit advances to.
-touched: change_ring.Touched = .{},
-/// Which Sessions changed at recent generations: Session listing's
-/// `since` hint, guarded by the mutex. Owned: `openWithOptions` maps it
-/// and `close` unmaps it.
-changes: *change_ring.Ring,
-/// This opening's identity: a `since` token from any other opening
-/// names generations this one never counted.
-instance: [16]u8 = undefined,
-statements: StatementCache = .{},
-/// The labels of the providers whose Sessions get model Attempts, each
-/// between commas, fixed at open.
-served: protocol.Routes = protocol.routesAll(.unserved),
-// Access.release closes the read transaction before unlocking, including
-// errors and yielded historical scans. Logical readers cannot pin the WAL.
-read_blob: ContentBlob = .{},
-// Source-level proof only: no counters/storage in the production Store.
-testing_content_work: if (@import("builtin").is_test) struct { read: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0), blob: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
+pub const Store = struct {
+    io: std.Io,
+    database: *c.sqlite3,
+    selector: protocol.Bounded(protocol.max_store_bytes),
+    mutex: std.Io.Mutex = .init,
+    fenced: std.atomic.Value(bool) = .init(false),
+    /// Advances before `release` of any entry point that changed rows, so
+    /// after every successful COMMIT. An unchanged value proves no canonical
+    /// fact changed since it was read; a rolled-back change also advances it.
+    commit_generation: std.atomic.Value(u64) = .init(0),
+    /// The Sessions the current entry point changed. Every writer touches
+    /// each Session whose rows it changes, and `release` records them under
+    /// the generation the commit advances to.
+    touched: change_ring.Touched = .{},
+    /// Which Sessions changed at recent generations: Session listing's
+    /// `since` hint, guarded by the mutex. Owned: `openWithOptions` maps it
+    /// and `close` unmaps it.
+    changes: *change_ring.Ring,
+    /// This opening's identity: a `since` token from any other opening
+    /// names generations this one never counted.
+    instance: [16]u8 = undefined,
+    statements: StatementCache = .{},
+    /// The labels of the providers whose Sessions get model Attempts, each
+    /// between commas, fixed at open.
+    served: protocol.Routes = protocol.routesAll(.unserved),
+    // Access.release closes the read transaction before unlocking, including
+    // errors and yielded historical scans. Logical readers cannot pin the WAL.
+    read_blob: ContentBlob = .{},
+    // Source-level proof only: no counters/storage in the production Store.
+    testing_content_work: if (@import("builtin").is_test) struct { read: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0), blob: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
+
+    /// Whether nothing changed since `since` on this opening: atomics only,
+    /// no lock. Never while fenced, so a read reports the failure.
+    pub fn notModified(self: *const Store, since: change_ring.Token) bool {
+        return !self.isFenced() and std.mem.eql(u8, &since.instance, &self.instance) and
+            since.generation == self.commit_generation.load(.acquire);
+    }
+
+    pub fn open(self: *Store, io: std.Io, database_path: []const u8, selector: []const u8) !void {
+        return self.openWithOptions(io, database_path, selector, .{});
+    }
+
+    pub fn inspectSessionForTesting(self: *Store, session_ref: []const u8) !SessionObservation {
+        var observation: SessionObservation = undefined;
+        try self.inspectSession(session_ref, &observation);
+        return observation;
+    }
+
+    /// Test fixture for a historical producing binding unavailable through
+    /// today's immutable Session configuration admission. Requires a newer
+    /// current revision, leaving that revision and its frozen inputs intact.
+    pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
+        if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+        return historical_domain.readPrefixSealLocked(self, binding);
+    }
+
+    pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+        const statement = try cached(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
+        defer sqlite.resetCached(statement);
+        try sqlite.bindU64(statement, 1, binding.operation_id);
+        const bytes = seal.encode();
+        try sqlite.bindBlob(statement, 2, &bytes);
+        try sqlite.expectDone(statement);
+        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
+    }
+
+    pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
+        if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+        var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
+        try bounded.set(model);
+        if (bounded.len == 0) return error.InvalidModel;
+        const statement = try cached(self, "UPDATE session_revision SET model=?2 " ++
+            "WHERE (session_ref,revision)=(SELECT o.session_ref,o.settings_revision FROM model_operation o " ++
+            "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.settings_revision<s.revision)");
+        defer sqlite.resetCached(statement);
+        try sqlite.bindU64(statement, 1, binding.operation_id);
+        try sqlite.bindText(statement, 2, model);
+        try sqlite.expectDone(statement);
+        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
+    }
+
+    /// Flips the first byte of the provider bag of the `binding` Operation's
+    /// first output item, keeping its recorded length and digest, as on-disk
+    /// damage would.
+    pub fn damageOutputBagForTesting(self: *Store, binding: AttemptBinding) !void {
+        if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+        const statement = try cached(self, "UPDATE content SET payload=CAST(CASE WHEN substr(CAST(payload AS TEXT),1,1)='X' THEN 'Y' ELSE 'X' END || substr(CAST(payload AS TEXT),2) AS BLOB) " ++
+            "WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE operation_id=?1 AND item_ordinal=0)");
+        defer sqlite.resetCached(statement);
+        try sqlite.bindU64(statement, 1, binding.operation_id);
+        try sqlite.expectDone(statement);
+        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingOutput;
+    }
+
+    /// Opens in place: the Host holds exactly one Store, never a copy. It
+    /// runs once per process; noinline keeps its path buffers off the
+    /// caller's frame, which lives as long as the Host.
+    pub noinline fn openWithOptions(
+        self: *Store,
+        io: std.Io,
+        database_path: []const u8,
+        selector: []const u8,
+        options: OpenOptions,
+    ) !void {
+        errdefer self.* = undefined;
+        if (options.cache_kib == 0 or options.cache_kib > 4096) return error.InvalidSqliteCacheSize;
+        if (c.sqlite3_hard_heap_limit64(@intCast(sqlite_heap_bytes)) < 0) {
+            return error.SqliteHeapLimitConfigurationFailed;
+        }
+        errdefer _ = c.sqlite3_hard_heap_limit64(0);
+
+        const existing = blk: {
+            const stat = std.Io.Dir.cwd().statFile(io, database_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :blk false,
+                else => return err,
+            };
+            if (stat.kind != .file) return error.InvalidStoreDatabase;
+            break :blk stat.size != 0;
+        };
+
+        var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+        const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database_path}, 0);
+        var database: ?*c.sqlite3 = null;
+        const open_result = c.sqlite3_open_v2(
+            path,
+            &database,
+            c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX,
+            null,
+        );
+        if (open_result != c.SQLITE_OK) {
+            if (database) |db| _ = c.sqlite3_close(db);
+            return error.StoreOpenFailed;
+        }
+        // The handle may still be null on later failure paths; never unwrap
+        // it while unwinding an open failure.
+        errdefer {
+            if (database) |db| _ = c.sqlite3_close(db);
+        }
+
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(protocol.max_sqlite_content_bytes + 4096));
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 32);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, 16);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 4096);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_ATTACHED, 0);
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_WORKER_THREADS, 0);
+        try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
+        try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
+        // Before the first read: the Host keeps the file lock until close, and
+        // WAL then keeps its index in heap memory, so no -shm file exists.
+        try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
+        if (existing) {
+            if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
+            try store_schema.validateExisting(database.?, selector);
+        }
+        try sqlite.exec(database.?, "PRAGMA busy_timeout=0");
+        try sqlite.exec(database.?, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(database.?, "PRAGMA mmap_size=0");
+        try sqlite.exec(database.?, "PRAGMA temp_store=FILE");
+        var cache_size_buffer: [64:0]u8 = undefined;
+        const cache_size = try std.fmt.bufPrintSentinel(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib}, 0);
+        try sqlite.exec(database.?, cache_size);
+        try sqlite.exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
+        try sqlite.exec(database.?, "PRAGMA synchronous=FULL");
+        if (@import("../os/os.zig").full_fsync) try sqlite.exec(database.?, "PRAGMA fullfsync=ON");
+        // Validation precedes this, so an incompatible Store keeps its journal mode.
+        const journal_mode = sqlite.diagnosticTextPragma(database.?, "PRAGMA journal_mode=WAL") orelse return error.StoreJournalModeFailed;
+        if (!std.mem.eql(u8, journal_mode.slice(), "wal")) return error.StoreJournalModeFailed;
+        // Checkpoints truncate a grown WAL back to the auto-checkpoint size.
+        try sqlite.exec(database.?, "PRAGMA journal_size_limit=4194304");
+        if (!existing) try store_schema.bootstrap(database.?, selector);
+        // A new Host never inherits a lost Action's sender authority.
+        try sqlite.exec(database.?, "UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL");
+
+        if (@import("builtin").is_test) try sqlite.createTouchOracleForTesting(database.?);
+
+        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        try stored_selector.set(selector);
+        const changes = try createRing();
+        errdefer destroyRing(changes);
+        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes };
+        self.served = options.served;
+        // The Store is in final storage, so the function may keep its address.
+        if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
+            return error.StoreOpenFailed;
+        // Tells this opening's `since` tokens from another's. It grants
+        // nothing, so the process CSPRNG serves, and Session IDs keep sole
+        // use of secure draws.
+        io.random(&self.instance);
+        errdefer self.statements.deinit();
+        // Error paths then roll back without preparing or allocating.
+        _ = try cached(self, "ROLLBACK");
+    }
+
+    pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
+        lockAdmin(self);
+        defer self.mutex.unlock(self.io);
+
+        var result: SqliteDiagnostic = .{};
+        var current: c.sqlite3_int64 = 0;
+        var highwater: c.sqlite3_int64 = 0;
+        if (c.sqlite3_status64(c.SQLITE_STATUS_MEMORY_USED, &current, &highwater, 0) == c.SQLITE_OK and
+            current >= 0 and highwater >= 0)
+        {
+            result.process_memory_current_bytes = @intCast(current);
+            result.process_memory_highwater_bytes = @intCast(highwater);
+        }
+
+        var cache_used: c_int = 0;
+        var unused_highwater: c_int = 0;
+        if (c.sqlite3_db_status(
+            self.database,
+            c.SQLITE_DBSTATUS_CACHE_USED,
+            &cache_used,
+            &unused_highwater,
+            0,
+        ) == c.SQLITE_OK and cache_used >= 0) {
+            result.cache_used_bytes = @intCast(cache_used);
+        }
+        var spills: c_int = 0;
+        if (c.sqlite3_db_status(
+            self.database,
+            c.SQLITE_DBSTATUS_CACHE_SPILL,
+            &spills,
+            &unused_highwater,
+            0,
+        ) == c.SQLITE_OK and spills >= 0) {
+            result.cache_spills = @intCast(spills);
+        }
+
+        const hard_heap_limit = c.sqlite3_hard_heap_limit64(-1);
+        if (hard_heap_limit >= 0) result.hard_heap_limit_bytes = @intCast(hard_heap_limit);
+        result.page_size_bytes = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA page_size");
+        result.cache_size_setting = sqlite.diagnosticSignedPragma(self.database, "PRAGMA cache_size");
+        result.cache_spill_threshold = sqlite.diagnosticSignedPragma(self.database, "PRAGMA cache_spill");
+        result.mmap_size_bytes = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA mmap_size");
+        result.synchronous = sqlite.diagnosticSignedPragma(self.database, "PRAGMA synchronous");
+        result.temp_store = sqlite.diagnosticSignedPragma(self.database, "PRAGMA temp_store");
+        result.busy_timeout_ms = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA busy_timeout");
+        result.journal_mode = sqlite.diagnosticTextPragma(self.database, "PRAGMA journal_mode");
+        return result;
+    }
+
+    pub fn close(self: *Store) !void {
+        lockAdmin(self);
+        self.statements.deinit();
+        const close_result = c.sqlite3_close(self.database);
+        self.mutex.unlock(self.io);
+        // Freed even when SQLite keeps the handle: nothing retries a close.
+        destroyRing(self.changes);
+        if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
+        _ = c.sqlite3_hard_heap_limit64(0);
+        self.* = undefined;
+    }
+
+    pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
+        lockAdmin(self);
+        defer self.mutex.unlock(self.io);
+        try retry_policy.validateWaits(waits_ms, try readUnixMilliseconds(self.io));
+    }
+
+    /// A configuration that requires a model is rejected when the Host does
+    /// not serve its Session's provider.
+    pub fn configure(
+        self: *Store,
+        command: *const protocol.ConfigureCommand,
+        faults: Faults,
+    ) ConfigureReply {
+        const access = enter(self, .none) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, configuration_domain.configureLocked(self, command, faults)) catch .infrastructure_failure;
+    }
+
+    /// A fresh Message admission, as `MessageCommitted` receives it.
+    pub const MessageAdmission = struct {
+        /// The admitted Session, borrowed for the call.
+        session: []const u8,
+        /// Store-wide, increasing with each admission.
+        admission_id: u64,
+        /// The sender was another Session's Action, not a person.
+        from_peer: bool,
+    };
+
+    /// Called once a fresh Message admission commits, before the Store lock
+    /// is released, so whatever reads the Store next also sees its effect.
+    /// A replayed or rejected Message calls nothing. It cannot fail.
+    pub const MessageCommitted = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque, admission: MessageAdmission) void,
+    };
+
+    /// A Message's `require_model` condition checks that the Host serves its
+    /// Session's provider before creating anything.
+    pub fn submitMessageWithModel(
+        self: *Store,
+        command: *const protocol.MessageCommand,
+        committed: ?MessageCommitted,
+        faults: Faults,
+    ) MessageReply {
+        const access = enter(self, .none) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
+    }
+
+    pub fn stopSession(
+        self: *Store,
+        command: *const protocol.SessionStopCommand,
+        faults: Faults,
+    ) SessionStopReply {
+        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
+    }
+
+    pub fn interruptModel(
+        self: *Store,
+        command: *const protocol.ModelInterruptionCommand,
+        faults: Faults,
+    ) ModelInterruptionReply {
+        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
+    }
+
+    pub fn decidePermission(
+        self: *Store,
+        command: *const protocol.PermissionDecisionCommand,
+        faults: Faults,
+    ) PermissionDecisionReply {
+        const access = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
+    }
+
+    pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
+    }
+
+    pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
+    }
+
+    pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
+    }
+
+    // Reverse chronological, with call order breaking ties at a completed
+    // group's final acceptance position. No transaction survives this call.
+    // The fixed end is the last committed position at the first read, not a
+    // count of visible rows; a private-only append cannot become public later.
+    pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
+    }
+
+    // Resolve the public identity again, rather than accepting a global digest:
+    // another Session's content or private provider material is not authority.
+    pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
+    }
+
+    pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+        try request.validate();
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
+    }
+
+    /// The Message with no Session sender next to `position` at `end`: one
+    /// seek in the index of those Messages, then its content's metadata.
+    pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
+        try request.validate();
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
+    }
+
+    pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
+    }
+
+    pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
+        try request.validate();
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
+    }
+
+    pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
+        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
+    }
+
+    /// Authenticates the Session/Operation/Attempt before reading optional
+    /// diagnostics. Diagnostic faults never fence canonical state.
+    pub fn captureFailedResponse(self: *Store, request: *const protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
+        const selection = request.failed_response.?;
+        const binding = binding: {
+            const access = try enter(self, .none);
+            defer access.release();
+            break :binding try access.finish(Ordinary.content, report_domain.failedResponseBindingLocked(self, request.session.slice(), selection));
+        };
+        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
+        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
+        errdefer capture.deinit();
+        try @import("../failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
+        return capture.seal();
+    }
+
+    pub fn captureSessionReport(
+        self: *Store,
+        session_ref: []const u8,
+        options: SessionReportOptions,
+    ) !SessionReport {
+        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
+        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
+        errdefer capture.deinit();
+        {
+            const access = try enter(self, .none);
+            defer access.release();
+            try access.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
+        }
+        return capture.seal();
+    }
+
+    /// Returns an owned, unlinked page; no SQLite cursor or mutex survives capture.
+    /// The caller releases its scratch charge by deinitializing the report.
+    pub fn captureSessionList(self: *Store, request: *const protocol.ListSessions, options: SessionListOptions) !SessionReport {
+        try request.validate();
+        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
+        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
+        errdefer capture.deinit();
+        {
+            const access = try enter(self, .none);
+            defer access.release();
+            try access.finishCapture(&capture, report_domain.renderSessionListLocked(self, request, &capture));
+        }
+        return capture.seal();
+    }
+
+    pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
+        return action_domain.actionContent(self, session_ref, action_id, "arguments_content_id");
+    }
+
+    pub fn actionCallId(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
+        return action_domain.actionContent(self, session_ref, action_id, "call_id_content_id");
+    }
+
+    pub fn admitNextModelAttempt(self: *Store, faults: Faults) !?AttemptAdmission {
+        if (!@import("builtin").is_test) @compileError("Production admission must select an explicit work kind");
+        return try self.admitModelAttempt(.message, faults) orelse
+            self.admitModelAttempt(.tool_continuation, faults);
+    }
+
+    pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, model_admission_domain.admitNextModelAttemptLocked(self, kind, faults));
+    }
+
+    pub fn admitNextActionAttempt(
+        self: *Store,
+        bash_timeout_ms: u64,
+        faults: Faults,
+    ) !?ActionAttemptAdmission {
+        if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, action_domain.admitNextActionAttemptLocked(self, bash_timeout_ms, faults));
+    }
+
+    /// `out` is valid only when this returns without error.
+    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.action_attempt, action_domain.readBashExecutionInputLocked(self, binding, out));
+    }
+
+    pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.none, action_domain.revokeActionSenderLocked(self, binding));
+    }
+
+    pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.none, action_domain.actionSupersededByStopLocked(self, binding));
+    }
+
+    pub fn withActionDispatchHandoff(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        context: anytype,
+        comptime handoff: anytype,
+    ) !void {
+        const access = try enter(self, .none);
+        defer access.release();
+        try access.finish(Ordinary.action_dispatch, action_domain.validateActionDispatchLocked(self, binding));
+        // Launch failures are effect outcomes, not canonical faults; the
+        // caller settles or fences them. The handoff still runs under the lock.
+        try handoff(context);
+    }
+
+    pub fn settleActionAttempt(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        code: ActionResolutionCode,
+        result: []const u8,
+        faults: Faults,
+    ) !ActionSettlement {
+        if (result.len == 0) return error.InvalidActionResult;
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttemptLocked(self, binding, code, result, faults));
+    }
+
+    pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, .{}, action_domain.recoverOneUncertainActionLocked(self, active));
+    }
+
+    pub fn tryAdmitNextModelRetry(
+        self: *Store,
+        active: ActiveOperationFilter,
+        faults: Faults,
+    ) !?AttemptAdmission {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, model_admission_domain.tryAdmitNextModelRetryLocked(self, active, faults));
+    }
+
+    /// Opens the view in `out`, where it stays until it closes: a view
+    /// borrows its own buffers, so it never moves.
+    pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !void {
+        try model_settlement_domain.checkAttempt(self, binding);
+        out.* = .{ .store = self, .binding = binding };
+    }
+
+    pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
+        const access = try enter(self, .none);
+        defer access.release();
+        try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        return access.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
+    }
+
+    pub fn isFenced(self: *const Store) bool {
+        return self.fenced.load(.acquire);
+    }
+
+    /// Read before the canonical reads it may let a caller skip.
+    pub fn commitGeneration(self: *const Store) u64 {
+        return self.commit_generation.load(.acquire);
+    }
+
+    pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finish(Ordinary.none, model_settlement_domain.operationSupersededByControlLocked(self, binding));
+    }
+
+    pub fn withDispatchHandoff(
+        self: *Store,
+        binding: AttemptBinding,
+        context: anytype,
+        comptime handoff: anytype,
+    ) !void {
+        const access = try enter(self, .none);
+        defer access.release();
+        try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        // As for Actions, dispatch failures belong to the caller.
+        try handoff(context);
+    }
+
+    /// Durably claims this Operation's one forced credential refresh before
+    /// any refresh exchange. The Attempt stays uncertain, so a crash before
+    /// settlement falls back to ordinary uncertain recovery while the claim
+    /// prevents a second refresh. Returns false when the Operation already
+    /// claimed, or when no replacement allowance would remain.
+    pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.attempt_binding, .{}, model_settlement_domain.claimModelAuthRefreshLocked(self, binding));
+    }
+
+    pub fn settleModelAttemptFailure(
+        self: *Store,
+        binding: AttemptBinding,
+        failure: ModelFailure,
+        disposition: ModelFailureClass,
+        faults: Faults,
+    ) !void {
+        const code = failure.code();
+        if (code.len == 0 or code.len > 96 or !std.unicode.utf8ValidateSlice(code)) {
+            return error.InvalidFailureCode;
+        }
+        if (failure.diagnostic()) |detail| {
+            std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
+        }
+        const report = failure.report();
+        std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.attempt_binding, faults, model_settlement_domain.settleModelAttemptFailureLocked(self, binding, failure, disposition, faults));
+    }
+
+    pub fn recoverOneExhaustedModelAttempt(
+        self: *Store,
+        active: ActiveOperationFilter,
+    ) !bool {
+        const access = try enter(self, .none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, .{}, model_settlement_domain.recoverOneExhaustedModelAttemptLocked(self, active));
+    }
+
+    pub fn settleModelSuccess(
+        self: *Store,
+        binding: AttemptBinding,
+        output: *const ValidatedOutput,
+        faults: Faults,
+    ) !void {
+        const access = try enter(self, .fromSettlement(faults.settlement_trace));
+        defer access.release();
+        return access.finishTransaction(Ordinary.model_success, faults, model_settlement_domain.settleModelSuccessLocked(self, binding, output, faults));
+    }
+
+    pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
+        return content_domain.openContentIdentity(self, reference, false);
+    }
+};
 
 pub const Faults = struct {
     content_read: bool = false,
@@ -262,7 +883,7 @@ const Access = struct {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
             if (Ordinary.contains(Expected, err)) return err;
-            return self.store.fence(err);
+            return fence(self.store, err);
         };
     }
 
@@ -272,9 +893,9 @@ const Access = struct {
         comptime Ordinary.produced(Expected, @TypeOf(result));
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            self.store.rollbackAfterError(faults) catch |rollback_err| return self.store.fence(rollback_err);
+            rollbackAfterError(self.store, faults) catch |rollback_err| return fence(self.store, rollback_err);
             if (Ordinary.contains(Expected, err)) return err;
-            return self.store.fence(err);
+            return fence(self.store, err);
         };
     }
 
@@ -283,7 +904,7 @@ const Access = struct {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
             if (capture.ordinary_failure) return err;
-            return self.store.fence(err);
+            return fence(self.store, err);
         };
     }
 
@@ -294,7 +915,7 @@ const Access = struct {
         // Counts autocommit and explicit-transaction writes alike. A
         // rolled-back change touched everything: never a missed change.
         if (c.sqlite3_total_changes64(store.database) != self.changes) {
-            if (@import("builtin").is_test) if (store.untouchedForTesting()) |id|
+            if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
             store.changes.record(generation, &store.touched);
@@ -331,7 +952,7 @@ pub fn enter(self: *Store, trace: AccessTrace) error{StoreFenced}!Access {
     self.mutex.lockUncancelable(self.io);
     self.touched = .{};
     // Rows a test changed outside any entry point belong to none.
-    if (@import("builtin").is_test) self.clearTouchOracleForTesting();
+    if (@import("builtin").is_test) clearTouchOracleForTesting(self);
     const access: Access = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database) };
     trace.mark(.acquired);
     if (self.isFenced()) {
@@ -351,7 +972,7 @@ fn lockAdmin(self: *Store) void {
 /// fails it, and fences, like any other. The Session's row must exist.
 pub fn touch(self: *Store, session_ref: []const u8) !void {
     if (!self.touched.needsEntry(session_ref)) return;
-    const workspace = try self.readSessionWorkspaceKey(session_ref) orelse return error.CorruptStore;
+    const workspace = try readSessionWorkspaceKey(self, session_ref) orelse return error.CorruptStore;
     self.touched.add(.{ .session = session_ref[0..change_ring.id_bytes].*, .workspace = workspace });
 }
 
@@ -359,14 +980,14 @@ pub fn touch(self: *Store, session_ref: []const u8) !void {
 /// exists, so the entry point has touched everything.
 pub fn rollback(self: *Store) !void {
     self.touched.everything = true;
-    try self.execute("ROLLBACK");
+    try execute(self, "ROLLBACK");
 }
 
 /// The change ring's key for a Workspace: the rowid of its first
 /// Session, or 0 while it has none. Workspaces are immutable and
 /// Sessions are never deleted, so a Session's key never changes.
 pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
-    const statement = try self.cached(workspace_key_sql);
+    const statement = try cached(self, workspace_key_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, workspace);
     return switch (c.sqlite3_step(statement)) {
@@ -379,7 +1000,7 @@ pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
 /// The key of `session_ref`'s Workspace, or null when no such Session
 /// exists.
 fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
-    const statement = try self.cached("SELECT workspace FROM session WHERE session_ref=?1");
+    const statement = try cached(self, "SELECT workspace FROM session WHERE session_ref=?1");
     // Reset only after the key lookup: it binds this row's text in place.
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
@@ -388,7 +1009,7 @@ fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
         c.SQLITE_ROW => {},
         else => return error.SessionReadFailed,
     }
-    return try self.readWorkspaceKey(try sqlite.boundedColumnText(statement, 0, protocol.max_workspace_bytes));
+    return try readWorkspaceKey(self, try sqlite.boundedColumnText(statement, 0, protocol.max_workspace_bytes));
 }
 
 /// Runs a write whose `RETURNING session_ref` names each changed row's
@@ -399,7 +1020,7 @@ pub fn stepTouching(self: *Store, statement: *c.sqlite3_stmt) !usize {
         c.SQLITE_ROW => {
             var session: protocol.Bounded(protocol.max_session_bytes) = .{};
             try sqlite.readText(statement, 0, &session);
-            try self.touch(session.slice());
+            try touch(self, session.slice());
             count += 1;
         },
         c.SQLITE_DONE => return count,
@@ -416,7 +1037,7 @@ pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
     if (self.touched.everything) return null;
     // Cached, so a test that counts prepared or uncached statements sees
     // none. A test that makes SQLite fail gets no verdict.
-    const statement = self.cached("SELECT DISTINCT session_ref FROM temp.touched_oracle WHERE session_ref IS NOT NULL") catch return null;
+    const statement = cached(self, "SELECT DISTINCT session_ref FROM temp.touched_oracle WHERE session_ref IS NOT NULL") catch return null;
     defer sqlite.resetCached(statement);
     while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
         const changed = c.sqlite3_column_text(statement, 0)[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
@@ -431,16 +1052,9 @@ pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
 
 fn clearTouchOracleForTesting(self: *Store) void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
-    const statement = self.cached("DELETE FROM temp.touched_oracle") catch return;
+    const statement = cached(self, "DELETE FROM temp.touched_oracle") catch return;
     defer sqlite.resetCached(statement);
     _ = c.sqlite3_step(statement);
-}
-
-/// Whether nothing changed since `since` on this opening: atomics only,
-/// no lock. Never while fenced, so a read reports the failure.
-pub fn notModified(self: *const Store, since: change_ring.Token) bool {
-    return !self.isFenced() and std.mem.eql(u8, &since.instance, &self.instance) and
-        since.generation == self.commit_generation.load(.acquire);
 }
 
 /// The only fence setter. Returns `err` so callers can propagate it.
@@ -449,19 +1063,9 @@ pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
     return err;
 }
 
-pub fn open(self: *Store, io: std.Io, database_path: []const u8, selector: []const u8) !void {
-    return self.openWithOptions(io, database_path, selector, .{});
-}
-
 pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
     var current: CurrentConfiguration = .{};
     return if (try configuration_domain.readSession(self, session_ref, &current)) current else null;
-}
-
-pub fn inspectSessionForTesting(self: *Store, session_ref: []const u8) !SessionObservation {
-    var observation: SessionObservation = undefined;
-    try self.inspectSession(session_ref, &observation);
-    return observation;
 }
 
 pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
@@ -482,223 +1086,11 @@ pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !Pro
     return page;
 }
 
-/// Test fixture for a historical producing binding unavailable through
-/// today's immutable Session configuration admission. Requires a newer
-/// current revision, leaving that revision and its frozen inputs intact.
-pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
-    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-    return historical_domain.readPrefixSealLocked(self, binding);
-}
-
-pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-    const statement = try self.cached("UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    const bytes = seal.encode();
-    try sqlite.bindBlob(statement, 2, &bytes);
-    try sqlite.expectDone(statement);
-    if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
-}
-
-pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
-    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-    var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
-    try bounded.set(model);
-    if (bounded.len == 0) return error.InvalidModel;
-    const statement = try self.cached("UPDATE session_revision SET model=?2 " ++
-        "WHERE (session_ref,revision)=(SELECT o.session_ref,o.settings_revision FROM model_operation o " ++
-        "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.settings_revision<s.revision)");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    try sqlite.bindText(statement, 2, model);
-    try sqlite.expectDone(statement);
-    if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
-}
-
-/// Flips the first byte of the provider bag of the `binding` Operation's
-/// first output item, keeping its recorded length and digest, as on-disk
-/// damage would.
-pub fn damageOutputBagForTesting(self: *Store, binding: AttemptBinding) !void {
-    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-    const statement = try self.cached("UPDATE content SET payload=CAST(CASE WHEN substr(CAST(payload AS TEXT),1,1)='X' THEN 'Y' ELSE 'X' END || substr(CAST(payload AS TEXT),2) AS BLOB) " ++
-        "WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE operation_id=?1 AND item_ordinal=0)");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    try sqlite.expectDone(statement);
-    if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingOutput;
-}
-
-/// Opens in place: the Host holds exactly one Store, never a copy. It
-/// runs once per process; noinline keeps its path buffers off the
-/// caller's frame, which lives as long as the Host.
-pub noinline fn openWithOptions(
-    self: *Store,
-    io: std.Io,
-    database_path: []const u8,
-    selector: []const u8,
-    options: OpenOptions,
-) !void {
-    errdefer self.* = undefined;
-    if (options.cache_kib == 0 or options.cache_kib > 4096) return error.InvalidSqliteCacheSize;
-    if (c.sqlite3_hard_heap_limit64(@intCast(sqlite_heap_bytes)) < 0) {
-        return error.SqliteHeapLimitConfigurationFailed;
-    }
-    errdefer _ = c.sqlite3_hard_heap_limit64(0);
-
-    const existing = blk: {
-        const stat = std.Io.Dir.cwd().statFile(io, database_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => break :blk false,
-            else => return err,
-        };
-        if (stat.kind != .file) return error.InvalidStoreDatabase;
-        break :blk stat.size != 0;
-    };
-
-    var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database_path}, 0);
-    var database: ?*c.sqlite3 = null;
-    const open_result = c.sqlite3_open_v2(
-        path,
-        &database,
-        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX,
-        null,
-    );
-    if (open_result != c.SQLITE_OK) {
-        if (database) |db| _ = c.sqlite3_close(db);
-        return error.StoreOpenFailed;
-    }
-    // The handle may still be null on later failure paths; never unwrap
-    // it while unwinding an open failure.
-    errdefer {
-        if (database) |db| _ = c.sqlite3_close(db);
-    }
-
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(protocol.max_sqlite_content_bytes + 4096));
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 32);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, 16);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 4096);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_ATTACHED, 0);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_WORKER_THREADS, 0);
-    try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
-    try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
-    // Before the first read: the Host keeps the file lock until close, and
-    // WAL then keeps its index in heap memory, so no -shm file exists.
-    try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
-    if (existing) {
-        if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
-        try store_schema.validateExisting(database.?, selector);
-    }
-    try sqlite.exec(database.?, "PRAGMA busy_timeout=0");
-    try sqlite.exec(database.?, "PRAGMA foreign_keys=ON");
-    try sqlite.exec(database.?, "PRAGMA mmap_size=0");
-    try sqlite.exec(database.?, "PRAGMA temp_store=FILE");
-    var cache_size_buffer: [64:0]u8 = undefined;
-    const cache_size = try std.fmt.bufPrintSentinel(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib}, 0);
-    try sqlite.exec(database.?, cache_size);
-    try sqlite.exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
-    try sqlite.exec(database.?, "PRAGMA synchronous=FULL");
-    if (@import("../os/os.zig").full_fsync) try sqlite.exec(database.?, "PRAGMA fullfsync=ON");
-    // Validation precedes this, so an incompatible Store keeps its journal mode.
-    const journal_mode = sqlite.diagnosticTextPragma(database.?, "PRAGMA journal_mode=WAL") orelse return error.StoreJournalModeFailed;
-    if (!std.mem.eql(u8, journal_mode.slice(), "wal")) return error.StoreJournalModeFailed;
-    // Checkpoints truncate a grown WAL back to the auto-checkpoint size.
-    try sqlite.exec(database.?, "PRAGMA journal_size_limit=4194304");
-    if (!existing) try store_schema.bootstrap(database.?, selector);
-    // A new Host never inherits a lost Action's sender authority.
-    try sqlite.exec(database.?, "UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL");
-
-    if (@import("builtin").is_test) try sqlite.createTouchOracleForTesting(database.?);
-
-    var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
-    try stored_selector.set(selector);
-    const changes = try createRing();
-    errdefer destroyRing(changes);
-    self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes };
-    self.served = options.served;
-    // The Store is in final storage, so the function may keep its address.
-    if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
-        return error.StoreOpenFailed;
-    // Tells this opening's `since` tokens from another's. It grants
-    // nothing, so the process CSPRNG serves, and Session IDs keep sole
-    // use of secure draws.
-    io.random(&self.instance);
-    errdefer self.statements.deinit();
-    // Error paths then roll back without preparing or allocating.
-    _ = try self.cached("ROLLBACK");
-}
-
-pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
-    self.lockAdmin();
-    defer self.mutex.unlock(self.io);
-
-    var result: SqliteDiagnostic = .{};
-    var current: c.sqlite3_int64 = 0;
-    var highwater: c.sqlite3_int64 = 0;
-    if (c.sqlite3_status64(c.SQLITE_STATUS_MEMORY_USED, &current, &highwater, 0) == c.SQLITE_OK and
-        current >= 0 and highwater >= 0)
-    {
-        result.process_memory_current_bytes = @intCast(current);
-        result.process_memory_highwater_bytes = @intCast(highwater);
-    }
-
-    var cache_used: c_int = 0;
-    var unused_highwater: c_int = 0;
-    if (c.sqlite3_db_status(
-        self.database,
-        c.SQLITE_DBSTATUS_CACHE_USED,
-        &cache_used,
-        &unused_highwater,
-        0,
-    ) == c.SQLITE_OK and cache_used >= 0) {
-        result.cache_used_bytes = @intCast(cache_used);
-    }
-    var spills: c_int = 0;
-    if (c.sqlite3_db_status(
-        self.database,
-        c.SQLITE_DBSTATUS_CACHE_SPILL,
-        &spills,
-        &unused_highwater,
-        0,
-    ) == c.SQLITE_OK and spills >= 0) {
-        result.cache_spills = @intCast(spills);
-    }
-
-    const hard_heap_limit = c.sqlite3_hard_heap_limit64(-1);
-    if (hard_heap_limit >= 0) result.hard_heap_limit_bytes = @intCast(hard_heap_limit);
-    result.page_size_bytes = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA page_size");
-    result.cache_size_setting = sqlite.diagnosticSignedPragma(self.database, "PRAGMA cache_size");
-    result.cache_spill_threshold = sqlite.diagnosticSignedPragma(self.database, "PRAGMA cache_spill");
-    result.mmap_size_bytes = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA mmap_size");
-    result.synchronous = sqlite.diagnosticSignedPragma(self.database, "PRAGMA synchronous");
-    result.temp_store = sqlite.diagnosticSignedPragma(self.database, "PRAGMA temp_store");
-    result.busy_timeout_ms = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA busy_timeout");
-    result.journal_mode = sqlite.diagnosticTextPragma(self.database, "PRAGMA journal_mode");
-    return result;
-}
-
-pub fn close(self: *Store) !void {
-    self.lockAdmin();
-    self.statements.deinit();
-    const close_result = c.sqlite3_close(self.database);
-    self.mutex.unlock(self.io);
-    // Freed even when SQLite keeps the handle: nothing retries a close.
-    destroyRing(self.changes);
-    if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
-    _ = c.sqlite3_hard_heap_limit64(0);
-    self.* = undefined;
-}
-
 /// Prepares `sql` once for the Store's lifetime; the caller resets it
 /// with `resetCached` before releasing the Store mutex. Comptime only
 /// pins the SQL to static storage, so one body serves every statement.
 pub inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
-    return self.cachedStatic(sql);
+    return cachedStatic(self, sql);
 }
 
 /// Reached only through `cached`: a reused buffer would alias its key.
@@ -721,17 +1113,17 @@ fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
 
 /// Runs a cached statement that returns no rows.
 pub inline fn execute(self: *Store, comptime sql: [:0]const u8) !void {
-    return self.executeStatic(sql);
+    return executeStatic(self, sql);
 }
 
 fn executeStatic(self: *Store, sql: [:0]const u8) !void {
-    const statement = try self.cachedStatic(sql);
+    const statement = try cachedStatic(self, sql);
     defer sqlite.resetCached(statement);
     if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.SqliteExecFailed;
 }
 
 pub fn nextIdentity(self: *Store, comptime table: []const u8, comptime column: []const u8) !u64 {
-    const statement = try self.cached("SELECT " ++ column ++ " FROM " ++ table ++ " ORDER BY " ++ column ++ " DESC LIMIT 1");
+    const statement = try cached(self, "SELECT " ++ column ++ " FROM " ++ table ++ " ORDER BY " ++ column ++ " DESC LIMIT 1");
     defer sqlite.resetCached(statement);
     const result = c.sqlite3_step(statement);
     if (result == c.SQLITE_DONE) return 1;
@@ -741,402 +1133,12 @@ pub fn nextIdentity(self: *Store, comptime table: []const u8, comptime column: [
     return @intCast(prior + 1);
 }
 
-pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
-    self.lockAdmin();
-    defer self.mutex.unlock(self.io);
-    try retry_policy.validateWaits(waits_ms, try readUnixMilliseconds(self.io));
-}
-
-/// A configuration that requires a model is rejected when the Host does
-/// not serve its Session's provider.
-pub fn configure(
-    self: *Store,
-    command: *const protocol.ConfigureCommand,
-    faults: Faults,
-) ConfigureReply {
-    const access = self.enter(.none) catch return .infrastructure_failure;
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, configuration_domain.configureLocked(self, command, faults)) catch .infrastructure_failure;
-}
-
-/// A fresh Message admission, as `MessageCommitted` receives it.
-pub const MessageAdmission = struct {
-    /// The admitted Session, borrowed for the call.
-    session: []const u8,
-    /// Store-wide, increasing with each admission.
-    admission_id: u64,
-    /// The sender was another Session's Action, not a person.
-    from_peer: bool,
-};
-
-/// Called once a fresh Message admission commits, before the Store lock
-/// is released, so whatever reads the Store next also sees its effect.
-/// A replayed or rejected Message calls nothing. It cannot fail.
-pub const MessageCommitted = struct {
-    context: *anyopaque,
-    call: *const fn (context: *anyopaque, admission: MessageAdmission) void,
-};
-
-/// A Message's `require_model` condition checks that the Host serves its
-/// Session's provider before creating anything.
-pub fn submitMessageWithModel(
-    self: *Store,
-    command: *const protocol.MessageCommand,
-    committed: ?MessageCommitted,
-    faults: Faults,
-) MessageReply {
-    const access = self.enter(.none) catch return .infrastructure_failure;
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
-}
-
-pub fn stopSession(
-    self: *Store,
-    command: *const protocol.SessionStopCommand,
-    faults: Faults,
-) SessionStopReply {
-    const access = self.enter(.fromControl(faults.control_trace)) catch return .infrastructure_failure;
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
-}
-
-pub fn interruptModel(
-    self: *Store,
-    command: *const protocol.ModelInterruptionCommand,
-    faults: Faults,
-) ModelInterruptionReply {
-    const access = self.enter(.fromControl(faults.control_trace)) catch return .infrastructure_failure;
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
-}
-
-pub fn decidePermission(
-    self: *Store,
-    command: *const protocol.PermissionDecisionCommand,
-    faults: Faults,
-) PermissionDecisionReply {
-    const access = self.enter(.fromControl(faults.control_trace)) catch return .infrastructure_failure;
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
-}
-
-pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
-}
-
-pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
-}
-
-pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
-}
-
-// Reverse chronological, with call order breaking ties at a completed
-// group's final acceptance position. No transaction survives this call.
-// The fixed end is the last committed position at the first read, not a
-// count of visible rows; a private-only append cannot become public later.
-pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
-}
-
-// Resolve the public identity again, rather than accepting a global digest:
-// another Session's content or private provider material is not authority.
-pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
-}
-
-pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
-    try request.validate();
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
-}
-
-/// The Message with no Session sender next to `position` at `end`: one
-/// seek in the index of those Messages, then its content's metadata.
-pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
-    try request.validate();
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
-}
-
-pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
-    if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
-}
-
-pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
-    try request.validate();
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
-}
-
-pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
-    if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
-}
-
-/// Authenticates the Session/Operation/Attempt before reading optional
-/// diagnostics. Diagnostic faults never fence canonical state.
-pub fn captureFailedResponse(self: *Store, request: *const protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
-    const selection = request.failed_response.?;
-    const binding = binding: {
-        const access = try self.enter(.none);
-        defer access.release();
-        break :binding try access.finish(Ordinary.content, report_domain.failedResponseBindingLocked(self, request.session.slice(), selection));
-    };
-    var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-    try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-    errdefer capture.deinit();
-    try @import("../failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
-    return capture.seal();
-}
-
-pub fn captureSessionReport(
-    self: *Store,
-    session_ref: []const u8,
-    options: SessionReportOptions,
-) !SessionReport {
-    var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-    try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-    errdefer capture.deinit();
-    {
-        const access = try self.enter(.none);
-        defer access.release();
-        try access.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
-    }
-    return capture.seal();
-}
-
-/// Returns an owned, unlinked page; no SQLite cursor or mutex survives capture.
-/// The caller releases its scratch charge by deinitializing the report.
-pub fn captureSessionList(self: *Store, request: *const protocol.ListSessions, options: SessionListOptions) !SessionReport {
-    try request.validate();
-    var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-    try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-    errdefer capture.deinit();
-    {
-        const access = try self.enter(.none);
-        defer access.release();
-        try access.finishCapture(&capture, report_domain.renderSessionListLocked(self, request, &capture));
-    }
-    return capture.seal();
-}
-
-pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
-    return action_domain.actionContent(self, session_ref, action_id, "arguments_content_id");
-}
-
-pub fn actionCallId(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
-    return action_domain.actionContent(self, session_ref, action_id, "call_id_content_id");
-}
-
-pub fn admitNextModelAttempt(self: *Store, faults: Faults) !?AttemptAdmission {
-    if (!@import("builtin").is_test) @compileError("Production admission must select an explicit work kind");
-    return try self.admitModelAttempt(.message, faults) orelse
-        self.admitModelAttempt(.tool_continuation, faults);
-}
-
-pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, model_admission_domain.admitNextModelAttemptLocked(self, kind, faults));
-}
-
-pub fn admitNextActionAttempt(
-    self: *Store,
-    bash_timeout_ms: u64,
-    faults: Faults,
-) !?ActionAttemptAdmission {
-    if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, action_domain.admitNextActionAttemptLocked(self, bash_timeout_ms, faults));
-}
-
-/// `out` is valid only when this returns without error.
-pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.action_attempt, action_domain.readBashExecutionInputLocked(self, binding, out));
-}
-
-pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.none, action_domain.revokeActionSenderLocked(self, binding));
-}
-
-pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.none, action_domain.actionSupersededByStopLocked(self, binding));
-}
-
-pub fn withActionDispatchHandoff(
-    self: *Store,
-    binding: ActionAttemptBinding,
-    context: anytype,
-    comptime handoff: anytype,
-) !void {
-    const access = try self.enter(.none);
-    defer access.release();
-    try access.finish(Ordinary.action_dispatch, action_domain.validateActionDispatchLocked(self, binding));
-    // Launch failures are effect outcomes, not canonical faults; the
-    // caller settles or fences them. The handoff still runs under the lock.
-    try handoff(context);
-}
-
-pub fn settleActionAttempt(
-    self: *Store,
-    binding: ActionAttemptBinding,
-    code: ActionResolutionCode,
-    result: []const u8,
-    faults: Faults,
-) !ActionSettlement {
-    if (result.len == 0) return error.InvalidActionResult;
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.action_attempt, faults, action_domain.settleActionAttemptLocked(self, binding, code, result, faults));
-}
-
-pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, .{}, action_domain.recoverOneUncertainActionLocked(self, active));
-}
-
-pub fn tryAdmitNextModelRetry(
-    self: *Store,
-    active: ActiveOperationFilter,
-    faults: Faults,
-) !?AttemptAdmission {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, faults, model_admission_domain.tryAdmitNextModelRetryLocked(self, active, faults));
-}
-
-/// Opens the view in `out`, where it stays until it closes: a view
-/// borrows its own buffers, so it never moves.
-pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !void {
-    try model_settlement_domain.checkAttempt(self, binding);
-    out.* = .{ .store = self, .binding = binding };
-}
-
-pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
-    const access = try self.enter(.none);
-    defer access.release();
-    try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
-    return access.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
-}
-
-pub fn isFenced(self: *const Store) bool {
-    return self.fenced.load(.acquire);
-}
-
-/// Read before the canonical reads it may let a caller skip.
-pub fn commitGeneration(self: *const Store) u64 {
-    return self.commit_generation.load(.acquire);
-}
-
-pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finish(Ordinary.none, model_settlement_domain.operationSupersededByControlLocked(self, binding));
-}
-
-pub fn withDispatchHandoff(
-    self: *Store,
-    binding: AttemptBinding,
-    context: anytype,
-    comptime handoff: anytype,
-) !void {
-    const access = try self.enter(.none);
-    defer access.release();
-    try access.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
-    // As for Actions, dispatch failures belong to the caller.
-    try handoff(context);
-}
-
-/// Durably claims this Operation's one forced credential refresh before
-/// any refresh exchange. The Attempt stays uncertain, so a crash before
-/// settlement falls back to ordinary uncertain recovery while the claim
-/// prevents a second refresh. Returns false when the Operation already
-/// claimed, or when no replacement allowance would remain.
-pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.attempt_binding, .{}, model_settlement_domain.claimModelAuthRefreshLocked(self, binding));
-}
-
-pub fn settleModelAttemptFailure(
-    self: *Store,
-    binding: AttemptBinding,
-    failure: ModelFailure,
-    disposition: ModelFailureClass,
-    faults: Faults,
-) !void {
-    const code = failure.code();
-    if (code.len == 0 or code.len > 96 or !std.unicode.utf8ValidateSlice(code)) {
-        return error.InvalidFailureCode;
-    }
-    if (failure.diagnostic()) |detail| {
-        std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
-    }
-    const report = failure.report();
-    std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.attempt_binding, faults, model_settlement_domain.settleModelAttemptFailureLocked(self, binding, failure, disposition, faults));
-}
-
-pub fn recoverOneExhaustedModelAttempt(
-    self: *Store,
-    active: ActiveOperationFilter,
-) !bool {
-    const access = try self.enter(.none);
-    defer access.release();
-    return access.finishTransaction(Ordinary.none, .{}, model_settlement_domain.recoverOneExhaustedModelAttemptLocked(self, active));
-}
-
-pub fn settleModelSuccess(
-    self: *Store,
-    binding: AttemptBinding,
-    output: *const ValidatedOutput,
-    faults: Faults,
-) !void {
-    const access = try self.enter(.fromSettlement(faults.settlement_trace));
-    defer access.release();
-    return access.finishTransaction(Ordinary.model_success, faults, model_settlement_domain.settleModelSuccessLocked(self, binding, output, faults));
-}
-
-pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
-    return content_domain.openContentIdentity(self, reference, false);
-}
-
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     // SQLite may already have rolled back what the entry point touched.
     self.touched.everything = true;
     if (c.sqlite3_get_autocommit(self.database) != 0) return;
     if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-    self.execute("ROLLBACK") catch return error.CanonicalRollbackFailed;
+    execute(self, "ROLLBACK") catch return error.CanonicalRollbackFailed;
     if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
 }
 

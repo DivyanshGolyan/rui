@@ -6,7 +6,8 @@ const protocol = @import("../../protocol.zig");
 const tool_catalog = @import("../../tools.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const historical_domain = @This();
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -14,11 +15,11 @@ const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
-const AttemptBinding = Store.AttemptBinding;
+const AttemptBinding = store_core.AttemptBinding;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
-const Ordinary = Store.Ordinary;
+const Ordinary = store_core.Ordinary;
 const accepted_resolutions = store_schema.accepted_resolutions;
 
 pub const PrefixSeal = prefix_seal.PrefixSeal;
@@ -404,7 +405,7 @@ pub const HistoricalReader = struct {
         text.hash.update(destination[0..count]);
         text.read += count;
         if (count != 0 and text.read == text.length and !std.mem.eql(u8, &text.hash.finalResult(), &text.digest))
-            return self.view.store.fence(error.CorruptStore);
+            return store_core.fence(self.view.store, error.CorruptStore);
         return count;
     }
 
@@ -419,13 +420,14 @@ pub const HistoricalReader = struct {
 pub const OutputItemKind = output_format.OutputItemKind;
 
 fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, readHistoricalSettingsLocked(self, view, out));
 }
 
 fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort,s.codec,s.codec_options IS NULL " ++
             "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
             "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
@@ -467,25 +469,25 @@ fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *Histo
 }
 
 fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return .{ .ready = try access.finish(Ordinary.historical_entry, readHistoricalEntryLocked(self, view, after_position)) };
 }
 
 fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, validateHistoricalOutputsStepLocked(self, view));
 }
 
 fn readPrefixSeal(self: *Store, binding: AttemptBinding) !?PrefixSeal {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, readPrefixSealLocked(self, binding));
 }
 
 pub fn readPrefixSealLocked(self: *Store, binding: AttemptBinding) !?PrefixSeal {
-    const statement = try self.cached("SELECT s.prefix_seal FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1");
+    const statement = try store_core.cached(self, "SELECT s.prefix_seal FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, binding.operation_id);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -495,26 +497,26 @@ pub fn readPrefixSealLocked(self: *Store, binding: AttemptBinding) !?PrefixSeal 
 }
 
 fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finishTransaction(Ordinary.attempt_binding, .{}, recordPrefixSealLocked(self, binding, seal));
 }
 
 fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     try model_settlement_domain.validateCurrentAttempt(self, binding);
-    const update = try self.cached("UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
+    const update = try store_core.cached(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
     defer sqlite.resetCached(update);
     try sqlite.bindU64(update, 1, binding.operation_id);
     const bytes = seal.encode();
     try sqlite.bindBlob(update, 2, &bytes);
     try sqlite.expectDone(update);
     if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
 }
 
 fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, readCompactionAnchorLocked(self, base_id));
 }
@@ -522,7 +524,7 @@ fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
 /// The position of the base's one compaction item.
 fn readCompactionAnchorLocked(self: *Store, base_id: u64) !u64 {
     // A compaction item is its provider bag: the opaque continuation.
-    const anchor = try self.cached("SELECT session_position,extras_content_id FROM model_output_item INDEXED BY model_output_compaction_anchor WHERE operation_id=?1 AND item_kind=4 ORDER BY item_ordinal");
+    const anchor = try store_core.cached(self, "SELECT session_position,extras_content_id FROM model_output_item INDEXED BY model_output_compaction_anchor WHERE operation_id=?1 AND item_kind=4 ORDER BY item_ordinal");
     defer sqlite.resetCached(anchor);
     try sqlite.bindU64(anchor, 1, base_id);
     if (c.sqlite3_step(anchor) != c.SQLITE_ROW) return error.CorruptStore;
@@ -540,7 +542,7 @@ fn readCompactionAnchorLocked(self: *Store, base_id: u64) !u64 {
 fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
     if (view.outputs_validated) return true;
     if (view.output_frontier == null) {
-        const boundary = try self.cached("SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) " ++
+        const boundary = try store_core.cached(self, "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) " ++
             "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
             "FROM model_operation selected INDEXED BY model_operation_compaction_bases WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
             "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1) " ++
@@ -556,7 +558,7 @@ fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !boo
     // The primary key makes ordinals unique, so the count, the first and
     // last ordinal and one position offset prove ordinals 0..count-1 at
     // consecutive positions, all after admission and below the boundary.
-    const source = try self.cached("SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose," ++
+    const source = try store_core.cached(self, "SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose," ++
         "(SELECT count(*)=source.output_item_count AND coalesce(min(item.item_ordinal)=0 AND max(item.item_ordinal)=count(*)-1 " ++
         "AND min(item.session_position-item.item_ordinal)=max(item.session_position-item.item_ordinal) " ++
         "AND min(item.session_position)>source.admission_position AND max(item.session_position)<?4 " ++
@@ -635,7 +637,8 @@ fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_positi
     view.entries_next = 0;
     view.entries_end = 0;
     errdefer view.entries_end = 0;
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL,NULL,NULL,NULL,NULL," ++
             "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id),NULL " ++
             "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
@@ -736,7 +739,7 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
     if (scan.source != 0) {
         // Walk the immutable item population, not just surviving call rows.
         // One item/classification per step also detects wholly missing calls.
-        const item = try self.cached("SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position," ++
+        const item = try store_core.cached(self, "SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position," ++
             "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal " ++
             "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
             "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1");
@@ -745,7 +748,7 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
         try sqlite.bindU64(item, 2, scan.item);
         const result = c.sqlite3_step(item);
         if (result == c.SQLITE_DONE) {
-            const extra = try self.cached("SELECT call_ordinal FROM model_tool_call WHERE operation_id=?1 AND call_ordinal>=?2 ORDER BY call_ordinal LIMIT 1");
+            const extra = try store_core.cached(self, "SELECT call_ordinal FROM model_tool_call WHERE operation_id=?1 AND call_ordinal>=?2 ORDER BY call_ordinal LIMIT 1");
             defer sqlite.resetCached(extra);
             try sqlite.bindU64(extra, 1, scan.source);
             try sqlite.bindU64(extra, 2, scan.calls);
@@ -768,7 +771,7 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
         try sqlite.readText(item, 2, &session);
         const proposal = try reads_domain.proposalLocked(self, session.slice(), position);
         if (proposal.metadata.operation != scan.source or proposal.metadata.call_ordinal != scan.calls) return error.CorruptStore;
-        const outcome = try self.cached("SELECT coalesce(call.acceptance_position,action.acceptance_position)," ++
+        const outcome = try store_core.cached(self, "SELECT coalesce(call.acceptance_position,action.acceptance_position)," ++
             "coalesce(call.rejection_content_id,action.resolution_content_id)," ++
             "CASE WHEN call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
             "action.session_ref=source.session_ref AND action.tool_kind=call.action_kind) THEN 1 ELSE 0 END " ++
@@ -786,7 +789,8 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
         scan.calls += 1;
         return error.HistoricalPending;
     }
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT source.operation_id,current.admission_position," ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ ",source.admission_position,source.output_item_count FROM model_operation current " ++
             "JOIN model_operation source INDEXED BY model_operation_session_history " ++
             "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 " ++
@@ -818,13 +822,14 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
 }
 
 fn readHistoricalOutput(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, readHistoricalOutputLocked(self, view, position));
 }
 
 fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.extras_content_id," ++
             "call.name_content_id,call.call_id_content_id,call.arguments_content_id,item.part_count,item.message_content_id " ++
             "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref AND item.session_position=?2 " ++
@@ -877,14 +882,15 @@ fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64
 }
 
 fn readHistoricalPart(self: *Store, view: *HistoricalView) !?HistoricalPart {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, readHistoricalPartLocked(self, view));
 }
 
 fn readHistoricalPartLocked(self: *Store, view: *HistoricalView) !?HistoricalPart {
     const cursor = &view.output_parts.?;
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT part_ordinal,part_array,part_kind,text_length,text_content_id,extras_content_id FROM model_output_part " ++
             "WHERE operation_id=?1 AND item_ordinal=?2 AND part_ordinal>=?3 ORDER BY part_ordinal LIMIT 1",
     );
@@ -960,7 +966,7 @@ fn readHistoricalToolResult(
     self: *Store,
     view: *HistoricalView,
 ) !?HistoricalToolResult {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, readHistoricalToolResultLocked(self, view));
 }
@@ -980,9 +986,9 @@ fn readHistoricalToolResultLocked(
         "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
         "AND coalesce(call.acceptance_position,action.acceptance_position)<current.admission_position ";
     const statement = if (after_call_ordinal == null)
-        try self.cached(next_call ++ "AND call.call_ordinal>=0 ORDER BY call.call_ordinal LIMIT 1")
+        try store_core.cached(self, next_call ++ "AND call.call_ordinal>=0 ORDER BY call.call_ordinal LIMIT 1")
     else
-        try self.cached(next_call ++ "AND call.call_ordinal>?3 ORDER BY call.call_ordinal LIMIT 1");
+        try store_core.cached(self, next_call ++ "AND call.call_ordinal>?3 ORDER BY call.call_ordinal LIMIT 1");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, view.binding.operation_id);
     try sqlite.bindU64(statement, 2, source_operation_id);
@@ -1019,7 +1025,7 @@ fn historicalContent(self: *Store, view: *HistoricalView, content_id: i64) !Hist
 
 /// Content as a view handle, only when its privacy is `private`.
 fn historicalContentAs(self: *Store, view: *HistoricalView, content_id: i64, private: bool) !HistoricalContent {
-    const statement = try self.cached("SELECT " ++ historical_content_columns_sql ++ " FROM content WHERE content.content_id=?1");
+    const statement = try store_core.cached(self, "SELECT " ++ historical_content_columns_sql ++ " FROM content WHERE content.content_id=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindI64(statement, 1, content_id);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;

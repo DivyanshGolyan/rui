@@ -3,11 +3,12 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
-const Faults = Store.Faults;
-const Ordinary = Store.Ordinary;
+const Faults = store_core.Faults;
+const Ordinary = store_core.Ordinary;
 
 const content_lookup_sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3";
 
@@ -68,7 +69,7 @@ pub const ContentReader = struct {
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active);
         const count = try readOwnedContent(self.store, self, start, destination);
-        if (!self.absorb(start, destination[0..count])) return self.store.fence(error.CorruptStore);
+        if (!self.absorb(start, destination[0..count])) return store_core.fence(self.store, error.CorruptStore);
         return count;
     }
 
@@ -117,7 +118,7 @@ pub const ContentBlob = struct {
 const ContentSlot = struct { id: i64, existing: bool };
 
 pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
-    const find = try self.cached(content_lookup_sql);
+    const find = try store_core.cached(self, content_lookup_sql);
     defer sqlite.resetCached(find);
     try sqlite.bindBlob(find, 1, digest);
     try sqlite.bindU64(find, 2, length);
@@ -129,7 +130,8 @@ pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bo
         return .{ .id = id, .existing = true };
     }
     if (result != c.SQLITE_DONE) return error.ContentReadFailed;
-    const insert = try self.cached(
+    const insert = try store_core.cached(
+        self,
         "INSERT INTO content(digest,byte_length,payload,private) VALUES(?1,?2,zeroblob(?2),?3)",
     );
     defer sqlite.resetCached(insert);
@@ -168,7 +170,7 @@ pub fn writeCheckedBytes(_: *Store, blob: ?*c.sqlite3_blob, hash: *std.crypto.ha
 }
 
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     return access.finish(Ordinary.none, openContentIdentityLocked(self, reference, private));
 }
@@ -183,7 +185,7 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     if (start > reader.reference.length) return error.RangeOutOfBounds;
     const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
     if (wanted != 0) reader.prepareRead();
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     try access.finish(Ordinary.none, readOwnedContentLocked(self, reader, start, destination[0..wanted]));
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
@@ -255,7 +257,7 @@ pub fn importContent(self: *Store, content: *const protocol.ContentField, faults
     {
         return error.MissingContentCustody;
     }
-    const find = try self.cached("SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=0");
+    const find = try store_core.cached(self, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=0");
     defer sqlite.resetCached(find);
     try sqlite.bindBlob(find, 1, &content.digest);
     try sqlite.bindU64(find, 2, content.length);
@@ -270,7 +272,7 @@ pub fn importContent(self: *Store, content: *const protocol.ContentField, faults
     }
     if (find_result != c.SQLITE_DONE) return error.ContentReadFailed;
 
-    const insert = try self.cached("INSERT INTO content(digest,byte_length,payload,private) VALUES(?1,?2,zeroblob(?2),0)");
+    const insert = try store_core.cached(self, "INSERT INTO content(digest,byte_length,payload,private) VALUES(?1,?2,zeroblob(?2),0)");
     defer sqlite.resetCached(insert);
     try sqlite.bindBlob(insert, 1, &content.digest);
     try sqlite.bindU64(insert, 2, content.length);
@@ -301,7 +303,7 @@ pub fn importContent(self: *Store, content: *const protocol.ContentField, faults
 pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
 pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-    const statement = try self.cached("SELECT byte_length,digest,private FROM content WHERE content_id=?1");
+    const statement = try store_core.cached(self, "SELECT byte_length,digest,private FROM content WHERE content_id=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindI64(statement, 1, content_id);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -318,7 +320,7 @@ pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata
 }
 
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
-    const statement = try self.cached(content_lookup_sql);
+    const statement = try store_core.cached(self, content_lookup_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindBlob(statement, 1, &reference.digest);
     try sqlite.bindU64(statement, 2, reference.length);

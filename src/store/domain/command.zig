@@ -3,7 +3,8 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -14,9 +15,9 @@ const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
 const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
-const AttemptBinding = Store.AttemptBinding;
+const AttemptBinding = store_core.AttemptBinding;
 const ContentReference = content_domain.ContentReference;
-const Faults = Store.Faults;
+const Faults = store_core.Faults;
 const MessageCommitted = Store.MessageCommitted;
 const MessageObservation = reads_domain.MessageObservation;
 const MessageProgress = reads_domain.MessageProgress;
@@ -137,7 +138,7 @@ pub fn submitMessageLocked(
     const command = request;
     // Only the Session changes: a creating Message answers with the one it created.
     var session = request.session;
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     const digest = command.semanticDigest();
     const supplied_content = ContentReference{
         .length = command.text.length,
@@ -200,7 +201,7 @@ pub fn submitMessageLocked(
             answer,
         );
         if (sender_known) if (command.sender) |*sender| {
-            const statement = try self.cached("INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,?2,?3,unixepoch())");
+            const statement = try store_core.cached(self, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,?2,?3,unixepoch())");
             defer sqlite.resetCached(statement);
             try sqlite.bindText(statement, 1, command.key.slice());
             try sqlite.bindText(statement, 2, sender.session.slice());
@@ -208,7 +209,7 @@ pub fn submitMessageLocked(
             try sqlite.expectDone(statement);
         };
         if (faults.before_commit) return error.InjectedCommitFailure;
-        try self.execute("COMMIT");
+        try store_core.execute(self, "COMMIT");
         return .{ .rejected = .{ .replayed = false, .code = rejection, .content = supplied_content } };
     }
     const text_id = try content_domain.importContent(self, &command.text, faults);
@@ -231,7 +232,7 @@ pub fn submitMessageLocked(
         if (command.sender) |*sender| sender.session.slice() else null,
     );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     if (committed) |callback| callback.call(callback.context, .{
         .session = session.slice(),
         .admission_id = admission_id,
@@ -249,7 +250,7 @@ fn messageSenderMatchesLocked(self: *Store, command: *const protocol.MessageComm
     const handle = command.sender_handle orelse return command.sender == null;
     const claimed = if (command.sender) |*sender| sender else return false;
     if (!claimed.store.eql(self.selector.slice())) return false;
-    const statement = try self.cached("SELECT action.session_ref FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+    const statement = try store_core.cached(self, "SELECT action.session_ref FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
         "AND NOT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id)");
     defer sqlite.resetCached(statement);
@@ -267,7 +268,7 @@ pub fn stopSessionLocked(
     command: *const protocol.SessionStopCommand,
     faults: Faults,
 ) !SessionStopReply {
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     const digest = command.semanticDigest();
     switch (try classifyReplay(self, protocol.SessionStopRejection, .session_stop, command.key.slice(), command.session.slice(), &digest)) {
         .fresh => {},
@@ -291,7 +292,8 @@ pub fn stopSessionLocked(
         return saveSessionStopRejection(self, command, &digest, .unknown_session, faults);
     }
 
-    const cutoff_statement = try self.cached(
+    const cutoff_statement = try store_core.cached(
+        self,
         "SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1",
     );
     defer sqlite.resetCached(cutoff_statement);
@@ -300,7 +302,8 @@ pub fn stopSessionLocked(
     const cutoff_value = c.sqlite3_column_int64(cutoff_statement, 0);
     if (cutoff_value < 0) return error.CorruptStore;
 
-    const active_statement = try self.cached(
+    const active_statement = try store_core.cached(
+        self,
         "SELECT t.turn_id,t.operation_id,o.resolution_code FROM turn t " ++
             "JOIN model_operation o ON o.operation_id=t.operation_id " ++
             "WHERE t.session_ref=?1 AND t.outcome_code IS NULL",
@@ -332,7 +335,8 @@ pub fn stopSessionLocked(
     );
     {
         const position = try turn_domain.claimSessionPosition(self, command.session.slice());
-        const insert = try self.cached(
+        const insert = try store_core.cached(
+            self,
             "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) VALUES(?1,?2,?3,?4,?5,unixepoch())",
         );
         defer sqlite.resetCached(insert);
@@ -354,7 +358,8 @@ pub fn stopSessionLocked(
             };
             interrupted_operation_id = current_operation_id;
         }
-        const unresolved_actions = try self.cached(
+        const unresolved_actions = try store_core.cached(
+            self,
             "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 " ++
                 "AND resolution_code IS NULL AND attempt_ordinal=0",
         );
@@ -366,7 +371,8 @@ pub fn stopSessionLocked(
         if (unresolved_count != 0) {
             const cancellation_content_id = try content_domain.importBytesContent(self, "Cancelled by Session stop.", false, faults.content_import);
             const first_position = try turn_domain.claimSessionPositions(self, command.session.slice(), @intCast(unresolved_count));
-            const cancel_actions = try self.cached(
+            const cancel_actions = try store_core.cached(
+                self,
                 "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
                     "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
                     "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
@@ -389,7 +395,7 @@ pub fn stopSessionLocked(
     };
     const completion = try sessionStopCompletion(self, selection);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{
         .replayed = false,
@@ -419,7 +425,7 @@ fn saveSessionStopRejection(
         answer,
     );
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return .{ .rejected = .{ .replayed = false, .code = code } };
 }
 
@@ -428,7 +434,7 @@ pub fn interruptModelLocked(
     command: *const protocol.ModelInterruptionCommand,
     faults: Faults,
 ) !ModelInterruptionReply {
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     const digest = command.semanticDigest();
     const replay = try classifyReplay(self, protocol.ModelInterruptionRejection, .model_interruption, command.key.slice(), command.session.slice(), &digest);
     if (replay == .accepted or replay == .rejected) {
@@ -456,7 +462,8 @@ pub fn interruptModelLocked(
     }
 
     if (rejection == null) {
-        const operation = try self.cached(
+        const operation = try store_core.cached(
+            self,
             "SELECT turn_id,session_ref,resolution_code FROM model_operation WHERE operation_id=?1",
         );
         defer sqlite.resetCached(operation);
@@ -483,9 +490,10 @@ pub fn interruptModelLocked(
     if (rejection) |code| {
         return saveModelInterruptionAnswer(self, command, &digest, false, @tagName(code), faults);
     }
-    try self.touch(command.session.slice());
+    try store_core.touch(self, command.session.slice());
 
-    const current_turn = try self.cached(
+    const current_turn = try store_core.cached(
+        self,
         "SELECT 1 FROM turn WHERE turn_id=?1 AND session_ref=?2 AND operation_id=?3 AND outcome_code IS NULL",
     );
     defer sqlite.resetCached(current_turn);
@@ -511,14 +519,15 @@ pub fn interruptModelLocked(
         if (!try turn_domain.closeTurn(self, command.turn_id, command.operation_id, .cancelled)) return error.InterruptionTargetChanged;
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{ .replayed = false } };
 }
 
 // The caller owns the Store lock and transaction, including the causing command.
 fn interruptOperation(self: *Store, operation_id: u64, command_key: []const u8) !void {
-    const update = try self.cached(
+    const update = try store_core.cached(
+        self,
         "UPDATE model_operation SET retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ "," ++
             "interrupted_by_command_key=?2," ++ operation_resolved_at_sql ++ " WHERE operation_id=?1 AND resolution_code IS NULL",
     );
@@ -541,7 +550,7 @@ fn saveModelInterruptionAnswer(
     try answer.code.set(code);
     try insertModelInterruptionCommand(self, command, digest, answer);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     if (accepted) return .{ .accepted = .{ .replayed = false } };
     return .{ .rejected = .{
         .replayed = false,
@@ -569,7 +578,8 @@ fn insertModelInterruptionCommand(
     const turn = try std.fmt.bufPrint(&turn_buffer, "{d}", .{command.turn_id});
     var operation_buffer: [20]u8 = undefined;
     const operation = try std.fmt.bufPrint(&operation_buffer, "{d}", .{command.operation_id});
-    const insert = try self.cached(
+    const insert = try store_core.cached(
+        self,
         "INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation_id) VALUES(?1,?2,?3,?4)",
     );
     defer sqlite.resetCached(insert);
@@ -585,7 +595,7 @@ pub fn decidePermissionLocked(
     command: *const protocol.PermissionDecisionCommand,
     faults: Faults,
 ) !PermissionDecisionReply {
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     const digest = command.semanticDigest();
     switch (try classifyReplay(self, protocol.PermissionDecisionRejection, .permission_decision, command.key.slice(), command.session.slice(), &digest)) {
         .fresh => {},
@@ -598,7 +608,8 @@ pub fn decidePermissionLocked(
     if (!protocol.validSessionId(command.session.slice())) rejection = .invalid_session_reference else if (command.action_id == 0 or
         command.action_id > std.math.maxInt(i64)) rejection = .invalid_target else if (try turn_domain.sessionNextPosition(self, command.session.slice()) == null) rejection = .unknown_session;
     if (rejection == null) {
-        const action = try self.cached(
+        const action = try store_core.cached(
+            self,
             "SELECT a.session_ref,a.authorized,a.resolution_code,t.outcome_code,t.turn_id FROM action_operation a " ++
                 "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
                 "JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
@@ -620,17 +631,17 @@ pub fn decidePermissionLocked(
     try insertCommand(self, command.key.slice(), .permission_decision, command.session.slice(), &digest, null, null, answer);
     var action_buffer: [20]u8 = undefined;
     const action_text = try std.fmt.bufPrint(&action_buffer, "{d}", .{command.action_id});
-    const save = try self.cached("INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)");
+    const save = try store_core.cached(self, "INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)");
     defer sqlite.resetCached(save);
     try sqlite.bindText(save, 1, command.key.slice());
     try sqlite.bindText(save, 2, action_text);
     try sqlite.bindText(save, 3, @tagName(command.decision));
     try sqlite.expectDone(save);
     if (rejection == null) {
-        try self.touch(command.session.slice());
+        try store_core.touch(self, command.session.slice());
         switch (command.decision) {
             .allow_once => {
-                const update = try self.cached("UPDATE action_operation SET authorized=1,decided_at=unixepoch() WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
+                const update = try store_core.cached(self, "UPDATE action_operation SET authorized=1,decided_at=unixepoch() WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
                 defer sqlite.resetCached(update);
                 try sqlite.bindU64(update, 1, command.action_id);
                 try sqlite.expectDone(update);
@@ -639,7 +650,8 @@ pub fn decidePermissionLocked(
             .deny => {
                 const result_content_id = try content_domain.importBytesContent(self, "Permission denied.", false, faults.content_import);
                 const position = try turn_domain.claimSessionPosition(self, command.session.slice());
-                const update = try self.cached(
+                const update = try store_core.cached(
+                    self,
                     "UPDATE action_operation SET resolution_code='denied',resolution_content_id=?2,acceptance_position=?3,resolved_at=unixepoch() " ++
                         "WHERE action_id=?1 AND resolution_code IS NULL",
                 );
@@ -654,7 +666,7 @@ pub fn decidePermissionLocked(
         }
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{ .replayed = false } };
@@ -715,7 +727,8 @@ fn readMessageQueue(
     content_id: i64,
     accepted: bool,
 ) !?AcceptedMessageQueue {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
             "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
             "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
@@ -771,13 +784,14 @@ fn readMessageQueue(
 /// Turn, or the work ahead of it in the queue.
 fn readMessageProgress(self: *Store, session_ref: []const u8, state: AcceptedMessageQueue.State) !MessageProgress {
     const session = (try configuration_domain.readSessionFacts(self, session_ref, null)) orelse return error.CorruptStore;
-    const work = (try report_domain.readWorkLocked(self, session_ref, session.created_at, try Store.readUnixMilliseconds(self.io))).work;
+    const work = (try report_domain.readWorkLocked(self, session_ref, session.created_at, try store_core.readUnixMilliseconds(self.io))).work;
     if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
     return .{ .status = work.state.progress() orelse return error.CorruptStore, .action_id = work.first_action };
 }
 
 pub fn commandResultLocked(self: *Store, key: []const u8) !ContentReference {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT t.outcome_code,t.outcome_content_id,EXISTS(" ++
             "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
             "AND m.admission_id<=stopped.admission_cutoff) FROM core_command command " ++
@@ -836,7 +850,7 @@ pub fn classifyReplay(
     digest: *const [32]u8,
 ) !Replay(Rejection) {
     const existing = try readExistingCommand(self, key) orelse return .fresh;
-    try self.rollback();
+    try store_core.rollback(self);
     if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !existing.target.eql(target)) or
         !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
     if (existing.accepted) return .{ .accepted = existing };
@@ -845,7 +859,7 @@ pub fn classifyReplay(
 }
 
 fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
-    const statement = try self.cached("SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
+    const statement = try store_core.cached(self, "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, key);
     const step_result = c.sqlite3_step(statement);
@@ -890,7 +904,7 @@ fn readMessageAdmission(
     session_ref: []const u8,
     content_id: i64,
 ) !u64 {
-    const statement = try self.cached("SELECT admission_id,session_ref,content_id FROM message_admission WHERE command_key=?1");
+    const statement = try store_core.cached(self, "SELECT admission_id,session_ref,content_id FROM message_admission WHERE command_key=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, command_key);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -908,7 +922,7 @@ fn readMessageAdmission(
 
 pub fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
     const cutoff = try latestSessionStopCutoff(self, session_ref);
-    const statement = try self.cached(pending_message_count_sql);
+    const statement = try store_core.cached(self, pending_message_count_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     try sqlite.bindU64(statement, 2, cutoff);
@@ -920,7 +934,8 @@ pub fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
 
 fn hasApplicablePendingMessage(self: *Store, session_ref: []const u8) !bool {
     const cutoff = try latestSessionStopCutoff(self, session_ref);
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT 1 FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 LIMIT 1",
     );
     defer sqlite.resetCached(statement);
@@ -934,7 +949,7 @@ fn hasApplicablePendingMessage(self: *Store, session_ref: []const u8) !bool {
 }
 
 pub fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
-    const statement = try self.cached(session_stop_cutoff_sql);
+    const statement = try store_core.cached(self, session_stop_cutoff_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     return switch (c.sqlite3_step(statement)) {
@@ -949,7 +964,8 @@ pub fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
 }
 
 fn readSessionStopSelection(self: *Store, command_key: []const u8) !SessionStopSelection {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT selected_turn_id,admission_cutoff FROM session_stop WHERE command_key=?1",
     );
     defer sqlite.resetCached(statement);
@@ -964,7 +980,8 @@ fn readSessionStopSelection(self: *Store, command_key: []const u8) !SessionStopS
 }
 
 fn readInterruptedOperation(self: *Store, command_key: []const u8) !?u64 {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT operation_id FROM model_operation WHERE interrupted_by_command_key=?1",
     );
     defer sqlite.resetCached(statement);
@@ -978,7 +995,8 @@ fn readInterruptedOperation(self: *Store, command_key: []const u8) !?u64 {
 }
 
 fn readModelInterruptionTarget(self: *Store, command_key: []const u8) !ModelInterruptionTarget {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT session_ref,turn_id,operation_id FROM model_interruption_command WHERE command_key=?1",
     );
     defer sqlite.resetCached(statement);
@@ -1005,7 +1023,7 @@ const PermissionTarget = struct {
 };
 
 fn readPermissionTarget(self: *Store, command_key: []const u8) !PermissionTarget {
-    const statement = try self.cached("SELECT action_id,decision FROM permission_decision_command WHERE command_key=?1");
+    const statement = try store_core.cached(self, "SELECT action_id,decision FROM permission_decision_command WHERE command_key=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, command_key);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -1035,7 +1053,7 @@ pub fn insertCommand(
     secondary_content_id: ?i64,
     answer: StoredAnswer,
 ) !void {
-    const statement = try self.cached("INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
+    const statement = try store_core.cached(self, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, key);
     const kind_value: i64 = switch (kind) {
@@ -1066,7 +1084,7 @@ fn insertMessageAdmission(
     content_id: i64,
     sender: ?[]const u8,
 ) !u64 {
-    const latest = try self.cached("SELECT admission_id FROM message_admission ORDER BY admission_id DESC LIMIT 1");
+    const latest = try store_core.cached(self, "SELECT admission_id FROM message_admission ORDER BY admission_id DESC LIMIT 1");
     defer sqlite.resetCached(latest);
     const latest_result = c.sqlite3_step(latest);
     const admission_id: u64 = if (latest_result == c.SQLITE_DONE)
@@ -1081,7 +1099,7 @@ fn insertMessageAdmission(
     const position = try turn_domain.claimSessionPosition(self, session_ref);
     // The sender's own sequence orders the send among its other facts.
     const sender_position: ?u64 = if (sender) |ref| try turn_domain.claimSessionPosition(self, ref) else null;
-    const statement = try self.cached("INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) VALUES(?1,?2,?3,?4,?5,unixepoch(),?6,?7)");
+    const statement = try store_core.cached(self, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) VALUES(?1,?2,?3,?4,?5,unixepoch(),?6,?7)");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, admission_id);
     try sqlite.bindText(statement, 2, session_ref);

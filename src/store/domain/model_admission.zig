@@ -9,7 +9,8 @@ const product_defaults = @import("../../product_defaults.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const historical_domain = @import("historical.zig");
@@ -20,8 +21,8 @@ const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
-const AttemptBinding = Store.AttemptBinding;
-const Faults = Store.Faults;
+const AttemptBinding = store_core.AttemptBinding;
+const Faults = store_core.Faults;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const SessionFacts = configuration_domain.SessionFacts;
 const accepted_resolutions = store_schema.accepted_resolutions;
@@ -126,7 +127,7 @@ pub fn compactionFacts(self: *Store, session_ref: []const u8, first_admission: ?
         .uncovered_bytes = 0,
         .output_reservation = policy.output_reservation,
     };
-    const last = try self.cached("SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
+    const last = try store_core.cached(self, "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
         "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
         "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1");
     defer sqlite.resetCached(last);
@@ -164,7 +165,7 @@ pub fn compactionFacts(self: *Store, session_ref: []const u8, first_admission: ?
 /// The first Message admission would select for this Session's next
 /// Turn, or 0 when none is runnable: a later Message has a new admission.
 fn firstRunnableAdmission(self: *Store, session_ref: []const u8) !i64 {
-    const statement = try self.cached("SELECT coalesce(min(m.admission_id),0) FROM message_admission m WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql);
+    const statement = try store_core.cached(self, "SELECT coalesce(min(m.admission_id),0) FROM message_admission m WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -179,7 +180,7 @@ const ContextEstimate = struct { usage_tokens: ?u64, uncovered_bytes: u64 };
 /// and the Current report read this one estimate.
 fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, provider: protocol.Provider, model: []const u8) !ContextEstimate {
     var usage_tokens: ?u64 = null;
-    const base = try self.cached("SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
+    const base = try store_core.cached(self, "SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
         "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
     defer sqlite.resetCached(base);
     try sqlite.bindText(base, 1, session_ref);
@@ -190,7 +191,7 @@ fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, pr
     // Covered provider/tool material is excluded separately by the base.
     var usage_position: u64 = 0;
     var result_admission = frontier;
-    const usage = try self.cached("SELECT o.usage_uncached_tokens,o.usage_cache_read_tokens,o.usage_cache_write_tokens,o.usage_output_tokens,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
+    const usage = try store_core.cached(self, "SELECT o.usage_uncached_tokens,o.usage_cache_read_tokens,o.usage_cache_write_tokens,o.usage_output_tokens,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
         "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "WHERE o.session_ref=?1 AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " " ++
         "AND o.admission_position>=?2 AND r.provider=?3 AND r.model=?4 ORDER BY o.admission_position DESC LIMIT 1");
@@ -217,7 +218,7 @@ fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, pr
         c.SQLITE_DONE => {},
         else => return error.CorruptStore,
     }
-    const estimate = try self.cached("SELECT " ++
+    const estimate = try store_core.cached(self, "SELECT " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
         "WHERE e.session_ref=?1 AND e.entry_kind IN (1,2) AND e.session_position>?2) + " ++
         // An output item's bytes are its bag, its parts' text and bags,
@@ -260,7 +261,7 @@ fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, pr
 
 pub fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
     const purpose = try model_settlement_domain.readModelOperationKind(self, binding.operation_id);
-    const statement = try self.cached("SELECT session_ref,admission_position FROM model_operation WHERE operation_id=?1");
+    const statement = try store_core.cached(self, "SELECT session_ref,admission_position FROM model_operation WHERE operation_id=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, binding.operation_id);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
@@ -273,7 +274,7 @@ pub fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
 fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64) !bool {
     // Any changed suffix of the newest base also belongs to every older
     // base. Older bases cannot change the answer.
-    const statement = try self.cached("WITH base AS (SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
+    const statement = try store_core.cached(self, "WITH base AS (SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
         "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 " ++
         "ORDER BY admission_position DESC LIMIT 1) " ++
         "SELECT NOT EXISTS(SELECT 1 FROM base " ++
@@ -292,8 +293,8 @@ fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64)
 
 pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
     const select = switch (kind) {
-        .message => try self.cached(runnable_selection_sql),
-        .tool_continuation => try self.cached(tool_continuation_selection_sql),
+        .message => try store_core.cached(self, runnable_selection_sql),
+        .tool_continuation => try store_core.cached(self, tool_continuation_selection_sql),
     };
     defer sqlite.resetCached(select);
     switch (c.sqlite3_step(select)) {
@@ -307,7 +308,7 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
     }
     var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
     try sqlite.readText(select, 0, &session_ref);
-    try self.touch(session_ref.slice());
+    try store_core.touch(self, session_ref.slice());
     const first_admission = c.sqlite3_column_int64(select, 1);
     const cutoff = c.sqlite3_column_int64(select, 2);
     var selected = c.sqlite3_column_int64(select, 3);
@@ -320,16 +321,17 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
     // The Store's one exclusive connection is held under its mutex, so the
     // row read above is still the selection inside the write transaction.
     std.debug.assert(c.sqlite3_get_autocommit(self.database) != 0);
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     const current = try configuration_domain.readSessionFacts(self, session_ref.slice(), null) orelse return error.CorruptStore;
     const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
     const purpose = try nextModelOperationKind(self, session_ref.slice(), first_admission, &current, policy);
     if (purpose == .compaction) selected = 0;
 
-    const turn_id = if (existing_turn) |value| @as(u64, @intCast(value)) else try self.nextIdentity("turn", "turn_id");
-    const operation_id = try self.nextIdentity("model_operation", "operation_id");
+    const turn_id = if (existing_turn) |value| @as(u64, @intCast(value)) else try store_core.nextIdentity(self, "turn", "turn_id");
+    const operation_id = try store_core.nextIdentity(self, "model_operation", "operation_id");
     if (existing_turn == null) {
-        const insert = try self.cached(
+        const insert = try store_core.cached(
+            self,
             "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id) " ++
                 "VALUES(?1,?2,?3,?4,?5,NULL,NULL)",
         );
@@ -341,7 +343,8 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
         try sqlite.bindU64(insert, 5, operation_id);
         try sqlite.expectDone(insert);
     } else {
-        const update = try self.cached(
+        const update = try store_core.cached(
+            self,
             "UPDATE turn SET input_cutoff=?2,operation_id=?3 WHERE turn_id=?1 AND outcome_code IS NULL",
         );
         defer sqlite.resetCached(update);
@@ -352,7 +355,8 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
         if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
     }
     if (selected != 0) {
-        const bind = try self.cached(
+        const bind = try store_core.cached(
+            self,
             "UPDATE message_admission SET turn_id=?1 WHERE session_ref=?2 AND turn_id IS NULL AND admission_id<=?3 " ++
                 "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=message_admission.session_ref " ++
                 "AND message_admission.admission_id<=stopped.admission_cutoff)",
@@ -365,7 +369,8 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
         if (c.sqlite3_changes(self.database) != selected) return error.SelectionChanged;
     }
     if (selected != 0) {
-        const project = try self.cached(
+        const project = try store_core.cached(
+            self,
             "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) " ++
                 "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
                 "row_number() OVER (ORDER BY admission_id),?3 + row_number() OVER (ORDER BY admission_id) - 1,1,?2,admission_id,NULL,NULL,content_id,unixepoch() " ++
@@ -385,7 +390,8 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
     // therefore the canonical applied frontier, including equal/clear text.
     const instruction_count = blk: {
         if (purpose == .compaction) break :blk @as(i64, 0);
-        const count = try self.cached(
+        const count = try store_core.cached(
+            self,
             "SELECT count(*) FROM session_revision r WHERE r.session_ref=?1 AND " ++
                 "r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) " ++
                 "AND r.revision<=?2 AND r.instructions_updated=1",
@@ -399,7 +405,8 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
         break :blk value;
     };
     if (instruction_count != 0) {
-        const project = try self.cached(
+        const project = try store_core.cached(
+            self,
             "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) " ++
                 "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
                 "row_number() OVER (ORDER BY revision),?3 + row_number() OVER (ORDER BY revision) - 1,2,?2,NULL,revision,NULL,instructions_content_id,unixepoch() " ++
@@ -421,7 +428,8 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
     const claimed_count = try std.math.add(u64, next_position - @as(u64, @intCast(initial_position)), 1);
     if (try turn_domain.claimSessionPositions(self, session_ref.slice(), claimed_count) != initial_position) return error.SelectionChanged;
     {
-        const insert = try self.cached(
+        const insert = try store_core.cached(
+            self,
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
                 "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
                 "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,0,unixepoch())",
@@ -440,7 +448,7 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
         try sqlite.expectDone(insert);
     }
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     const binding = AttemptBinding{
         .turn_id = turn_id,
         .operation_id = operation_id,
@@ -454,9 +462,9 @@ pub fn tryAdmitNextModelRetryLocked(
     active: ActiveOperationFilter,
     faults: Faults,
 ) !?AttemptAdmission {
-    const snapshot_ms = try Store.readUnixMilliseconds(self.io);
+    const snapshot_ms = try store_core.readUnixMilliseconds(self.io);
     const selection_limit = try std.math.add(usize, active.maximum_exclusions, 1);
-    const select = try self.cached(retry_admission_select_sql);
+    const select = try store_core.cached(self, retry_admission_select_sql);
     defer sqlite.resetCached(select);
     try sqlite.bindI64(select, 1, snapshot_ms);
     try sqlite.bindI64(select, 2, 0);
@@ -503,10 +511,11 @@ pub fn tryAdmitNextModelRetryLocked(
     // The held Store mutex excludes every other writer, so the candidate
     // read outside the transaction is still current inside it.
     const current = selected orelse return null;
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     if (current.attempt_ordinal >= retry_policy.maximum_attempts) return error.CorruptStore;
     const replacement_ordinal = current.attempt_ordinal + 1;
-    const update = try self.cached(
+    const update = try store_core.cached(
+        self,
         "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=unixepoch(),retry_scheduled_at=NULL " ++
             "WHERE operation_id=?1 AND turn_id=?3 AND resolution_code IS NULL " ++
             "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5 RETURNING session_ref",
@@ -517,12 +526,12 @@ pub fn tryAdmitNextModelRetryLocked(
     try sqlite.bindU64(update, 3, current.turn_id);
     try sqlite.bindU64(update, 4, current.attempt_ordinal);
     try sqlite.bindI64(update, 5, snapshot_ms);
-    if (try self.stepTouching(update) != 1) {
-        try self.rollback();
+    if (try store_core.stepTouching(self, update) != 1) {
+        try store_core.rollback(self);
         return null;
     }
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return .{ .permit = .{ .binding = .{
         .turn_id = current.turn_id,
         .operation_id = current.operation_id,
@@ -534,7 +543,8 @@ pub fn tryAdmitNextModelRetryLocked(
 /// from malformed canonical classification. Only each active Turn's
 /// current Operation can be blocking successor discovery.
 fn validateBlockedToolCalls(self: *Store) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
             "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
             "AND " ++ store_schema.resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
@@ -553,7 +563,8 @@ fn validateBlockedToolCalls(self: *Store) !void {
 
 /// Rejects an active Turn whose stored continuation disagrees with its Operation, since selection would skip it or take it too early.
 fn validateRecordedContinuations(self: *Store) !void {
-    const disagreeing = try self.cached(
+    const disagreeing = try store_core.cached(
+        self,
         "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
             "WHERE active.outcome_code IS NULL AND (active.continuation_operation_id IS active.operation_id)!=" ++
             "(CASE WHEN " ++ continues_without_input_sql ++ " THEN 1 ELSE 0 END) LIMIT 1",

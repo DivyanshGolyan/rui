@@ -7,19 +7,19 @@ const tool_catalog = @import("../tools.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
 const turn_policy = @import("../turn_policy.zig");
-const facade = @import("../store.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
-const application_id = facade.application_id;
 const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql;
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
-pub const schema_version = facade.schema_version;
 
 comptime {
     // The schema's fixed literal for the seal's length.
     std.debug.assert(prefix_seal.encoded_bytes == 56);
 }
+
+pub const application_id: u32 = 0x4c544631; // LTF1
+pub const schema_version: u32 = 45;
 
 /// SQL membership of `column` in a set of enum tags or enum literals,
 /// generated at compile time. An OR of equalities, not IN: SQLite builds a

@@ -9,7 +9,8 @@ const tool_catalog = @import("../../tools.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const session_work = @import("../../session_work.zig");
 const change_ring = @import("../../change_ring.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
@@ -20,7 +21,7 @@ const store_schema = @import("../schema.zig");
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
-const AttemptBinding = Store.AttemptBinding;
+const AttemptBinding = store_core.AttemptBinding;
 const ContentReference = content_domain.ContentReference;
 const ContentSource = reads_domain.ContentSource;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
@@ -292,7 +293,7 @@ pub const SessionReportCapture = struct {
 };
 
 pub fn failedResponseBindingLocked(self: *Store, session: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
-    const statement = try self.cached("SELECT turn_id FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal>=?3");
+    const statement = try store_core.cached(self, "SELECT turn_id FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal>=?3");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, selection.operation);
     try sqlite.bindText(statement, 2, session);
@@ -326,7 +327,7 @@ pub fn renderSessionListLocked(self: *Store, request: *const protocol.ListSessio
 fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
     var ceiling = request.ceiling;
     if (request.after == 0) {
-        const maximum = try self.cached("SELECT coalesce(max(rowid),0) FROM session");
+        const maximum = try store_core.cached(self, "SELECT coalesce(max(rowid),0) FROM session");
         defer sqlite.resetCached(maximum);
         if (c.sqlite3_step(maximum) != c.SQLITE_ROW) return error.SessionReadFailed;
         const value = c.sqlite3_column_int64(maximum, 0);
@@ -341,9 +342,9 @@ fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, 
     var more = false;
     {
         const statement = if (request.workspace == null)
-            try self.cached("SELECT rowid,session_ref FROM session WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 9")
+            try store_core.cached(self, "SELECT rowid,session_ref FROM session WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 9")
         else
-            try self.cached("SELECT rowid,session_ref FROM session INDEXED BY session_workspace_list WHERE rowid>?1 AND rowid<=?2 AND workspace=?3 ORDER BY rowid LIMIT 9");
+            try store_core.cached(self, "SELECT rowid,session_ref FROM session INDEXED BY session_workspace_list WHERE rowid>?1 AND rowid<=?2 AND workspace=?3 ORDER BY rowid LIMIT 9");
         defer sqlite.resetCached(statement);
         try sqlite.bindU64(statement, 1, request.after);
         try sqlite.bindU64(statement, 2, ceiling);
@@ -381,7 +382,7 @@ fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, 
 /// each shown row's own read. A Session it names may be unchanged; one
 /// it omits did not change.
 fn renderChangedSessionsLocked(self: *Store, request: *const protocol.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
-    const workspace: ?u64 = if (request.workspace) |*scope| try self.readWorkspaceKey(scope.slice()) else null;
+    const workspace: ?u64 = if (request.workspace) |*scope| try store_core.readWorkspaceKey(self, scope.slice()) else null;
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
     var references: [protocol.session_list_page_size + 1]change_ring.Id = undefined;
     const changed = self.changes.changed(since, through, workspace, after, &references);
@@ -400,7 +401,7 @@ fn renderChangedSessionsLocked(self: *Store, request: *const protocol.ListSessio
 
 /// The page head and its rows, each read fresh under this lock.
 fn appendSessionRows(self: *Store, references: []const []const u8, capture: *SessionReportCapture) !void {
-    const now_ms = try Store.readUnixMilliseconds(self.io);
+    const now_ms = try store_core.readUnixMilliseconds(self.io);
     try capture.appendShape(protocol.session_list_reply.head, .{});
     var row: protocol.SessionRow = .{ .reference = .{ .len = 0 }, .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     for (references, 0..) |reference, index| {
@@ -417,7 +418,7 @@ pub fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64, 
     // values need no reset.
     {
         // The settings land straight in the row: no configuration copy.
-        const statement = try self.cached("SELECT workspace,provider,model,tools_mask,permission_mode,label,created_at,revision,next_position FROM session WHERE session_ref=?1");
+        const statement = try store_core.cached(self, "SELECT workspace,provider,model,tools_mask,permission_mode,label,created_at,revision,next_position FROM session WHERE session_ref=?1");
         defer sqlite.resetCached(statement);
         try sqlite.bindText(statement, 1, session_ref);
         switch (c.sqlite3_step(statement)) {
@@ -443,7 +444,7 @@ pub fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64, 
 
 /// One seek: the latest Message with no Session sender.
 fn readPeerFactsLocked(self: *Store, session_ref: []const u8) !protocol.PeerFacts {
-    const statement = try self.cached("SELECT admitted_at FROM message_admission INDEXED BY message_admission_person " ++
+    const statement = try store_core.cached(self, "SELECT admitted_at FROM message_admission INDEXED BY message_admission_person " ++
         "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
@@ -464,7 +465,7 @@ fn readFirstMessageLocked(self: *Store, session_ref: []const u8) !?protocol.Firs
         "SELECT first_admission_id FROM turn INDEXED BY turn_session_latest WHERE session_ref=?1 ORDER BY turn_id LIMIT 1",
         "SELECT admission_id FROM message_admission INDEXED BY message_admission_session_pending WHERE session_ref=?1 AND turn_id IS NULL ORDER BY admission_id LIMIT 1",
     }) |sql| {
-        const statement = try self.cached(sql);
+        const statement = try store_core.cached(self, sql);
         defer sqlite.resetCached(statement);
         try sqlite.bindText(statement, 1, session_ref);
         switch (c.sqlite3_step(statement)) {
@@ -477,7 +478,7 @@ fn readFirstMessageLocked(self: *Store, session_ref: []const u8) !?protocol.Firs
         }
     }
     const admission = first orelse return null;
-    const statement = try self.cached("SELECT admission_position,admitted_at,sender_session_ref,content_id FROM message_admission WHERE admission_id=?1 AND session_ref=?2");
+    const statement = try store_core.cached(self, "SELECT admission_position,admitted_at,sender_session_ref,content_id FROM message_admission WHERE admission_id=?1 AND session_ref=?2");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, admission);
     try sqlite.bindText(statement, 2, session_ref);
@@ -609,7 +610,7 @@ pub fn renderSessionReportLocked(
 }
 
 fn appendCurrentWork(self: *Store, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
-    const read = try readWorkLocked(self, session_ref, created_at, try Store.readUnixMilliseconds(self.io));
+    const read = try readWorkLocked(self, session_ref, created_at, try store_core.readUnixMilliseconds(self.io));
     const work: protocol.SessionWork = .fromCore(read.work);
     try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
     const outcome = read.outcome orelse return capture.append(",\"latest_outcome\":null}");
@@ -641,7 +642,8 @@ pub fn readWorkLocked(self: *Store, session_ref: []const u8, created_at: u64, no
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     // The quota diagnostic is read only for a failed outcome, and only
     // while it is small enough to be one.
-    const latest = try self.cached(
+    const latest = try store_core.cached(
+        self,
         "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
             "o.resolution_code,o.retry_due_at_ms,o.last_failure_code,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
             "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=512 AND t.outcome_code NOT IN ('completed','cancelled'))," ++
@@ -708,7 +710,8 @@ pub fn readWorkLocked(self: *Store, session_ref: []const u8, created_at: u64, no
 /// One aggregate over the Operation's Actions, bounded by its calls, and
 /// the oldest running Action's call ordinal and saved description.
 fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bounded(protocol.max_tool_description_bytes)) !session_work.Inputs.Actions {
-    const group = try self.cached(
+    const group = try store_core.cached(
+        self,
         "SELECT count(*),count(*) FILTER (WHERE a.resolution_code IS NULL)," ++
             "count(*) FILTER (WHERE a.resolution_code IS NULL AND a.authorized=0)," ++
             "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END)," ++
@@ -734,7 +737,8 @@ fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bound
         .latest_decision_at = try sqlite.readOptionalPositive(group, 6),
     };
     if (actions.running == 0) return actions;
-    const oldest = try self.cached(
+    const oldest = try store_core.cached(
+        self,
         "SELECT a.attempt_at,call.description,a.call_ordinal FROM action_operation a " ++
             "JOIN model_tool_call call ON call.operation_id=a.parent_operation_id AND call.call_ordinal=a.call_ordinal " ++
             "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
@@ -752,7 +756,8 @@ fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bound
 /// newest stop-excluded one and the earliest stop that excluded it.
 fn readWorkQueue(self: *Store, session_ref: []const u8, inputs: *session_work.Inputs) !void {
     const cutoff = try command_domain.latestSessionStopCutoff(self, session_ref);
-    const queued = try self.cached(
+    const queued = try store_core.cached(
+        self,
         "SELECT admitted_at,admission_position FROM message_admission INDEXED BY message_admission_session_pending " ++
             "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
     );
@@ -768,7 +773,8 @@ fn readWorkQueue(self: *Store, session_ref: []const u8, inputs: *session_work.In
         else => return error.MessageAdmissionReadFailed,
     }
     if (cutoff == 0) return;
-    const excluded = try self.cached(
+    const excluded = try store_core.cached(
+        self,
         "SELECT admission_id FROM message_admission INDEXED BY message_admission_session_pending " ++
             "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id<=?2 ORDER BY admission_id DESC LIMIT 1",
     );
@@ -780,7 +786,8 @@ fn readWorkQueue(self: *Store, session_ref: []const u8, inputs: *session_work.In
         c.SQLITE_DONE => return,
         else => return error.MessageAdmissionReadFailed,
     };
-    const stop = try self.cached(
+    const stop = try store_core.cached(
+        self,
         "SELECT position,stopped_at FROM session_stop INDEXED BY session_stop_exclusion " ++
             "WHERE session_ref=?1 AND admission_cutoff>=?2 ORDER BY admission_cutoff,position LIMIT 1",
     );
@@ -793,7 +800,7 @@ fn readWorkQueue(self: *Store, session_ref: []const u8, inputs: *session_work.In
 
 fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
     // An active Turn owns the selection even if a successor is queued.
-    const active = try self.cached("SELECT m.command_key FROM turn t INDEXED BY turn_one_active_per_session " ++
+    const active = try store_core.cached(self, "SELECT m.command_key FROM turn t INDEXED BY turn_one_active_per_session " ++
         "JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
         "WHERE t.session_ref=?1 AND t.outcome_code IS NULL");
     defer sqlite.resetCached(active);
@@ -806,7 +813,7 @@ fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *Sessio
     }
     if (active_step != c.SQLITE_DONE) return error.TurnReadFailed;
 
-    const queued = try self.cached("SELECT command_key FROM message_admission INDEXED BY message_admission_session_pending " ++
+    const queued = try store_core.cached(self, "SELECT command_key FROM message_admission INDEXED BY message_admission_session_pending " ++
         "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1");
     defer sqlite.resetCached(queued);
     try sqlite.bindText(queued, 1, session_ref);
@@ -825,7 +832,7 @@ fn appendRecentMessages(self: *Store, session_ref: []const u8, capture: *Session
     // Traverse terminal Turns newest-first, then their admissions newest-first.
     // CROSS JOIN fixes that indexed order so LIMIT stops after ten Messages,
     // even when older history or unrelated Sessions grow.
-    const statement = try self.cached("SELECT t.turn_id,m.command_key,t.outcome_code FROM turn t INDEXED BY turn_session_latest " ++
+    const statement = try store_core.cached(self, "SELECT t.turn_id,m.command_key,t.outcome_code FROM turn t INDEXED BY turn_session_latest " ++
         "CROSS JOIN message_admission m INDEXED BY message_admission_session_order " ++
         "WHERE t.session_ref=?1 AND t.outcome_code IS NOT NULL " ++
         "AND m.session_ref=t.session_ref AND m.turn_id=t.turn_id " ++
@@ -849,7 +856,8 @@ fn appendRecentMessages(self: *Store, session_ref: []const u8, capture: *Session
 }
 
 fn appendActionablePermissions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT action.action_id,action.permission_revision FROM turn active INDEXED BY turn_one_active_per_session " ++
             "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
             "WHERE active.session_ref=?1 AND active.outcome_code IS NULL " ++
@@ -871,7 +879,8 @@ fn appendUnresolvedActions(
     session_ref: []const u8,
     capture: *SessionReportCapture,
 ) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode," ++
             "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest " ++
             "FROM turn active INDEXED BY turn_one_active_per_session " ++
@@ -933,7 +942,8 @@ fn appendResolvedActions(
     session_ref: []const u8,
     capture: *SessionReportCapture,
 ) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
             "result.byte_length,result.digest FROM turn active INDEXED BY turn_one_active_per_session " ++
             "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
@@ -987,7 +997,8 @@ fn appendRejectedCalls(
     session_ref: []const u8,
     capture: *SessionReportCapture,
 ) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT call.operation_id,call.call_ordinal,call.rejection_code,call.acceptance_position," ++
             "rejection.byte_length,rejection.digest," ++
             "name.byte_length,name.digest," ++
@@ -1056,7 +1067,8 @@ fn appendRejectedCalls(
 }
 
 fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "WITH occurrence(revision,field_order,content_id) AS MATERIALIZED (" ++
             "SELECT revision,0,instructions_content_id FROM session_revision WHERE session_ref=?1 UNION ALL " ++
             "SELECT revision,1,output_schema_content_id FROM session_revision WHERE session_ref=?1 AND output_schema_content_id IS NOT NULL)," ++
@@ -1155,7 +1167,8 @@ fn appendRevisionContent(
 }
 
 fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
             "t.outcome_code,t.outcome_content_id " ++
             "FROM message_admission m LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
@@ -1164,7 +1177,8 @@ fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReport
     );
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
-    const stops = try self.cached(
+    const stops = try store_core.cached(
+        self,
         "SELECT stopped.command_key,stopped.admission_cutoff FROM session_stop stopped " ++
             "JOIN core_command command ON command.command_key=stopped.command_key " ++
             "WHERE stopped.session_ref=?1 ORDER BY command.rowid",
@@ -1234,7 +1248,8 @@ fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReport
 
 fn appendConversation(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
     try reads_domain.validateAssistantEntries(self, session_ref, 0, std.math.maxInt(i64));
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id " ++
             "FROM conversation_entry WHERE session_ref=?1 ORDER BY entry_ordinal",
     );
@@ -1268,7 +1283,7 @@ fn appendConversation(self: *Store, session_ref: []const u8, capture: *SessionRe
 }
 
 fn appendTurns(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached("SELECT turn_id,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id FROM turn WHERE session_ref=?1 ORDER BY turn_id");
+    const statement = try store_core.cached(self, "SELECT turn_id,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id FROM turn WHERE session_ref=?1 ORDER BY turn_id");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;
@@ -1285,7 +1300,7 @@ fn appendTurns(self: *Store, session_ref: []const u8, capture: *SessionReportCap
 }
 
 fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached("SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision,request_id,reasoning_effort FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
+    const statement = try store_core.cached(self, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision,request_id,reasoning_effort FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;
@@ -1309,7 +1324,8 @@ fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *Sessio
 }
 
 fn appendToolCalls(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT call.operation_id,call.call_ordinal,call.item_ordinal,call.rejection_code,call.acceptance_position," ++
             "call.name_content_id,call.call_id_content_id,call.arguments_content_id,call.rejection_content_id " ++
             "FROM model_tool_call call JOIN model_operation operation ON operation.operation_id=call.operation_id " ++
@@ -1342,7 +1358,7 @@ fn appendToolCalls(self: *Store, session_ref: []const u8, capture: *SessionRepor
 }
 
 fn appendAllActions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached("SELECT action_id,parent_operation_id,call_ordinal,permission_revision," ++
+    const statement = try store_core.cached(self, "SELECT action_id,parent_operation_id,call_ordinal,permission_revision," ++
         "CASE WHEN resolution_code IS 'denied' THEN 'denied' WHEN authorized=1 THEN 'authorized' ELSE 'requested' END,resolution_code,resolution_content_id,acceptance_position FROM action_operation WHERE session_ref=?1 ORDER BY action_id");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
@@ -1366,7 +1382,7 @@ fn appendAllActions(self: *Store, session_ref: []const u8, capture: *SessionRepo
 }
 
 fn appendPermissionDecisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached("SELECT decision.command_key,decision.action_id,decision.decision,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.rowid");
+    const statement = try store_core.cached(self, "SELECT decision.command_key,decision.action_id,decision.decision,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.rowid");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;
@@ -1388,7 +1404,7 @@ fn appendPermissionDecisions(self: *Store, session_ref: []const u8, capture: *Se
 }
 
 fn appendSessionStops(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached("SELECT command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key WHERE command.kind=3 AND command.target=?1 ORDER BY command.rowid");
+    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key WHERE command.kind=3 AND command.target=?1 ORDER BY command.rowid");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;
@@ -1406,7 +1422,7 @@ fn appendSessionStops(self: *Store, session_ref: []const u8, capture: *SessionRe
 }
 
 fn appendModelInterruptions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached("SELECT command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id FROM model_interruption_command interruption JOIN core_command command ON command.command_key=interruption.command_key WHERE interruption.session_ref=?1 ORDER BY command.rowid");
+    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id FROM model_interruption_command interruption JOIN core_command command ON command.command_key=interruption.command_key WHERE interruption.session_ref=?1 ORDER BY command.rowid");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
     var first = true;
@@ -1424,7 +1440,8 @@ fn appendModelInterruptions(self: *Store, session_ref: []const u8, capture: *Ses
 }
 
 fn appendToolResults(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT call.operation_id,call.call_ordinal,coalesce(call.acceptance_position,action.acceptance_position)," ++
             "call.call_id_content_id,coalesce(call.rejection_code,action.resolution_code)," ++
             "coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_tool_call call " ++
@@ -1493,7 +1510,8 @@ fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCap
 }
 
 pub fn countActions(self: *Store, session_ref: []const u8) !u64 {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT count(*) FROM turn active INDEXED BY turn_one_active_per_session " ++
             "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
             "ON operation.turn_id=active.turn_id " ++
@@ -1509,7 +1527,8 @@ pub fn countActions(self: *Store, session_ref: []const u8) !u64 {
 }
 
 pub fn countRejectedCalls(self: *Store, session_ref: []const u8) !u64 {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT count(*) FROM turn active INDEXED BY turn_one_active_per_session " ++
             "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
             "ON operation.turn_id=active.turn_id " ++
@@ -1525,7 +1544,8 @@ pub fn countRejectedCalls(self: *Store, session_ref: []const u8) !u64 {
 }
 
 pub fn validateActiveTurnToolCalls(self: *Store, session_ref: []const u8) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT operation.operation_id FROM turn active INDEXED BY turn_one_active_per_session " ++
             "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
             "ON operation.turn_id=active.turn_id " ++
@@ -1559,7 +1579,8 @@ pub fn readToolOutcomeFacts(
     operation_id: u64,
     require_terminal: bool,
 ) !ToolOutcomeFacts {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT (SELECT count(*) FROM model_output_item expected " ++
             "WHERE expected.operation_id=?1 AND expected.item_kind=3),count(call.operation_id)," ++
             "coalesce(sum(CASE WHEN item.operation_id IS NOT NULL AND item.item_kind=3 " ++
@@ -1596,7 +1617,7 @@ pub fn readToolOutcomeFacts(
         (require_terminal and terminal != expected)) return error.CorruptStore;
     const position = try sqlite.readNullablePositiveI64(statement, 4);
     if (require_terminal and position == null) return error.CorruptStore;
-    const sources = try self.cached("SELECT item.session_ref,item.session_position FROM model_tool_call call " ++
+    const sources = try store_core.cached(self, "SELECT item.session_ref,item.session_position FROM model_tool_call call " ++
         "LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal " ++
         "WHERE call.operation_id=?1 ORDER BY call.call_ordinal");
     defer sqlite.resetCached(sources);

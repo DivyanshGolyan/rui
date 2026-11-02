@@ -10,7 +10,8 @@ const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
-const Store = @import("Store.zig");
+const store_core = @import("Store.zig");
+const Store = store_core.Store;
 const action_domain = @import("domain/action.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
@@ -22,6 +23,7 @@ const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
+const store_testing = @import("testing.zig");
 const turn_domain = @import("domain/turn.zig");
 const c = sqlite.c;
 const AcceptedMessage = command_domain.AcceptedMessage;
@@ -29,16 +31,16 @@ const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptAdmission = model_admission_domain.AttemptAdmission;
-const AttemptBinding = Store.AttemptBinding;
+const AttemptBinding = store_core.AttemptBinding;
 const BashExecutionInput = action_domain.BashExecutionInput;
 const ConfigurationContentAction = configuration_domain.ConfigurationContentAction;
 const ConfigurationUpdatePlan = configuration_domain.ConfigurationUpdatePlan;
 const ConfigureReply = configuration_domain.ConfigureReply;
 const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
-const ControlTracePhase = Store.ControlTracePhase;
+const ControlTracePhase = store_core.ControlTracePhase;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
-const Faults = Store.Faults;
+const Faults = store_core.Faults;
 const HistoricalContent = historical_domain.HistoricalContent;
 const HistoricalEntry = historical_domain.HistoricalEntry;
 const HistoricalEntryKind = historical_domain.HistoricalEntryKind;
@@ -51,14 +53,21 @@ const ModelFailure = model_settlement_domain.ModelFailure;
 const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const OutputItemKind = historical_domain.OutputItemKind;
+const OutputMetadataWriter = store_testing.OutputMetadataWriter;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const SessionReport = report_domain.SessionReport;
 const SessionStopReply = command_domain.SessionStopReply;
-const SettlementTracePhase = Store.SettlementTracePhase;
+const SettlementTracePhase = store_core.SettlementTracePhase;
 const StatementCache = sqlite.StatementCache;
+const TestingAnswerPart = store_testing.TestingAnswerPart;
 const TurnOutcome = turn_domain.TurnOutcome;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const activity_sequence_guard_sql = reads_domain.activity_sequence_guard_sql;
+const answerTestTurn = store_testing.answerTestTurn;
+const canonicalCwd = store_testing.canonicalCwd;
+const completeConfiguration = store_testing.completeConfiguration;
+const completeMessage = store_testing.completeMessage;
+const configureTestSession = store_testing.configureTestSession;
 const empty_active_context = action_domain.empty_active_context;
 const next_action_attempt_sql = action_domain.next_action_attempt_sql;
 const pending_message_count_sql = command_domain.pending_message_count_sql;
@@ -69,11 +78,14 @@ const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 const runnable_selection_sql = model_admission_domain.runnable_selection_sql;
 const schema_version = store_schema.schema_version;
 const session_stop_cutoff_sql = command_domain.session_stop_cutoff_sql;
+const settleCompactionForTesting = store_testing.settleCompactionForTesting;
 const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
+const submitTestMessage = store_testing.submitTestMessage;
+const testingPublicProjection = store_testing.testingPublicProjection;
+const testing_absent_model_evidence = store_testing.testing_absent_model_evidence;
 const tool_continuation_selection_sql = model_admission_domain.tool_continuation_selection_sql;
 const workspace_key_sql = sqlite.workspace_key_sql;
 
-const OutputMetadataWriter = output_format.OutputMetadataWriter;
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 /// Tests read a view's settings by value; the Host fills them in place.
@@ -129,19 +141,19 @@ test "Store allocates six character IDs atomically retries collisions and replay
     try std.testing.expect(b.created and !b.replayed);
     try std.testing.expectEqualStrings("zzzzzz", b.session.slice());
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
-    try std.testing.expectEqualStrings("model-a", (try storage.readSessionForTesting(a.session.slice())).?.model.slice());
-    try std.testing.expectEqualStrings("model-b", (try storage.readSessionForTesting(b.session.slice())).?.model.slice());
+    try std.testing.expectEqualStrings("model-a", (try store_core.readSessionForTesting(&storage, a.session.slice())).?.model.slice());
+    try std.testing.expectEqualStrings("model-b", (try store_core.readSessionForTesting(&storage, b.session.slice())).?.model.slice());
     const replay = storage.configure(&second, .{}).accepted;
     try std.testing.expect(replay.replayed and replay.created);
     try std.testing.expectEqualStrings(b.session.slice(), replay.session.slice());
     try std.testing.expectEqual(@as(usize, 3), Entropy.draws);
-    const current = (try storage.readSessionForTesting(a.session.slice())).?;
+    const current = (try store_core.readSessionForTesting(&storage, a.session.slice())).?;
     for ([_][]const u8{ "short", "1234567", "K7m2qx", "k7m2qi", "k7m\x00qx" }) |invalid| {
         try std.testing.expectError(error.StatementFailed, configuration_domain.insertSession(&storage, invalid, &current));
     }
     var unknown = try completeConfiguration("unknown-update", "k7m2qx", workspace, "model-c");
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, storage.configure(&unknown, .{}).rejected.code);
-    try std.testing.expect(try storage.readSessionForTesting("k7m2qx") == null);
+    try std.testing.expect(try store_core.readSessionForTesting(&storage, "k7m2qx") == null);
     for ([_][]const u8{ "old/name", "K7m2qx", "k7m2qi", "k7\x00qx" }, 0..) |invalid, index| {
         var key: [32]u8 = undefined;
         var bad = try completeConfiguration(try std.fmt.bufPrint(&key, "invalid-id-{d}", .{index}), invalid, workspace, "model-c");
@@ -245,44 +257,6 @@ fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) ![]c
     return path;
 }
 
-fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !protocol.ConfigureCommand {
-    var command: protocol.ConfigureCommand = .{};
-    try command.key.set(key);
-    try command.session.set(session_ref);
-    command.configuration.workspace.state = .value;
-    try command.configuration.workspace.value.set(workspace);
-    command.configuration.provider.state = .value;
-    try command.configuration.provider.value.set("codex");
-    command.configuration.model.state = .value;
-    try command.configuration.model.value.set(model);
-    return command;
-}
-
-fn completeMessage(
-    key: []const u8,
-    session_ref: []const u8,
-    file: std.Io.File,
-    text: []const u8,
-) !protocol.MessageCommand {
-    var command: protocol.MessageCommand = .{};
-    try command.key.set(key);
-    try command.session.set(session_ref);
-    command.text = .{
-        .state = .value,
-        .file = file,
-        .length = text.len,
-        .digest = protocol.contentDigest(text),
-    };
-    return command;
-}
-
-fn canonicalCwd(io: std.Io, buffer: []u8) ![]const u8 {
-    var directory = try std.Io.Dir.cwd().openDir(io, ".", .{});
-    defer directory.close(io);
-    const length = try directory.realPath(io, buffer);
-    return buffer[0..length];
-}
-
 fn testingContent(tmp: *std.testing.TmpDir, name: []const u8, fill: u8, length: usize) !protocol.ContentField {
     const file = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
     errdefer file.close(std.testing.io);
@@ -355,11 +329,6 @@ fn execSessionSql(database: *c.sqlite3, sql: [:0]const u8, session: []const u8) 
     try sqlite.expectDone(statement);
 }
 
-const testing_absent_model_evidence: protocol.Bounded(775) = .{
-    .bytes = .{1} ++ @as([774]u8, @splat(0)),
-    .len = 7,
-};
-
 fn admitRetryForTesting(storage: *Store) !?AttemptAdmission {
     return storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{});
 }
@@ -387,25 +356,13 @@ fn completeModelInterruption(
 fn expectActivityOutcome(storage: *Store, session: []const u8, binding: AttemptBinding, code: []const u8) !void {
     var request: protocol.ActivityPage = .{ .direction = .backward };
     try request.session.set(session);
-    const page = try storage.activityPageForTesting(request);
+    const page = try store_core.activityPageForTesting(storage, request);
     try std.testing.expect(page.count != 0 and page.items[0].value == .outcome);
     const outcome = page.items[0].value.outcome;
     try std.testing.expectEqual(binding.turn_id, outcome.turn);
     try std.testing.expectEqual(binding.operation_id, outcome.operation);
     try std.testing.expectEqualStrings(code, outcome.code.slice());
     try std.testing.expectEqual(page.end, page.items[0].position);
-}
-
-fn configureTestSession(
-    storage: *Store,
-    key: []const u8,
-) !protocol.Bounded(protocol.max_session_bytes) {
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-    var command = try completeConfiguration(key, "", workspace, "model-a");
-    const reply = storage.configure(&command, .{});
-    try std.testing.expect(reply == .accepted);
-    return reply.accepted.session;
 }
 
 fn configureTestSessionAsk(
@@ -423,22 +380,6 @@ fn configureTestSessionAsk(
     const reply = storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
-}
-
-fn submitTestMessage(
-    storage: *Store,
-    tmp: *std.testing.TmpDir,
-    file_name: []const u8,
-    key: []const u8,
-    session_ref: []const u8,
-    text: []const u8,
-) !void {
-    const file = try tmp.dir.createFile(std.testing.io, file_name, .{ .read = true });
-    try file.writeStreamingAll(std.testing.io, text);
-    try file.sync(std.testing.io);
-    var command = try completeMessage(key, session_ref, file, text);
-    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&command, null, .{}) == .accepted);
 }
 
 const TestingCall = struct {
@@ -935,7 +876,7 @@ test "a since listing answers only the Sessions changed since its token, or ever
     // A fenced Store never answers unchanged, so the read reports the failure.
     const now: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
     try std.testing.expect(storage.notModified(now));
-    try std.testing.expectEqual(error.SqliteExecFailed, storage.fence(error.SqliteExecFailed));
+    try std.testing.expectEqual(error.SqliteExecFailed, store_core.fence(&storage, error.SqliteExecFailed));
     try std.testing.expect(!storage.notModified(now));
 }
 
@@ -1090,12 +1031,12 @@ test "a Session creation that rolls back never reaches a since listing" {
     const session = try configureTestSession(&storage, "rollback-config");
     const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
     {
-        const access = try storage.enter(.none);
+        const access = try store_core.enter(&storage, .none);
         defer access.release();
-        try storage.execute("BEGIN IMMEDIATE");
-        const current = (try storage.readSessionForTesting(session.slice())).?;
+        try store_core.execute(&storage, "BEGIN IMMEDIATE");
+        const current = (try store_core.readSessionForTesting(&storage, session.slice())).?;
         try std.testing.expect(try configuration_domain.insertSession(&storage, "zzzzzz", &current));
-        try storage.rollbackAfterError(.{});
+        try store_core.rollbackAfterError(&storage, .{});
     }
     // The rolled-back insert still moved the commit counter. The hint
     // forgot instead of naming a Session that does not exist.
@@ -1118,15 +1059,15 @@ test "the touch oracle names a Session whose rows changed without a touch" {
     const session = configured.accepted.session.slice();
     const generation = storage.commit_generation.load(.acquire);
     {
-        const access = try storage.enter(.none);
+        const access = try store_core.enter(&storage, .none);
         defer access.release();
-        try std.testing.expect(storage.untouchedForTesting() == null);
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
         // A writer that forgets its touch.
         var sql: [96]u8 = undefined;
         try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE session SET label='forgot' WHERE session_ref='{s}'", .{session}, 0));
-        try std.testing.expectEqualStrings(session, &storage.untouchedForTesting().?);
-        try storage.touch(session);
-        try std.testing.expect(storage.untouchedForTesting() == null);
+        try std.testing.expectEqualStrings(session, &store_core.untouchedForTesting(&storage).?);
+        try store_core.touch(&storage, session);
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
     // The touched write is recorded under the generation it advanced to.
     try std.testing.expectEqual(generation + 1, storage.commit_generation.load(.acquire));
@@ -1217,11 +1158,11 @@ test "a list row reads the same steps however long its Session's history" {
     const Counter = struct {
         fn rowSteps(store: *Store, session: []const u8) !u64 {
             var row: protocol.SessionRow = .{};
-            try report_domain.readSessionRowLocked(store, session, try Store.readUnixMilliseconds(std.testing.io), &row);
+            try report_domain.readSessionRowLocked(store, session, try store_core.readUnixMilliseconds(std.testing.io), &row);
             var counter: TestingSteps = .{};
             counter.begin(store.database);
             defer counter.end(store.database);
-            try report_domain.readSessionRowLocked(store, session, try Store.readUnixMilliseconds(std.testing.io), &row);
+            try report_domain.readSessionRowLocked(store, session, try store_core.readUnixMilliseconds(std.testing.io), &row);
             try std.testing.expect(row.work.state == .finished and row.first_message != null);
             return counter.steps;
         }
@@ -1670,7 +1611,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
 
     var public_request = protocol.ConversationPage{};
     try public_request.session.set(session.slice());
-    const proposed = try storage.publicConversationPageForTesting(public_request);
+    const proposed = try store_core.publicConversationPageForTesting(&storage, public_request);
     try std.testing.expectEqual(@as(usize, 1), proposed.count);
     try std.testing.expect(proposed.items[0].kind == .user);
     // The provider's complete proposal, including its call arguments, is not
@@ -1710,7 +1651,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try deny.session.set(session.slice());
     const accepted = storage.decidePermission(&deny, .{});
     try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
-    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPageForTesting(public_request)).count);
+    try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, public_request)).count);
     try std.testing.expect(storage.decidePermission(&deny, .{}).accepted.replayed);
     deny.action_id += 1;
     try std.testing.expect(storage.decidePermission(&deny, .{}) == .conflict);
@@ -1748,7 +1689,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const action_stop = storage.stopSession(&stop, .{});
     try std.testing.expect(action_stop == .accepted);
     try std.testing.expectEqual(protocol.SessionStopCompletion.completed, action_stop.accepted.completion);
-    const settled_page = try storage.publicConversationPageForTesting(public_request);
+    const settled_page = try store_core.publicConversationPageForTesting(&storage, public_request);
     try std.testing.expectEqual(@as(usize, 3), settled_page.count);
     try std.testing.expect(settled_page.items[0].kind == .tool_result);
     try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
@@ -1758,7 +1699,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try std.testing.expectEqualStrings("Run first command", settled_page.items[1].presentation.?.description.?.slice());
     try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, settled_page.items[1].presentation.?.code);
     for (settled_page.items[0..2]) |item| try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
-    const activity = try storage.activityPageForTesting(.{ .session = public_request.session, .direction = .backward });
+    const activity = try store_core.activityPageForTesting(&storage, .{ .session = public_request.session, .direction = .backward });
     var results: usize = 0;
     for (activity.items[0..activity.count]) |item| if (item.value == .tool_result) {
         const p = item.value.tool_result.presentation;
@@ -1945,7 +1886,7 @@ test "Current, activity pages and Message progress report one work through an ap
 fn pageWorkAgrees(store: *Store, report: std.json.Value, first_action: u64) !void {
     var request: protocol.ActivityPage = .{};
     try request.session.set(report.object.get("session").?.object.get("reference").?.string);
-    const page = try store.activityPageForTesting(request);
+    const page = try store_core.activityPageForTesting(store, request);
     const work = report.object.get("work").?.object;
     var state: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&state);
@@ -1978,7 +1919,7 @@ fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8,
 
     var request: protocol.ActivityPage = .{};
     try request.session.set(session);
-    const page = try storage.activityPageForTesting(request);
+    const page = try store_core.activityPageForTesting(storage, request);
     var paged: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
     var paged_writer: std.Io.Writer = .fixed(&paged);
     try (protocol.WorkStateJson{ .state = page.work.work.state }).writeJson(&paged_writer);
@@ -2033,7 +1974,7 @@ test "Current, activity pages and Message progress report one work in each state
     {
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
-        const failed = (try storage.activityPageForTesting(request)).work.work.state.failed;
+        const failed = (try store_core.activityPageForTesting(&storage, request)).work.work.state.failed;
         try std.testing.expectEqualStrings("provider_usage_limit_reached", failed.code.slice());
         try std.testing.expectEqual(@as(?u64, 1792940000), failed.resets_at);
     }
@@ -2128,7 +2069,7 @@ test "a quota reset is read from a saved record and never fences" {
         try storage.settleModelAttemptFailure(binding, failure, .ordinary, .{});
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
-        const failed = (try storage.activityPageForTesting(request)).work.work.state.failed;
+        const failed = (try store_core.activityPageForTesting(&storage, request)).work.work.state.failed;
         try std.testing.expectEqualStrings(case.code, failed.code.slice());
         try std.testing.expectEqual(case.resets_at, failed.resets_at);
     }
@@ -2158,7 +2099,7 @@ test "contradictory work inputs fence the Store" {
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
-        try std.testing.expectError(error.CorruptStore, storage.activityPageForTesting(request));
+        try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
         try std.testing.expect(storage.isFenced());
     }
 }
@@ -2509,11 +2450,20 @@ test "Store entry points lock and fence only through canonical access" {
     // cannot take the mutex, read or set the fence beside it, or enter
     // without returning through a classifier.
     const sources = .{
-        @embedFile("Store.zig"),                   @embedFile("sqlite.zig"),            @embedFile("schema.zig"),
-        @embedFile("domain/action.zig"),           @embedFile("domain/command.zig"),    @embedFile("domain/configuration.zig"),
-        @embedFile("domain/content.zig"),          @embedFile("domain/historical.zig"), @embedFile("domain/model_admission.zig"),
-        @embedFile("domain/model_settlement.zig"), @embedFile("domain/reads.zig"),      @embedFile("domain/report.zig"),
+        @embedFile("Store.zig"),
+        @embedFile("domain/action.zig"),
+        @embedFile("domain/command.zig"),
+        @embedFile("domain/configuration.zig"),
+        @embedFile("domain/content.zig"),
+        @embedFile("domain/historical.zig"),
+        @embedFile("domain/model_admission.zig"),
+        @embedFile("domain/model_settlement.zig"),
+        @embedFile("domain/reads.zig"),
+        @embedFile("domain/report.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("schema.zig"),
+        @embedFile("sqlite.zig"),
+        @embedFile("testing.zig"),
     };
     var locks: usize = 0;
     var fence_stores: usize = 0;
@@ -2523,11 +2473,11 @@ test "Store entry points lock and fence only through canonical access" {
         locks += std.mem.count(u8, source, "mutex.lock" ++ "Uncancelable(");
         fence_stores += std.mem.count(u8, source, "fenced.store" ++ "(true");
         fence_loads += std.mem.count(u8, source, "fenced.load" ++ "(");
-        const enter = "self.enter" ++ "(";
+        const enter = "enter" ++ "(self, ";
         var entries = std.mem.splitSequence(u8, source, enter);
         _ = entries.next();
         while (entries.next()) |rest| : (entered += 1) {
-            const body = rest[0 .. std.mem.indexOf(u8, rest, "\n}\n") orelse rest.len];
+            const body = rest[0 .. std.mem.indexOf(u8, rest, "\n    }\n") orelse rest.len];
             try std.testing.expect(std.mem.indexOf(u8, body, "access.finish") != null);
         }
     }
@@ -2923,25 +2873,25 @@ test "claiming Session positions stops at the largest position, and fails when i
     const last: u64 = std.math.maxInt(i64);
     try execSessionSql(storage.database, "UPDATE session SET next_position=9223372036854775805 WHERE session_ref=?1", session.slice());
     {
-        const access = try storage.enter(.none);
+        const access = try store_core.enter(&storage, .none);
         defer access.release();
-        try storage.execute("BEGIN IMMEDIATE");
+        try store_core.execute(&storage, "BEGIN IMMEDIATE");
         try std.testing.expectEqual(last - 2, try turn_domain.claimSessionPositions(&storage, session.slice(), 2));
         try std.testing.expectError(error.SessionPositionExhausted, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
         try std.testing.expectEqual(last, try turn_domain.claimSessionPositions(&storage, session.slice(), 0));
         try std.testing.expectError(error.SessionPositionExhausted, turn_domain.claimSessionPositions(&storage, session.slice(), last + 1));
-        try storage.execute("COMMIT");
+        try store_core.execute(&storage, "COMMIT");
     }
     try std.testing.expectEqual(last, try queryU64(storage.database, "SELECT next_position FROM session"));
 
     try execSessionSql(storage.database, "UPDATE session SET next_position=1 WHERE session_ref=?1", session.slice());
     try sqlite.exec(storage.database, "CREATE TEMP TRIGGER skip_claim BEFORE UPDATE OF next_position ON main.session BEGIN SELECT RAISE(IGNORE); END");
     {
-        const access = try storage.enter(.none);
+        const access = try store_core.enter(&storage, .none);
         defer access.release();
-        try storage.execute("BEGIN IMMEDIATE");
+        try store_core.execute(&storage, "BEGIN IMMEDIATE");
         try std.testing.expectError(error.CorruptStore, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
-        try storage.execute("ROLLBACK");
+        try store_core.execute(&storage, "ROLLBACK");
     }
 }
 
@@ -3015,7 +2965,7 @@ test "every transition dates its fact from the Host clock" {
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    const before: u64 = @intCast(@divFloor(try Store.readUnixMilliseconds(std.testing.io), 1000));
+    const before: u64 = @intCast(@divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000));
 
     const session = try configureTestSessionAsk(&storage, "dated-config");
     try submitTestMessage(&storage, &tmp, "dated-message", "dated-message", session.slice(), "propose");
@@ -3032,7 +2982,7 @@ test "every transition dates its fact from the Host clock" {
     var stop = try completeSessionStop("dated-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
-    const after: u64 = @intCast(@divFloor(try Store.readUnixMilliseconds(std.testing.io), 1000));
+    const after: u64 = @intCast(@divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000));
 
     const Column = struct { table: []const u8, column: []const u8 };
     const columns = [_]Column{
@@ -3263,7 +3213,7 @@ test "tool continuation admission runs its selection once" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "output", &calls);
 
-    const selection = try storage.cached(tool_continuation_selection_sql);
+    const selection = try store_core.cached(&storage, tool_continuation_selection_sql);
     const runs_before = c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0);
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
@@ -6433,7 +6383,7 @@ test "real SQLite full during import publishes no canonical prefix" {
         configuration_domain.configureLocked(&storage, &command, .{}),
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
-    storage.fence(error.CanonicalStorageFull) catch {};
+    store_core.fence(&storage, error.CanonicalStorageFull) catch {};
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.observeCommand("full-import"));
     try storage.close();
@@ -6828,7 +6778,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     const handle = input.sender_handle;
     var own_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
     try own_ref.set(sender);
-    const sender_end = (try storage.activityPageForTesting(.{ .session = own_ref })).end;
+    const sender_end = (try store_core.activityPageForTesting(&storage, .{ .session = own_ref })).end;
     const Send = struct {
         fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !protocol.MessageCommand {
             const file = try dir.createFile(std.testing.io, key, .{ .read = true });
@@ -6909,7 +6859,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
 
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set(allocated_session_1.slice());
-    const received = try storage.activityPageForTesting(.{ .session = session });
+    const received = try store_core.activityPageForTesting(&storage, .{ .session = session });
     try std.testing.expectEqual(@as(usize, 1), received.count);
     const peer = received.items[0].value.admission.sender.?;
     try std.testing.expectEqualStrings(sender, peer.session.slice());
@@ -6924,7 +6874,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
 
     try session.set(sender);
     try sqlite.exec(storage.database, "UPDATE sent_rejection SET rejected_at=200+sender_position");
-    const own = try storage.activityPageForTesting(.{ .session = session, .position = sender_end });
+    const own = try store_core.activityPageForTesting(&storage, .{ .session = session, .position = sender_end });
     try std.testing.expectEqual(@as(usize, 3), own.count);
     try std.testing.expectEqualStrings("invalid_session_reference", own.items[2].value.send_failed.code.slice());
     const out = own.items[0].value.sent;
@@ -7827,7 +7777,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     const created_session_0 = created_session_0_reply.accepted.session;
     var request = protocol.ConversationPage{};
     try request.session.set(created_session_0.slice());
-    try std.testing.expectEqual(@as(usize, 0), (try storage.publicConversationPageForTesting(request)).count);
+    try std.testing.expectEqual(@as(usize, 0), (try store_core.publicConversationPageForTesting(&storage, request)).count);
 
     // A large first input and nineteen small ones expose both the item and
     // content bound; no answer is invented for queued, unapplied input.
@@ -7844,7 +7794,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
         try std.testing.expect(storage.submitMessageWithModel(&command, null, .{}) == .accepted);
         try command.removeTemporaryContent(std.testing.io);
     }
-    try std.testing.expectEqual(@as(usize, 0), (try storage.publicConversationPageForTesting(request)).count);
+    try std.testing.expectEqual(@as(usize, 0), (try store_core.publicConversationPageForTesting(&storage, request)).count);
     var instruction: protocol.ConfigureCommand = .{};
     try instruction.key.set("public-instruction-before-selection");
     try instruction.session.set(created_session_0.slice());
@@ -7852,14 +7802,14 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     defer instruction.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.configure(&instruction, .{}) == .accepted);
     const active = (try storage.admitNextModelAttempt(.{})).?;
-    const first = try storage.publicConversationPageForTesting(request);
+    const first = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 16), first.count);
     try std.testing.expect(first.more);
     try std.testing.expectEqual(@as(u64, 40), first.items[0].position);
     try std.testing.expectEqual(@as(u64, 25), first.items[15].position);
     for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
     try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
-    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPageForTesting(.{
+    try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{
         .session = request.session,
         .end = first.end,
         .before_position = first.items[15].position,
@@ -7885,7 +7835,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try submitTestMessage(&storage, &tmp, "after-page", "after-page-key", created_session_0.slice(), "later public input");
     try storage.settleModelAttemptFailure(active.permit.binding, .{ .uncorrelated = "fixture_failure" }, .ordinary, .{});
     _ = (try storage.admitNextModelAttempt(.{})).?;
-    const fixed_first = try storage.publicConversationPageForTesting(.{ .session = request.session, .end = first.end });
+    const fixed_first = try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session, .end = first.end });
     try std.testing.expectEqual(first.end, fixed_first.end);
     try std.testing.expectEqual(first.count, fixed_first.count);
     for (first.items[0..first.count], fixed_first.items[0..fixed_first.count]) |expected, actual| {
@@ -7894,13 +7844,13 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     }
     request.end = first.end;
     request.before_position = first.items[15].position;
-    const older = try storage.publicConversationPageForTesting(request);
+    const older = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 4), older.count);
     try std.testing.expect(!older.more);
     try std.testing.expectEqual(@as(u64, 24), older.items[0].position);
     try std.testing.expectEqual(@as(u64, 21), older.items[3].position);
     try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
-    const fresh = try storage.publicConversationPageForTesting(.{ .session = request.session });
+    const fresh = try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session });
     try std.testing.expectEqual(@as(usize, 16), fresh.count);
     try std.testing.expect(fresh.items[0].position > first.end);
     try std.testing.expect(fresh.items[0].kind == .user);
@@ -7915,7 +7865,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&read));
     try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = .{}, .position = 1 }));
     try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 21, .start = 1024 * 1024 + 1 }));
-    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPageForTesting(.{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
+    try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
     try std.testing.expect(!storage.isFenced());
 }
 
@@ -7997,7 +7947,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     _ = (try storage.admitNextModelAttempt(.{})).?;
     var request = protocol.ConversationPage{};
     request.session = session;
-    const valid = try storage.publicConversationPageForTesting(request);
+    const valid = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 1), valid.count);
     try std.testing.expect(valid.items[0].kind == .user);
     if (foreign_turn) {
@@ -8022,10 +7972,10 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
             reader.close();
             break :blk {};
         } else |err| err
-    else if (storage.publicConversationPageForTesting(request)) |_| {} else |err| err;
+    else if (store_core.publicConversationPageForTesting(&storage, request)) |_| {} else |err| err;
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.publicConversationPageForTesting(request));
+    try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
     try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
@@ -8067,7 +8017,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call"));
     var request = protocol.ConversationPage{};
     try request.session.set(session.slice());
-    const valid = try storage.publicConversationPageForTesting(request);
+    const valid = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 3), valid.count);
     const item = valid.items[if (target_sibling) 0 else 1];
     try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
@@ -8105,10 +8055,10 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
             reader.close();
             break :blk {};
         } else |err| err
-    else if (storage.publicConversationPageForTesting(request)) |_| {} else |err| err;
+    else if (store_core.publicConversationPageForTesting(&storage, request)) |_| {} else |err| err;
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.publicConversationPageForTesting(request));
+    try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
     try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
@@ -8189,10 +8139,10 @@ test "public completed Action sibling corruption fences first Conversation read"
                     reader.close();
                     break :blk {};
                 } else |err| err
-            else if (storage.publicConversationPageForTesting(request)) |_| {} else |err| err;
+            else if (store_core.publicConversationPageForTesting(&storage, request)) |_| {} else |err| err;
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, storage.publicConversationPageForTesting(request));
+            try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
@@ -8238,7 +8188,7 @@ test "private-only model output never becomes public conversation" {
     }, .{});
     var request = protocol.ConversationPage{};
     try request.session.set(session.slice());
-    const page = try storage.publicConversationPageForTesting(request);
+    const page = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 1), page.count);
     try std.testing.expect(page.items[0].kind == .user);
     try std.testing.expect(page.end > page.items[0].position);
@@ -8269,7 +8219,7 @@ test "public tool-result cursor crosses a completed group boundary" {
     try settleCallsForTesting(&storage, &tmp, binding, "group-metadata", &calls);
     var cursor = protocol.ConversationPage{};
     try cursor.session.set(session.slice());
-    const newest = try storage.publicConversationPageForTesting(cursor);
+    const newest = try store_core.publicConversationPageForTesting(&storage, cursor);
     try std.testing.expectEqual(@as(usize, 16), newest.count);
     try std.testing.expect(newest.more);
     for (newest.items[0..newest.count], 0..) |item, index| {
@@ -8280,10 +8230,10 @@ test "public tool-result cursor crosses a completed group boundary" {
     cursor.end = newest.end;
     cursor.before_position = newest.items[15].position;
     cursor.before_ordinal = 18; // No such completed call in this group.
-    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPageForTesting(cursor));
+    try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, cursor));
     try std.testing.expect(!storage.isFenced());
     cursor.before_ordinal = newest.items[15].ordinal;
-    const older = try storage.publicConversationPageForTesting(cursor);
+    const older = try store_core.publicConversationPageForTesting(&storage, cursor);
     try std.testing.expectEqual(@as(usize, 2), older.count);
     try std.testing.expect(!older.more);
     try std.testing.expectEqual(@as(u64, 1), older.items[0].ordinal);
@@ -8295,75 +8245,6 @@ test "public tool-result cursor crosses a completed group boundary" {
     var result: [64]u8 = undefined;
     const size = try reader.read(0, &result);
     try std.testing.expectEqualStrings("Unknown tool: unknown.", result[0..size]);
-}
-
-const TestingAnswerPart = struct { encoded: []const u8, decoded: []const u8 };
-
-pub fn testingPublicProjection(
-    storage: *Store,
-    tmp: *std.testing.TmpDir,
-    parts: []const TestingAnswerPart,
-) !protocol.ConversationContent {
-    const session = try configureTestSession(storage, "projection-config");
-    try answerTestTurn(storage, tmp, session.slice(), "projection", parts);
-    const page = try storage.publicConversationPageForTesting(.{ .session = session });
-    try std.testing.expect(page.items[0].kind == .assistant);
-    return .{ .session = session, .position = page.items[0].position };
-}
-
-/// One Turn: a message named by `name`, its admission and an answer of `parts`.
-fn answerTestTurn(
-    storage: *Store,
-    tmp: *std.testing.TmpDir,
-    session: []const u8,
-    comptime name: []const u8,
-    parts: []const TestingAnswerPart,
-) !void {
-    try submitTestMessage(storage, tmp, name ++ "-input", name ++ "-key", session, "input");
-    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // A real message item whose output_text blocks hold the parts.
-    var capacity: usize = 128;
-    for (parts) |part| capacity += part.encoded.len + 32;
-    const source_buffer = try std.testing.allocator.alloc(u8, capacity);
-    defer std.testing.allocator.free(source_buffer);
-    var writer = std.Io.Writer.fixed(source_buffer);
-    var digest = protocol.contentHasher();
-    var decoded_length: u64 = 0;
-    try writer.writeAll("{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[");
-    for (parts, 0..) |part, index| {
-        if (index != 0) try writer.writeByte(',');
-        try writer.print("{{\"type\":\"output_text\",\"text\":\"{s}\"}}", .{part.encoded});
-        digest.update(part.decoded);
-        decoded_length += part.decoded.len;
-    }
-    try writer.writeAll("]}");
-    const bytes = writer.buffered();
-    const source = try tmp.dir.createFile(std.testing.io, name ++ "-source", .{ .read = true });
-    defer source.close(std.testing.io);
-    try source.writeStreamingAll(std.testing.io, bytes);
-    try source.sync(std.testing.io);
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
-    var metadata_used: std.atomic.Value(u64) = .init(0);
-    var retained: ?named_scratch.Owner = null;
-    var metadata = try OutputMetadataWriter.init(std.testing.io, root_buffer[0..root_length], name ++ "-metadata", .{ .used = &metadata_used, .limit = 1 << 20 }, false, &retained);
-    defer metadata.deinit();
-    _ = try output_decode.recordItemForTesting(&metadata, source, 0, bytes.len, 0, .assistant_response);
-    try metadata.sealForRead();
-    const output = ValidatedOutput{
-        .source = source,
-        .source_length = bytes.len,
-        .metadata = metadata.file,
-        .item_count = 1,
-        .call_count = 0,
-        .answer_item_ordinal = 0,
-        .answer_length = decoded_length,
-        .answer_digest = digest.finalResult(),
-        .response_id = .{},
-        .model_evidence = testing_absent_model_evidence,
-        .request_id = .{},
-    };
-    try storage.settleModelSuccess(binding, &output, .{});
 }
 
 test "replay fences part damage that keeps every digest" {
@@ -8550,14 +8431,14 @@ test "public assistant message provenance binds the exact accepted item" {
             try storage.close();
             try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
-                .page => if (storage.publicConversationPageForTesting(.{ .session = request.session })) |_| {} else |err| err,
+                .page => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
                 .bytes => if (storage.openPublicConversationContent(&request)) |location| blk: {
                     var owned: ContentReader = undefined;
                     owned.open(location);
                     owned.close();
                     break :blk {};
                 } else |err| err,
-                .activity => if (storage.activityPageForTesting(.{ .session = request.session })) |_| {} else |err| err,
+                .activity => if (store_core.activityPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
                 .activity_bytes => if (storage.openActivityContent(&.{ .session = request.session, .position = request.position })) |location| blk: {
                     var owned: ContentReader = undefined;
                     owned.open(location);
@@ -8596,14 +8477,14 @@ test "missing assistant certificates respect page windows and fixed ends" {
         try storage.close();
         try testingStore(&storage, &tmp, std.testing.io);
         // A historical window ending before the damage remains readable.
-        _ = try storage.publicConversationPageForTesting(.{ .session = missing.session, .end = missing.position - 1 });
-        _ = try storage.activityPageForTesting(.{ .session = missing.session, .end = missing.position - 1 });
+        _ = try store_core.publicConversationPageForTesting(&storage, .{ .session = missing.session, .end = missing.position - 1 });
+        _ = try store_core.activityPageForTesting(&storage, .{ .session = missing.session, .end = missing.position - 1 });
         if (activity) {
-            const latest = try storage.activityPageForTesting(.{ .session = missing.session, .direction = .backward });
+            const latest = try store_core.activityPageForTesting(&storage, .{ .session = missing.session, .direction = .backward });
             try std.testing.expect(latest.more);
             var cursor = latest.items[latest.count - 1];
             while (true) {
-                const older = storage.activityPageForTesting(.{
+                const older = store_core.activityPageForTesting(&storage, .{
                     .session = missing.session,
                     .end = latest.end,
                     .direction = .backward,
@@ -8618,10 +8499,10 @@ test "missing assistant certificates respect page windows and fixed ends" {
                 cursor = older.items[older.count - 1];
             }
         } else {
-            const latest = try storage.publicConversationPageForTesting(.{ .session = missing.session });
+            const latest = try store_core.publicConversationPageForTesting(&storage, .{ .session = missing.session });
             try std.testing.expectEqual(@as(usize, 16), latest.count);
             try std.testing.expect(latest.more);
-            try std.testing.expectError(error.CorruptStore, storage.publicConversationPageForTesting(.{
+            try std.testing.expectError(error.CorruptStore, store_core.publicConversationPageForTesting(&storage, .{
                 .session = missing.session,
                 .end = latest.end,
                 .before_position = latest.items[latest.count - 1].position,
@@ -8945,7 +8826,7 @@ test "continued accepted output keeps model immutable and public text readable" 
     try storage.settleModelSuccess(binding, &output, .{});
     var public_request = protocol.ConversationPage{};
     try public_request.session.set(created_session_0.slice());
-    const public_page = try storage.publicConversationPageForTesting(public_request);
+    const public_page = try store_core.publicConversationPageForTesting(&storage, public_request);
     try std.testing.expectEqual(@as(usize, 2), public_page.count);
     try std.testing.expect(public_page.items[0].kind == .assistant);
     var public_reader: ContentReader = undefined;
@@ -8966,7 +8847,7 @@ test "continued accepted output keeps model immutable and public text readable" 
     try std.testing.expectEqual(@as(usize, 6), try public_reader.read(0, &decoded));
     try std.testing.expectEqualStrings("answer", &decoded);
     public_reader.close();
-    const before_answer = try storage.publicConversationPageForTesting(.{
+    const before_answer = try store_core.publicConversationPageForTesting(&storage, .{
         .session = public_request.session,
         .end = public_page.end,
         .before_position = public_page.items[0].position,
@@ -9104,7 +8985,7 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
             .request_id = .{},
             .report = "",
         } }, .ordinary, .{});
-        const healthy = try storage.publicConversationPageForTesting(.{ .session = session });
+        const healthy = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
         try std.testing.expectEqual(@as(usize, 1), healthy.count);
         try std.testing.expect(healthy.items[0].kind == .user);
         const position = try queryU64(storage.database, "SELECT next_position FROM session");
@@ -9115,8 +8996,8 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
         try sqlite.exec(storage.database, "UPDATE session SET next_position=next_position+1");
         const result: anyerror!void = switch (route) {
-            .conversation => if (storage.publicConversationPageForTesting(.{ .session = session })) |_| {} else |err| err,
-            .activity => if (storage.activityPageForTesting(.{ .session = session })) |_| {} else |err| err,
+            .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = session })) |_| {} else |err| err,
+            .activity => if (store_core.activityPageForTesting(&storage, .{ .session = session })) |_| {} else |err| err,
             .conversation_content => if (storage.openPublicConversationContent(&.{ .session = session, .position = position })) |value| blk: {
                 var reader: ContentReader = undefined;
                 reader.open(value);
@@ -9306,7 +9187,7 @@ test "a failed Turn's activity outcome references the provider's report" {
         try expectActivityOutcome(&storage, session.slice(), binding, "provider_cyber_policy");
         var request: protocol.ActivityPage = .{ .direction = .backward };
         try request.session.set(session.slice());
-        const outcome = (try storage.activityPageForTesting(request)).items[0].value.outcome;
+        const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.outcome;
         if (words.len == 0) {
             // No words, no report: never an empty one.
             try std.testing.expect(outcome.content == null);
@@ -10160,7 +10041,7 @@ test "public proposal structural corruption fences independently on every route"
             try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
             var request: protocol.ProposalPage = .{};
             try request.session.set(session.slice());
-            const healthy = try storage.proposalPageForTesting(request);
+            const healthy = try store_core.proposalPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), healthy.count);
             const item = healthy.items[0];
             try std.testing.expectEqual(binding.operation_id, item.operation);
@@ -10180,10 +10061,10 @@ test "public proposal structural corruption fences independently on every route"
                     reader.close();
                     break :blk {};
                 } else |err| err
-            else if (storage.proposalPageForTesting(request)) |_| {} else |err| err;
+            else if (store_core.proposalPageForTesting(&storage, request)) |_| {} else |err| err;
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, storage.proposalPageForTesting(request));
+            try std.testing.expectError(error.StoreFenced, store_core.proposalPageForTesting(&storage, request));
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
@@ -10200,15 +10081,15 @@ test "proposal callable cursor domain preserves healthy Store" {
     var request: protocol.ProposalPage = .{};
     try request.session.set(session.slice());
     request.end = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidCursor, storage.proposalPageForTesting(request));
+    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
     request.end = null;
     request.after = 1;
-    try std.testing.expectError(error.InvalidCursor, storage.proposalPageForTesting(request));
+    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
     request.end = 0;
     request.after = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidCursor, storage.proposalPageForTesting(request));
+    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
     request.after = 0;
-    const page = try storage.proposalPageForTesting(request);
+    const page = try store_core.proposalPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(u64, 0), page.end);
     try std.testing.expectEqual(@as(usize, 0), page.count);
     try std.testing.expect(!page.more and !storage.isFenced());
@@ -10232,7 +10113,7 @@ test "public activity admission corruption fences page and content independently
             try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "input bytes");
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
-            const queued = try storage.activityPageForTesting(request);
+            const queued = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 1), queued.count);
             const item = queued.items[0];
             try std.testing.expectEqualStrings("message", item.value.admission.key.slice());
@@ -10248,10 +10129,10 @@ test "public activity admission corruption fences page and content independently
                     reader.close();
                     break :blk {};
                 } else |err| err
-            else if (storage.activityPageForTesting(request)) |_| {} else |err| err;
+            else if (store_core.activityPageForTesting(&storage, request)) |_| {} else |err| err;
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, storage.activityPageForTesting(request));
+            try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
@@ -10267,10 +10148,10 @@ test "activity fixed admission prefix survives later application and stop" {
     const session = try configureTestSession(&storage, "activity-config");
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
-    const empty = try storage.activityPageForTesting(request);
+    const empty = try store_core.activityPageForTesting(&storage, request);
     try submitTestMessage(&storage, &tmp, "activity-a", "a", session.slice(), "same");
     try submitTestMessage(&storage, &tmp, "activity-b", "b", session.slice(), "same");
-    const queued = try storage.activityPageForTesting(request);
+    const queued = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 2), queued.count);
     try std.testing.expect(queued.items[0].value.admission.admission != queued.items[1].value.admission.admission);
     try std.testing.expect(queued.items[0].value.admission.turn == null);
@@ -10280,11 +10161,11 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     try expectActivityOutcome(&storage, session.slice(), admitted.permit.binding, "cancelled");
     request.end = queued.end;
-    const frozen = try storage.activityPageForTesting(request);
+    const frozen = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 2), frozen.count);
     try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
     request.end = empty.end;
-    try std.testing.expectEqual(@as(usize, 0), (try storage.activityPageForTesting(request)).count);
+    try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
 }
 
 test "an activity page reports the queued Messages at its end, until applied or stopped" {
@@ -10296,10 +10177,10 @@ test "an activity page reports the queued Messages at its end, until applied or 
     const session = try configureTestSession(&storage, "queued-config");
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
-    try std.testing.expectEqual(@as(protocol.Queued, .{}), (try storage.activityPageForTesting(request)).queued);
+    try std.testing.expectEqual(@as(protocol.Queued, .{}), (try store_core.activityPageForTesting(&storage, request)).queued);
     try submitTestMessage(&storage, &tmp, "queued-a", "a", session.slice(), "first");
     try submitTestMessage(&storage, &tmp, "queued-b", "b", session.slice(), "second");
-    const waiting = try storage.activityPageForTesting(request);
+    const waiting = try store_core.activityPageForTesting(&storage, request);
     const first = waiting.items[0];
     const second = waiting.items[1];
     try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position }), waiting.queued);
@@ -10307,21 +10188,21 @@ test "an activity page reports the queued Messages at its end, until applied or 
     // do at the earlier one.
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     _ = try admitted.permit.consume();
-    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.count);
+    try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
     var frozen = request;
     frozen.end = waiting.end;
-    try std.testing.expectEqual(waiting.queued, (try storage.activityPageForTesting(frozen)).queued);
+    try std.testing.expectEqual(waiting.queued, (try store_core.activityPageForTesting(&storage, frozen)).queued);
     // One sent behind the work waits until a stop excludes it.
     try submitTestMessage(&storage, &tmp, "queued-c", "c", session.slice(), "third");
-    const behind = try storage.activityPageForTesting(request);
+    const behind = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(u64, 1), behind.queued.count);
     try std.testing.expectEqual(behind.end, behind.queued.oldest_position);
     try std.testing.expectEqual(behind.end, behind.queued.newest_position);
     var stop = try completeSessionStop("queued-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).queued.count);
+    try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
     frozen.end = behind.end;
-    try std.testing.expectEqual(behind.queued, (try storage.activityPageForTesting(frozen)).queued);
+    try std.testing.expectEqual(behind.queued, (try store_core.activityPageForTesting(&storage, frozen)).queued);
 }
 
 test "the queued Messages cost the queue, not the history after a page's end" {
@@ -10347,7 +10228,7 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
-        const statement = try storage.cached(queued_sql);
+        const statement = try store_core.cached(&storage, queued_sql);
         for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
             _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
             try std.testing.expectEqual(protocol.Queued{ .count = 1, .oldest_position = 2 * newest, .newest_admission = newest, .newest_position = 2 * newest }, try reads_domain.readQueuedLocked(&storage, "qu3u3d", end));
@@ -10382,7 +10263,7 @@ test "every activity row is dated by the fact that owns it" {
         "UPDATE session_stop SET stopped_at=108");
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
-    const page = try storage.activityPageForTesting(request);
+    const page = try store_core.activityPageForTesting(&storage, request);
     var seen: std.EnumSet(std.meta.Tag(protocol.ActivityItem.Value)) = .empty;
     for (page.items[0..page.count]) |item| {
         const expected: u64 = switch (item.value) {
@@ -10421,7 +10302,7 @@ test "a Tool Result is dated by its group's last acceptance, even when the clock
         "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 100 ELSE 200 END");
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
-    const page = try storage.activityPageForTesting(request);
+    const page = try store_core.activityPageForTesting(&storage, request);
     var results: usize = 0;
     for (page.items[0..page.count]) |item| if (item.value == .tool_result) {
         try std.testing.expectEqual(@as(u64, 100), item.at);
@@ -10541,13 +10422,13 @@ test "persisted tool label corruption fences every publication route" {
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
             request.direction = .backward;
-            const healthy = try storage.activityPageForTesting(request);
+            const healthy = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(u64, 2), healthy.call_activity.total);
             try std.testing.expectEqualStrings("Run first command", healthy.call_activity.entries[0].presentation.description.?.slice());
             if (route == .settled_activity or route == .conversation) {
                 var stop = try completeSessionStop("label-stop", session.slice());
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-                try std.testing.expectEqual(@as(usize, 3), (try storage.publicConversationPageForTesting(.{ .session = request.session })).count);
+                try std.testing.expectEqual(@as(usize, 3), (try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })).count);
             }
             var sql: [256]u8 = undefined;
             try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE model_tool_call SET description={s} WHERE call_ordinal=0", .{description.sql}, 0));
@@ -10557,12 +10438,12 @@ test "persisted tool label corruption fences every publication route" {
                     std.testing.allocator.free(bytes);
                     break :blk {};
                 } else |err| err,
-                .live_activity, .settled_activity => if (storage.activityPageForTesting(request)) |_| {} else |err| err,
-                .conversation => if (storage.publicConversationPageForTesting(.{ .session = request.session })) |_| {} else |err| err,
+                .live_activity, .settled_activity => if (store_core.activityPageForTesting(&storage, request)) |_| {} else |err| err,
+                .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
             };
             try std.testing.expectError(description.failure, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, storage.activityPageForTesting(request));
+            try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
@@ -10582,14 +10463,14 @@ test "tool label observation trusts admission over damaged call field bytes" {
         try settleTwoActionsForTesting(&storage, &tmp, binding, "label-calls");
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
-        const before = try storage.activityPageForTesting(request);
+        const before = try store_core.activityPageForTesting(&storage, request);
         // Damage only the call fields' bytes, not the accepted references or
         // their metadata. Lightweight observations do not read those bytes.
         try sqlite.exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT arguments_content_id FROM model_tool_call)");
         const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
         defer std.testing.allocator.free(report);
         try std.testing.expect(std.mem.indexOf(u8, report, "Run first command") != null);
-        const after = try storage.activityPageForTesting(request);
+        const after = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expectEqual(before.call_activity.total, after.call_activity.total);
         for (before.call_activity.entries[0..before.call_activity.count], after.call_activity.entries[0..after.call_activity.count]) |original, observed| {
             try std.testing.expectEqualStrings(original.presentation.description.?.slice(), observed.presentation.description.?.slice());
@@ -10614,9 +10495,9 @@ test "completed tool labels trust admission while model replay authenticates pay
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     var request: protocol.ConversationPage = .{};
     try request.session.set(session.slice());
-    const before = try storage.publicConversationPageForTesting(request);
+    const before = try store_core.publicConversationPageForTesting(&storage, request);
     try sqlite.exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT name_content_id FROM model_tool_call)");
-    const after = try storage.publicConversationPageForTesting(request);
+    const after = try store_core.publicConversationPageForTesting(&storage, request);
     try std.testing.expectEqual(before.count, after.count);
     var results: usize = 0;
     for (before.items[0..before.count], after.items[0..after.count]) |original, observed| {
@@ -10667,7 +10548,7 @@ test "live tool activity survives completed Turns and split result pages" {
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
-    const page = try storage.activityPageForTesting(request);
+    const page = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expect(page.more);
     for (page.items[0..page.count]) |item| try std.testing.expect(item.value != .tool_result);
     try std.testing.expectEqual(@as(u64, 20), page.call_activity.total);
@@ -10681,20 +10562,20 @@ test "live tool activity survives completed Turns and split result pages" {
     request.end = page.end;
     request.position = last.position;
     request.ordinal = last.ordinal;
-    const split = try storage.activityPageForTesting(request);
+    const split = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expect(split.more);
     try std.testing.expectEqual(@as(u64, 10), split.call_activity.total);
     try std.testing.expectEqual(@as(u64, 10), split.call_activity.entries[0].ordinal);
     const split_last = split.items[split.count - 1];
     request.position = split_last.position;
     request.ordinal = split_last.ordinal;
-    const finished = try storage.activityPageForTesting(request);
+    const finished = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expect(!finished.more);
     try std.testing.expectEqual(@as(u64, 0), finished.call_activity.total);
     request.position = 0;
     request.ordinal = null;
     request.direction = .backward;
-    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPageForTesting(request)).call_activity.total);
+    try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).call_activity.total);
 
     // Fixed history boundaries cannot suppress newer live calls.
     try submitTestMessage(&storage, &tmp, "live-new", "new", session.slice(), "propose again");
@@ -10702,7 +10583,7 @@ test "live tool activity survives completed Turns and split result pages" {
     try settleTwoActionsForTesting(&storage, &tmp, next, "live-new-calls");
     request.direction = .forward;
     request.position = finished.end;
-    const frozen = try storage.activityPageForTesting(request);
+    const frozen = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 0), frozen.count);
     try std.testing.expectEqual(@as(u64, 2), frozen.call_activity.total);
     try std.testing.expectEqual(next.operation_id, frozen.call_activity.entries[0].operation);
@@ -10798,54 +10679,6 @@ const TestingHistoryCursor = struct {
     }
 };
 
-pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, kinds: []const OutputItemKind) !void {
-    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-    const source = try tmp.dir.createFile(std.testing.io, "compaction-output", .{ .read = true });
-    defer source.close(std.testing.io);
-    var root: [protocol.max_store_bytes]u8 = undefined;
-    const root_length = try tmp.dir.realPath(std.testing.io, &root);
-    var used: std.atomic.Value(u64) = .init(0);
-    var retained: ?named_scratch.Owner = null;
-    var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "compaction-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
-    defer metadata.deinit();
-    var offset: u64 = 0;
-    var calls: u64 = 0;
-    for (kinds, 0..) |kind, ordinal| {
-        var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "{s}-{d}", .{ @tagName(kind), ordinal });
-        const fields: []const u8 = switch (kind) {
-            .reasoning => ",\"summary\":[],\"encrypted_content\":\"opaque\"",
-            .function_call => ",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"",
-            .compaction => ",\"encrypted_content\":\"opaque\"",
-            .message => ",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"\"}]",
-        };
-        var item_buffer: [256]u8 = undefined;
-        const bytes = try std.fmt.bufPrint(&item_buffer, "{{\"type\":\"{s}\",\"id\":\"{s}\"{s}}}", .{ @tagName(kind), id, fields });
-        if (kind == .function_call) calls += 1;
-        try source.writeStreamingAll(std.testing.io, bytes);
-        try source.sync(std.testing.io);
-        // Each item is judged under the Operation that accepts its kind, so
-        // the Store's own Operation check is what rejects a misplaced item.
-        const operation: output_format.ModelOperationKind = if (kind == .compaction) .compaction else .assistant_response;
-        _ = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, operation);
-        offset += bytes.len;
-    }
-    try metadata.sealForRead();
-    try storage.settleModelSuccess(binding, &.{
-        .source = source,
-        .source_length = offset,
-        .metadata = metadata.file,
-        .item_count = kinds.len,
-        .call_count = calls,
-        // Deliberately present: compaction must not project visible messages.
-        .answer_length = if (try storage.modelOperationKind(binding) == .compaction) 6 else 0,
-        .answer_digest = protocol.contentDigest("answer"),
-        .response_id = .{},
-        .model_evidence = testing_absent_model_evidence,
-        .request_id = .{},
-    }, .{});
-}
-
 test "compaction success retains host inputs and ordered anchor suffix across reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -10865,15 +10698,15 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     try settleCompactionForTesting(&storage, &tmp, compact, &.{ .reasoning, .compaction, .message });
     var request: protocol.ConversationPage = .{};
     try request.session.set(session.slice());
-    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPageForTesting(request)).count);
+    try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, request)).count);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).action_count);
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
     // Accepted compaction message items remain private, without a required
     // assistant Conversation entry, across every public inventory on reopen.
-    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPageForTesting(request)).count);
-    const activity = try storage.activityPageForTesting(.{ .session = request.session });
+    try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, request)).count);
+    const activity = try store_core.activityPageForTesting(&storage, .{ .session = request.session });
     for (activity.items[0..activity.count]) |item| try std.testing.expect(item.value != .assistant);
     const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
     defer std.testing.allocator.free(report);

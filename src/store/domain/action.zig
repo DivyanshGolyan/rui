@@ -3,15 +3,16 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
-const Store = @import("../Store.zig");
+const store_core = @import("../Store.zig");
+const Store = store_core.Store;
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
 const ContentReference = content_domain.ContentReference;
-const Faults = Store.Faults;
-const Ordinary = Store.Ordinary;
+const Faults = store_core.Faults;
+const Ordinary = store_core.Ordinary;
 
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
@@ -87,14 +88,15 @@ fn containsNoActiveOperation(_: *const anyopaque, _: u64) bool {
 }
 
 pub fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
-    const access = try self.enter(.none);
+    const access = try store_core.enter(self, .none);
     defer access.release();
     if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
     return access.finish(Ordinary.action, actionContentLocked(self, session_ref, action_id, column));
 }
 
 fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT call." ++ column ++ ",item.session_position FROM action_operation action JOIN model_tool_call call " ++
             "ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
             "LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal " ++
@@ -121,7 +123,7 @@ pub fn admitNextActionAttemptLocked(
     bash_timeout_ms: u64,
     faults: Faults,
 ) !?ActionAttemptAdmission {
-    const select = try self.cached(next_action_attempt_sql);
+    const select = try store_core.cached(self, next_action_attempt_sql);
     defer sqlite.resetCached(select);
     const step = c.sqlite3_step(select);
     if (step == c.SQLITE_DONE) return null;
@@ -137,11 +139,12 @@ pub fn admitNextActionAttemptLocked(
     // The held Store mutex excludes every other writer, so the candidate
     // read outside the transaction is still current inside it.
     _ = c.sqlite3_reset(select);
-    try self.execute("BEGIN IMMEDIATE");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
     var random: [16]u8 = undefined;
     try std.Io.randomSecure(self.io, &random);
     const sender_handle = std.fmt.bytesToHex(random, .lower);
-    const update = try self.cached(
+    const update = try store_core.cached(
+        self,
         "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=unixepoch(),bash_timeout_ms=?2,sender_handle=?3 " ++
             "WHERE action_id=?1 AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 RETURNING session_ref",
     );
@@ -149,9 +152,9 @@ pub fn admitNextActionAttemptLocked(
     try sqlite.bindI64(update, 1, action_id);
     try sqlite.bindU64(update, 2, selected_timeout_ms);
     try sqlite.bindText(update, 3, &sender_handle);
-    if (try self.stepTouching(update) != 1) return error.ActionSelectionChanged;
+    if (try store_core.stepTouching(self, update) != 1) return error.ActionSelectionChanged;
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return .{ .permit = .{ .binding = .{
         .turn_id = @intCast(turn_id),
         .parent_operation_id = @intCast(parent_operation_id),
@@ -160,7 +163,8 @@ pub fn admitNextActionAttemptLocked(
 }
 
 pub fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref,action.sender_handle " ++
             "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
             "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
@@ -186,15 +190,16 @@ pub fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding,
 }
 
 pub fn revokeActionSenderLocked(self: *Store, binding: ActionAttemptBinding) !void {
-    const statement = try self.cached("UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND " ++ action_attempted_sql ++ " RETURNING session_ref");
+    const statement = try store_core.cached(self, "UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND " ++ action_attempted_sql ++ " RETURNING session_ref");
     defer sqlite.resetCached(statement);
     try sqlite.bindU64(statement, 1, binding.action_id);
     try sqlite.bindU64(statement, 2, binding.parent_operation_id);
-    _ = try self.stepTouching(statement);
+    _ = try store_core.stepTouching(self, statement);
 }
 
 pub fn actionSupersededByStopLocked(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
             "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
             "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
@@ -212,7 +217,8 @@ pub fn actionSupersededByStopLocked(self: *Store, binding: ActionAttemptBinding)
 }
 
 pub fn validateActionDispatchLocked(self: *Store, binding: ActionAttemptBinding) !void {
-    const statement = try self.cached(
+    const statement = try store_core.cached(
+        self,
         "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
             "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
             "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
@@ -235,8 +241,9 @@ pub fn settleActionAttemptLocked(
     result: []const u8,
     faults: Faults,
 ) !ActionSettlement {
-    try self.execute("BEGIN IMMEDIATE");
-    const statement = try self.cached(
+    try store_core.execute(self, "BEGIN IMMEDIATE");
+    const statement = try store_core.cached(
+        self,
         "SELECT action.session_ref,operation.turn_id," ++
             "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
             "FROM action_operation action JOIN model_operation operation " ++
@@ -259,7 +266,8 @@ pub fn settleActionAttemptLocked(
     const effective_result = if (stopped == 1) "Cancelled by Session stop." else result;
     const content_id = try content_domain.importBytesContent(self, effective_result, false, faults.content_import);
     const position = try turn_domain.claimSessionPosition(self, session_ref.slice());
-    const update = try self.cached(
+    const update = try store_core.cached(
+        self,
         "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL,resolved_at=unixepoch() " ++
             "WHERE action_id=?1 AND parent_operation_id=?5 AND " ++ action_attempted_sql ++ " AND resolution_code IS NULL",
     );
@@ -274,7 +282,7 @@ pub fn settleActionAttemptLocked(
     try turn_domain.completeStoppedTurnIfReady(self, binding.turn_id);
     try turn_domain.recordContinuation(self, binding.turn_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return if (stopped == 1) .session_stop else .effect;
 }
 
@@ -282,7 +290,8 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
     const limit = try std.math.add(usize, active.maximum_exclusions, 1);
     var selected: ?u64 = null;
     {
-        const select = try self.cached(
+        const select = try store_core.cached(
+            self,
             "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt " ++
                 "WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id",
         );
@@ -303,8 +312,8 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
         };
     }
     const action_id = selected orelse return false;
-    try self.execute("BEGIN IMMEDIATE");
-    const action = try self.cached("SELECT session_ref FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1");
+    try store_core.execute(self, "BEGIN IMMEDIATE");
+    const action = try store_core.cached(self, "SELECT session_ref FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1");
     defer sqlite.resetCached(action);
     try sqlite.bindU64(action, 1, action_id);
     if (c.sqlite3_step(action) != c.SQLITE_ROW) return error.ActionSelectionChanged;
@@ -317,7 +326,8 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
         false,
     );
     const position = try turn_domain.claimSessionPosition(self, session_ref.slice());
-    const update = try self.cached(
+    const update = try store_core.cached(
+        self,
         "UPDATE action_operation SET resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3,resolved_at=unixepoch() " ++
             "WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1",
     );
@@ -327,7 +337,8 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
     try sqlite.bindU64(update, 3, position);
     try sqlite.expectDone(update);
     if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-    const turn_statement = try self.cached(
+    const turn_statement = try store_core.cached(
+        self,
         "SELECT operation.turn_id FROM action_operation action JOIN model_operation operation " ++
             "ON operation.operation_id=action.parent_operation_id WHERE action.action_id=?1",
     );
@@ -338,6 +349,6 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
     if (turn_id <= 0) return error.CorruptStore;
     try turn_domain.completeStoppedTurnIfReady(self, @intCast(turn_id));
     try turn_domain.recordContinuation(self, @intCast(turn_id));
-    try self.execute("COMMIT");
+    try store_core.execute(self, "COMMIT");
     return true;
 }
