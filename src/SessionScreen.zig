@@ -60,9 +60,17 @@ staging: Document = .{},
 // The draft as displayed: tabs show as one space so offsets stay exact.
 composer: [65_536]u8 = undefined,
 view: ViewKind = .live,
-// Newer transcript rows left the copy so older pages fit; returning to them
-// means returning to live.
-newer_trimmed: bool = false,
+// The transcript's end is not where live output continues: newer rows left
+// the copy so older pages fit, or it holds the rows after the read-through
+// position. Only a move past its end returns to live.
+ends_apart: bool = false,
+// For a transcript copied from live output, what to add to its absolute
+// offsets to get the live offsets of the same text; null for a transcript
+// of pages alone. Prepending moves the copy's offsets, not its text.
+copy_shift: ?i64 = null,
+// The live offset the copy starts at: rows above it are older pages and
+// labels, not live rows.
+copy_front: u64 = 0,
 // Rows asked for above the transcript's top while an older page loads; the
 // page applies them, so holding PgUp or the wheel keeps moving.
 overscroll: usize = 0,
@@ -365,15 +373,69 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
     self.browsing = self.live;
     self.browsing.discardFront(front);
     try self.browsing.prepare();
-    // Moves apply to the transcript's own height, which its heading and the
-    // absent calls make differ from the live view's: start at its end so the
-    // same rows down as up return to live output.
-    self.height = self.browsing_height;
+    // Start at its end, so the same rows down as up return to live output.
+    self.enterTranscript(false);
     self.browsing.top = null;
-    self.newer_trimmed = false;
+    self.copy_shift = 0;
+    self.copy_front = self.browsing.origin;
+}
+
+/// Starts an empty transcript at its top, which newer pages then fill.
+pub fn beginNewer(self: *Self) void {
+    std.debug.assert(self.view == .live);
+    self.browsing.clear();
+    self.browsing.sidenotes = self.live.sidenotes;
+    self.browsing.quotes = false;
+    self.browsing.width_method = self.live.width_method;
+    self.enterTranscript(true);
+    self.browsing.top = .{};
+    self.copy_shift = null;
+}
+
+fn enterTranscript(self: *Self, apart: bool) void {
+    // Moves apply to the transcript's own height, which its heading and the
+    // absent calls make differ from the live view's.
+    self.height = self.browsing_height;
+    self.ends_apart = apart;
     self.overscroll = 0;
     self.view = .transcript;
     self.invalidateScope();
+}
+
+/// Appends one newer page, rendered to `file`, below the transcript without
+/// moving the rows in view. Returns false when text no frame showed left
+/// the transcript's front to make room.
+pub fn appendFile(self: *Self, io: std.Io, file: std.Io.File) !bool {
+    std.debug.assert(self.view == .transcript);
+    const document = &self.browsing;
+    try document.prepare();
+    const first = document.first(self.textLayout(), self.height);
+    const top = document.origin + first.offset;
+    const unshown = document.origin + document.length;
+    const length = (try file.stat(io)).size;
+    var buffer: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < length) {
+        const wanted: usize = @intCast(@min(buffer.len, length - offset));
+        if (try file.readPositionalAll(io, buffer[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
+        try document.append(buffer[0..wanted]);
+        offset += wanted;
+    }
+    try document.prepare();
+    document.top = if (top >= document.origin) .{ .offset = @intCast(top - document.origin), .row = first.row } else .{};
+    return document.origin <= unshown;
+}
+
+/// The transcript shows its last row.
+pub fn transcriptAtBottom(self: *const Self) bool {
+    return self.view == .transcript and self.browsing.atBottom(self.textLayout(), self.height);
+}
+
+/// Whether the latest live view shows the row at absolute live offset `at`.
+pub fn liveShows(self: *const Self, at: u64) bool {
+    if (at < self.live.origin) return false;
+    const first = self.live.first(self.textLayout(), self.height);
+    return (Position{ .offset = @intCast(at - self.live.origin) }).order(first) != .lt;
 }
 
 /// Pages or lines through the shown document. Returns true when a downward
@@ -389,7 +451,7 @@ pub fn browse(self: *Self, down: bool, page: bool) bool {
     document.browse(self.textLayout(), down, moves, self.height, unseen);
     if (self.view != .transcript or !down) return false;
     // Untrimmed transcript ends where live output continues.
-    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
+    return (end and self.ends_apart) or (!self.ends_apart and document.atBottom(self.textLayout(), self.height));
 }
 
 /// The transcript shows its first retained row, so older text is wanted.
@@ -417,11 +479,42 @@ pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
     }
     const before = self.browsing.collapsed(0, self.browsing.text().len).count;
     const older = self.staging.collapsed(0, self.staging.text().len).count;
-    if (try self.browsing.prepend(&self.staging, self.textLayout(), self.height)) self.newer_trimmed = true;
+    try self.prependBrowsing(&self.staging);
     const first = self.browsing.first(self.textLayout(), self.height);
     self.browsing.top = self.browsing.up(self.textLayout(), first, self.overscroll);
     self.overscroll = 0;
     return .{ .older = older, .trimmed = before + older - self.browsing.collapsed(0, self.browsing.text().len).count };
+}
+
+/// Places `older` above the transcript, keeping the copy's live offsets.
+fn prependBrowsing(self: *Self, older: anytype) !void {
+    try self.browsing.prepare();
+    const front = self.browsing.origin;
+    if (try self.browsing.prepend(older, self.textLayout(), self.height)) self.ends_apart = true;
+    // The text that started at `front` now starts after the older text.
+    if (self.copy_shift) |*shift| shift.* += @as(i64, @intCast(front)) - @as(i64, @intCast(self.browsing.origin + older.length));
+}
+
+/// The live offsets of the rows the latest transcript frame draws, from
+/// its top row to the first row it leaves undrawn, for a transcript copied
+/// from live output; null otherwise.
+pub fn transcriptLiveSpan(self: *Self) !?struct { start: u64, end: u64 } {
+    if (self.view != .transcript) return null;
+    const shift = self.copy_shift orelse return null;
+    const document = &self.browsing;
+    try document.prepare();
+    const layout = self.textLayout();
+    const first = document.first(layout, self.height);
+    // A partly drawn line is not drawn.
+    const start = if (first.row == 0) first.offset else document.nextLine(first.offset) orelse document.text().len;
+    const end = if (document.atBottom(layout, self.height)) document.text().len else document.down(layout, first, self.height).offset;
+    // Text prepended above the copy sits before its live offsets, so only
+    // the rows drawn from the copy itself map to live ones.
+    const base = @as(i64, @intCast(document.origin)) + shift;
+    const from = @max(base + @as(i64, @intCast(start)), @as(i64, @intCast(self.copy_front)));
+    const to = base + @as(i64, @intCast(@max(start, end)));
+    if (to <= from) return null;
+    return .{ .start = @intCast(from), .end = @intCast(to) };
 }
 
 /// Collapsed blocks an older page kept, its newest, and those newer rows
@@ -452,7 +545,7 @@ fn boundary(self: *Self, text: []const u8) !usize {
     try marker.append(text);
     try marker.append(View.Style.normal.code(self.colour));
     const before = self.transcriptCollapsed();
-    if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
+    try self.prependBrowsing(&marker);
     return before - self.transcriptCollapsed();
 }
 
@@ -1605,6 +1698,54 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
 }
 
+test "a transcript of live output names the live rows its frame drew, across older pages and labels" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: [160]u8 = undefined;
+    for (0..60) |line| {
+        var buffer: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&buffer, "live {d:0>2}\n", .{line}));
+    }
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expect(try screen.transcriptLiveSpan() == null);
+    try screen.beginTranscript(0);
+    for (0..20) |_| _ = screen.browse(false, false);
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    const drawn = (try screen.transcriptLiveSpan()).?;
+    // From the top row drawn, whole rows only.
+    const top = try std.testing.allocator.dupe(u8, rowText(screen, 1, &storage));
+    defer std.testing.allocator.free(top);
+    try std.testing.expect(std.mem.startsWith(u8, top, "live "));
+    try std.testing.expect(std.mem.startsWith(u8, screen.live.text()[@intCast(drawn.start - screen.live.origin)..], top));
+    try std.testing.expect(drawn.end > drawn.start and (drawn.end - drawn.start) % 8 == 0);
+    try std.testing.expect(drawn.end < try screen.liveEnd());
+    // Text above the copy moves its offsets, not the live rows it names.
+    const older = try tmp.dir.createFile(io, "older", .{ .read = true });
+    defer older.close(io);
+    try older.writePositionalAll(io, "older 1\nolder 2\nolder 3\n", 0);
+    _ = try screen.prependFile(io, older);
+    _ = try screen.markGap();
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(top, rowText(screen, 1, &storage));
+    const moved = (try screen.transcriptLiveSpan()).?;
+    try std.testing.expectEqual(drawn.start, moved.start);
+    try std.testing.expectEqual(drawn.end, moved.end);
+    // A transcript of pages alone names no live rows.
+    try screen.latest();
+    screen.beginNewer();
+    try std.testing.expect(try screen.transcriptLiveSpan() == null);
+}
+
 test "an unchanged frame writes nothing" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -1785,6 +1926,61 @@ test "browsing up then down by the same rows returns to the latest view" {
             try screen.latest();
         }
     }
+}
+
+test "a transcript of newer pages starts at its top, keeps its rows in view as pages join, and says when unshown text left" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var storage: [64]u8 = undefined;
+    const size: std.posix.winsize = .{ .row = 12, .col = 60, .xpixel = 0, .ypixel = 0 };
+    try screen.append("latest row\n");
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer page.close(io);
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer text.deinit();
+    try text.writer.writeAll("── new since you looked ──\n");
+    for (0..20) |index| try text.writer.print("new row {d}\n", .{index});
+    try page.writePositionalAll(io, text.written(), 0);
+    screen.beginNewer();
+    try std.testing.expect(try screen.appendFile(io, page));
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    // Under the transcript's heading.
+    try std.testing.expectEqualStrings("── new since you looked ──", rowText(screen, 1, &storage));
+    try std.testing.expect(!screen.transcriptAtBottom());
+    while (!screen.transcriptAtBottom()) {
+        try std.testing.expect(!screen.browse(true, true));
+        _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    }
+    const shown = rowText(screen, 1, &storage);
+    var kept: [64]u8 = undefined;
+    @memcpy(kept[0..shown.len], shown);
+    try page.setLength(io, 0);
+    try page.writePositionalAll(io, "next row\n", 0);
+    try std.testing.expect(try screen.appendFile(io, page));
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(kept[0..shown.len], rowText(screen, 1, &storage));
+    try std.testing.expect(!screen.transcriptAtBottom());
+    // Its end is not live output's: only a move past it returns there.
+    while (!screen.transcriptAtBottom()) _ = screen.browse(true, true);
+    try std.testing.expect(screen.browse(true, true));
+    // A page larger than the view pushes out text no frame showed.
+    try page.setLength(io, 0);
+    for (0..Viewport.capacity / 32 + 1) |index| {
+        var line: [32]u8 = undefined;
+        _ = try std.fmt.bufPrint(&line, "filler row {d:0>20}\n", .{index});
+        try page.writePositionalAll(io, &line, index * line.len);
+    }
+    try std.testing.expect(!try screen.appendFile(io, page));
 }
 
 /// A frame writer that runs `hook` once, as output pumping does, before it

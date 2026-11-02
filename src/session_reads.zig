@@ -19,6 +19,7 @@ const session_line = @import("session_line.zig");
 const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
+const unseen = @import("unseen.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Terminal = @import("SessionTerminal.zig");
 const ReadPhase = departure.ReadPhase;
@@ -172,6 +173,24 @@ fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     return value;
 }
 
+/// What a history or message read renders.
+pub const Target = union(enum) {
+    /// The conversation page before `Job.older`.
+    older,
+    /// This part of a transcript's listing.
+    listing: Listing,
+    /// This collapsed block's Message, in full.
+    message: View.Collapsed,
+    /// The conversation after this cursor, for the end of the transcript
+    /// that starts at the "new since you looked" rule.
+    newer: protocol_reply.ActivityCursor,
+};
+
+/// How far a transcript of the rows after the read-through position
+/// reaches: where its next page starts, null once it holds the opening's
+/// end, and the position its rows show every row through.
+pub const Newer = struct { next: ?protocol_reply.ActivityCursor, through: u64 };
+
 pub const Job = struct {
     init: std.process.Init = undefined,
     store: []const u8 = "",
@@ -185,10 +204,10 @@ pub const Job = struct {
     cursor: protocol_reply.ActivityCursor = .{},
     opening: bool = false,
     older: ?protocol_reply.ConversationCursor = null,
-    // A history read renders this part of a transcript's listing instead.
-    listing: ?Listing = null,
-    // A message read shows this collapsed block's Message in full.
-    message_target: ?View.Collapsed = null,
+    target: Target = .older,
+    // The opening first records this read-through position, which an
+    // earlier visit saw but the Store may not hold yet.
+    unrecorded_read: ?u64 = null,
     recall: ?Input.Step = null,
     // The latest live work held queued input: a listed echo, whose read
     // was earlier, is labelled by it.
@@ -243,6 +262,13 @@ pub const Job = struct {
         // (see `seam`): the opening's start, an echo's position or the
         // lowest a stop showed.
         lowest: ?u64 = null,
+        // The Session's read-through position, as the opening's page read it.
+        read_through: ?u64 = null,
+        // Where the opening put the "new since you looked" rule, as an
+        // output offset.
+        rule: unseen.Rule = .none,
+        // How far a newer page reaches.
+        newer: Newer = .{ .next = null, .through = 0 },
         // A seam's listing searched down to its range's lowest position and
         // found nothing it lists below this one (see `list`).
         searched: ?u64 = null,
@@ -394,6 +420,12 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     const requests = task.requests();
     var cursor = job.cursor;
     if (job.opening) cursor.direction = .backward;
+    // The page then reads the position back. No saved work depends on it:
+    // a Host that does not take it keeps the earlier one.
+    if (job.opening) if (job.unrecorded_read) |position| requests.markRead(job.store, job.session, position, requests.markReadDeadline()) catch |err| switch (err) {
+        error.CanonicalStoreFailure => return err,
+        else => {},
+    };
     const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
         .page => |page| page,
         .failure => |failure| return requests.failRead(failure),
@@ -447,19 +479,29 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .messages = job.messages, .end = page.facts.end, .drawn = job.drawn.admission, .colour = job.colour };
     // Which Messages before the opening's page a seam lists is known only
     // by reading them, so its search starts at the history's first
     // position, at the first transcript that reaches the seam and not here:
     // opening reads the same after any history (see `list`).
-    if (job.opening) job.result.lowest = 1;
+    if (job.opening) {
+        job.result.lowest = 1;
+        job.result.read_through = page.facts.read_through;
+        const oldest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else null;
+        switch (unseen.place(page.facts.read_through, oldest, page.facts.beyond_unseen)) {
+            .here => output.unseen_after = page.facts.read_through,
+            .older => job.result.rule = .older,
+            .none => {},
+        }
+    }
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
     const from: ?u64 = if (job.queued.count != 0) job.queued.oldest_position - 1 else null;
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .messages = job.messages, .end = page.facts.end, .drawn = job.drawn.admission };
     job.drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = from });
     // One shown at its Admission is delivered too.
     job.result.delivered = @max(job.result.delivered, job.drawn.admission);
+    if (output.rule_at) |offset| job.result.rule = .{ .at = offset };
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
@@ -505,7 +547,12 @@ fn writeSubmission(job: *const Job, out: *std.Io.Writer) !void {
 pub fn history(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const latest = job.phase == .details;
-    if (!latest) if (job.listing) |step| return list(job, task, step);
+    if (!latest) switch (job.target) {
+        .older => {},
+        .listing => |step| return list(job, task, step),
+        .newer => |cursor| return newer(job, task, cursor),
+        .message => unreachable,
+    };
     const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
@@ -514,6 +561,28 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     if (latest) try output.feed("\nRecent conversation — tool details\n");
     try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
     if (!latest) job.result.history_cursor = prepared.page.continuation();
+}
+
+/// Renders one Activity page after `cursor`, oldest first and as live
+/// output shows it, for the end of the transcript that starts at the "new
+/// since you looked" rule. The first page, which follows the read-through
+/// position itself, starts with the rule.
+fn newer(job: *Job, task: *Task, cursor: protocol_reply.ActivityCursor) !void {
+    const requests = task.requests();
+    const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+        .page => |page| page,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    job.result.rendering = true;
+    try job.files.inspection.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .end = page.facts.end, .colour = job.colour };
+    if (cursor.ordinal == null) try output.rule();
+    var compact = false;
+    _ = try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact, .{ .drawn = .{}, .from = null });
+    _ = output.finish();
+    const next = page.continuation();
+    // Later rows of a page's last position may be on the next page.
+    job.result.newer = .{ .next = next, .through = if (next) |after| @max(after.position - 1, cursor.position) else page.facts.end };
 }
 
 /// Renders one listed Message, bound to its item's length and digest, and
@@ -810,6 +879,11 @@ const DisplayCapture = struct {
     current: ?protocol.ActivityItem = null,
     current_start: u64 = 0,
     current_shown: bool = false,
+    /// The rule goes before the first shown item after this position.
+    unseen_after: ?u64 = null,
+    /// Where the rule went.
+    rule_at: ?u64 = null,
+    colour: bool = false,
 
     pub fn item(self: *@This(), value: protocol.ActivityItem) void {
         _ = self.finish();
@@ -824,6 +898,20 @@ const DisplayCapture = struct {
     /// The current item is a Message shown while it waited.
     pub fn drew(self: *@This(), admission: u64) void {
         self.drawn = admission;
+    }
+
+    /// Writes the "new since you looked" rule here.
+    fn rule(self: *@This()) !void {
+        self.unseen_after = null;
+        self.rule_at = self.offset;
+        try self.write(View.Style.quiet.code(self.colour));
+        try self.write(unseen.rule);
+        try self.write(View.Style.normal.code(self.colour));
+    }
+
+    fn write(self: *@This(), bytes: []const u8) !void {
+        try self.file.writePositionalAll(self.task.io, bytes, self.offset);
+        self.offset += bytes.len;
     }
 
     /// A stop shows the queued Messages it excluded next, from the one
@@ -842,8 +930,13 @@ const DisplayCapture = struct {
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
-        try self.file.writePositionalAll(self.task.io, bytes, self.offset);
-        self.offset += bytes.len;
+        // An item's first bytes follow the rule when it is the first unseen
+        // one shown, and its echo and boundary start after the rule.
+        if (bytes.len != 0 and !self.current_shown) if (self.current) |current| if (self.unseen_after) |after| if (current.position > after) {
+            try self.rule();
+            self.current_start = self.offset;
+        };
+        try self.write(bytes);
         if (bytes.len == 0 or self.current_shown) return;
         const current = self.current orelse return;
         self.current_shown = true;
@@ -865,6 +958,35 @@ const DisplayCapture = struct {
         return self.messages;
     }
 };
+
+test "the rule precedes the first shown item after the read-through position, once, outside its echo" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "output", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    const message: protocol.ActivityItem.Message = .{ .admission = 4, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 };
+    var output: DisplayCapture = .{ .task = &task, .file = file, .unseen_after = 3 };
+    // Read items, and an unseen one that shows nothing, take no rule.
+    output.item(.{ .position = 3, .at = 1, .value = .{ .assistant = content } });
+    try output.feed("seen\n");
+    output.item(.{ .position = 4, .at = 1, .value = .{ .call = undefined } });
+    try output.feed("");
+    output.item(.{ .position = 5, .at = 1, .value = .{ .admission = message } });
+    try output.feed("\n› new\n");
+    output.item(.{ .position = 6, .at = 1, .value = .{ .assistant = content } });
+    try output.feed("later\n");
+    _ = output.finish();
+    var bytes: [128]u8 = undefined;
+    const written = bytes[0..try file.readPositionalAll(io, &bytes, 0)];
+    try std.testing.expectEqualStrings("seen\n" ++ unseen.rule ++ "\n› new\nlater\n", written);
+    try std.testing.expectEqual(@as(?u64, 5), output.rule_at);
+    // The Message's echo is its own rows, after the rule.
+    try std.testing.expectEqual(@as(usize, 1), output.echoes.count);
+    try std.testing.expectEqualStrings("\n› new\n", written[@intCast(output.echoes.items[0].output)..@intCast(output.echoes.items[0].end)]);
+}
 
 /// Messages shown in live output, by admission id. Another Session's Message
 /// shows first as its Admission, as does a person's or script's taken next;
@@ -1287,7 +1409,7 @@ test "a transcript joins at the first retained boundary or shows the gap after t
 pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
-    const target = job.message_target.?;
+    const target = job.target.message;
     const Staging = struct {
         io: std.Io,
         file: std.Io.File,
@@ -1698,6 +1820,7 @@ const FakeHost = struct {
     end: u64,
     held: bool = false,
     refuse_content: bool = false,
+    read_through: ?u64 = null,
     pages: usize = 0,
     contents: usize = 0,
     others: usize = 0,
@@ -1743,6 +1866,8 @@ const FakeHost = struct {
             next = if (direction == .forward) next + 1 else next - 1;
         }
         facts.more = facts.count == facts.items.len and next >= 1 and next <= end;
+        facts.read_through = self.read_through;
+        facts.beyond_unseen = direction == .backward and facts.more and if (self.read_through) |through| next > through else true;
         const boundary = if (direction == .forward and facts.more) facts.items[facts.count - 1].position else end;
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
@@ -1876,6 +2001,37 @@ test "the queued row's line fails the read when the Host refuses it" {
     var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
     try std.testing.expectError(error.HostInvocationFailed, host.read(&job));
     try std.testing.expectEqual(@as(usize, 1), host.contents);
+}
+
+test "Messages waiting at an opening on the rule show in the queued row, and the rule only above one live output shows" {
+    // Rows through 19 were read; 20 shows nothing, and A and B wait at 21
+    // and 22. Behind work, both wait in the queued row: no unseen row shows,
+    // so there is no rule to land on.
+    const tail = [_]FakeHost.Tail{ .{ .value = FakeHost.message(1) }, .{ .value = FakeHost.message(2) } };
+    var held: FakeHost = .{ .history = 20, .tail = &tail, .end = 22, .held = true, .read_through = 19 };
+    var behind: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
+    try held.read(&behind);
+    try std.testing.expectEqualStrings("", held.shown);
+    try std.testing.expectEqual(unseen.Rule.none, behind.result.rule);
+    try std.testing.expectEqual(@as(?u64, 19), behind.result.read_through);
+    try std.testing.expectEqual(@as(u64, 2), behind.result.queued.count);
+    // Idle, A is taken next and shows at its Admission, under the rule; B
+    // still waits in the row.
+    var idle: FakeHost = .{ .history = 20, .tail = &tail, .end = 22, .read_through = 19 };
+    var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
+    try idle.read(&opening);
+    try std.testing.expect(std.mem.startsWith(u8, idle.shown, unseen.rule));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, idle.shown, "please wait"));
+    try std.testing.expectEqual(unseen.Rule{ .at = 0 }, opening.result.rule);
+    try std.testing.expectEqual(@as(u64, 1), opening.drawn.admission);
+    // With every row on the page unseen, the rule is above it, and the page
+    // still leaves B to the row.
+    var early: FakeHost = .{ .history = 40, .tail = &tail, .end = 42, .read_through = 5 };
+    var older: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 42 } };
+    try early.read(&older);
+    try std.testing.expectEqual(unseen.Rule.older, older.result.rule);
+    try std.testing.expect(std.mem.indexOf(u8, early.shown, unseen.rule) == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, early.shown, "please wait"));
 }
 
 test "a stop labels a Message that showed while it waited at the opening" {

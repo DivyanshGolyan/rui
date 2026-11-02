@@ -1230,6 +1230,7 @@ const Route = enum {
     proposal_field,
     activity_page,
     activity_content,
+    mark_read,
     person_message,
     unsupported_control,
 
@@ -1539,6 +1540,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
+        .mark_read => |*command| {
+            host.store.markRead(command) catch |err| switch (err) {
+                error.SessionNotFound, error.PositionNotReached => return respondStatic(fd, 409, .mark_read_refused, @errorName(err)),
+                else => {
+                    fenceDispatch(host, "last read", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.mark_read_ack.len, protocol.JsonOut.append, .{protocol.mark_read_ack});
+        },
         .person_message => |*command| {
             const found = host.store.personMessage(command) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
@@ -1668,6 +1679,8 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/mark-read"))
+            .mark_read
         else if (std.mem.eql(u8, path, "/v1/person-message"))
             .person_message
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
@@ -3189,6 +3202,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     facts.work = .{ .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max }, .revision = max };
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.len = protocol.max_workspace_bytes;
+    facts.read_through = max;
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
     try facts.writeJson(&page_writer);

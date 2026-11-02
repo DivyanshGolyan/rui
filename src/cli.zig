@@ -519,7 +519,10 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     const io = init.io;
     switch (client.hostStatus(io, selected)) {
         .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
-        .incompatible => return error.IncompatibleHost,
+        .incompatible => {
+            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host stop, then run this rui again; saved work is unchanged.\n", .{});
+            return error.IncompatibleHost;
+        },
         .access_failure => return error.StoreAccessFailed,
         .unavailable, .owned_unavailable => {},
     }

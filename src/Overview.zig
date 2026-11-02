@@ -73,12 +73,15 @@ pub const Operations = struct {
     /// ends the overview after a canonical Store failure.
     start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
+    /// Records how far the person saw a Session, giving up at the awake
+    /// clock's `until`.
+    mark_read: *const fn (*Self, client.Requests, []const u8, u64, i128) anyerror!void,
     /// Lends the terminal to the Session's conversation. Null once the
     /// person returned to the overview.
     converse: *const fn (*Self, view.Reference) ?Left,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .converse = converse };
+pub const client_operations: Operations = .{ .host = hostFacts, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .mark_read = markRead, .converse = converse };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -183,6 +186,8 @@ const Job = union(enum) {
     /// read on the worker's thread.
     start: view.OwnedStart,
     stop: view.Reference,
+    /// Records `marks`, which `dispatch` moved into `marking`.
+    mark_read,
 
     /// A job owns its inputs until it is replaced or the overview ends,
     /// whether or not it ran.
@@ -191,9 +196,55 @@ const Job = union(enum) {
     }
 };
 
-/// One host read and list page, at most one first-line batch, and the
-/// requests the core's ledger allows can wait at once.
-const max_jobs = 3 + view.max_requests;
+/// One host read and list page, at most one first-line batch, one mark
+/// read, and the requests the core's ledger allows can wait at once.
+const max_jobs = 4 + view.max_requests;
+
+/// How far the person saw Sessions they returned from, not yet recorded:
+/// one position per Session, so returning again and again while the Host
+/// is slow holds one entry, not one job each.
+pub const Marks = struct {
+    const capacity = 8;
+    entries: [capacity]Mark = undefined,
+    count: usize = 0,
+
+    pub const Mark = struct { session: view.Reference, position: u64 };
+
+    /// The furthest position for a Session wins. Past capacity the oldest
+    /// Session's entry goes: its next opening lands earlier, and no saved
+    /// work depends on it.
+    fn put(self: *Marks, session: view.Reference, position: u64) void {
+        for (self.entries[0..self.count]) |*entry| if (std.mem.eql(u8, &entry.session, &session)) {
+            entry.position = @max(entry.position, position);
+            return;
+        };
+        if (self.count == capacity) {
+            std.mem.copyForwards(Mark, self.entries[0 .. capacity - 1], self.entries[1..capacity]);
+            self.count -= 1;
+        }
+        self.entries[self.count] = .{ .session = session, .position = position };
+        self.count += 1;
+    }
+
+    fn get(self: *const Marks, session: view.Reference) ?u64 {
+        for (self.entries[0..self.count]) |entry| if (std.mem.eql(u8, &entry.session, &session)) return entry.position;
+        return null;
+    }
+
+    /// Removes a Session's entry and returns its position.
+    fn take(self: *Marks, session: view.Reference) ?u64 {
+        for (self.entries[0..self.count], 0..) |entry, at| if (std.mem.eql(u8, &entry.session, &session)) {
+            std.mem.copyForwards(Mark, self.entries[at .. self.count - 1], self.entries[at + 1 .. self.count]);
+            self.count -= 1;
+            return entry.position;
+        };
+        return null;
+    }
+
+    fn slice(self: *const Marks) []const Mark {
+        return self.entries[0..self.count];
+    }
+};
 
 /// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
@@ -252,6 +303,13 @@ host: ?view.Host = null,
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
 reply: Reply = .{},
+/// Positions waiting for the next mark job, which takes them all.
+marks: Marks = .{},
+/// The positions the mark job in flight, or last run, records. Only the
+/// worker's job reads them while it runs.
+marking: Marks = .{},
+/// A mark job waits in the queue.
+mark_queued: bool = false,
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 
@@ -498,6 +556,11 @@ fn dispatch(self: *Self, jobs: enum { all, stops }) !void {
     self.job = self.jobs[at];
     std.mem.copyForwards(Job, self.jobs[at .. self.job_count - 1], self.jobs[at + 1 .. self.job_count]);
     self.job_count -= 1;
+    if (self.job == .mark_read) {
+        self.marking = self.marks;
+        self.marks = .{};
+        self.mark_queued = false;
+    }
     try self.worker.start(self.init.io, self, work);
 }
 
@@ -531,7 +594,50 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
         },
         .start => |*start| try self.ops.start(self, requests, self.startInput(start), &self.reply),
         .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        .mark_read => try self.recordMarks(requests, self.marking.slice(), requests.markReadDeadline()),
     }
+}
+
+/// Records how far the person saw a Session they returned from, once the
+/// worker is free; the overview draws meanwhile.
+fn noteSeen(self: *Self, session: view.Reference, position: u64) void {
+    self.marks.put(session, position);
+    if (self.mark_queued) return;
+    self.queue(.mark_read);
+    self.mark_queued = true;
+}
+
+/// How far the person saw `session` as far as the overview knows but the
+/// Host may not yet: a waiting position, which the opening now records
+/// before it reads, or one the job in flight is still sending.
+fn unrecordedRead(self: *Self, session: view.Reference) ?u64 {
+    const waiting = self.marks.take(session);
+    const sending = if (self.worker.thread != null and self.job == .mark_read) self.marking.get(session) else null;
+    if (waiting) |position| return @max(position, sending orelse 0);
+    return sending;
+}
+
+/// Sends each mark by one deadline. No saved work depends on them: a Host
+/// that does not take one keeps the earlier position, and the next opening
+/// lands there. A canonical Store failure ends the overview, as it does
+/// for every other request.
+fn recordMarks(self: *Self, requests: client.Requests, marks: []const Marks.Mark, until: i128) !void {
+    for (marks) |*mark| self.ops.mark_read(self, requests, &mark.session, mark.position, until) catch |err| switch (err) {
+        error.CanonicalStoreFailure => return err,
+        else => {},
+    };
+}
+
+/// On the way out, records every position not yet recorded, all within
+/// one second: the terminal is restored, so waiting holds no screen.
+/// `sending`: the mark job in flight was cancelled and may not have sent
+/// its own.
+fn flushMarks(self: *Self, sending: bool, last: ?Marks.Mark) !void {
+    const requests: client.Requests = .{ .io = self.init.io };
+    const until = requests.markReadDeadline();
+    if (last) |mark| try self.recordMarks(requests, &.{mark}, until);
+    if (sending) try self.recordMarks(requests, self.marking.slice(), until);
+    try self.recordMarks(requests, self.marks.slice(), until);
 }
 
 /// Joins the finished job and steps the core with what it left: a failed
@@ -566,6 +672,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .start = self.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
+        .mark_read => {},
     }
     return null;
 }
@@ -786,11 +893,14 @@ fn converse(self: *Self, session: view.Reference) ?Left {
         return left;
     };
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine };
-    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, lender);
+    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, self.unrecordedRead(session), lender);
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
     if (returned) ended = frontend.back() orelse {
+        // The overview draws while its worker records how far the person
+        // read.
+        if (frontend.takeSeen()) |position| self.noteSeen(session, position);
         self.init.gpa.destroy(frontend);
         for (opened) |file| file.close(io);
         return null;
@@ -843,6 +953,7 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 /// follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
+    const sending = self.worker.thread != null and self.job == .mark_read;
     self.worker.cancel();
     const answered: anyerror!?Next = if (view.step(&self.state, .leave)) |_| self.complete() else |err| err;
     // A ledger entry prints well under 512 bytes.
@@ -853,20 +964,22 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
     var ending = try ended;
     switch (ending) {
         .overview => {
+            const marked = self.flushMarks(sending, null);
             try restored;
             _ = try answered;
+            try marked;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
             if (answered) |_| {} else |err| left.ended = err;
-            return self.leave(left.*, restored);
+            return self.leave(left.*, restored, sending);
         },
     }
 }
 
 /// Lets the conversation the person left join its borrowers and write its
 /// guidance, then names the Session to resume.
-fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
+fn leave(self: *Self, left: Left, restored: anyerror!void, sending: bool) !void {
     const io = self.init.io;
     defer if (left.files) |files| inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(io);
     defer if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
@@ -875,10 +988,13 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     const outcome: anyerror!void = run: {
         const frontend = left.frontend orelse {
             restored catch {};
+            const marked = self.flushMarks(sending, null);
             _ = left.ended catch |err| break :run err;
-            break :run {};
+            break :run marked;
         };
         const departure = frontend.leave(left.ended, restored);
+        const seen: ?Marks.Mark = if (frontend.takeSeen()) |position| .{ .session = left.session, .position = position } else null;
+        const marked = self.flushMarks(sending, seen);
         const end = departure.end catch |err| {
             if (departure.failure_notice) self.terminal.detached(store, session, departure.action) catch |notice_error|
                 stderr.diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
@@ -891,8 +1007,13 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
             },
             .returned => unreachable,
         }
+        marked catch |err| break :run err;
     };
     return outcome catch |err| if (self.lent_failed) err else self.failed(err, left.session);
+}
+
+fn markRead(self: *Self, requests: client.Requests, session: []const u8, position: u64, until: i128) !void {
+    return requests.markRead(self.options.store, session, position, until);
 }
 
 fn hostFacts(self: *Self) ?view.Host {
@@ -987,6 +1108,10 @@ const Seen = struct {
     conversed: view.Reference = @splat(0),
     /// How many Sessions the fake listing returns, from `listed_references`.
     listed: usize = 1,
+    /// Each mark the worker sent, in order.
+    marked: [16]struct { session: view.Reference = @splat(0), position: u64 = 0 } = @splat(.{}),
+    marks: usize = 0,
+    mark_failure: ?anyerror = null,
 
     var now: Seen = .{};
 
@@ -1056,6 +1181,13 @@ const fake_operations: Operations = .{
             reply.* = .{ .outcome = .accepted };
         }
     }.stop,
+    .mark_read = struct {
+        fn markRead(_: *Self, _: client.Requests, session: []const u8, position: u64, _: i128) !void {
+            if (Seen.now.mark_failure) |err| return err;
+            Seen.now.marked[Seen.now.marks] = .{ .session = session[0..6].*, .position = position };
+            Seen.now.marks += 1;
+        }
+    }.markRead,
     .converse = struct {
         fn converse(_: *Self, session: view.Reference) ?Left {
             Seen.now.conversations += 1;
@@ -1519,6 +1651,66 @@ fn finishedWith(rig: *Rig, ending: Ending, failure: anyerror, buffer: []u8) ![]c
     try std.testing.expectError(failure, finished);
     const count = std.c.read(pipe[0], buffer.ptr, buffer.len);
     return if (count > 0) buffer[0..@intCast(count)] else "";
+}
+
+fn testReference(text: []const u8) view.Reference {
+    return text[0..6].*;
+}
+
+test "returning to Sessions while the Host is slow waits as one mark per Session, the furthest" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    // Far more returns than the queue holds jobs.
+    for (0..4 * max_jobs) |index| {
+        overview.noteSeen(testReference("k7m2qx"), 10 + index);
+        overview.noteSeen(testReference("b4n8wd"), 3);
+    }
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.marks);
+    try std.testing.expectEqualStrings("k7m2qx", &Seen.now.marked[0].session);
+    try std.testing.expectEqual(@as(u64, 10 + 4 * max_jobs - 1), Seen.now.marked[0].position);
+    try std.testing.expectEqualStrings("b4n8wd", &Seen.now.marked[1].session);
+}
+
+test "reopening a Session takes the mark still waiting for it, so the opening records it first" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.noteSeen(testReference("k7m2qx"), 12);
+    overview.noteSeen(testReference("b4n8wd"), 5);
+    try std.testing.expectEqual(@as(?u64, 12), overview.unrecordedRead(testReference("k7m2qx")));
+    try std.testing.expectEqual(@as(?u64, null), overview.unrecordedRead(testReference("p3c6tz")));
+    try std.testing.expect(try rig.settle() == null);
+    // The worker sends only the other Session's.
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.marks);
+    try std.testing.expectEqualStrings("b4n8wd", &Seen.now.marked[0].session);
+}
+
+test "a canonical Store failure recording a mark ends the overview; a refusal does not" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    Seen.now.mark_failure = error.MarkReadRejected;
+    rig.overview.noteSeen(testReference("k7m2qx"), 12);
+    try std.testing.expect(try rig.settle() == null);
+    Seen.now.mark_failure = error.CanonicalStoreFailure;
+    rig.overview.noteSeen(testReference("k7m2qx"), 13);
+    try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
+}
+
+test "quitting records the marks still waiting" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    rig.overview.noteSeen(testReference("k7m2qx"), 12);
+    var buffer: [1024]u8 = undefined;
+    _ = try finishedGuidance(rig, &buffer);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.marks);
+    try std.testing.expectEqual(@as(u64, 12), Seen.now.marked[0].position);
 }
 
 test "while a conversation holds the terminal the worker sends only its stop, and a listing's failure stays the overview's" {

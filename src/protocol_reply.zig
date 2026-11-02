@@ -247,14 +247,14 @@ pub const ActivityPage = struct {
         };
         const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work, read_through: ?JsonString(20), beyond_unseen: bool };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
         var page: ActivityPage = .{ .facts = .{ .end = try id(wire.end, true), .direction = wire.direction.value, .more = wire.more, .count = wire.items.count } };
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("activity_page") or page.facts.direction != cursor.direction or
             (cursor.end != null and cursor.end.? != page.facts.end) or cursor.position > page.facts.end or
-            (wire.more and wire.items.count != 16)) return error.InvalidActivityPage;
+            (wire.more and wire.items.count != 16) or (wire.beyond_unseen and !wire.more)) return error.InvalidActivityPage;
         var position = cursor.position;
         var ordinal = cursor.ordinal;
         for (wire.items.values[0..wire.items.count], page.facts.items[0..wire.items.count]) |item, *fact| {
@@ -344,6 +344,8 @@ pub const ActivityPage = struct {
         // The permission prompt shows this Workspace, so it keeps Current's rule.
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
         facts.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
+        page.facts.read_through = if (wire.read_through) |text| try id(text, false) else null;
+        page.facts.beyond_unseen = wire.beyond_unseen;
         return page;
     }
 

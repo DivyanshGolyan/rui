@@ -40,6 +40,7 @@ const cores = .{
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
+    .{ "unseen.zig", @import("unseen.zig") },
     .{ "work_line.zig", @import("work_line.zig") },
 };
 

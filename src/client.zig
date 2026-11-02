@@ -200,6 +200,29 @@ pub const Requests = struct {
         return readActionContent(self, store_path, session, action_id, protocol.read_action_call_id_request, "/v1/read-action-call-id", destination, reply_buffer);
     }
 
+    /// Records that a person saw `session`'s conversation through
+    /// `position`, giving up at `until` (awake clock nanoseconds): leaving
+    /// sends it, so a Host that does not answer does not hold the departure.
+    /// A canonical Store failure is CanonicalStoreFailure; any other refusal
+    /// is MarkReadRejected.
+    pub fn markRead(self: Requests, store_path: []const u8, session: []const u8, position: u64, until: i128) !void {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.mark_read_request, .{ paths.store.slice(), session, position });
+        var reply_buffer: ReplyBuffer = .{};
+        const reply = try sendSource(self, &paths, "/v1/mark-read", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get();
+        try markReadAnswer(reply);
+    }
+
+    /// Leaving waits at most this long for the Host to record how far a
+    /// person read.
+    pub fn markReadDeadline(self: Requests) i128 {
+        return std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds + std.time.ns_per_s;
+    }
+
     pub fn conversationPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ConversationCursor) !protocol_reply.ConversationPageReply {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
@@ -1547,6 +1570,11 @@ pub const Environment = struct {
     }
 };
 
+fn markReadAnswer(reply: protocol_reply.CommandReply) !void {
+    try protocol_reply.checkCanonicalFailure(reply);
+    if (reply.status != 200 or !std.mem.eql(u8, reply.body, protocol.mark_read_ack)) return error.MarkReadRejected;
+}
+
 fn sendSource(
     requests: Requests,
     paths: *const platform.Paths,
@@ -2150,7 +2178,7 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"4\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"},\"read_through\":null,\"beyond_unseen\":false}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -3144,6 +3172,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.proposal_field_request, .{ &store, &session, id, protocol.ProposalField.arguments }, protocol.max_proposal_field_request_bytes },
         .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+        .{ protocol.mark_read_request, .{ &store, &session, id }, protocol.max_mark_read_request_bytes },
         .{ protocol.person_message_request, .{ &store, &session, optional_id, id, Direction.backward }, protocol.max_person_message_request_bytes },
     };
     var largest: usize = 0;
@@ -3461,6 +3490,16 @@ test "a first-line read of a 1 MiB Message returns after the first line, before 
     try std.testing.expectEqualStrings("Review the release plan", (try reply).line);
     try std.testing.expect(host.failure != null);
     try std.testing.expect(host.sent < 1024 * 1024);
+}
+
+test "a mark-read reply keeps a canonical Store failure apart from a refusal" {
+    var body: protocol.ResponseBuffer = .{};
+    try body.appendShape(protocol.error_reply, .{ protocol.ErrorType.invocation_error, "canonical_store_failure" });
+    try std.testing.expectError(error.CanonicalStoreFailure, markReadAnswer(.{ .status = 500, .body = body.slice() }));
+    body = .{};
+    try body.appendShape(protocol.error_reply, .{ protocol.ErrorType.mark_read_refused, "PositionNotReached" });
+    try std.testing.expectError(error.MarkReadRejected, markReadAnswer(.{ .status = 409, .body = body.slice() }));
+    try markReadAnswer(.{ .status = 200, .body = protocol.mark_read_ack });
 }
 
 test "a first-line read returns the Host's refusal" {

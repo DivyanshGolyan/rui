@@ -22,7 +22,7 @@ const change_ring = @import("change_ring.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 45;
+pub const schema_version: u32 = 46;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -60,17 +60,82 @@ const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coale
     "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
     "AND count(coalesce(call.acceptance_position,action.acceptance_position))=count(*) " ++
     "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), ";
-const activity_sql = public_tool_groups_sql ++
-    "entries AS (SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission WHERE session_ref=?1 " ++
-    "UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN (1,3) " ++
-    "UNION ALL SELECT session_position,0,4,NULL FROM model_output_item WHERE session_ref=?1 AND item_kind=3 " ++
-    "UNION ALL SELECT sender_position,0,8,admission_id FROM message_admission WHERE sender_session_ref=?1), " ++
-    "completions AS (SELECT groups.position AS position,call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
-    "UNION ALL SELECT outcome_position,0,6,turn_id FROM turn WHERE session_ref=?1 AND outcome_code IS NOT NULL " ++
-    "UNION ALL SELECT position,0,7,NULL FROM session_stop WHERE session_ref=?1 " ++
-    // Each compound keeps within the Store's four-term limit.
-    "UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1), " ++
-    "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions) ";
+
+/// An Activity source row `last`, a rejected call or a resolved Action of
+/// `operation`, is where that Operation's tool group completes: every call
+/// has its accepted result, one per call item, and none was accepted later.
+/// It reads only that Operation's calls, so a seek by acceptance position
+/// finds a group's results without grouping the Session's history.
+fn toolGroupCompletesAtLast(comptime operation: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM model_operation op WHERE op.operation_id=" ++ operation ++ " AND op.session_ref=?1 AND " ++
+        resolutionIs("op.resolution_code", .tool_proposals) ++ ") " ++
+        "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=" ++ operation ++ ")=" ++
+        "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=" ++ operation ++ " AND item.item_kind=3) " ++
+        "AND NOT EXISTS(SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
+        "WHERE c.operation_id=" ++ operation ++ " AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL " ++
+        "OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL OR coalesce(c.acceptance_position,a.acceptance_position)>last.acceptance_position))";
+}
+
+/// Each Activity source, as (position, ordinal, kind, id) rows matching
+/// `filter`, which names a source's position and ordinal through `range`.
+/// Every source seeks an index on (Session, position), so a filter on
+/// position reads only the rows it keeps. The sources come in three groups,
+/// each within the Store's four-term compound limit.
+fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime order: []const u8) [3][]const u8 {
+    return .{
+        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission INDEXED BY message_admission_position " ++
+            "WHERE session_ref=?1 AND " ++ range("admission_position", "0") ++
+            " UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry " ++
+            "WHERE session_ref=?1 AND entry_kind IN (1,3) AND " ++ range("session_position", "0") ++
+            " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item INDEXED BY model_output_call_history " ++
+            "WHERE session_ref=?1 AND item_kind=3 AND " ++ range("session_position", "0") ++
+            " UNION ALL SELECT sender_position,0,8,admission_id FROM message_admission WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++ order,
+        // A tool group's results sit at its last acceptance, one per call,
+        // ordered by call.
+        "SELECT last.acceptance_position AS position,call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last " ++
+            "JOIN model_tool_call call ON call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++
+            range("last.acceptance_position", "call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id") ++
+            " UNION ALL SELECT last.acceptance_position,call.call_ordinal+1,5,NULL FROM action_operation last " ++
+            "JOIN model_tool_call call ON call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++
+            range("last.acceptance_position", "call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
+            " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn INDEXED BY turn_outcome_position WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ range("outcome_position", "0") ++
+            " UNION ALL SELECT position,0,7,NULL FROM session_stop INDEXED BY session_stop_position WHERE session_ref=?1 AND " ++ range("position", "0") ++ order,
+        "SELECT sender_position AS position,0 AS ordinal,9 AS kind,NULL AS id FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++ order,
+    };
+}
+
+fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const u8) []const u8 {
+    _ = ordinal;
+    return position ++ " IS NOT NULL";
+}
+
+/// The Activity row at position ?3 and ordinal ?4 through end ?2: each
+/// source seeks that one position.
+const activity_item_sql = blk: {
+    const sources = activitySources(anyActivityPosition, "");
+    break :blk std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), " ++
+        "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions UNION ALL {s}) " ++
+        "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ sources[0], sources[1], sources[2] });
+};
+
+/// One Activity page, at most 17 rows past cursor (?3, ?4) through end ?2,
+/// in `forward` order. Each source group keeps its own first 17 rows, read
+/// in order from its indexes, and the page takes the first 17 of those:
+/// the cost follows the page, not the Session's history.
+fn activityPageSql(comptime forward: bool) [:0]const u8 {
+    const Range = struct {
+        fn after(comptime position: []const u8, comptime ordinal: []const u8) []const u8 {
+            return position ++ ">=?3 AND " ++ position ++ "<=?2 AND (" ++ position ++ ">?3 OR " ++ ordinal ++ ">?4)";
+        }
+        fn before(comptime position: []const u8, comptime ordinal: []const u8) []const u8 {
+            return position ++ "<=?3 AND (" ++ position ++ "<?3 OR " ++ ordinal ++ "<?4)";
+        }
+    };
+    const order = if (forward) " ORDER BY 1,2 LIMIT 17" else " ORDER BY 1 DESC,2 DESC LIMIT 17";
+    const sources = activitySources(if (forward) Range.after else Range.before, order);
+    return std.fmt.comptimePrint("SELECT position,ordinal FROM ({s}) UNION ALL SELECT position,ordinal FROM ({s}) " ++
+        "UNION ALL SELECT position,ordinal FROM ({s}){s}", .{ sources[0], sources[1], sources[2], order });
+}
 /// Nullable columns permit corruption detection; no writer may omit one.
 /// Each partial index is empty in a sound Store, so every activity read
 /// checks the whole Session in a few steps, however long its history.
@@ -1683,6 +1748,7 @@ pub const Store = struct {
     const Ordinary = struct {
         const none = error{};
         const page = error{ SessionNotFound, InvalidCursor };
+        const read_through = error{ SessionNotFound, PositionNotReached };
         const content = error{ContentNotFound};
         const public_content = error{ ContentNotFound, RangeOutOfBounds };
         const action = error{ActionNotFound};
@@ -3383,7 +3449,11 @@ pub const Store = struct {
                 // one at the greatest position: times order nothing.
                 "(SELECT coalesce(a.resolved_at,op.resolved_at) FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
                 "WHERE c.operation_id=op.operation_id ORDER BY coalesce(c.acceptance_position,a.acceptance_position) DESC LIMIT 1) " ++
-                "FROM model_operation op " ++
+                // Only an Operation with an acceptance at the position can
+                // complete there.
+                "FROM (SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position=?2 " ++
+                "UNION ALL SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position=?2) last " ++
+                "CROSS JOIN model_operation op ON op.operation_id=last.operation_id " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
                 "WHERE op.session_ref=?1 AND " ++ resolutionIs("op.resolution_code", .tool_proposals) ++ " AND call.call_ordinal+1=?3 " ++
@@ -3560,26 +3630,30 @@ pub const Store = struct {
             };
         }
         page.end = end;
-        const statement = try self.cached(activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
-            "(?3=0 OR (?5=0 AND (position>?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal>?4))) OR " ++
-            "(?5=1 AND (position<?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal<?4)))) " ++
-            "ORDER BY CASE WHEN ?5=0 THEN position END,CASE WHEN ?5=0 THEN ordinal END," ++
-            "CASE WHEN ?5=1 THEN position END DESC,CASE WHEN ?5=1 THEN ordinal END DESC LIMIT 17");
+        // The cursor as a bound on (position, ordinal): a whole position is
+        // passed or kept by the largest ordinal, and a backward page with
+        // no cursor starts after the end's last row.
+        const forward = request.direction == .forward;
+        const statement = if (forward) try self.cached(comptime activityPageSql(true)) else try self.cached(comptime activityPageSql(false));
         defer resetCached(statement);
+        const whole: u64 = std.math.maxInt(i64);
         try bindText(statement, 1, request.session.slice());
         try bindU64(statement, 2, end);
-        try bindU64(statement, 3, request.position);
-        try bindNullableU64(statement, 4, request.ordinal);
-        try bindU64(statement, 5, @backingInt(request.direction));
+        try bindU64(statement, 3, if (forward or request.position != 0) request.position else end);
+        try bindU64(statement, 4, if (forward) request.ordinal orelse whole else if (request.position == 0) whole else request.ordinal orelse 0);
+        page.read_through = try self.readThroughLocked(request.session.slice());
         while (true) {
             const result = c.sqlite3_step(statement);
             if (result == c.SQLITE_DONE) break;
             if (result != c.SQLITE_ROW) return error.ActivityReadFailed;
+            const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
             if (page.count == page.items.len) {
                 page.more = true;
+                // The row after a backward page's oldest says whether the
+                // unseen rows reach past it.
+                page.beyond_unseen = !forward and if (page.read_through) |read| @as(u64, @intCast(position)) > read else true;
                 break;
             }
-            const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
             const ordinal = c.sqlite3_column_int64(statement, 1);
             if (ordinal < 0) return error.CorruptStore;
             page.items[page.count] = (try self.activityItemLocked(request.session.slice(), end, @intCast(position), @intCast(ordinal))).item;
@@ -3597,6 +3671,37 @@ pub const Store = struct {
         const work = (try self.readWorkLocked(request.session.slice(), session.created_at, try readUnixMilliseconds(self.io))).work;
         page.work.work = .fromCore(work);
         page.work.revision = session.revision;
+    }
+
+    fn readThroughLocked(self: *Store, session: []const u8) !?u64 {
+        const statement = try self.cached("SELECT read_through FROM session WHERE session_ref=?1");
+        defer resetCached(statement);
+        try bindText(statement, 1, session);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SessionReadFailed;
+        return if (try readNullablePositiveI64(statement, 0)) |position| @intCast(position) else null;
+    }
+
+    /// Records that a person has seen the Session's conversation through
+    /// `request.position`. It only advances, so a client that saw less, or a
+    /// repeated write, changes nothing. No Session list row shows it, so
+    /// it touches nothing in the change ring: a list watching the Session
+    /// does not read it again.
+    pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.read_through, self.markReadLocked(request));
+    }
+
+    fn markReadLocked(self: *Store, request: *const protocol.MarkRead) !void {
+        const session = request.session.slice();
+        const statement = try self.cached("UPDATE session SET read_through=?2 WHERE session_ref=?1 AND ?2<next_position AND (read_through IS NULL OR read_through<?2)");
+        defer resetCached(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, request.position);
+        try expectDone(statement);
+        if (c.sqlite3_changes(self.database) == 1) return;
+        const next_position = (try self.sessionNextPosition(session)) orelse return error.SessionNotFound;
+        if (request.position >= next_position) return error.PositionNotReached;
     }
 
     /// The Message with no Session sender next to `position` at `end`: one
@@ -3635,8 +3740,20 @@ pub const Store = struct {
     // This projection shares the page's canonical capture, not Current's active
     // Turn lifetime. It is staged until the frontend acknowledges that page.
     fn readCallActivityLocked(self: *Store, session: []const u8, position: u64, ordinal: ?u64) !protocol.CallActivity {
-        const statement = try self.cached(public_tool_groups_sql ++
-            "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM model_operation op " ++
+        // A group still waiting has an Action without its result; one that
+        // completes after the page has an acceptance after it. Only those
+        // Operations are grouped, not the Session's history.
+        const statement = try self.cached("WITH ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
+            "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
+            "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
+            "groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
+            "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE op.session_ref=?1 AND " ++ resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
+            "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+            "AND count(coalesce(call.acceptance_position,action.acceptance_position))=count(*) " ++
+            "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+            "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
             "LEFT JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
             "LEFT JOIN groups ON groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
             "AND (groups.position IS NULL OR groups.position>?2 OR (groups.position=?2 AND ?3 IS NOT NULL AND call.call_ordinal+1>?3))) " ++
@@ -3742,7 +3859,7 @@ pub const Store = struct {
 
     fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64, ordinal: u64) !ActivityIdentity {
         if (ordinal == 0 and position <= end) try self.validateAssistantEntries(session, position, position);
-        const statement = try self.cached(activity_sql ++ "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2");
+        const statement = try self.cached(activity_item_sql);
         defer resetCached(statement);
         try bindText(statement, 1, session);
         try bindU64(statement, 2, end);
@@ -7398,7 +7515,7 @@ pub const Store = struct {
             null;
         const insert_call = try self.cached(
             "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id," ++
-                "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata,session_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         );
         defer resetCached(insert_call);
         try bindU64(insert_call, 1, binding.operation_id);
@@ -7420,6 +7537,7 @@ pub const Store = struct {
             @memcpy(field_metadata[index * 40 + 8 ..][0..32], &field.content_digest);
         }
         try bindBlob(insert_call, 12, &field_metadata);
+        try bindText(insert_call, 13, session_ref_slice);
         try expectDone(insert_call);
 
         if (rejection_code == null) {
@@ -8516,7 +8634,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     ++ reasoning_effort_column_sql ++
         \\ label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),
         \\ created_at INTEGER NOT NULL CHECK(created_at>0),
-        \\ next_position INTEGER NOT NULL CHECK(next_position>0)
+        \\ next_position INTEGER NOT NULL CHECK(next_position>0),
+        \\ -- The position a person has seen the conversation through; NULL until one has.
+        \\ read_through INTEGER CHECK(read_through IS NULL OR (read_through>0 AND read_through<next_position))
         \\) STRICT;
         \\CREATE INDEX session_workspace_list ON session(workspace);
         \\CREATE TABLE core_command(
@@ -8703,6 +8823,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE model_tool_call(
         \\ operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),
+        \\ session_ref TEXT NOT NULL,
         \\ call_ordinal INTEGER NOT NULL CHECK(call_ordinal>=0),
         \\ item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),
         \\ name_content_id INTEGER NOT NULL REFERENCES content(content_id),
@@ -8718,6 +8839,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ UNIQUE(operation_id,item_ordinal),
         \\ UNIQUE(operation_id,call_id_content_id),
         \\ UNIQUE(operation_id,call_ordinal,action_kind),
+        \\ FOREIGN KEY(operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),
         \\ CHECK((rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND action_kind IS 1) OR
         \\       (rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL AND acceptance_position IS NOT NULL AND action_kind IS NULL))
         \\) STRICT, WITHOUT ROWID;
@@ -8765,8 +8887,10 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
         \\CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL;
         \\CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL;
+        \\CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position);
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position);
         \\CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL;
+        \\CREATE INDEX session_stop_position ON session_stop(session_ref,position);
         \\CREATE INDEX session_stop_turn ON session_stop(selected_turn_id);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
         \\CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle) WHERE sender_handle IS NOT NULL;
@@ -8774,6 +8898,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0;
         \\CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
+        \\CREATE INDEX model_tool_call_acceptance ON model_tool_call(session_ref,acceptance_position) WHERE acceptance_position IS NOT NULL;
         \\
     ++ "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND " ++
         retry_allowance_open_sql ++ ";\n" ++
@@ -8787,9 +8912,11 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         resolutionIs("resolution_code", .compacted) ++ ";\n" ++
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
+        \\CREATE INDEX model_output_call_history ON model_output_item(session_ref,session_position) WHERE item_kind=3;
         \\CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4;
         \\CREATE INDEX turn_session_latest ON turn(session_ref,turn_id DESC);
         \\CREATE INDEX turn_unpositioned ON turn(session_ref) WHERE (outcome_code IS NULL)!=(outcome_position IS NULL);
+        \\CREATE INDEX turn_outcome_position ON turn(session_ref,outcome_position);
     );
     try exec(database, "PRAGMA application_id=1280591409");
     try exec(database, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
@@ -8809,7 +8936,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_output_part','model_tool_call','action_operation','permission_decision_command')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_output_part','model_tool_call','action_operation','permission_decision_command')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','message_admission_person','message_admission_unpositioned','session_stop_exclusion','session_stop_unpositioned','session_stop_turn','action_operation_session_order','action_operation_sender_handle','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','turn_tool_continuation','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest','turn_unpositioned')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','message_admission_person','message_admission_unpositioned','message_admission_position','session_stop_exclusion','session_stop_unpositioned','session_stop_position','session_stop_turn','action_operation_session_order','action_operation_sender_handle','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','model_tool_call_acceptance','turn_one_active_per_session','turn_tool_continuation','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_call_history','model_output_compaction_anchor','turn_session_latest','turn_unpositioned','turn_outcome_position')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -9070,6 +9197,18 @@ fn createTouchOracleForTesting(database: *c.sqlite3) !void {
             try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ owner[0], event, event, owner[0], body }));
         }
     }
+    // How far a person read is no Session list row's fact, so recording it
+    // needs no touch: the Session's update trigger watches every other
+    // column, read from the schema so a new column is watched too.
+    try exec(database, "DROP TRIGGER temp.touched_session_UPDATE");
+    const columns = "SELECT group_concat(name,',') FROM pragma_table_info('session') WHERE name<>'read_through'";
+    var statement: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(database, columns, -1, &statement, null) != c.SQLITE_OK) return error.SqliteExecFailed;
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SqliteExecFailed;
+    const names = c.sqlite3_column_text(statement, 0) orelse return error.SqliteExecFailed;
+    var sql: [2048]u8 = undefined;
+    try exec(database, try std.fmt.bufPrintSentinel(&sql, "CREATE TEMP TRIGGER touched_session_UPDATE AFTER UPDATE OF {s} ON main.session BEGIN INSERT INTO touched_oracle VALUES(NEW.session_ref);INSERT INTO touched_oracle VALUES(OLD.session_ref); END", .{std.mem.span(names)}, 0));
 }
 
 fn setLimit(database: *c.sqlite3, category: c_int, value: c_int) !void {
@@ -19507,6 +19646,93 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expectEqual(@as(usize, 0), (try storage.activityPageForTesting(request)).count);
 }
 
+test "read-through only advances, within the Session's committed positions, touches no list, and pages carry it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "read-through-config");
+    try submitTestMessage(&storage, &tmp, "read-through-a", "a", session.slice(), "first");
+    try submitTestMessage(&storage, &tmp, "read-through-b", "b", session.slice(), "second");
+    var page: protocol.ActivityPage = .{};
+    try page.session.set(session.slice());
+    const unread = try storage.activityPageForTesting(page);
+    try std.testing.expectEqual(@as(?u64, null), unread.read_through);
+    const first = unread.items[0].position;
+    var read: protocol.MarkRead = .{ .position = first };
+    try read.session.set(session.slice());
+    const unmarked = storage.commit_generation.load(.acquire);
+    try storage.markRead(&read);
+    try std.testing.expectEqual(@as(?u64, first), (try storage.activityPageForTesting(page)).read_through);
+    // No Session list row shows it, so a list watching the Session has
+    // nothing to read again.
+    var changed: [1]change_ring.Id = undefined;
+    try std.testing.expectEqual(@as(usize, 0), storage.changes.changed(unmarked, storage.commit_generation.load(.acquire), null, null, &changed).len);
+    // A client that saw more moves it on; one that saw less, or the same
+    // write again, leaves it.
+    read.position = unread.end;
+    try storage.markRead(&read);
+    try storage.markRead(&read);
+    read.position = first;
+    try storage.markRead(&read);
+    try std.testing.expectEqual(@as(?u64, unread.end), (try storage.activityPageForTesting(page)).read_through);
+    // A position the Session has not reached, or an unknown Session, fails
+    // without fencing the Store.
+    read.position = unread.end + 1;
+    try std.testing.expectError(error.PositionNotReached, storage.markRead(&read));
+    try read.session.set("zzzzzz");
+    read.position = 1;
+    try std.testing.expectError(error.SessionNotFound, storage.markRead(&read));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(?u64, unread.end), (try storage.activityPageForTesting(page)).read_through);
+}
+
+test "a latest page says whether unseen rows reach past its oldest row" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "beyond-unseen-config");
+    var key: [32]u8 = undefined;
+    for (0..20) |index| {
+        const name = try std.fmt.bufPrint(&key, "beyond-unseen-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "row");
+    }
+    var page: protocol.ActivityPage = .{ .direction = .backward };
+    try page.session.set(session.slice());
+    const latest = try storage.activityPageForTesting(page);
+    try std.testing.expect(latest.more and latest.count == latest.items.len);
+    // The rows before the page, newest first.
+    var older = page;
+    older.end = latest.end;
+    older.position = latest.items[latest.count - 1].position;
+    older.ordinal = latest.items[latest.count - 1].ordinal;
+    const before = try storage.activityPageForTesting(older);
+    const just_before = before.items[0].position;
+    try std.testing.expect(just_before < older.position);
+    var further: u64 = 0;
+    for (before.items[0..before.count]) |item| if (item.position < just_before) {
+        further = item.position;
+        break;
+    };
+    try std.testing.expect(further != 0);
+    var read: protocol.MarkRead = .{ .position = further };
+    try read.session.set(session.slice());
+    // The row just before the page is unseen too.
+    try storage.markRead(&read);
+    try std.testing.expectEqual(true, (try storage.activityPageForTesting(page)).beyond_unseen);
+    // Read through it: every unseen row is on the page, so the opening
+    // places the rule there without reading an older page.
+    read.position = just_before;
+    try storage.markRead(&read);
+    const placed = try storage.activityPageForTesting(page);
+    try std.testing.expectEqual(true, placed.more);
+    try std.testing.expectEqual(false, placed.beyond_unseen);
+    try std.testing.expectEqual(just_before, placed.read_through.?);
+}
+
 test "an activity page reports the queued Messages at its end, until applied or stopped" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -19865,6 +20091,82 @@ test "completed tool labels trust admission while model replay authenticates pay
     var buffer: [4096]u8 = undefined;
     try std.testing.expectError(error.CorruptStore, reader.read(0, buffer[0..@intCast(name.length)]));
     try std.testing.expect(storage.isFenced());
+}
+
+test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
+    // Each Store holds `history` earlier units, a Message, its call item, the
+    // call's rejection and its Turn's outcome, then the same Session tail: a
+    // Message, twenty rejected calls and a stop. The opening's page and a
+    // forward page from the tail's first row read only the tail.
+    var steps: [2][2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "cost-config");
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+4*(value-1) AS position,instructions_content_id AS content FROM sequence,session; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                "SELECT value,'{1s}',printf('history-%d',value),content,position,value,1 FROM history; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1 FROM history; " ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT value,0,'{1s}',position+1,3,1,zeroblob(32),0,content,0 FROM history; " ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                "SELECT value,'{1s}',0,0,content,content,content,zeroblob(120),'unknown_tool',content,position+2 FROM history; " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT value,'{1s}',value,value,value,'completed',position+3,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+4*{0}; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try exec(storage.database, insert);
+        try exec(storage.database, "PRAGMA foreign_keys=ON");
+        const tail = (try storage.sessionNextPosition(session.slice())).?;
+        try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var identities: [20][24]u8 = undefined;
+        var calls: [20]TestingCall = undefined;
+        for (&calls, &identities, 0..) |*call, *identity, index| {
+            const id = try std.fmt.bufPrint(identity, "cost-{d}", .{index});
+            call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" };
+        }
+        try settleCallsForTesting(&storage, &tmp, binding, "cost-calls", &calls);
+        var stop = try completeSessionStop("cost-stop", session.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+
+        var opening: protocol.ActivityPage = .{ .direction = .backward };
+        try opening.session.set(session.slice());
+        cost[0] = try activityPageSteps(&storage, opening);
+        const page = try storage.activityPageForTesting(opening);
+        try std.testing.expect(page.more);
+        var forward: protocol.ActivityPage = .{ .end = page.end, .position = tail - 1 };
+        try forward.session.set(session.slice());
+        cost[1] = try activityPageSteps(&storage, forward);
+        const later = try storage.activityPageForTesting(forward);
+        try std.testing.expect(later.more);
+        try std.testing.expectEqual(tail, later.items[0].position);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+/// The VM steps every statement of the Store's connection takes to read one
+/// Activity page.
+fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {
+    var statement = c.sqlite3_next_stmt(storage.database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.database, each))
+        _ = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+    _ = try storage.activityPageForTesting(request);
+    var total: i64 = 0;
+    statement = c.sqlite3_next_stmt(storage.database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.database, each))
+        total += c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    return total;
 }
 
 test "live tool activity survives completed Turns and split result pages" {

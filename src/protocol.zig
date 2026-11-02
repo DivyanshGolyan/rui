@@ -174,6 +174,7 @@ pub const Kind = enum {
     proposal_field,
     activity_page,
     activity_content,
+    mark_read,
     person_message,
 };
 
@@ -684,6 +685,8 @@ pub const ActivityItem = struct {
     }
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
+/// A person has seen the Session's conversation through `position`.
+pub const MarkRead = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0 };
 
 /// The Message with no Session sender nearest `position` at `end`: before
 /// it backward, after it forward. Position zero starts either traversal.
@@ -960,11 +963,17 @@ pub const ActivityFacts = struct {
     /// At the same boundary as `call_activity`.
     queued: Queued = .{},
     work: PageWork = .{},
+    /// The position a person has read the Session's conversation through,
+    /// as of this page's read; null until someone has.
+    read_through: ?u64 = null,
+    /// The first row past this page, in its direction, follows the
+    /// read-through position: false when there is none.
+    beyond_unseen: bool = false,
 
     /// Holes: end, direction; then the items, then `tail`.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
-    /// Holes: more, call activity, queued, work.
-    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, "}" };
+    /// Holes: more, call activity, queued, work, read-through position, beyond unseen.
+    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, ",\"read_through\":", Hole.optional_id, ",\"beyond_unseen\":", Hole.boolean, "}" };
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
@@ -973,7 +982,7 @@ pub const ActivityFacts = struct {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work });
+        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work, self.read_through, self.beyond_unseen });
     }
 };
 
@@ -997,13 +1006,14 @@ pub const Request = union(Kind) {
     proposal_field: ReadProposalField,
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
+    mark_read: MarkRead,
     person_message: ReadPersonMessage,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .person_message => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .mark_read, .person_message => {},
         }
     }
 
@@ -1338,6 +1348,8 @@ const Parser = struct {
             .activity_page
         else if (kind_text.eql("activity_content"))
             .activity_content
+        else if (kind_text.eql("mark_read"))
+            .mark_read
         else if (kind_text.eql("person_message"))
             .person_message
         else
@@ -1423,6 +1435,10 @@ const Parser = struct {
             .activity_content => {
                 out.* = .{ .activity_content = .{ .store = store } };
                 try self.parseActivityContent(&out.activity_content);
+            },
+            .mark_read => {
+                out.* = .{ .mark_read = .{ .store = store } };
+                try self.parseMarkRead(&out.mark_read);
             },
             .person_message => {
                 out.* = .{ .person_message = .{ .store = store } };
@@ -1779,6 +1795,16 @@ const Parser = struct {
         try self.readSmallString(&direction);
         out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
         try out.validate();
+    }
+
+    fn parseMarkRead(self: *Parser, out: *MarkRead) !void {
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&out.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        out.position = try self.readCanonicalU64();
+        if (out.position == 0 or out.position > std.math.maxInt(i64)) return error.InvalidCursor;
     }
 
     fn parsePersonMessage(self: *Parser, out: *ReadPersonMessage) !void {
@@ -2382,6 +2408,8 @@ pub const proposal_field_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\
 pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
+/// Holes: Store, Session, position.
+pub const mark_read_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"mark_read\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, end, position, direction.
 pub const person_message_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"person_message\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
@@ -2424,6 +2452,7 @@ pub const max_proposal_page_request_bytes = shapeBytes(proposal_page_request);
 pub const max_proposal_field_request_bytes = shapeBytes(proposal_field_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
+pub const max_mark_read_request_bytes = shapeBytes(mark_read_request);
 pub const max_person_message_request_bytes = shapeBytes(person_message_request);
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
@@ -2432,7 +2461,7 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_result_request,         list_sessions_changed_request, read_action_arguments_request,
     read_action_call_id_request, conversation_content_request,  conversation_page_request,
     proposal_page_request,       proposal_field_request,        activity_page_request,
-    activity_content_request,    person_message_request,
+    activity_content_request,    mark_read_request,             person_message_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2590,7 +2619,7 @@ pub const command_observation_reply = struct {
 
 /// Holes: error type and code.
 /// The `type` of an error reply: what kind of failure its code names.
-pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, proposal_unavailable, failed_response_unavailable };
+pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, proposal_unavailable, failed_response_unavailable, mark_read_refused };
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
@@ -2609,10 +2638,11 @@ comptime {
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
+pub const mark_read_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"mark_read_reply\",\"status\":\"recorded\"}";
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, mark_read_ack.len));
 
 pub const conversation_page_reply = struct {
     /// Hole: the page end.
@@ -3065,6 +3095,30 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         } else {
             const request = try parseForTest(&parser);
             try std.testing.expect(request == .conversation_page);
+        }
+    }
+}
+
+test "a read-through position is a canonical positive Session position" {
+    const cases = [_]struct { position: []const u8, expected: ?u64 = null, failure: ?anyerror = null }{
+        .{ .position = "1", .expected = 1 },
+        .{ .position = "9223372036854775807", .expected = std.math.maxInt(i64) },
+        .{ .position = "0", .failure = error.InvalidCursor },
+        .{ .position = "9223372036854775808", .failure = error.InvalidCursor },
+        .{ .position = "07", .failure = error.InvalidIdentity },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"mark_read\",\"store\":\"s\",\"session\":\"x\",\"position\":\"{s}\"}}", .{case.position});
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const request = try parseForTest(&parser);
+            try std.testing.expectEqual(case.expected.?, request.mark_read.position);
+            try std.testing.expectEqualStrings("x", request.mark_read.session.slice());
         }
     }
 }
