@@ -7,6 +7,7 @@ const tool_catalog = @import("../../tools.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
+const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
@@ -124,7 +125,7 @@ pub const ValidatedOutput = struct {
 pub fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    try entry.finish(Ordinary.attempt_binding, validateCurrentAttempt(self, binding));
+    _ = try entry.finish(Ordinary.attempt_binding, validateCurrentAttempt(self, binding));
 }
 
 pub fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKind {
@@ -139,7 +140,9 @@ pub fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKi
     };
 }
 
-pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
+/// Checks that `binding` names its Operation's current Attempt, touching
+/// and returning the Operation's Session.
+pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !change_ring.Id {
     const statement = try store_core.cached(
         self,
         "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key,session_ref " ++
@@ -154,10 +157,11 @@ pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try sqlite.readText(statement, 4, &session);
     try store_core.touch(self, session.slice());
+    if (session.len != change_ring.id_bytes) return error.CorruptStore;
     if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
         c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
         return error.StaleAttemptBinding;
-    if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return;
+    if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return session.slice()[0..change_ring.id_bytes].*;
     if (c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL) return error.SupersededByControl;
     return error.StaleAttemptBinding;
 }
@@ -180,7 +184,7 @@ pub fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding)
 
 pub fn claimModelAuthRefreshLocked(self: *Store, binding: AttemptBinding) !bool {
     try store_core.begin(self);
-    try validateCurrentAttempt(self, binding);
+    _ = try validateCurrentAttempt(self, binding);
     const update = try store_core.cached(
         self,
         "UPDATE model_operation SET auth_refresh_claimed=1 " ++
@@ -210,7 +214,7 @@ pub fn settleModelAttemptFailureLocked(
     var retry_random: u64 = 0;
     if (disposition == .retryable) self.io.random(std.mem.asBytes(&retry_random));
     try store_core.begin(self);
-    try validateCurrentAttempt(self, binding);
+    const session = try validateCurrentAttempt(self, binding);
     switch (disposition) {
         .ordinary, .context_overflow => {
             const compact = disposition == .context_overflow and try model_admission_domain.overflowCanCompact(self, binding);
@@ -236,7 +240,7 @@ pub fn settleModelAttemptFailureLocked(
             try sqlite.expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
             if (compact) {
-                try turn_domain.recordContinuation(self, binding.turn_id);
+                try turn_domain.recordContinuation(self, binding.turn_id, &session);
                 if (faults.before_commit) return error.InjectedCommitFailure;
                 try store_core.commit(self);
                 return;
@@ -376,7 +380,7 @@ pub fn settleModelSuccessLocked(
         std.debug.assert(c.sqlite3_txn_state(self.database, "main") == c.SQLITE_TXN_WRITE);
         trace.mark(.transaction_active);
     }
-    try validateCurrentAttempt(self, binding);
+    _ = try validateCurrentAttempt(self, binding);
     const operation = try store_core.cached(
         self,
         "SELECT o.session_ref,r.tools_mask FROM model_operation o JOIN session_revision r " ++
@@ -556,7 +560,7 @@ pub fn settleModelSuccessLocked(
     }
     if (turn_policy.completesTurn(output_fact, pending)) {
         if (!try turn_domain.closeTurn(self, binding.turn_id, binding.operation_id, .{ .completed = answer_id.? })) return error.StaleAttemptBinding;
-    } else try turn_domain.recordContinuation(self, binding.turn_id);
+    } else try turn_domain.recordContinuation(self, binding.turn_id, session_ref.slice());
     if (faults.output_commit) return error.InjectedOutputCommitFailure;
     try store_core.commit(self);
 }

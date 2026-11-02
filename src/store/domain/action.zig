@@ -255,11 +255,13 @@ const resolve_action = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleActionAttemptBinding } },
 });
 
-/// Round 1 reads the binding's facts and looks up the result's content; a
-/// stop that selected the Turn adds a round for the cancellation text and
-/// whether the Turn is ready to close. The write round resolves the Action,
-/// closes a stopped Turn its last Action leaves ready, and records a
-/// continuation, then commits.
+/// Round 1 reads the binding's facts. Round 2 looks up the content the
+/// Action settles with: its result, or, when a stop selected the Turn, the
+/// cancellation text, together with whether the Turn is ready to close. So
+/// a stop never hashes a result it discards, and the common path runs the
+/// two reads main did. The write round resolves the Action, closes a
+/// stopped Turn its last Action leaves ready, and records a continuation,
+/// then commits.
 pub fn settleActionAttempt(
     a: anytype,
     binding: ActionAttemptBinding,
@@ -268,27 +270,23 @@ pub fn settleActionAttempt(
     faults: Faults,
 ) !ActionSettlement {
     var facts: settle_facts.Result = undefined;
-    var effect: content_domain.Import = .ofBytes(result, false);
     a.read(settle_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &facts);
-    content_domain.lookup(a, &effect);
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
 
     // A stop that selected the Turn cancels whatever the Action did.
-    var cancellation: content_domain.Import = .ofBytes(content_domain.stop_cancellation_text, false);
+    const settled: struct { code: ActionResolutionCode, text: []const u8 } =
+        if (found.stopped) .{ .code = .cancelled, .text = content_domain.stop_cancellation_text } else .{ .code = code, .text = result };
+    var content: content_domain.Import = if (found.stopped) content_domain.stop_cancellation else .ofBytes(result, false);
     var completion: turn_domain.stopped_turn.Result = null;
-    if (found.stopped) {
-        content_domain.lookup(a, &cancellation);
-        a.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &completion);
-        try a.run();
-    }
-    const settled: struct { code: ActionResolutionCode, text: []const u8, content: *const content_domain.Import } =
-        if (found.stopped) .{ .code = .cancelled, .text = content_domain.stop_cancellation_text, .content = &cancellation } else .{ .code = code, .text = result, .content = &effect };
+    content_domain.lookup(a, &content);
+    if (found.stopped) a.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &completion);
+    try a.run();
 
     if (faults.content_import) return error.InjectedContentImportFailure;
     const positions = try a.positions(found.session);
-    const content_id = try content_domain.importBytes(a, settled.content, settled.text);
+    const content_id = try content_domain.importBytes(a, &content, settled.text);
     a.write(resolve_action, .{
         .action_id = binding.action_id,
         .code = settled.code,
@@ -366,7 +364,7 @@ pub fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilt
     const turn_id = c.sqlite3_column_int64(turn_statement, 0);
     if (turn_id <= 0) return error.CorruptStore;
     try turn_domain.completeStoppedTurnIfReady(self, @intCast(turn_id));
-    try turn_domain.recordContinuation(self, @intCast(turn_id));
+    try turn_domain.recordContinuation(self, @intCast(turn_id), session_ref.slice());
     try store_core.commit(self);
     return true;
 }

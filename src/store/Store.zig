@@ -636,7 +636,7 @@ pub const Store = struct {
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
         const entry = try enter(self, .none);
         defer entry.release();
-        try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
         return entry.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
     }
 
@@ -663,7 +663,7 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
         // As for Actions, dispatch failures belong to the caller.
         try handoff(context);
     }

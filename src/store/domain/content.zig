@@ -12,8 +12,6 @@ const c = sqlite.c;
 const Faults = store_core.Faults;
 const Ordinary = store_core.Ordinary;
 
-const content_lookup_sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3";
-
 pub const ContentReference = struct {
     length: u64,
     digest: [32]u8,
@@ -143,6 +141,12 @@ pub const Import = struct {
     pub fn ofBytes(bytes: []const u8, private: bool) Import {
         return .{ .digest = protocol.contentDigest(bytes), .length = bytes.len, .private = private };
     }
+};
+
+/// `stop_cancellation_text`'s identity, hashed when the Host is built.
+pub const stop_cancellation: Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes(stop_cancellation_text, false);
 };
 
 /// Queues the read that finds `value`'s row; `importSlot` follows its round.
@@ -342,15 +346,11 @@ pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata
 }
 
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
-    const statement = try store_core.cached(self, content_lookup_sql);
+    const statement = try store_core.cachedTyped(self, lookup_content);
     defer sqlite.resetCached(statement);
-    try sqlite.bindBlob(statement, 1, &reference.digest);
-    try sqlite.bindU64(statement, 2, reference.length);
-    try sqlite.bindI64(statement, 3, @as(i64, if (private) 1 else 0));
+    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, null);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const content_id = c.sqlite3_column_int64(statement, 0);
-    if (content_id <= 0) return error.CorruptStore;
-    return content_id;
+    return @intCast((try sqlite.decodeRow(lookup_content.Row, statement)).content_id.get());
 }
 
 /// A content hash and one window of the bytes it hashes. Declared as

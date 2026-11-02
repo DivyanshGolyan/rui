@@ -149,16 +149,17 @@ pub fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
     try a.apply();
 }
 
-/// `queueContinuation` for unconverted code, inside its transaction.
-pub fn recordContinuation(self: *Store, turn_id: u64) !void {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var open: open_turn.Result = undefined;
-    a.read(open_turn, .{ .turn_id = turn_id, .operation_id = null }, &open);
-    try a.run();
-    const row = open orelse return;
-    queueContinuation(&a, turn_id, row.session);
-    try a.apply();
+/// `queueContinuation` for unconverted code, inside its transaction, for
+/// `session_ref`, the Turn's Session, which the caller has touched: the
+/// same statement, stepped at once, so it costs one statement as on main.
+pub fn recordContinuation(self: *Store, turn_id: u64, session_ref: []const u8) !void {
+    const statement = try store_core.cachedTyped(self, record_continuation);
+    defer sqlite.resetCached(statement);
+    comptime std.debug.assert(std.mem.eql(u8, @typeInfo(record_continuation.Args).@"struct".field_names[0], "turn_id"));
+    try sqlite.bindU64(statement, 1, turn_id);
+    try sqlite.bindText(statement, 2, session_ref);
+    try sqlite.expectDone(statement);
+    if (c.sqlite3_changes(self.database) > 1) return error.CorruptStore;
 }
 
 pub fn turnIsComplete(self: *Store, turn_id: u64) !bool {

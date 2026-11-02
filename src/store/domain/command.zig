@@ -660,7 +660,7 @@ pub fn decidePermissionLocked(
                 try sqlite.bindU64(update, 3, position);
                 try sqlite.expectDone(update);
                 if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-                try turn_domain.recordContinuation(self, turn_id.?);
+                try turn_domain.recordContinuation(self, turn_id.?, command.session.slice());
             },
         }
     }

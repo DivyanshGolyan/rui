@@ -504,7 +504,7 @@ fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSe
 
 fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
     try store_core.begin(self);
-    try model_settlement_domain.validateCurrentAttempt(self, binding);
+    _ = try model_settlement_domain.validateCurrentAttempt(self, binding);
     const update = try store_core.cached(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
     defer sqlite.resetCached(update);
     try sqlite.bindU64(update, 1, binding.operation_id);
