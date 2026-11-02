@@ -589,8 +589,9 @@ fn newer(job: *Job, task: *Task, state: Newer) !void {
     const drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact, taking);
     _ = output.finish();
     const next = page.continuation();
-    // Later rows of a page's last position may be on the next page.
-    job.result.newer = .{ .next = next, .through = if (next) |after| @max(after.position - 1, cursor.position) else page.facts.end, .taking = .{ .drawn = drawn, .from = searchFrom(page.facts.queued) } };
+    // Later rows of a page's last position may be on the next page, and
+    // the cursor's own position is read through only if it was before.
+    job.result.newer = .{ .next = next, .through = if (next) |after| @max(after.position - 1, state.through) else page.facts.end, .taking = .{ .drawn = drawn, .from = searchFrom(page.facts.queued) } };
 }
 
 /// Where a stop's search for the Messages it excluded begins, for those
