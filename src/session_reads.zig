@@ -1760,7 +1760,7 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer page.close(io);
     var interrupted: client.Cancellation = .{};
-    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined }, .command = Probe.command, .interrupted = &interrupted };
+    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined, .actions = undefined }, .command = Probe.command, .interrupted = &interrupted };
     var task: Task = .{ .io = io };
     Probe.before = Probe.inheritable();
     try runCommand(&job, &task);
