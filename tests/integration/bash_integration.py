@@ -1486,7 +1486,7 @@ def main():
         nothing = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
         assert (nothing.returncode, nothing.stdout) == (0, ""), nothing
-        assert nothing.stderr == "rui: no Session in this Store has work to stop.\n", nothing
+        assert nothing.stderr == "\nrui: no Session in this Store has work to stop.\n", nothing
         # A stop saved but whose reply is lost is unconfirmed, never "not
         # stopped", and names the handle that recovers its saved answer.
         lost = configure(state, store, "stop-all-lost-config")
