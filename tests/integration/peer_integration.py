@@ -137,7 +137,8 @@ class PeerModel(TestHTTPServer):
                 f"printf %s 'self report generated' | rui session send --to {address} "
                 "> b-self-generated.out 2> b-self-generated.err; "
                 "echo $? > b-self-generated.status; "
-                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after; '
+                # Renamed whole, so the test never reads it half written.
+                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after.part && mv b-captures-after.part b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
                 + report
             ), stdin=REPORT)
