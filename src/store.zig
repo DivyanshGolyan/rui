@@ -13682,12 +13682,16 @@ test "Current report work is independent of terminal tool history" {
                 "active",
             );
             const active = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleCallsForTesting(
+            // Usage anchors the context estimate here, so the report reads
+            // only what follows this call, as it does with a real provider.
+            try settleCallsForTestingWithFaults(
                 &storage,
                 &tmp,
                 active,
                 "current-cost-active-metadata",
                 &calls,
+                .{},
+                "{\"input_tokens\":10,\"output_tokens\":0}",
             );
 
             var root: [protocol.max_store_bytes]u8 = undefined;
@@ -17035,6 +17039,9 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("public-config", "", workspace, "model-a");
+    // The 1 MiB Message must not start a compaction: this test reads pages.
+    configuration.configuration.compaction_trigger.state = .value;
+    try configuration.configuration.compaction_trigger.value.set("1000000000");
     const created_session_0_reply = storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
@@ -20163,7 +20170,8 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
         const created_session_0_reply = storage.configure(&configure, .{});
         try std.testing.expect(created_session_0_reply == .accepted);
         const created_session_0 = created_session_0_reply.accepted.session;
-        const expected: ?u64 = if (model_index < supported_ids.len) 244800 else null;
+        // An unlisted model compacts at 90% of the window Rui assumes for it.
+        const expected: ?u64 = if (model_index < supported_ids.len) 244800 else 115200;
         const initial = try storage.inspectSessionForTesting(created_session_0.slice());
         try std.testing.expectEqual(expected, initial.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 0), initial.output_reservation);
@@ -20215,8 +20223,8 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
         try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compact));
         try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
         const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        // Overflow recovery remains enabled without a default trigger, but
-        // unchanged context cannot authorize another compaction.
+        // Overflow recovery compacts once; unchanged context cannot
+        // authorize another compaction.
         try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
         try expectActivityOutcome(&storage, created_session_0.slice(), successor, "ResourceExceeded");
@@ -20259,8 +20267,8 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
         try patch.session.set(session.slice());
         patch.configuration.compaction_trigger.state = .value;
         try patch.configuration.compaction_trigger.value.set("1000");
-        // An unknown model has no guessed automatic capacity, even with
-        // accepted usage far above the known model's default threshold.
+        // An unlisted model without an override compacts at the share of
+        // the small window Rui assumes for it.
         if (index == 7) patch.configuration.compaction_trigger.state = .omitted;
         patch.configuration.output_reservation.state = .value;
         try patch.configuration.output_reservation.value.set("0");
@@ -20281,16 +20289,13 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
             try std.testing.expectEqual(@as(u64, 600), try queryU64(storage.database, "SELECT usage_cache_read_tokens FROM model_operation WHERE output_item_count IS NOT NULL"));
         }
         // The Current report's estimate is the pressure the next admission
-        // compares: at or past the trigger exactly when it compacts, and
-        // absent without a trigger.
-        const compacts = index == 1 or index >= 8;
-        const estimate = try testingContextEstimate(&storage, &tmp, session.slice());
-        if (index == 7) {
-            try std.testing.expectEqual(@as(?u64, null), estimate);
-        } else {
-            try std.testing.expectEqual(compacts, estimate.? >= 1000);
-            if (index == 0) try std.testing.expectEqual(@as(?u64, 999), estimate);
-        }
+        // compares: at or past the trigger exactly when it compacts.
+        const compacts = index == 1 or index >= 7;
+        const estimate = (try testingContextEstimate(&storage, &tmp, session.slice())).?;
+        const trigger: u64 = if (index == 7) model_capability.compactionPolicy("model-a", null, null).compaction_trigger else 1000;
+        try std.testing.expectEqual(compacts, estimate >= trigger);
+        if (index == 0) try std.testing.expectEqual(@as(u64, 999), estimate);
+        if (index == 7) try std.testing.expectEqual(@as(u64, 1000000), estimate);
         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(if (compacts) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
         // The call after a compaction answers whatever the pressure, so

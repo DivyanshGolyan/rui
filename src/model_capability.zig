@@ -96,7 +96,7 @@ pub fn supportsReasoningEffort(model: []const u8, effort: ReasoningEffort) bool 
 }
 
 /// A model's context window: its row's, else the product's unlisted default.
-pub fn contextWindow(model: []const u8) u64 {
+fn contextWindow(model: []const u8) u64 {
     return if (find(model)) |row| row.context_window else product_defaults.unlisted_context_window;
 }
 
