@@ -178,6 +178,8 @@ fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
     const ellipsis = "…";
     var end = width -| ellipsis.len;
     while (end > 0 and (text[end] & 0xc0) == 0x80) end -= 1;
+    // A cut after a word reads as the word's end, not a blank before "…".
+    while (end > 0 and text[end - 1] == ' ') end -= 1;
     writer.writeAll(text[0..end]) catch unreachable;
     writer.writeAll(ellipsis) catch unreachable;
 }
@@ -199,6 +201,7 @@ test "a web search call's description says what it did, on one line, within the 
         .{ .action = .search, .target = "zig 0.17 release notes", .expected = "Search “zig 0.17 release notes”" },
         .{ .action = .search, .target = " \n\t ", .expected = "Search the web" },
         .{ .action = .search, .expected = "Search the web" },
+        .{ .action = .search, .target = (comptime repeat("a", 83)) ++ " bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .expected = "Search “" ++ (comptime repeat("a", 83)) ++ "…”" },
         .{ .action = .none, .target = "ignored", .expected = "Search the web" },
         .{ .action = .search, .target = "  two\r\nlines\u{2028}here  ", .expected = "Search “two lines here”" },
         .{ .action = .open_page, .target = "https://www.ziglang.org/download/", .expected = "Open ziglang.org/download/" },

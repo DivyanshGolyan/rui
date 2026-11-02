@@ -72,7 +72,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn INDEXED BY turn_outcome_position WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ range("outcome_position", "0") ++
             " UNION ALL SELECT position,0,7,NULL FROM session_stop INDEXED BY session_stop_position WHERE session_ref=?1 AND " ++ range("position", "0") ++ order,
         "SELECT sender_position AS position,0 AS ordinal,9 AS kind,NULL AS id FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++
-            " UNION ALL SELECT session_position,0,10,NULL FROM model_output_item INDEXED BY model_output_history " ++
+            " UNION ALL SELECT session_position,0,10,NULL FROM model_output_item INDEXED BY model_output_hosted_history " ++
             "WHERE session_ref=?1 AND item_kind=5 AND " ++ range("session_position", "0") ++ order,
     };
 }
@@ -276,7 +276,7 @@ pub fn publicConversationPageLocked(self: *Store, request: *const protocol.Conve
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "WHERE tool_groups.position<=?2 " ++
         // A hosted call is public at its own item's position.
-        "UNION ALL SELECT item.session_position,0,5,NULL FROM model_output_item item WHERE item.session_ref=?1 AND item.item_kind=5 AND item.session_position<=?2) " ++
+        "UNION ALL SELECT item.session_position,0,5,NULL FROM model_output_item item INDEXED BY model_output_hosted_history WHERE item.session_ref=?1 AND item.item_kind=5 AND item.session_position<=?2) " ++
         "SELECT position,ordinal,kind,content_id FROM public WHERE (?3=0 OR position<?3 OR (position=?3 AND ordinal<?4)) " ++
         "ORDER BY position DESC,ordinal DESC LIMIT 17");
     defer sqlite.resetCached(statement);
@@ -550,7 +550,7 @@ pub fn hostedCallLocked(self: *Store, session: []const u8, position: u64) !struc
     const statement = try store_core.cached(self, "SELECT item.description,item.call_failed,op.resolved_at," ++
         "op.session_ref=item.session_ref AND op.attempt_ordinal=item.attempt_ordinal AND op.purpose=0 AND " ++
         store_schema.oneOf("op.resolution_code", &accepted_resolutions) ++
-        " FROM model_output_item item LEFT JOIN model_operation op ON op.operation_id=item.operation_id " ++
+        " FROM model_output_item item INDEXED BY model_output_hosted_history LEFT JOIN model_operation op ON op.operation_id=item.operation_id " ++
         "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=5");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session);

@@ -1727,10 +1727,19 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
     if (data[@intCast(start)] != '{') return call;
     const Strings = struct { type: ?Range = null, query: ?Range = null, url: ?Range = null, pattern: ?Range = null };
     var strings: Strings = .{};
+    // A search may name its queries only as a list; its first then reads as the query.
+    var first_query: ?Range = null;
     offset = start;
     while (nextKey(data, &offset)) |member| {
         const value = json.valueAt(data, @intCast(member.value));
         offset = value.end;
+        if (data[@intCast(member.value)] == '[' and json.decodedTag(enum { queries }, slice(data, member.key)) != null) {
+            if (first_query == null) {
+                var element: u64 = member.value;
+                if (nextElement(data, &element)) |at| first_query = json.valueAt(data, @intCast(at)).string;
+            }
+            continue;
+        }
         const string = value.string orelse continue;
         const field = switch (json.decodedTag(std.meta.FieldEnum(Strings), slice(data, member.key)) orelse continue) {
             .type => &strings.type,
@@ -1744,7 +1753,7 @@ pub fn hostedCall(data: []const u8, item: *const codec_abi.OutputItem) codec_abi
     switch (json.decodedTag(enum { search, open_page, find_in_page }, slice(data, kind)) orelse return call) {
         .search => {
             call.action = .search;
-            call.target = strings.query;
+            call.target = strings.query orelse first_query;
         },
         .open_page => {
             call.action = .open_page;
@@ -2165,6 +2174,9 @@ test "a web search call reads as its action, its strings and its outcome" {
         .{ .item = "{ \"action\" : { \"url\" : \"https://a.b\" , \"type\" : \"open_page\" } , \"status\" : \"failed\" }", .action = .open_page, .target = "https://a.b", .failed = true },
         .{ .item = "{\"action\":{\"type\":\"find_in_page\",\"url\":\"u\",\"pattern\":\"p\",\"pattern\":\"q\"},\"action\":{\"type\":\"search\"}}", .action = .find_in_page, .target = "u", .pattern = "p" },
         .{ .item = "{\"action\":{\"type\":\"search\",\"query\":7}}", .action = .search },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[ \"first\" , \"second\" ]}}", .action = .search, .target = "first" },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[]}}", .action = .search },
+        .{ .item = "{\"action\":{\"type\":\"search\",\"queries\":[7,\"late\"]}}", .action = .search },
         .{ .item = "{\"action\":{\"type\":\"future\",\"query\":\"q\"},\"status\":\"completed\"}", .action = .none },
         .{ .item = "{\"action\":null,\"status\":null}", .action = .none },
         .{ .item = "{\"id\":\"ws\",\"status\":\"fail\\u0065d\"}", .action = .none, .failed = true },
