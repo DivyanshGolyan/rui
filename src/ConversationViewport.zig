@@ -6,6 +6,7 @@ const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
 const draft_layout = @import("draft_layout.zig");
+const TerminalText = @import("TerminalText.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
@@ -108,8 +109,16 @@ fn hanging(line: []const u8, width: u16, user: bool) Hanging {
 /// Retained style byte, display-only: bits 0-2 bold, italic and underline,
 /// bits 3-5 a foreground index, bit 6 user text and bit 7 its dim summary.
 /// Bit 7 alone marks a sidenote, drawn in the right margin.
+/// Two foreground indexes no colour uses mark an OSC 8 link: its address,
+/// kept in the text but never drawn, and right after it the text it links.
 const foregrounds = [_]u8{ 3, 8, 9, 12 };
 const foreground_mask: u8 = 0b111 << 3;
+const linked_index: u8 = 6;
+const address_index: u8 = 7;
+
+fn foregroundIndex(value: u8) u8 {
+    return (value & foreground_mask) >> 3;
+}
 const user_bit: u8 = 1 << 6;
 const summary_bit: u8 = 1 << 7;
 /// From this width a document with sidenotes keeps a right margin, and the
@@ -125,14 +134,14 @@ pub const CellStyle = struct { bold: bool = false, dim: bool = false, italic: bo
 /// User text is dim and italic only with colour; without it, position alone
 /// sets it apart. Its summary and sidenotes are dim but never italic.
 pub fn cellStyle(value: u8, colour: bool) CellStyle {
-    const index = (value & foreground_mask) >> 3;
+    const index = foregroundIndex(value);
     const quiet = colour and value & (user_bit | summary_bit) != 0;
     return .{
         .bold = value & 1 != 0,
         .dim = quiet,
         .italic = value & 2 != 0 or (quiet and value & summary_bit == 0),
         .underline = value & 4 != 0,
-        .foreground = if (colour and index != 0) foregrounds[index - 1] else null,
+        .foreground = if (colour and index != 0 and index <= foregrounds.len) foregrounds[index - 1] else null,
     };
 }
 
@@ -156,6 +165,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         style: u8 = 0,
         control: [8]u8 = undefined,
         control_length: usize = 0,
+        /// Where the OSC 8 link being received is: its address or its text.
+        link: enum { none, address, text } = .none,
+        address_length: usize = 0,
         length: usize = 0,
         origin: u64 = 0,
         /// The first row in view; null follows the latest rows.
@@ -187,6 +199,15 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                             self.style = (self.style & ~foreground_mask) | (colour_index << 3);
                         }
                         self.control_length = 0;
+                    } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_open)) {
+                        // An address follows, empty for the closing sequence.
+                        self.link = .address;
+                        self.address_length = 0;
+                        self.control_length = 0;
+                    } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_end)) {
+                        std.debug.assert(self.link == .address);
+                        self.link = if (self.address_length == 0) .none else .text;
+                        self.control_length = 0;
                     }
                     start = index + 1;
                 }
@@ -215,7 +236,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 const count = @min(input.len - position, limit - self.length);
                 @memcpy(self.bytes[self.length..][0..count], input[position..][0..count]);
-                if (styled) @memset(self.styles[self.length..][0..count], self.style);
+                if (styled) @memset(self.styles[self.length..][0..count], self.cellValue());
+                if (self.link == .address) self.address_length += count;
                 self.length += count;
                 position += count;
             }
@@ -224,12 +246,36 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.dirty = true;
         }
 
+        /// The retained style of text appended now, with any link mark.
+        fn cellValue(self: *const Self) u8 {
+            const index: u8 = switch (self.link) {
+                .none => return self.style,
+                .address => address_index,
+                .text => linked_index,
+            };
+            return (self.style & ~foreground_mask) | (index << 3);
+        }
+
+        /// The address of the link whose text holds `position`: the hidden
+        /// run right before that text. Empty when the text is not a link or
+        /// its address began before the retained text.
+        fn address(self: *const Self, position: usize) []const u8 {
+            if (foregroundIndex(self.styles[position]) != linked_index) return "";
+            var end = position;
+            while (end > 0 and foregroundIndex(self.styles[end - 1]) == linked_index) end -= 1;
+            var start = end;
+            while (start > 0 and foregroundIndex(self.styles[start - 1]) == address_index) start -= 1;
+            if (start == 0 and self.origin != 0) return "";
+            return self.bytes[start..end];
+        }
+
         pub fn clear(self: *Self) void {
             self.length = 0;
             self.origin = 0;
             self.top = null;
             self.style = 0;
             self.control_length = 0;
+            self.link = .none;
             self.dirty = true;
         }
 
@@ -265,6 +311,14 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 const complete = self.text().len;
                 const saved_style = self.style;
                 defer self.style = saved_style;
+                // Retained styles already carry their link marks.
+                const saved_link = self.link;
+                const saved_address = self.address_length;
+                self.link = .none;
+                defer {
+                    self.link = saved_link;
+                    self.address_length = saved_address;
+                }
                 self.length = 0;
                 var clusters = unicode.graphemeIterator(bytes[0..complete]);
                 while (clusters.next()) |value| {
@@ -418,8 +472,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     stop = start + 1;
                     while (stop < end and self.styles[stop] == self.styles[start]) stop += 1;
                 }
-                if (!styled or isSidenote(self.styles[start]) == notes) {
-                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain) };
+                const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
+                if (shown) {
+                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain), .link = .{ .uri = if (styled) self.address(start) else "" } };
                     count += 1;
                 }
                 start = stop;
@@ -599,7 +654,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 @memcpy(self.styles[0..older.length], older.styles[0..older.length]);
             }
             self.length = older.length + keep;
-            if (trimmed) self.control_length = 0;
+            if (trimmed) {
+                self.control_length = 0;
+                self.link = .none;
+            }
             self.origin = older.origin;
             self.dirty = true;
             try self.prepare();
@@ -1018,4 +1076,72 @@ test "older text prepends above the rows in view and trims newer text at capacit
     full.discardFront(full.origin + 6);
     try std.testing.expect(std.mem.startsWith(u8, full.text(), "old 1\n"));
     try std.testing.expectEqual(@as(u64, 6), full.origin);
+}
+
+/// Each drawn cell's link address in one row, `-` for a cell with none.
+fn expectLinks(view: anytype, from: Position, width: u16, expected: []const []const u8) !void {
+    var test_screen: TestScreen = undefined;
+    _ = view.draw(test_screen.window(width, 1), from, true, true, .{});
+    for (expected, 0..) |uri, column| {
+        const cell = test_screen.screen.readCell(@intCast(column), 0).?;
+        errdefer std.debug.print("column={d} grapheme={s} uri={s}\n", .{ column, cell.char.grapheme, cell.link.uri });
+        try std.testing.expectEqualStrings(if (std.mem.eql(u8, uri, "-")) "" else uri, cell.link.uri);
+    }
+}
+
+fn linkBytes(comptime address_text: []const u8, comptime text: []const u8) []const u8 {
+    return TerminalText.link_open ++ address_text ++ TerminalText.link_end ++ text ++ TerminalText.link_close;
+}
+
+test "a link's text carries its hidden address to the cells, however its bytes arrive" {
+    const a = "https://g.dev/a";
+    const b = "https://b.dev";
+    const input = "See " ++ comptime linkBytes(a, "\x1b[4mg.\x1b[0m\x1b[3mdev\x1b[0m") ++ ". " ++ linkBytes(a, "x") ++ linkBytes(b, "y") ++ "!";
+    for (0..input.len + 1) |split| {
+        var view: Sized(256, true) = .{};
+        try view.append(input[0..split]);
+        try view.append(input[split..]);
+        try view.prepare();
+        // The address takes no cell: the row reads as the text alone.
+        var test_screen: TestScreen = undefined;
+        _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{});
+        var row: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("See g.dev. xy!", std.mem.trimEnd(u8, test_screen.row(0, &row), " "));
+        try expectLinks(&view, .{}, 20, &.{ "-", "-", "-", "-", a, a, a, a, a, "-", "-", a, b, "-" });
+        const shown = test_screen.screen.readCell(4, 0).?.style;
+        try std.testing.expect(shown.ul_style == .single and shown.fg == .default);
+    }
+}
+
+test "a link keeps its address through wrapping, escaping, older pages and eviction" {
+    const a = "https://a.dev";
+    // Wrapped rows of one link all open it.
+    var wrapped: Sized(256, true) = .{};
+    try wrapped.append(comptime linkBytes(a, "one two three"));
+    try expectLinks(&wrapped, .{ .offset = 0, .row = 1 }, 8, &.{ a, a, a, a, a });
+    // Escaped text before and inside a link moves with it.
+    var escaped: Sized(256, true) = .{};
+    try escaped.append("\u{200b}" ++ comptime linkBytes(a, "b\u{200b}c") ++ "d" ++ TerminalText.link_open ++ a ++ TerminalText.link_end ++ "e");
+    try escaped.prepare();
+    const before: []const []const u8 = &.{ "-", "-", "-", "-", "-", "-", "-", "-" };
+    const inside: []const []const u8 = &.{ a, a, a, a, a, a, a, a, a, a };
+    try expectLinks(&escaped, .{}, 24, before ++ inside ++ &[_][]const u8{ "-", a });
+    try escaped.append("f" ++ TerminalText.link_close ++ "g");
+    try escaped.prepare();
+    try expectLinks(&escaped, .{}, 24, before ++ inside ++ &[_][]const u8{ "-", a, a, "-" });
+    // An older page placed before keeps both pages' links on their text.
+    const b = "https://b.dev";
+    var view: Sized(256, true) = .{};
+    try view.append("See " ++ comptime linkBytes(a, "docs") ++ "\n");
+    var older: Sized(64, true) = .{};
+    try older.append(comptime linkBytes(b, "old") ++ " page\n");
+    try std.testing.expect(!try view.prepend(&older, .{ .width = 16, .method = .unicode }, 2));
+    try expectLinks(&view, .{}, 16, &.{ b, b, b, "-", "-" });
+    try expectLinks(&view, .{ .offset = view.nextLine(0).? }, 16, &.{ "-", "-", "-", "-", a, a, a, a, "-" });
+    // Eviction that cuts into an address leaves its text unlinked, never
+    // linked to part of an address.
+    var evicted: Sized(32, true) = .{};
+    try evicted.append(comptime linkBytes("https://abcdefghij.dev", "link") ++ " and more words");
+    try std.testing.expect(evicted.origin != 0);
+    try expectLinks(&evicted, .{}, 16, &.{ "-", "-", "-", "-" });
 }
