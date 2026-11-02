@@ -897,10 +897,7 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     };
     return outcome catch |err| {
         if (self.lent_failed) return err;
-        // A conversation's reads fail as transport errors once its Host stops.
-        const transport = err == error.FileNotFound or err == error.ConnectionRefused or
-            err == error.ConnectionResetByPeer or err == error.BrokenPipe;
-        if (!transport or !self.ops.stopped(self)) return self.failed(err, left.session);
+        if (!client.hostUnreachable(err) or !self.ops.stopped(self)) return self.failed(err, left.session);
         stderr.diagnostic("rui: The Host stopped. Run rui host start, then resume this Session.\n", .{});
         return self.failed(error.HostStopped, left.session);
     };
