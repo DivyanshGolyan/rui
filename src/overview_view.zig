@@ -1820,15 +1820,13 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
         .action => |pressed| switch (pressed) {
             .previous, .next, .first, .last => if (picker) |shown| {
                 if (shown.step == .models) pickerMove(state, shown, pressed);
-            } else if (commandList(state, value.draft)) |shown| {
-                // A shown command list takes the arrows, as the picker does.
-                state.list_row = switch (pressed) {
-                    .previous => state.list_row -| 1,
-                    .next => @min(state.list_row + 1, shown.count - 1),
-                    .first => 0,
-                    .last => shown.count - 1,
-                    else => unreachable,
-                };
+            } else if (pressed == .previous or pressed == .next) {
+                // A shown command list takes the arrows, as the picker
+                // does. Home and End stay the draft's: the list shows only
+                // over a draft, where the composer takes them.
+                if (commandList(state, value.draft)) |shown| {
+                    state.list_row = if (pressed == .previous) state.list_row -| 1 else @min(state.list_row + 1, shown.count - 1);
+                } else move(state, pressed);
             } else move(state, pressed),
             .select_previous => move(state, .previous),
             .select_next => move(state, .next),

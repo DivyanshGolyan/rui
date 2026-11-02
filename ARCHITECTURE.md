@@ -2828,7 +2828,7 @@ Enter in a shown list takes the highlighted row: a command with nothing more to 
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/configure`, `/exit` and `/model`, the same way, giving the list rows the Sessions above can spare, and its Up, Down, Home and End move the highlight while the list shows; there Esc and Ctrl-G clear the draft and the list with it, as its hint says.
+The overview lists its own commands, `/configure`, `/exit` and `/model`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there Esc and Ctrl-G clear the draft and the list with it, as its hint says.
 `/effort` needs a level: alone it states its usage, and the list offers the levels.
 `/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
 `/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
