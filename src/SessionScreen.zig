@@ -988,8 +988,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
 /// at most `frame_link_bytes` of addresses, and a grid whose copies reach
 /// `grid_link_bytes` is replaced and the next frame redrawn whole, so links
 /// stay within the cell memory budget at any geometry.
-const frame_link_bytes = 512 * 1024;
-const grid_link_bytes = 2 * 1024 * 1024;
+const frame_link_bytes = 128 * 1024;
+const grid_link_bytes = 512 * 1024;
 
 fn boundLinks(self: *Self) !void {
     var linked: usize = 0;
