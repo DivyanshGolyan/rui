@@ -2936,7 +2936,7 @@ fn providerBand(painter: *Painter, trouble: Band, now_ms: u64) error{OutOfMemory
     var buffer: [8]u8 = undefined;
     return bandLine(painter, switch (trouble.trouble) {
         .sign_in => "Sign-in expired. Run " ++ comptime Provider.codex.login() ++ ".",
-        .api_key => "OpenAI API key rejected. Run " ++ comptime Provider.openai.login() ++ ", then rui host stop.",
+        .api_key => "OpenAI API key rejected. Run " ++ comptime Provider.openai.login() ++ ", then rui host pause.",
         .quota => if (trouble.resets_at) |at|
             try std.fmt.allocPrint(painter.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else

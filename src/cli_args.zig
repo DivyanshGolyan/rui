@@ -25,7 +25,7 @@ pub const Command = enum {
     action_read_call_id,
     action_read_arguments,
     host_start,
-    host_stop,
+    host_pause,
     host_status,
     host_serve,
     defaults_inspect,
@@ -60,7 +60,7 @@ pub const Command = enum {
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets --active-capacity N, default {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports, and stderr says so when --active-capacity differs.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{value("active-capacity", "N")} },
-            .host_stop => .{ .resource = .host, .name = "stop", .description = "Request whole-Host shutdown, affecting every Session in this Store. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
+            .host_pause => .{ .resource = .host, .name = "pause", .description = "Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
@@ -444,6 +444,17 @@ pub fn retired(name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// A former operation, its replacement and why it changed.
+pub const RetiredOperation = struct { resource: Resource, name: []const u8, replacement: Command, reason: []const u8 };
+const retired_operations = [_]RetiredOperation{
+    .{ .resource = .host, .name = "stop", .replacement = .host_pause, .reason = "Paused work resumes when a Host starts again; rui session stop ends one Session's work for good." },
+};
+
+pub fn retiredOperation(resource: Resource, name: []const u8) ?RetiredOperation {
+    for (retired_operations) |entry| if (entry.resource == resource and std.mem.eql(u8, entry.name, name)) return entry;
+    return null;
+}
+
 pub fn find(resource: Resource, name: []const u8) ?Command {
     inline for (comptime std.meta.tags(Command)) |command| {
         const definition = command.definition();
@@ -606,6 +617,8 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expect(try expectMissing(.session_configure, &.{}) == null);
     try std.testing.expectEqualStrings("defaults inspect|configure", retired("setup").?);
     try std.testing.expect(retired("session") == null and retired("fix the build") == null);
+    try std.testing.expectEqual(Command.host_pause, retiredOperation(.host, "stop").?.replacement);
+    try std.testing.expect(retiredOperation(.session, "stop") == null and find(.host, "stop") == null);
 }
 
 test "Host start help states the product default capacity and existing-Host precedence" {

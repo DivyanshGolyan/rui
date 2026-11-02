@@ -46,6 +46,7 @@ class Dialect:
         self.address_send = arguments.exists() and 'value("to", "ADDRESS")' in arguments.read_text()
         self.short_ids = "pub const session_id_bytes = 6;" in (checkout / "src/protocol.zig").read_text()
         self.stdin_message = arguments.exists() and ".session_start" in arguments.read_text()
+        self.pause = ("host", "pause") if arguments.exists() and ".host_pause" in arguments.read_text() else ("host", "stop")
 
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
@@ -133,7 +134,7 @@ def stop_detached(dialect, binary, store):
     if state == "ready":
         remaining = deadline - time.monotonic()
         assert remaining > 0, shown
-        subprocess.run([binary, "host", "stop", "--store", store], check=True, timeout=min(5, remaining))
+        subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=min(5, remaining))
         wait_for(status, "Store ownership release", deadline=deadline, ready=lambda observed: observed[0] == "unavailable")
 
 
@@ -185,7 +186,7 @@ def main():
             before = dialect.inspect_session(store, session)["session"]
             for field, value in configuration.items():
                 assert before[field] == value, (field, value, before)
-            subprocess.run([binary, "host", "stop", "--store", store], check=True, timeout=10)
+            subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=10)
             # Effect-aware shutdown is a nonzero serving exit, not a crash.
             assert seed.wait(timeout=10) != 0
             stop_detached(dialect, binary, store)  # Confirm lease release, not just acknowledgement.

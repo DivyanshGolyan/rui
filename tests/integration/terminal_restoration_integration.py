@@ -2834,7 +2834,7 @@ def host_diagnostic_cases(state, library):
                     # file before provider launch, so its correct charge is 0.
                     assert int(resources["scratch_used_bytes"]) == leftovers[0].stat().st_size == 0, resources
                     assert not endpoint.requests, endpoint.requests
-                    stopped = subprocess.run([str(fixture.RUI), "host", "stop", "--store", str(store), "--instance", instance],
+                    stopped = subprocess.run([str(fixture.RUI), "host", "pause", "--store", str(store), "--instance", instance],
                         capture_output=True, text=True, timeout=8)
                     (root / "host-stop.stdout").write_text(stopped.stdout)
                     (root / "host-stop.stderr").write_text(stopped.stderr)
@@ -2842,7 +2842,7 @@ def host_diagnostic_cases(state, library):
                     stop_reply = json.loads(stopped.stdout)
                     assert {key: stop_reply[key] for key in ("type", "status", "instance", "retirement")} == {
                         "type": "host_stop", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
-                    assert "stop affects all work in this Store" in stopped.stderr, stopped
+                    assert "pause interrupts all work in this Store" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
                     # A stop acknowledgement is not cleanup completion: the
                     # injected unlink refusal remains active during shutdown.
