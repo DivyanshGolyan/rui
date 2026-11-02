@@ -42,6 +42,19 @@ const c = @import("h2_c");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
+const tls = @import("tls.zig");
+
+/// What the Store's Postgres TLS shares with this module: one copy of
+/// OpenSSL, its client settings, host naming and trust loading. Its
+/// `.system` trust is the bundle OpenSSL reads, never SecTrust, which
+/// verifies only this module's sessions on its job threads.
+pub const openssl_client = struct {
+    pub const c = @import("h2_c");
+    pub const HostKind = tls.HostKind;
+    pub const newContext = tls.newContext;
+    pub const nameHost = tls.nameHost;
+    pub const loadTrust = tls.loadTrust;
+};
 
 /// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
@@ -74,8 +87,8 @@ pub const read_allowance_bytes = 64 * 1024;
 pub fn checkLibraries() error{UnexpectedLibraryVersion}!void {
     const nghttp2: *const c.nghttp2_info = c.nghttp2_version(0) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(nghttp2.version_str), nghttp2_version)) return error.UnexpectedLibraryVersion;
-    const openssl = c.OpenSSL_version(c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
-    if (!std.mem.eql(u8, std.mem.span(openssl), openssl_version)) return error.UnexpectedLibraryVersion;
+    const linked = c.OpenSSL_version(c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
+    if (!std.mem.eql(u8, std.mem.span(linked), openssl_version)) return error.UnexpectedLibraryVersion;
 }
 
 // ---------------------------------------------------------------- endpoints

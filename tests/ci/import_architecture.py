@@ -4,6 +4,7 @@
 This is a source architecture check, not Zig's lazy declaration analysis. Both
 platform branches count; test declarations, comments and string contents do not.
 addRui in build.zig owns the Zig executable root. Package imports are external.
+The Store's boundary is checked over every file under src/, tests included.
 """
 import argparse
 import json
@@ -15,19 +16,27 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
 BASELINE = Path(__file__).with_name("import_cycles.json")
+STORE_DIRECTORY = "src/store/"
+STORE_FACADE = "src/store.zig"
+# Wire clients are protocol leaves with no Store types: any root may test them,
+# and they import nothing else of the Store.
+STORE_WIRE = "src/store/wire/"
+STORE_TESTS = "src/store/tests.zig"
+ACCESS_TEST = re.compile(r'^test "Store entry points lock and fence only through canonical access" \{\n(.*?)^\}$', re.M | re.S)
 BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
 # Preserve strings as tokens so braces/import spellings inside them are inert.
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
 
 
-def production_imports(source):
+def production_imports(source, tests=False):
+    """Literal imports outside test declarations, or every import with tests=True."""
     tokens = [m.group() for m in TOKEN.finditer(source)
               if not m.group().startswith(("//", "\\\\"))]
     depth = 0
     test_depth = None
     imports = set()
     for i, token in enumerate(tokens):
-        if token == "test" and test_depth is None and (i == 0 or tokens[i - 1] != "@"):
+        if token == "test" and not tests and test_depth is None and (i == 0 or tokens[i - 1] != "@"):
             # Preserve the outermost test scope, including nested container tests.
             following = i + 1
             if following < len(tokens) and tokens[following].startswith('"'):
@@ -79,6 +88,68 @@ def graph(root, roots=ROOTS, read_source=None):
     return result
 
 
+def store_boundary(root):
+    """Across every file under src/, test declarations included: outside
+    src/store/ only the facade imports a Store file, no Store file imports
+    the facade, and a wire client imports no Store file outside wire/."""
+    resolved = root.resolve()
+    for path in sorted((root / "src").rglob("*.zig")):
+        source = path.relative_to(root).as_posix()
+        for imported in production_imports(path.read_text(), tests=True):
+            if not imported.endswith(".zig"):
+                continue
+            target = (path.parent / imported).resolve()
+            if not target.is_relative_to(resolved):
+                continue
+            target = target.relative_to(resolved).as_posix()
+            if source.startswith(STORE_WIRE) and target.startswith(STORE_DIRECTORY) and not target.startswith(STORE_WIRE):
+                raise ValueError(f"{source} imports {target}; a wire client imports only wire/")
+            if target.startswith(STORE_WIRE):
+                continue
+            if target.startswith(STORE_DIRECTORY) and not source.startswith(STORE_DIRECTORY) and source != STORE_FACADE:
+                raise ValueError(f"{source} imports {target}; import {STORE_FACADE} instead")
+            if target == STORE_FACADE and source.startswith(STORE_DIRECTORY):
+                raise ValueError(f"{source} imports {STORE_FACADE}; Store files import each other directly")
+
+
+def store_access_sources(root):
+    """The lock-and-fence test reads every Store file but its tests and the
+    wire clients, which hold no Store state.
+
+    The facade holds only re-exports, so it has no entry point to check; a
+    function there must join the test's sources.
+    """
+    directory = root / STORE_DIRECTORY
+    expected = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*.zig")
+                      if path != root / STORE_TESTS and not path.is_relative_to(root / STORE_WIRE))
+    test = ACCESS_TEST.search((root / STORE_TESTS).read_text())
+    if not test:
+        raise ValueError(f"{STORE_TESTS} has no lock-and-fence source test")
+    listed = sorted(re.findall(r'@embedFile\("([^"]+)"\)', test[1]))
+    if listed != expected:
+        raise ValueError(f"lock-and-fence test reads {listed}; the Store's files are {expected}")
+    if "fn" in TOKEN.findall((root / STORE_FACADE).read_text()):
+        raise ValueError(f"{STORE_FACADE} declares a function; add it to the lock-and-fence test's sources")
+
+
+def store_unit(dependencies):
+    """Collapse src/store/ into its facade for the cycle ratchet.
+
+    The Store's files hold one type's declarations: Store.zig's entry points
+    call the domain files, which call back into Store.zig's locking and
+    statement helpers. Those cycles are inherent to splitting one type, so
+    they are not counted; store_boundary keeps them inside src/store/.
+    """
+    def unit(name):
+        return STORE_FACADE if name.startswith(STORE_DIRECTORY) and not name.startswith(STORE_WIRE) else name
+
+    collapsed = {}
+    for source, targets in dependencies.items():
+        collapsed.setdefault(unit(source), set()).update(unit(target) for target in targets)
+    collapsed.get(STORE_FACADE, set()).discard(STORE_FACADE)
+    return collapsed
+
+
 def cyclic_edges(dependencies):
     """Every edge with a return path, including self edges (no SCC exemptions)."""
     def reaches(start, goal):
@@ -116,7 +187,7 @@ def trusted_allowance(root, baseline, roots):
 
 
 def check(root=ROOT, baseline=BASELINE, roots=ROOTS):
-    dependencies = graph(root, roots)
+    dependencies = store_unit(graph(root, roots))
     actual = cyclic_edges(dependencies)
     allowed = json.loads(baseline.read_text())["cyclic_edges"]
     added = [edge for edge in actual if edge not in allowed]
@@ -137,6 +208,8 @@ def main():
     parser.add_argument("--baseline", type=Path, default=BASELINE)
     args = parser.parse_args()
     try:
+        store_boundary(args.root)
+        store_access_sources(args.root)
         print(json.dumps(check(args.root, args.baseline), indent=2))
     except ValueError as error:
         parser.exit(1, f"{error}\n")

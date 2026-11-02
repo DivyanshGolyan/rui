@@ -44,9 +44,9 @@ class PlanTest(unittest.TestCase):
         git("clone", "-q", str(root / "remote.git"), str(root / "work"))
         os.chdir(root / "work")
 
-    def commit(self, schema):
-        Path("src").mkdir(exist_ok=True)
-        Path("src/store.zig").write_text(f"const x = 1;\npub const schema_version: u32 = {schema};\n")
+    def commit(self, schema, path="src/store/schema.zig"):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(f"const x = 1;\npub const schema_version: u32 = {schema};\n")
         with open("history", "a") as history:
             history.write(f"{schema}\n")
         git("add", "-A")
@@ -79,14 +79,21 @@ class PlanTest(unittest.TestCase):
         self.publish(third, [("v0.36.x", second), ("w0.36.4", second)])
         self.assertEqual(self.plan(third), "0.36.0")
 
+    def test_revisions_before_the_store_split_read_the_format_from_src_store_zig(self):
+        before = self.commit(35, "src/store.zig")
+        after = self.commit(36)
+        self.publish(after)
+        self.assertEqual(self.plan(before), "0.35.0")
+        self.assertEqual(self.plan(after), "0.36.0")
+
     def test_schema_must_be_declared(self):
-        Path("src").mkdir()
-        Path("src/store.zig").write_text("const schema_version = 35;\n")
+        Path("src/store").mkdir(parents=True)
+        Path("src/store/schema.zig").write_text("const schema_version = 35;\n")
         git("add", "-A")
         git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "no schema")
         sha = git("rev-parse", "HEAD")
         self.publish(sha)
-        with self.assertRaisesRegex(SystemExit, "schema_version"):
+        with self.assertRaisesRegex(SystemExit, "src/store/schema.zig has no schema_version"):
             self.plan(sha)
 
 

@@ -1,6 +1,6 @@
 ---
 name: rui-ci-triage
-description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when asked why CI, stable, Daily Mac or a nightly is red, or when Selected checks, stable qualification, cold acceptance or Auto-land failed.
+description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when asked why CI, stable, Daily Mac or a nightly is red, or when Selected checks, stable qualification, cold acceptance or Auto-land failed, or a job stalled, timed out or shows cancelled.
 ---
 
 # rui-ci-triage
@@ -24,15 +24,17 @@ Before blaming the commit under test or calling it a stale base, look up the sig
 
 - **Intermittent** when the signature fails on SHAs that never touched the fixture or its owner (`git log <a>..<b> -- <paths>`), or when one SHA both passes and fails across workflows. Stable qualification runs Mac checks whatever the diff, so unrelated SHAs failing one fixture point to a race, not a stale base.
 - **Caused by the diff** when the signature is new and the diff touches the fixture's owner.
+- **A job that stalled or hit its timeout** shows as cancelled, not failed, and has no per-fixture `timed out` record. Treat it as a failure. Find the last test that started. If the diff added tests to that binary, suspect them first. Compare the same job's duration on main and other PRs before an A/B run or asking the user.
 
-Search the issues for the signature before filing. [Landing](../../../AGENTS.md#landing) says who owns a recurring red and when it counts as fixed.
+Search the open `stable-red` and CI-red issues for the signature before filing, and group them by fixture; several signatures in one fixture are often one race. [Landing](../../../AGENTS.md#landing) says who owns a recurring red and when it counts as fixed.
 
 ## 4. Fix and prove an intermittent
 
 - Mac-only reds can be timing or buffer-size races that slower hosted Macs expose, not named Darwin divergences. Reproduce on Linux by forcing the suspected ordering, using the peer delays from [Evidence](../../../CODING_STANDARDS.md#evidence), or by imposing Darwin-sized limits such as a small AF_UNIX send buffer.
+- Darwin's temp root is long and is a symlink (`/var` to `/private/var`, `/tmp` to `/private/tmp`). A test that compares a resolved path with an unresolved one, or packs a temp path into a fixed-size field such as a socket path, fails only on Mac. Reproduce it on Linux by pointing `TMPDIR` at a long symlinked directory.
 - Accept a race fix only when the forced run fails without it and passes with it. A later Mac green proves nothing alone.
 - Changes to fixtures that use raw sockets or wait on process lifetime also need the on-demand Mac run in [Landing cadence](../../../VERIFICATION.md#landing-cadence).
 
 ## Report
 
-Give the signature, the SHAs and workflows where it passed and failed, whether the diff caused it and why, the issue link, and the fix with its forced-ordering proof. Leave a cause "unknown" only after the full-log search, and say what was searched.
+Give the signature, the SHAs and workflows where it passed and failed, whether the diff caused it and why, the issue link, and the fix with its forced-ordering proof. The fix PR says `Fixes #N` for every open issue whose signature it fixes. Leave a cause "unknown" only after the full-log search, and say what was searched.

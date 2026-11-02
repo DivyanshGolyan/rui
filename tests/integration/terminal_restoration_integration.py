@@ -955,7 +955,7 @@ def stop_receipt_case(state, library):
     # The second peer response is never released: that Transfer is stopped.
     endpoint = fixture.SuccessEndpoint([], responses_by_input={
         "hello": (fixture.sse_answer("capture", "reason", "message", answer.decode())[0], provider_release),
-        "stop": (fixture.ResponseSpec(b"unused", {}, gate_timeout=60), stop_release)})
+        "stop": (fixture.ResponseSpec(b"unused", {}), stop_release)})
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     host = diagnostics = inspector = None
@@ -2753,7 +2753,9 @@ def host_diagnostic_cases(state, library):
                 arm.touch()
             if credit == "diagnostic-partial":
                 fixture.command("session", "inspect", "--store", store, "--session", session)
-                assert "diagnostic-partial\n" in log.read_text()
+                # The Host writes the inspection's trace beside its reply, so
+                # the reply can arrive first.
+                fixture.wait_for(lambda: "diagnostic-partial\n" in log.read_text(), "the armed partial trace write")
                 arm.unlink()
             if credit == "diagnostic-contention-host":
                 # The forwarding driver proves the exact inspection matcher.

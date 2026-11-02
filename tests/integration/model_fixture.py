@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from host_process import TestHTTPServer, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
+from host_process import HeldReplies, TestHTTPServer, hold, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -41,7 +41,7 @@ def instructions_workspace(instructions):
     return json.loads('"' + quoted + '"')
 
 
-class FailureEndpoint(TestHTTPServer):
+class FailureEndpoint(HeldReplies, TestHTTPServer):
     allow_reuse_address = True
     # One stream per h2c connection, so a dropped connection (/disconnect)
     # fails one request only, as it does over HTTP/1.1.
@@ -90,8 +90,7 @@ class FailureHandler(http.server.BaseHTTPRequestHandler):
                     raise
             self.close_connection = True
             return
-        if not self.server.release.wait(10):
-            raise RuntimeError("fixture response was never released")
+        hold(self.server, self.server.release, "fixture response")
         if self.path == "/disconnect":
             self.close_connection = True
             return
@@ -302,7 +301,7 @@ def classification_population(prefix, forbidden_effect, count=32):
     return calls
 
 
-class SuccessEndpoint(TestHTTPServer):
+class SuccessEndpoint(HeldReplies, TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, responses, responses_by_input=None, *, chunk_sizes=None):
@@ -324,7 +323,7 @@ class SuccessEndpoint(TestHTTPServer):
 class ResponseSpec:
     def __init__(
         self, body, headers, status=200, *, retry_date_seconds=None,
-        chunk_delay=0, pacing_end=None, gate_timeout=10,
+        chunk_delay=0, pacing_end=None,
     ):
         self.body = body
         self.headers = headers
@@ -332,7 +331,6 @@ class ResponseSpec:
         self.retry_date_seconds = retry_date_seconds
         self.chunk_delay = chunk_delay
         self.pacing_end = pacing_end
-        self.gate_timeout = gate_timeout
         self.body_finished_at = None
 
 
@@ -359,8 +357,7 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
                 payload = self.server.responses.pop(0)
         if isinstance(payload, tuple):
             payload, release = payload
-            if not release.wait(payload.gate_timeout if isinstance(payload, ResponseSpec) else 10):
-                raise RuntimeError("success fixture response was never released")
+            hold(self.server, release, "success fixture response")
         headers = {"X-Request-Id": f"request-{len(self.server.requests)}", "OpenAI-Model": "model-a-served"}
         status = 200
         spec = payload if isinstance(payload, ResponseSpec) else None

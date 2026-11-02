@@ -45,9 +45,11 @@ def plan(sha):
         if contains(commit, sha):
             print(f"{tag} at {commit} already includes {sha}; nothing to release", file=sys.stderr)
             return None
-    match = SCHEMA.search(git("show", f"{sha}:src/store.zig"))
+    # Revisions before the Store's split declare the format in src/store.zig.
+    path = "src/store/schema.zig" if git("ls-tree", "--name-only", sha, "--", "src/store/schema.zig") else "src/store.zig"
+    match = SCHEMA.search(git("show", f"{sha}:{path}"))
     if not match:
-        raise SystemExit("src/store.zig has no schema_version declaration")
+        raise SystemExit(f"{path} has no schema_version declaration")
     schema = int(match[1])
     patch = max((patch + 1 for minor, patch, _ in releases.values() if minor == schema), default=0)
     return f"0.{schema}.{patch}"

@@ -112,8 +112,8 @@ ZIG_EXPRESSION = re.compile(r"(?:\.|\berror)\s*$")
 ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests|testing)/|tests?\.zig$")
 
 
-def zig_sleep_ordering(path, text):
-    """Sleeps in `test` blocks, by test, and elsewhere in a test-only file, by top-level declaration."""
+def zig_blocks(text):
+    """The code with comments and strings blanked, its `test` blocks and its top-level declarations."""
     code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
     names = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] == '"' else " " * len(match[0]), text)
     tests, declarations, open_blocks, head, top_head = [], [], [], 0, 0
@@ -135,6 +135,12 @@ def zig_sleep_ordering(path, text):
             head = index + 1
             if not open_blocks:
                 top_head = index + 1
+    return code, tests, declarations
+
+
+def zig_sleep_ordering(path, text):
+    """Sleeps in `test` blocks, by test, and elsewhere in a test-only file, by top-level declaration."""
+    code, tests, declarations = zig_blocks(text)
     test_only = ZIG_TEST_ONLY.search(path) is not None
     offenses = Counter()
     for match in ZIG_SLEEP.finditer(code):
@@ -187,6 +193,26 @@ def sleep_ordering(sources):
     return offenses
 
 
+def sleep_keys(sources):
+    """Every key a sleep could count against, whether or not it sleeps: Zig tests,
+    top-level declarations of test-only Zig files, and Python functions and methods."""
+    keys = set()
+    for path, text in sources:
+        if path.endswith(".zig") and path.startswith(("src/", "tests/")):
+            _, tests, declarations = zig_blocks(text)
+            keys.update((path, name) for _, _, name in tests)
+            if ZIG_TEST_ONLY.search(path):
+                keys.update((path, name) for _, _, name in declarations)
+        elif re.fullmatch(r"tests/integration/[^/]+\.py|tests/ci/(?:test_[^/]*|[^/]*_test)\.py", path):
+            for node in ast.parse(text).body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    keys.add((path, node.name))
+                if isinstance(node, ast.ClassDef):
+                    keys.update((path, f"{node.name}.{child.name}") for child in node.body
+                                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+    return keys
+
+
 def tree_sources(root=ROOT):
     for path in sorted([*(root / "src").rglob("*"), *(root / "tests").rglob("*")]):
         if path.suffix in (".zig", ".py") and path.is_file():
@@ -209,10 +235,10 @@ def review_base_sources(root=ROOT):
         contents = contents[size + 1:]
 
 
-def review_base_ceiling(root=ROOT):
+def review_base_ceiling(root=ROOT, sources=None):
     """Per key, the larger of the rule's count at the review base and that base's own allowance."""
     # Lets an honest rule change move a sleep between keys without granting new allowance.
-    sources = dict(review_base_sources(root))
+    sources = sources or dict(review_base_sources(root))
     ceiling = sleep_ordering(sources.items())
     allowlists = [node.value for node in ast.parse(sources["tests/ci/test_harness_contracts.py"]).body
                   if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "SLEEP_ORDERED"]
@@ -220,6 +246,25 @@ def review_base_ceiling(root=ROOT):
         raise AssertionError("review base has no single SLEEP_ORDERED allowlist")
     for key, (count, _) in ast.literal_eval(allowlists[0]).items():
         ceiling[key] = max(ceiling[key], count)
+    return ceiling
+
+
+def moved_ceiling(offenses, trusted, present, base):
+    """The review-base ceiling, with each test that moved to another file keeping its count there.
+
+    `present` and `base` are the sleep keys at head and at the review base. A
+    test moved when its old file no longer has a test of that name and exactly
+    one test of that name that did not exist at the review base now sleeps. A
+    deleted test and a new, unrelated test of the same name elsewhere still look
+    like a move: names are all either side has.
+    """
+    ceiling = Counter(trusted)
+    for (path, name), count in trusted.items():
+        if (path, name) in offenses or (path, name) in present:
+            continue
+        moved = [key for key in offenses if key[1] == name and key not in trusted and key not in base]
+        if len(moved) == 1:
+            ceiling[moved[0]] = max(ceiling[moved[0]], count)
     return ceiling
 
 
@@ -261,7 +306,7 @@ SLEEP_ORDERED = {
         (1, "pump: the peer thread services its sockets every 1 ms until the test stops it"),
     ("src/server.zig", "reply delivery interrupted poll consumes the existing inactivity budget"):
         (1, "pump: the interrupter signals the blocked writer every 5 ms until the test stops it"),
-    ("src/store.zig", "temporary model failures conserve allowance and exhaust after four Attempts"):
+    ("src/store/tests.zig", "temporary model failures conserve allowance and exhaust after four Attempts"):
         (2, "sleeps out a 5 ms retry wait on the real clock"),
     ("tests/ci/test_selection.py", "FullCheckPartitionTest.run_part"):
         (1, "samples for 0.1 s that held authority starts no isolated work"),
@@ -302,8 +347,36 @@ class SleepOrderingTest(unittest.TestCase):
     """CODING_STANDARDS.md#evidence: tests order actors with gates, not sleeps."""
 
     def test_tree_matches_the_shrink_only_allowlist(self):
-        self.assertEqual(sleep_allowlist_problems(sleep_ordering(tree_sources()), SLEEP_ORDERED,
-                                                  review_base_ceiling()), [])
+        tree = list(tree_sources())
+        base = dict(review_base_sources())
+        offenses = sleep_ordering(tree)
+        ceiling = moved_ceiling(offenses, review_base_ceiling(sources=base), sleep_keys(tree), sleep_keys(base.items()))
+        self.assertEqual(sleep_allowlist_problems(offenses, SLEEP_ORDERED, ceiling), [])
+
+    def test_a_moved_test_keeps_only_its_own_allowance(self):
+        base = Counter({("a.zig", "t"): 2, ("a.zig", "u"): 1})
+        base_keys = {("a.zig", "t"), ("a.zig", "u"), ("c.zig", "t")}
+        moved = Counter({("b.zig", "t"): 2, ("a.zig", "u"): 1})
+        self.assertEqual(moved_ceiling(moved, base, set(moved), base_keys)[("b.zig", "t")], 2)
+        both = base + Counter({("b.zig", "t"): 1})
+        self.assertEqual(moved_ceiling(both, base, set(both), base_keys)[("b.zig", "t")], 0)
+        self.assertEqual(moved_ceiling(Counter({("b.zig", "v"): 1}), base, {("b.zig", "v")}, base_keys)[("b.zig", "v")], 0)
+        # The test stayed in a.zig and stopped sleeping: b.zig's new test of that name did not move there.
+        stayed = Counter({("b.zig", "t"): 2, ("a.zig", "u"): 1})
+        self.assertEqual(moved_ceiling(stayed, base, set(stayed) | {("a.zig", "t")}, base_keys)[("b.zig", "t")], 0)
+        # a.zig's test was deleted; c.zig's test of that name existed at the base and starts sleeping.
+        deleted = Counter({("c.zig", "t"): 2, ("a.zig", "u"): 1})
+        self.assertEqual(moved_ceiling(deleted, base, set(deleted), base_keys)[("c.zig", "t")], 0)
+
+    def test_sleep_keys_name_every_test_whether_or_not_it_sleeps(self):
+        zig = 'test "quiet" {}\ntest "loud" { std.Thread.sleep(1); }\nfn helper() void {}\n'
+        python = "def run():\n    pass\n\n\nclass Case:\n    def step(self):\n        pass\n"
+        self.assertEqual(sleep_keys([("src/a.zig", zig), ("src/x/tests.zig", zig),
+                                     ("tests/integration/a.py", python), ("docs/b.zig", zig)]), {
+            ("src/a.zig", "quiet"), ("src/a.zig", "loud"),
+            ("src/x/tests.zig", "quiet"), ("src/x/tests.zig", "loud"), ("src/x/tests.zig", "helper"),
+            ("tests/integration/a.py", "run"), ("tests/integration/a.py", "Case"),
+            ("tests/integration/a.py", "Case.step")})
 
     def test_zig_sleeps_count_in_tests_and_test_only_files(self):
         source = r'''

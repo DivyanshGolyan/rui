@@ -69,7 +69,7 @@ RULES = (
       "tests/integration/product_defaults.py"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "CLI selection and otherwise unnamed native caller checks"),
-    (("src/store.zig",), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
+    (("src/store.zig", "src/store/*", "!src/store/wire/*"), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
      "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance"),
     (("tests/integration/peer_integration.py",), ("check",), ("check",),
      "Peer round trip through installed Bash, runtime address and capture recovery"),
@@ -100,6 +100,8 @@ RULES = (
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      "Bash execution, direct custody and process-crash recovery"),
     (("src/h2/*",), ("test-h2",), ("test-h2",), "The HTTP/2 client module's own tests"),
+    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig"),
+     ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux"),
     (("src/store/wire/mysql.zig", "tests/integration/mysql_wire*", "build.zig"),
      ("test-logic", "mysql-wire-integration"), ("test-logic",),
      "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)"),
@@ -196,7 +198,7 @@ RULES = (
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
 
 CHECK_COVERS = {
-    "test", "test-h2", "test-codec-runtime", "admission-integration", "dispatch-integration",
+    "test", "test-h2", "test-pg", "test-codec-runtime", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
@@ -241,6 +243,12 @@ def execution_batches(targets, check_part="all"):
                else [target] for target in targets if target in isolated])
 
 
+def matches(path, patterns):
+    """A path matches a rule's patterns unless a "!" pattern excludes it."""
+    included = any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns if not pattern.startswith("!"))
+    return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
+
+
 def select(paths, phase, available):
     targets, native_targets, reasons = set(), set(), set()
     manual_checks = set()
@@ -259,7 +267,7 @@ def select(paths, phase, available):
             continue
         matched = False
         for patterns, checks, native_checks, reason in RULES:
-            if any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns):
+            if matches(path, patterns):
                 targets.update(checks)
                 native_targets.update(native_checks)
                 reasons.add(reason)

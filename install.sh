@@ -33,9 +33,9 @@ if [[ -z $expected_zig || $actual_zig != "$expected_zig" ]]; then
     printf 'Zig %s is required; found %s. No installation changed.\n' "$expected_zig" "$actual_zig" >&2
     exit 1
 fi
-format=$(sed -n 's/^pub const schema_version: u32 = \([0-9][0-9]*\);$/\1/p' src/store.zig) || format=
+format=$(sed -n 's/^pub const schema_version: u32 = \([0-9][0-9]*\);$/\1/p' src/store/schema.zig) || format=
 if [[ -z $format ]]; then
-    printf 'src/store.zig declares no schema_version. No installation changed.\n' >&2
+    printf 'src/store/schema.zig declares no schema_version. No installation changed.\n' >&2
     exit 1
 fi
 . "$repo/release/publish.sh"
