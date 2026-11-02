@@ -225,9 +225,16 @@ pub const SessionReportCapture = struct {
     }
 
     fn appendTools(self: *SessionReportCapture, tools_mask: u8) !void {
-        if (tools_mask > tool_catalog.toolBit(.bash)) return error.CorruptStore;
+        if (tools_mask > tool_catalog.all_tools_mask) return error.CorruptStore;
         try self.append("[");
-        if (tools_mask & tool_catalog.toolBit(.bash) != 0) try self.append("\"bash\"");
+        var first = true;
+        for (std.enums.values(tool_catalog.Tool)) |tool| if (tools_mask & tool_catalog.toolBit(tool) != 0) {
+            if (!first) try self.append(",");
+            first = false;
+            try self.append("\"");
+            try self.append(@tagName(tool));
+            try self.append("\"");
+        };
         try self.append("]");
     }
 
@@ -432,7 +439,9 @@ pub fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64, 
         try sqlite.readText(statement, 0, &row.workspace);
         row.provider = try sqlite.readProvider(statement, 1);
         try sqlite.readText(statement, 2, &row.model);
-        row.bash = try sqlite.readToolsMask(statement, 3) & tool_catalog.toolBit(.bash) != 0;
+        const tools_mask = try sqlite.readToolsMask(statement, 3);
+        row.bash = tools_mask & tool_catalog.toolBit(.bash) != 0;
+        row.web_search = tools_mask & tool_catalog.toolBit(.web_search) != 0;
         row.permission_mode = if (try sqlite.readPermissionMode(statement, 4) == 0) .ask else .bypass;
         row.label = try sqlite.readNullableLabel(statement, 5);
         row.created_at = @intCast(try sqlite.readNullablePositiveI64(statement, 6) orelse return error.CorruptStore);
@@ -1093,7 +1102,7 @@ fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *Sessi
         const tools = c.sqlite3_column_int(statement, 4);
         const permission = c.sqlite3_column_int(statement, 5);
         const instructions_id = c.sqlite3_column_int64(statement, 6);
-        if (revision <= 0 or tools < 0 or tools > tool_catalog.toolBit(.bash) or permission < 0 or permission > 1 or instructions_id <= 0) return error.CorruptStore;
+        if (revision <= 0 or tools < 0 or tools > tool_catalog.all_tools_mask or permission < 0 or permission > 1 or instructions_id <= 0) return error.CorruptStore;
         try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{revision});
         try appendColumnString(statement, 1, 128, capture);
         try capture.append(",\"workspace\":");

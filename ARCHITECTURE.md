@@ -1136,9 +1136,10 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 ### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-Its only current tool is `bash`; Session configuration selects Bash or no tools.
-CLI `--tools` accepts exactly `bash` or `none`; the public configuration and report arrays contain exactly `["bash"]` or `[]`.
-Removed `edit`, combinations, duplicates and alternate spellings reject rather than aliasing another selection.
+It holds `bash`, which Rui runs as Actions, and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+A fresh Session gets both.
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash` before `web_search`).
+Removed `edit`, duplicates, other orders and alternate spellings reject rather than aliasing another selection.
 Classify proposed Tool Calls against the proposing model Operation's frozen Tool Catalog, not the latest Session configuration.
 Removing Bash while that model request runs changes future model requests, not the applicability of its Bash proposal.
 A later Operation that was not offered Bash can still contain a trustworthy Bash call envelope, but classification saves its rejection result and creates no Action.

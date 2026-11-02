@@ -70,7 +70,7 @@ pub fn readPermissionMode(statement: *c.sqlite3_stmt, column: c_int) !u8 {
 
 pub fn readToolsMask(statement: *c.sqlite3_stmt, column: c_int) !u8 {
     const tools = c.sqlite3_column_int(statement, column);
-    if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
+    if (tools < 0 or tools > tool_catalog.all_tools_mask) return error.CorruptStore;
     return @intCast(tools);
 }
 

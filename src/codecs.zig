@@ -207,6 +207,20 @@ test "a tool entry escapes its name and description as JSON strings" {
     try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"t\",\"description\":\"say \\\"hi\\\"\\\\\\n\\u0001é\",\"strict\":true,\"parameters\":{}}", written);
 }
 
+test "hosted web search follows the function tools and asks for live pages" {
+    var encoder = resumeFrom(responses_initial);
+    var buffer: [512]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try encodeForTesting(&encoder, null, &.{
+        .{ .item = .tools_start },
+        .{ .item = .tool, .handles = &.{ "bash", "d", "{}" } },
+        .{ .item = .web_search },
+        .{ .item = .text_format },
+    }, &out);
+    try std.testing.expectEqualStrings("],\"tools\":[{\"type\":\"function\",\"name\":\"bash\",\"description\":\"d\",\"strict\":true,\"parameters\":{}}," ++
+        "{\"type\":\"web_search\",\"external_web_access\":true}],\"text\":{\"verbosity\":\"low\"}", out.buffered());
+}
+
 test "a resumed encoder writes what an uninterrupted one writes" {
     const history = [_]TestItem{
         .{ .item = .{ .message = .user }, .handles = &.{"one"} },
