@@ -213,7 +213,7 @@ pub const Requests = struct {
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.mark_read_request, .{ paths.store.slice(), session, position });
         var reply_buffer: ReplyBuffer = .{};
-        const reply = try sendSource(self, &paths, "/v1/mark-read", .{}, body.len, null, body.slice(), null, &reply_buffer, until).get();
+        const reply = try sendSource(self, &paths, "/v1/mark-read", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get();
         try markReadAnswer(reply);
     }
 
