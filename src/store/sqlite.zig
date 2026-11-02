@@ -379,10 +379,6 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
     return @intCast(value);
 }
 
-/// SQLite copies the bytes: a typed statement is bound when queued and
-/// stepped when its round runs, after the caller's arguments are gone.
-const transient: c.sqlite3_destructor_type = @ptrFromInt(std.math.maxInt(usize));
-
 /// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
 /// the text uses @now.
 pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64) !void {
@@ -405,14 +401,29 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
         .@"enum" => try bindText(statement, index, @tagName(value)),
         .array => |array| {
             comptime std.debug.assert(array.child == u8);
-            if (c.sqlite3_bind_blob64(statement, index, &value, value.len, transient) != c.SQLITE_OK) return error.BindFailed;
+            const copy = try sqliteCopy(&value);
+            if (c.sqlite3_bind_blob64(statement, index, copy, value.len, c.sqlite3_free) != c.SQLITE_OK) return error.BindFailed;
         },
         else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
     }
 }
 
+/// A typed statement is bound when queued and stepped when its round runs,
+/// after the caller's arguments are gone, so SQLite owns a copy and frees it.
+/// Not SQLITE_TRANSIENT: Zig refuses its address, -1, as a function pointer
+/// on aarch64.
 fn bindCopied(statement: *c.sqlite3_stmt, index: c_int, value: []const u8) !void {
-    if (c.sqlite3_bind_text64(statement, index, value.ptr, value.len, transient, c.SQLITE_UTF8) != c.SQLITE_OK) return error.BindFailed;
+    // Empty text has no bytes to outlive.
+    if (value.len == 0) return bindText(statement, index, "");
+    const copy = try sqliteCopy(value);
+    if (c.sqlite3_bind_text64(statement, index, copy, value.len, c.sqlite3_free, c.SQLITE_UTF8) != c.SQLITE_OK) return error.BindFailed;
+}
+
+/// `bytes` in memory SQLite frees; a bind frees it even when it fails.
+fn sqliteCopy(bytes: []const u8) error{OutOfMemory}![*]u8 {
+    const copy: [*]u8 = @ptrCast(c.sqlite3_malloc64(bytes.len) orelse return error.OutOfMemory);
+    @memcpy(copy[0..bytes.len], bytes);
+    return copy;
 }
 
 /// The current row as `Row`. Every value that breaks its type is
