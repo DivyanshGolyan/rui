@@ -996,7 +996,7 @@ def terminal_wait_oracles():
     # committed frame, not readiness or a Session borrowed from earlier ones.
     session = 's/é"\n'
     page = ["Browsing · Esc returns", ' Status · s/é\\"\\n', "   Permissions     bypass · Bash runs without asking", " Work", "   Finished", "", "›"]
-    def frame_after(command, chunks, read):
+    def frame_after(command, chunks, read, typed=None):
         reader, peer = socket.socketpair()
         with reader, peer:
             forget_terminal(reader.fileno())
@@ -1009,7 +1009,7 @@ def terminal_wait_oracles():
                 assert failure.args[0][0] == "terminal closed before command result", failure
                 return None
             finally:
-                assert peer.recv(4096) == (command + "\n").encode()
+                assert peer.recv(4096) == (typed or command + "\n").encode()
                 forget_terminal(reader.fileno())
     status = lambda fd: status_frame(fd, session)
     configured = lambda fd: configured_frame(fd, "/configure --model m")
@@ -1021,7 +1021,26 @@ def terminal_wait_oracles():
     assert shown is not None and "Inspect café" not in shown, shown  # A transient live outcome is legitimate.
     live = ["answer", "Configured.", "›"]
     assert frame_after("/configure --model m", [terminal_frame(live, (2, 1))], configured) is None
-    assert frame_after("/configure --model m", [terminal_frame(["Browsing · Esc returns"] + live, (4, 3))], configured) is None
+    over_page = terminal_frame(["Browsing · Esc returns"] + live, (4, 3))
+    # Over the page, the reply is the result only once Esc returns to the conversation.
+    assert frame_after("/configure --model m", [over_page], configured, "/configure --model m\n\x1b") is None
+    reader, peer = socket.socketpair()
+    with reader, peer:
+        forget_terminal(reader.fileno())
+        peer.settimeout(1)
+        keys = []
+        def answer():
+            for frame in (over_page, terminal_frame(live, (3, 3))):
+                keys.append(peer.recv(4096))
+                peer.sendall(frame)
+        answering = threading.Thread(target=answer)
+        answering.start()
+        try:
+            shown = configured(reader.fileno())
+        finally:
+            answering.join()
+            forget_terminal(reader.fileno())
+        assert keys == [b"/configure --model m\n", b"\x1b"] and shown.startswith("Browsing · Esc returns\n"), (keys, shown)
     assert frame_after("/configure --model m", [terminal_frame(live, (3, 3))], configured) is not None
     # Every command step with a composer check binds marker and readiness to
     # one frame: a marker frame that is not ready, then a ready frame without
@@ -4832,6 +4851,8 @@ def renderer_cases():
                 time.sleep(0.5)
                 os.write(tty.master, b"\xa9")
                 tty.wait(" Status · ")
+                # The page is taller than the screen; Work ends it.
+                tty.send("\x1b[6~", predicate=lambda: "\n Work\n" in tty.capture.completed)
                 generation = tty.capture.generation
                 run(home, "action", "deny", "--store", store, "--session", session, "--action", action)
                 tty.wait(predicate=lambda: " Work\n   Finished" in tty.capture.completed, after=generation, timeout=20)
@@ -4916,9 +4937,12 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("wait briefly\n", "• Wait briefly")
             shown = tty.send("/status\n", " Status · ")
+            assert BYPASS_STATUS in shown, shown
+            # The page is taller than the screen; Work ends it.
+            shown = tty.send("\x1b[6~", predicate=lambda: "\n Work\n" in tty.capture.completed)
             assert any(f" Work\n   {kind.capitalize()}" in shown for kind in ("working", "pending", "bash")), shown
             shown = tty.wait(predicate=lambda: " Work\n   Finished" in tty.capture.completed, timeout=20)
-            assert " Status · " in shown and BYPASS_STATUS in shown, shown
+            assert shown.startswith("Browsing · Esc returns\n"), shown
             tty.send("\x07", marker)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
@@ -5172,9 +5196,11 @@ def renderer_cases():
             os.write(tty.master, b"/status\n")
             time.sleep(1)
             release.set()
-            tty.wait(predicate=lambda: " Work\n   Finished" in tty.capture.completed, timeout=20)
+            tty.wait(" Status · ", timeout=20)
+            # The page is taller than the screen; Work ends it.
+            tty.send("\x1b[6~", predicate=lambda: " Work\n   Finished" in tty.capture.completed)
             for frame in frames:
-                assert not (" Status · " in frame and LIVE_LINE.search(frame)), frame
+                assert not (frame.startswith("Browsing · Esc returns\n") and LIVE_LINE.search(frame)), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
