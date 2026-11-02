@@ -94,8 +94,12 @@ pub const Rule = struct {
     colour: Colour,
     word: ?[]const u8 = null,
     /// The row says its work line beside its title: what needs the person
-    /// or explains a wait. The mark and the group say the rest.
+    /// or explains a wait. The mark and the group say the rest. The line's
+    /// tone colours the mark either way.
     says: bool = false,
+    /// The model or a tool is at work, so your own row's mark turns the
+    /// spinner. A retry counting down or a stop holds still.
+    spins: bool = false,
     /// A failed or stopped row names the Session that sent its first
     /// Message, by Label, else reference.
     starter: bool = false,
@@ -107,9 +111,9 @@ pub const Rule = struct {
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .group = .idle, .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
     .pending = .{ .group = .queued, .mark = .queued, .colour = .normal, .stoppable = true },
-    .working = .{ .group = .active, .mark = .active, .colour = .ink, .stoppable = true },
+    .working = .{ .group = .active, .mark = .active, .colour = .ink, .spins = true, .stoppable = true },
     .retrying = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = true },
-    .bash = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = true },
+    .bash = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .spins = true, .stoppable = true },
     .approval = .{ .group = .active, .mark = .waiting, .colour = .normal, .says = true, .stoppable = true },
     .stopping = .{ .group = .active, .mark = .active, .colour = .ink, .says = true, .stoppable = false },
     .finished = .{ .group = .finished, .mark = .finished, .colour = .mark, .word = "finished", .stoppable = false },
@@ -2507,8 +2511,7 @@ fn topRows(state: *const State) usize {
     return 1 + @max(bands, 1) + 1 + @intFromBool(sinceLooked(state) != null);
 }
 
-/// Draws the overview at `state.size`. `frame` picks each pulsing mark's
-/// glyph.
+/// Draws the overview at `state.size`. `frame` picks the spinner's glyph.
 pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, frame: u64) error{OutOfMemory}!Screen {
     const width = state.size.width;
     const height = state.size.height;
@@ -3398,7 +3401,7 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     // Your own Session at work turns the spinner, every one in step; any
     // other mark holds still. Only Unicode in colour spins, and a faded
     // row's state is stale, so it holds still.
-    const spins = !faded and painter.caps.unicode and painter.caps.depth != .none and rule.mark == .active and row.group() == .yours;
+    const spins = !faded and painter.caps.unicode and painter.caps.depth != .none and rule.spins and row.group() == .yours;
     painter.spun = painter.spun or spins;
     const glyph = if (spins) spinner[painter.frame % spinner.len] else if (painter.caps.unicode) mark.unicode else mark.ascii;
     _ = try painter.put(2, glyph, 1, .{ .colour = if (faded) .quiet else if (line) |shown| toneColour(shown.tone, rule.colour) else rule.colour });
@@ -3813,8 +3816,8 @@ test "each heading counts its group, and Yours takes a Session from the group it
     try std.testing.expect(std.mem.indexOf(u8, text, "Waiting for a slot                                                       5s\n") != null);
 }
 
-/// Rows whose state changed in the last few seconds, beside two older.
-const fresh = [_]Listed{
+/// The rows the picker tests open on: work, ends and an approval.
+const picker_rows = [_]Listed{
     session("s0rt00", .{ .working = ago(0) }, .{ .label = "Started just now" }),
     session("f1n1sh", .{ .finished = ago(1) }, .{ .label = "Finished a second ago" }),
     session("a5k1ng", .{ .approval = ago(2) }, .{ .label = "Asked two seconds ago" }),
@@ -3828,6 +3831,8 @@ const spinning = [_]Listed{
     session("y0urs2", .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(max_label_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .{ .label = "Mine, running", .yours = true }),
     session("y0urs3", .{ .approval = ago(2) }, .{ .label = "Mine, asking", .yours = true }),
     session("y0urs4", .{ .pending = ago(3) }, .{ .label = "Mine, queued", .yours = true }),
+    session("y0urs5", .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Mine, retrying", .yours = true }),
+    session("y0urs6", .{ .stopping = ago(4) }, .{ .label = "Mine, stopping", .yours = true }),
     session("w0rk00", .{ .working = ago(0) }, .{ .label = "Theirs, thinking" }),
     session("f1n1sh", .{ .finished = ago(1) }, .{ .label = "Theirs, finished" }),
 };
@@ -3851,6 +3856,8 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
         try std.testing.expectEqualStrings(turn, markOf(text, "Mine, running"));
         try std.testing.expectEqualStrings("○", markOf(text, "Mine, asking"));
         try std.testing.expectEqualStrings("◌", markOf(text, "Mine, queued"));
+        try std.testing.expectEqualStrings("●", markOf(text, "Mine, retrying"));
+        try std.testing.expectEqualStrings("●", markOf(text, "Mine, stopping"));
         try std.testing.expectEqualStrings("●", markOf(text, "Theirs, thinking"));
         try std.testing.expectEqualStrings("✓", markOf(text, "Theirs, finished"));
         var screen = try sizedRender(&state, .{}, 80, 24, .{}, frame);
@@ -3860,6 +3867,15 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
         const mine = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Mine, thinking").?], "\n");
         try std.testing.expectEqual(Style{ .colour = .ink }, screen.styleAt(mine, 2).?);
     }
+    // A stop the person asked for holds the mark still before the Host
+    // reports it.
+    state.selected = "y0urs1".*;
+    _ = try press(&state, .{}, .stop);
+    _ = try press(&state, .{}, .stop);
+    try std.testing.expect(state.openStop("y0urs1".*) != null);
+    const asked = try frameText(&state, 80, 24, .{}, 1);
+    defer std.testing.allocator.free(asked);
+    try std.testing.expectEqualStrings("●", markOf(asked, "Mine, thinking"));
     // ASCII, NO_COLOR and a faded screen hold still on every frame.
     for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
         if (at == 3) state.unreachable_since_ms = state.now_ms;
@@ -6251,7 +6267,7 @@ fn openPicker(state: *State, lists: []const model_list.Entry) !void {
 
 /// An overview on a 60 by 24 screen with `default`.
 fn pickerState(default: ?Default) !State {
-    var state = try opened(&fresh);
+    var state = try opened(&picker_rows);
     state.default = default;
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
     return state;
