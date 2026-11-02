@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
         if (err == error.EmptyMessageInput) {
             @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
-        } else TerminalText.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
+        } else if (err != error.HostStopped) TerminalText.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }

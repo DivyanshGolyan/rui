@@ -830,7 +830,14 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
             .returned => unreachable,
         }
     };
-    return outcome catch |err| self.failed(err, left.session);
+    return outcome catch |err| {
+        // A conversation's reads fail as transport errors once its Host stops.
+        const transport = err == error.FileNotFound or err == error.ConnectionRefused or
+            err == error.ConnectionResetByPeer or err == error.BrokenPipe;
+        if (!transport or self.ops.host(self) != null) return self.failed(err, left.session);
+        TerminalText.diagnostic("rui: The Host stopped. Run rui host start, then resume this Session.\n", .{});
+        return self.failed(error.HostStopped, left.session);
+    };
 }
 
 fn hostFacts(self: *Self) ?view.Host {
@@ -1485,6 +1492,43 @@ test "a conversation that fails to open still names the unconfirmed start on dep
     const written = try finishedWith(rig, ending, error.AccessDenied, &buffer);
     try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover lost-handle\n" ++
         "\nResume: rui session resume --store $'/store' k7m2qx\n", written);
+}
+
+test "a conversation ended by its Host stopping says how to start it again" {
+    const Down = struct {
+        var stopped: bool = false;
+        fn host(_: *Self) ?view.Host {
+            return if (stopped) null else .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 0 };
+        }
+    };
+    var ops = fake_operations;
+    ops.host = Down.host;
+    ops.converse = converse;
+    var cancellation: client.Cancellation = .{};
+    var buffer: [1024]u8 = undefined;
+    for ([_]bool{ true, false }) |stopped| {
+        Down.stopped = false;
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        rig.overview.hooks.scratch = struct {
+            fn scratch(_: std.process.Init) !std.Io.File {
+                return error.FileNotFound;
+            }
+        }.scratch;
+        try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        const ending = (try rig.press("\x1b[H\n")).?;
+        Down.stopped = stopped;
+        const resume_line = "\nResume: rui session resume --store $'/store' k7m2qx\n";
+        if (stopped) {
+            const written = try finishedWith(rig, ending, error.HostStopped, &buffer);
+            try std.testing.expectEqualStrings("\nrui: The Host stopped. Run rui host start, then resume this Session.\n" ++ resume_line, written);
+        } else {
+            // A running Host means the failure was something else; name it.
+            const written = try finishedWith(rig, ending, error.FileNotFound, &buffer);
+            try std.testing.expectEqualStrings(resume_line, written);
+        }
+    }
 }
 
 test "leaving while a start is queued or running says what became of it" {
