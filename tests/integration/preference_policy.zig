@@ -9,8 +9,8 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, args[1], "read")) {
         _ = try preferences.load(args[2]);
     } else if (std.mem.eql(u8, args[1], "login")) {
-        _ = try preferences.fillProviderAfterLogin(args[2]);
+        _ = try preferences.fillProviderAfterLogin(args[2], .codex);
     } else if (std.mem.eql(u8, args[1], "set") and args.len == 4) {
-        _ = try preferences.update(args[2], .{ .provider = .{ .set = "codex" }, .model = .{ .set = args[3] } }, .missing);
+        _ = try preferences.update(args[2], .{ .provider = .{ .set = "codex" }, .model = .{ .set = args[3] } }, &preferences.Readinesses.initFill(.missing));
     } else return error.InvalidArguments;
 }

@@ -31,12 +31,21 @@ const ExecutionPopulation = struct {
     maximum: usize,
 };
 
+/// The model transport a Host runs.
+pub const Transport = enum {
+    none,
+    /// Model requests.
+    requests,
+    /// Model requests and the OpenAI key's model list.
+    requests_and_model_list,
+};
+
 pub fn calculate(
     inherited: usize,
     active_capacity: usize,
     ordinary_exchanges: usize,
     control_exchanges: usize,
-    provider_configured: bool,
+    transport: Transport,
     authentication_configured: bool,
     os_tag: std.Target.Os.Tag,
 ) !Requirement {
@@ -50,7 +59,7 @@ pub fn calculate(
     var fixed_host = try add(store_lease, sqlite);
     fixed_host = try add(fixed_host, listener);
     // The h2 Client's one waker: an eventfd on Linux, a pipe on macOS.
-    const transport_wake: usize = if (!provider_configured)
+    const transport_wake: usize = if (transport == .none)
         0
     else switch (os_tag) {
         .linux => 1,
@@ -58,6 +67,10 @@ pub fn calculate(
         else => return error.UnsupportedDescriptorPlatform,
     };
     fixed_host = try add(fixed_host, transport_wake);
+    // The model list's stream sits beside every model slot's, so its one
+    // socket does too. A Host with no slot fetches nothing.
+    const model_list: usize = @intFromBool(transport == .requests_and_model_list and active_capacity != 0);
+    fixed_host = try add(fixed_host, model_list);
 
     // While sealing the second configure content value, an ordinary
     // connection can retain its socket, the first sealed file, and both the
@@ -169,7 +182,7 @@ fn multiply(left: usize, right: usize) !usize {
 }
 
 test "requirement uses simultaneous owner populations rather than summing exclusive maxima" {
-    const linux = try calculate(3, 2, 10, 2, true, false, .linux);
+    const linux = try calculate(3, 2, 10, 2, .requests, false, .linux);
     try std.testing.expectEqual(@as(usize, 3), linux.inherited);
     try std.testing.expectEqual(@as(usize, 8), linux.fixed_host);
     try std.testing.expectEqual(@as(usize, 42), linux.clients);
@@ -178,25 +191,32 @@ test "requirement uses simultaneous owner populations rather than summing exclus
     try std.testing.expectEqual(@as(usize, 2), linux.self_wake);
     try std.testing.expectEqual(@as(usize, 70), linux.total);
 
-    const managed = try calculate(3, 2, 10, 2, true, true, .linux);
+    const managed = try calculate(3, 2, 10, 2, .requests, true, .linux);
     try std.testing.expectEqual(@as(usize, 6), managed.authentication);
     try std.testing.expectEqual(@as(usize, 76), managed.total);
 
-    const without_transport = try calculate(3, 2, 10, 2, false, false, .linux);
+    const listing = try calculate(3, 2, 10, 2, .requests_and_model_list, false, .linux);
+    try std.testing.expectEqual(@as(usize, 9), listing.fixed_host);
+    try std.testing.expectEqual(@as(usize, 71), listing.total);
+
+    const without_transport = try calculate(3, 2, 10, 2, .none, false, .linux);
     try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
     try std.testing.expectEqual(@as(usize, 69), without_transport.total);
 
-    const macos = try calculate(3, 2, 10, 2, true, true, .macos);
+    const macos = try calculate(3, 2, 10, 2, .requests, true, .macos);
     try std.testing.expectEqual(@as(usize, 9), macos.fixed_host);
     try std.testing.expectEqual(@as(usize, 7), macos.authentication);
     try std.testing.expectEqual(@as(usize, 78), macos.total);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {
-    const requirement = try calculate(3, 0, 10, 2, false, true, .linux);
+    const requirement = try calculate(3, 0, 10, 2, .none, true, .linux);
     try std.testing.expectEqual(@as(usize, 0), requirement.execution);
     try std.testing.expectEqual(@as(usize, 0), requirement.authentication);
     try std.testing.expectEqual(@as(usize, 54), requirement.total);
+    // No slot, no Reactor: the model list is never fetched.
+    const listing = try calculate(3, 0, 10, 2, .requests_and_model_list, true, .linux);
+    try std.testing.expectEqual((try calculate(3, 0, 10, 2, .requests, true, .linux)).fixed_host, listing.fixed_host);
 }
 
 test "execution population compares exclusive steady and shared transition overlaps" {
@@ -213,7 +233,7 @@ test "execution population compares exclusive steady and shared transition overl
 test "requirement arithmetic rejects overflow" {
     try std.testing.expectError(
         error.DescriptorRequirementOverflow,
-        calculate(3, std.math.maxInt(usize), 10, 2, true, true, .linux),
+        calculate(3, std.math.maxInt(usize), 10, 2, .requests, true, .linux),
     );
 }
 

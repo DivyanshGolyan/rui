@@ -7,6 +7,9 @@ const protocol = @import("protocol.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
+const failure_class = @import("failure_class.zig");
+const work_line = @import("work_line.zig");
+const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
@@ -439,7 +442,7 @@ pub fn UserBody(comptime Sink: type) type {
             if (self.whole) {
                 try self.escaped.finish();
             } else if (self.length <= collapse_bytes and !collapses(self.small[0..self.length])) {
-                try self.escaped.feed(self.small[0..drawn(self.small[0..self.length])]);
+                try self.escaped.feed(self.small[0..beforeBlankLines(self.small[0..self.length])]);
                 try self.escaped.finish();
             } else {
                 if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
@@ -512,7 +515,7 @@ fn collapses(bytes: []const u8) bool {
 }
 
 /// The bytes before trailing blank lines.
-fn drawn(bytes: []const u8) usize {
+fn beforeBlankLines(bytes: []const u8) usize {
     var end: usize = 0;
     var start: usize = 0;
     while (start <= bytes.len) {
@@ -698,9 +701,16 @@ pub const Live = struct {
         return .{ .entries = facts.entries, .count = facts.count, .total = facts.total };
     }
 
-    // Worst terminal escaping is four bytes per input byte; allow glyph/suffix.
-    pub const line_bytes = 4 * protocol.max_tool_description_bytes + 96;
-    pub fn line(self: *const Live, index: usize, buffer: *[line_bytes]u8) ![]const u8 {
+    // The escaped description, then glyph and suffix, or a running call's
+    // clock.
+    pub const line_bytes = Text.max_bytes_per_byte * protocol.max_tool_description_bytes + 96;
+    comptime {
+        std.debug.assert("• ".len + work_line.max_clock_bytes <= line_bytes - Text.max_bytes_per_byte * protocol.max_tool_description_bytes);
+    }
+
+    /// The call's row; `running` is the clock after the words of the
+    /// running call the work line names, and empty for every other call.
+    pub fn line(self: *const Live, index: usize, buffer: *[line_bytes]u8, running: []const u8) ![]const u8 {
         const entry = self.entries[index];
         const state = toolState(entry.presentation.code);
         var writer = std.Io.Writer.fixed(buffer);
@@ -709,6 +719,7 @@ pub const Live = struct {
         try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
         try text.finish(&writer);
         try writer.writeAll(state.suffix);
+        try writer.writeAll(running);
         return writer.buffered();
     }
 
@@ -719,21 +730,29 @@ pub const Live = struct {
 
 /// Live conversation and inspection share hanging indentation. Input is already
 /// escaped or rendered; cell layout owns wrapping in the alternate screen.
+/// `prefix` begins each later non-empty line: two spaces, or a mark that sets
+/// quoted content apart from the lines around it. A mark also begins each
+/// empty line, without its trailing space, so quoted blank lines stay quoted,
+/// including the one a final newline leaves at `finish`.
 pub fn Indented(comptime Sink: type) type {
     return struct {
         sink: Sink,
+        prefix: []const u8 = "  ",
+        marks_empty: bool = false,
         line_start: bool = false,
         sgr: bool = false,
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             var storage: [4096]u8 = undefined;
             var out = std.Io.Writer.fixed(&storage);
             for (bytes) |byte| {
-                if (storage.len - out.end < 3) {
+                if (storage.len - out.end < self.prefix.len + 1) {
                     try self.sink.feed(out.buffered());
                     out.end = 0;
                 }
-                if (self.line_start and byte != '\n') {
-                    try out.writeAll("  ");
+                if (self.line_start and byte == '\n' and self.marks_empty) {
+                    try out.writeAll(std.mem.trimEnd(u8, self.prefix, " "));
+                } else if (self.line_start and byte != '\n') {
+                    try out.writeAll(self.prefix);
                     self.line_start = false;
                 }
                 if (self.sgr or byte == 0x1b) {
@@ -745,6 +764,9 @@ pub fn Indented(comptime Sink: type) type {
         }
         pub fn finish(self: *@This()) !void {
             if (self.sgr) return error.IncompleteRenderedText;
+            if (!self.marks_empty or !self.line_start) return;
+            try self.sink.feed(std.mem.trimEnd(u8, self.prefix, " "));
+            self.line_start = false;
         }
     };
 }
@@ -769,15 +791,50 @@ test "hanging indentation survives split windows and trusted styles" {
     }
 }
 
-/// What the Action heading says, for keeping it beside the choice.
+/// What the Action's `?` row says, for keeping it beside the choice.
 pub const ActionSummary = struct {
     description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
-    // The Workspace the Action document names, not whatever is current later.
-    workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
-    timeout_ms: ?u64 = null,
 };
 
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
+/// A time limit as exactly as the model set it, in its largest whole unit.
+fn writeTimeLimit(out: anytype, milliseconds: u64) !void {
+    if (milliseconds != 0 and milliseconds % 60_000 == 0) return print(out, "{d} min", .{milliseconds / 60_000});
+    if (milliseconds != 0 and milliseconds % 1000 == 0) return print(out, "{d} s", .{milliseconds / 1000});
+    return print(out, "{d} ms", .{milliseconds});
+}
+
+test "a time limit shows in its largest whole unit, never rounded" {
+    const Sink = struct {
+        bytes: [32]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    for ([_]struct { u64, []const u8 }{
+        .{ 600_000, "10 min" },
+        .{ 60_000, "1 min" },
+        .{ 90_000, "90 s" },
+        .{ 1000, "1 s" },
+        .{ 1500, "1500 ms" },
+        .{ 1, "1 ms" },
+        .{ 0, "0 ms" },
+        .{ std.math.maxInt(u64), "18446744073709551615 ms" },
+    }) |case| {
+        var sink: Sink = .{};
+        try writeTimeLimit(&sink, case[0]);
+        try std.testing.expectEqualStrings(case[1], sink.bytes[0..sink.length]);
+    }
+}
+
+/// The request block of one Bash Action: what it is for, the exact command,
+/// then a time limit and piped-in input only when the model set them.
+/// Begins each line of an Action's command after its first, and each line of
+/// its stdin. ConversationViewport hangs wrapped rows under the text after it.
+pub const content_mark = "│ ";
+
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -791,8 +848,13 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
+    return request(requests.io, scratch, sink, colour);
+}
+
+/// The request block from an Action's arguments JSON in `scratch`.
+fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
     var buffer: [4096]u8 = undefined;
-    var reader = scratch.reader(requests.io, &buffer);
+    var reader = scratch.reader(io, &buffer);
     const Source = struct {
         reader: *std.Io.Reader,
         pub fn peek(self: *@This()) !?u8 {
@@ -808,45 +870,80 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var source: Source = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
-    // Where and how long first, then the exact command; the description is
-    // the model's label, never a substitute for the command.
+    // What it is for, then the exact command; the description is the
+    // model's label, never a substitute for the command.
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
-    try sink.feed("? Run Bash");
+    try sink.feed("?");
     try sink.feed(Style.normal.code(colour));
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     if (arguments.description.len != 0) {
-        try indented.feed(" · ");
+        try indented.feed(" ");
         var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
         try label.feed(arguments.description.slice());
         try label.finish();
     }
-    try indented.feed("\nWorkspace: ");
-    var location: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
-    try location.feed(workspace);
-    try location.finish();
-    if (arguments.timeout_ms) |timeout| {
-        try print(&indented, "\nTime limit: {d} ms", .{timeout});
-    } else try indented.feed("\nTime limit: Host default");
     try indented.feed("\n$ ");
-    var command: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented };
+    // Every later line of the command and of stdin carries the content mark,
+    // so their text can never pass for the fields between them.
+    var command: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true };
     var escaped: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
     try escaped.finish();
     try command.finish();
+    if (arguments.timeout_ms) |timeout| {
+        try indented.feed("\nTime limit: ");
+        try writeTimeLimit(&indented, timeout);
+    }
     if (arguments.stdin_present) {
         try reader.seekTo(0);
-        try indented.feed("\nStandard input (literal; EOF after data):\n");
-        var input: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
+        try indented.feed("\nstdin:\n");
+        // Every line of stdin, its first included, carries the mark.
+        var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
+        var input: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
         if (!try tools.writeBashStdin(&source, &input)) return error.InvalidBashArguments;
         try input.finish();
-        try command.finish();
+        try lines.finish();
     }
     try indented.feed("\n");
     try indented.finish();
-    var summary: ActionSummary = .{ .description = arguments.description, .timeout_ms = arguments.timeout_ms };
-    try summary.workspace.set(workspace);
-    return summary;
+    return .{ .description = arguments.description };
+}
+
+test "an Action's command and stdin lines carry the content mark, so neither can pass for a field" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    const Sink = struct {
+        bytes: [512]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const Case = struct { arguments: []const u8, expected: []const u8 };
+    for ([_]Case{
+        .{
+            .arguments = "{\"description\":\"Probe\",\"cmd\":\"echo a\\nTime limit: 1 min\\n\\nstdin:\",\"stdin\":null,\"timeout_ms\":null}",
+            .expected = "\n? Probe\n  $ echo a\n  │ Time limit: 1 min\n  │\n  │ stdin:\n",
+        },
+        .{
+            .arguments = "{\"description\":\"Probe\",\"cmd\":\"cat\",\"stdin\":\"Time limit: 1 min\\nx\",\"timeout_ms\":5000}",
+            .expected = "\n? Probe\n  $ cat\n  Time limit: 5 s\n  stdin:\n  │ Time limit: 1 min\n  │ x\n",
+        },
+        .{
+            .arguments = "{\"description\":\"Probe\",\"cmd\":\"cat\",\"stdin\":\"x\\n\",\"timeout_ms\":null}",
+            .expected = "\n? Probe\n  $ cat\n  stdin:\n  │ x\n  │\n",
+        },
+    }) |case| {
+        try scratch.setLength(std.testing.io, 0);
+        try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
+        var sink: Sink = .{};
+        _ = try request(std.testing.io, scratch, &sink, false);
+        try std.testing.expectEqualStrings(case.expected, sink.bytes[0..sink.length]);
+    }
 }
 
 pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !protocol_reply.Current {
@@ -957,56 +1054,50 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
 }
 
-/// Exact fixed-end summary requires a metadata walk, not Current or the newest
-/// page. Retains no identity or payload: a transcript lists unapplied Messages
-/// in full where they belong (see `message`).
-pub const Pending = struct {
-    total: u64 = 0,
-    /// The newest queued Message's admission id. Once applied, its row shows
-    /// nothing live, so live reads count it shown (see session_reads.Messages).
-    newest: u64 = 0,
-    /// The lowest position of a Message not applied at the end, if any:
-    /// where a transcript's search for unapplied Messages may stop.
-    lowest: ?u64 = null,
+/// Which Message states a read labels. Live output labels none: its next
+/// pages show what became of each Message. A read that stays on screen
+/// labels a stop's exclusion, which lasts, and a queued Message only while
+/// work under way holds the queue (`WorkState.holdsQueue`). A pending
+/// Session acts at once, so that label would be stale at the next frame.
+pub const Labels = enum {
+    none,
+    excluded,
+    excluded_and_queued,
 
-    pub fn render(self: *const Pending, sink: anytype) !void {
-        if (self.total == 0) return;
-        try print(sink, "Rui: {d} queued messages.\n", .{self.total});
+    pub fn lasting(held: bool) Labels {
+        return if (held) .excluded_and_queued else .excluded;
     }
 };
 
-pub fn pending(requests: client.Requests, store: []const u8, session: []const u8, end: u64) !Pending {
-    var summary: Pending = .{};
-    var cursor: protocol_reply.ActivityCursor = .{ .end = end };
-    while (true) {
-        const page = switch (try requests.activityPage(store, session, cursor)) {
-            .page => |page| page,
-            .failure => |failure| return requests.failRead(failure),
-        };
-        for (page.facts.items[0..page.facts.count]) |item| {
-            if (item.value != .admission or item.value.admission.state == .applied) continue;
-            if (summary.lowest == null) summary.lowest = item.position;
-            if (item.value.admission.state != .queued) continue;
-            summary.total += 1;
-            summary.newest = @max(summary.newest, item.value.admission.admission);
-        }
-        cursor = page.continuation() orelse return summary;
-    }
-}
-
-/// What a Message's state was when read: a transcript labels it as of then.
-pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state")) ?[]const u8 {
+/// What a Message's state was when read. Only a stop's exclusion asks
+/// something of the person, so only it carries the mark.
+pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?[]const u8 {
+    if (labels == .none) return null;
     return switch (state) {
         .applied => null,
-        .queued => "Queued",
-        .excluded => "Stopped before it ran · send it again to run it",
+        .queued => if (labels == .excluded_and_queued) "Queued" else null,
+        .excluded => "! Stopped before it ran · send it again to run it",
     };
+}
+
+test "a queued Message is labelled only while work under way holds it" {
+    const working: protocol.WorkState = .{ .working = .{ .since = 1 } };
+    // Opened between admission and the model request that reads it: the
+    // Session is pending, so a label would be stale by the next frame.
+    const starting: protocol.WorkState = .{ .pending = .{ .since = 1 } };
+    try std.testing.expect(messageLabel(.queued, .lasting(starting.holdsQueue())) == null);
+    try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?);
+    // A stop's exclusion asks the person to act whatever the work is doing.
+    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, .lasting(false)).?);
+    try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
+    // Live output's next pages say what became of each Message.
+    inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
 /// One Message in full, labelled unless applied: live, in the opening and in
 /// a transcript's listing alike.
-pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, label: bool, sink: anytype, colour: bool) !void {
-    if (label) if (messageLabel(value.state)) |text| try print(sink, "\n! {s}", .{text});
+pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
+    if (messageLabel(value.state, labels)) |text| try print(sink, "\n{s}", .{text});
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     if (value.sender) |sender| {
         var line: PeerLine(@TypeOf(sink)) = undefined;
@@ -1263,42 +1354,175 @@ test "tool summary hides only complete routine metadata and retains warnings" {
     }
 }
 
-fn workEnded(sink: anytype, code: []const u8) !void {
-    try print(sink, "\n! Work ended: {s}. Send a message to continue.\n", .{code});
+/// Why a Turn ended, in the person's terms, and the one step that helps.
+/// A reason of null shows the saved code itself.
+const Ending = struct { reason: ?[]const u8, next: []const u8 };
+
+fn ending(code: []const u8) Ending {
+    const again = "Send a message to continue.";
+    return switch (failure_class.of(code)) {
+        .policy => .{ .reason = "OpenAI refused this request", .next = "Rephrase it, or start a new Session; sending more here will likely be refused again." },
+        .quota => .{ .reason = "the OpenAI account is out of quota", .next = "Add credit or wait for the limit to reset, then send a message to continue." },
+        .plan => .{ .reason = "the OpenAI plan does not include this Session's model", .next = "Choose another with /configure --model, then send a message to continue." },
+        .model => .{ .reason = "OpenAI cannot serve this Session's model", .next = "Choose another with /configure --model, then send a message to continue." },
+        .sign_in => .{ .reason = "sign-in expired", .next = "Run rui auth login codex, then send a message to continue." },
+        // A running Host keeps the key it started with.
+        .api_key => .{ .reason = "the OpenAI API key was rejected", .next = "Save a new one with rui auth login openai, restart the Host with rui host stop, then send a message to continue." },
+        .overflow => .{ .reason = "the conversation no longer fits the model's context", .next = "Start a new Session; more here will not fit either." },
+        .refused => .{ .reason = null, .next = "Sending this again will likely fail the same way; change what the error names, or start a new Session." },
+        .unreachable_provider => .{ .reason = "OpenAI could not be reached", .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
+        .retries_exhausted => .{ .reason = "retries ran out", .next = again },
+        .interrupted => .{ .reason = "it was interrupted", .next = again },
+        .other => .{ .reason = null, .next = again },
+    };
 }
 
-test "an ended Turn says what happened and what to do next where it ended" {
-    var buffer: [128]u8 = undefined;
-    var out = std.Io.Writer.fixed(&buffer);
+/// `report` is the provider's own words, escaped: never trusted as
+/// terminal text.
+fn workEnded(sink: anytype, code: []const u8, report: ?[]const u8) !void {
+    const end = ending(code);
+    try sink.feed("\n! Work ended: ");
+    try sink.feed(end.reason orelse code);
+    if (report) |words| {
+        try sink.feed(" (");
+        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+        try escaped.feed(words);
+        try escaped.finish();
+        try sink.feed(")");
+    }
+    try sink.feed(".\n  ");
+    try sink.feed(end.next);
+    try sink.feed("\n");
+}
+
+/// A failed outcome's report, read whole before its line is drawn. A
+/// longer one than the Store keeps shows its prefix.
+const ReportBytes = struct {
+    bytes: [protocol.max_report_bytes]u8,
+    len: usize,
+
+    pub fn feed(self: *ReportBytes, bytes: []const u8) !void {
+        const kept = @min(bytes.len, self.bytes.len - self.len);
+        @memcpy(self.bytes[self.len..][0..kept], bytes[0..kept]);
+        self.len += kept;
+    }
+};
+
+test "an ended Turn says why and the one next step that helps, where it ended" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
     };
-    var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "retry_exhausted");
-    // /status only repeats the code, so the line itself carries the next step.
-    try std.testing.expectEqualStrings("\n! Work ended: retry_exhausted. Send a message to continue.\n", out.buffered());
+    const cases = [_]struct { code: []const u8, report: ?[]const u8, shown: []const u8 }{
+        // The captured cyber_policy refusal: resending is no next step.
+        .{ .code = "provider_cyber_policy", .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity.", .shown = "\n! Work ended: OpenAI refused this request (cyber_policy: This request has been flagged for potentially high-risk cyber activity.).\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
+        .{ .code = "provider_invalid_prompt", .report = null, .shown = "\n! Work ended: OpenAI refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
+        .{ .code = "provider_insufficient_quota", .report = "insufficient_quota: You exceeded your current quota.", .shown = "\n! Work ended: the OpenAI account is out of quota (insufficient_quota: You exceeded your current quota.).\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
+        .{ .code = "provider_model_not_found", .report = "model_not_found: The model `gpt-x` does not exist.", .shown = "\n! Work ended: OpenAI cannot serve this Session's model (model_not_found: The model `gpt-x` does not exist.).\n  Choose another with /configure --model, then send a message to continue.\n" },
+        .{ .code = "provider_http_401", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
+        .{ .code = "provider_api_key_rejected", .report = "Incorrect API key provided", .shown = "\n! Work ended: the OpenAI API key was rejected (Incorrect API key provided).\n  Save a new one with rui auth login openai, restart the Host with rui host stop, then send a message to continue.\n" },
+        .{ .code = "ResourceExceeded", .report = null, .shown = "\n! Work ended: the conversation no longer fits the model's context.\n  Start a new Session; more here will not fit either.\n" },
+        // Retries keep the last Attempt's words.
+        .{ .code = "retry_exhausted", .report = "server_is_overloaded: Try again later.", .shown = "\n! Work ended: retries ran out (server_is_overloaded: Try again later.).\n  Send a message to continue.\n" },
+        .{ .code = "cancelled", .report = null, .shown = "\n! Work ended: it was interrupted.\n  Send a message to continue.\n" },
+        // Any other code shows itself, beside whatever the provider said.
+        .{ .code = "provider_http_400", .report = "invalid_request_error: Unsupported \"x\"\x1b[2J", .shown = "\n! Work ended: provider_http_400 (invalid_request_error: Unsupported \"x\"\\x1b[2J).\n  Sending this again will likely fail the same way; change what the error names, or start a new Session.\n" },
+        .{ .code = "provider_usage_not_included", .report = null, .shown = "\n! Work ended: the OpenAI plan does not include this Session's model.\n  Choose another with /configure --model, then send a message to continue.\n" },
+        .{ .code = "provider_tls_verification_failed", .report = null, .shown = "\n! Work ended: OpenAI could not be reached.\n  Check the network, proxy or provider endpoint, then send a message to continue.\n" },
+        // The provider's words for an overflow say how far over it went.
+        .{ .code = "ResourceExceeded", .report = "context_length_exceeded: Your input exceeds the context window.", .shown = "\n! Work ended: the conversation no longer fits the model's context (context_length_exceeded: Your input exceeds the context window.).\n  Start a new Session; more here will not fit either.\n" },
+        .{ .code = "malformed_provider_output", .report = null, .shown = "\n! Work ended: malformed_provider_output.\n  Send a message to continue.\n" },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        var sink: Sink = .{ .out = &out };
+        try workEnded(&sink, case.code, case.report);
+        try std.testing.expectEqualStrings(case.shown, out.buffered());
+    }
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
+/// What a live page needs to show the Messages people and scripts sent as
+/// they are taken.
+pub const Taking = struct {
+    /// The newest such Message shown while it waited, at its Admission: its
+    /// row never shows live.
+    drawn: queued_line.Drawn,
+    /// A position before the Admission of every such Message that waits at
+    /// the page's start, where a stop's search for those it excluded begins;
+    /// null when none waits.
+    from: ?u64,
+};
+
+/// Whether live output shows a waiting Message a person or script sent at
+/// its Admission: nothing holds the queue and it is the oldest waiting, so
+/// it is taken next and never waits above the input. Any other waits in
+/// the queued row and shows as its row once taken.
+pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, drawn: queued_line.Drawn, queued: protocol.Queued, held: bool) bool {
+    return value.state == .queued and value.admission > drawn.admission and !held and position == queued.oldest_position;
+}
+
+test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
+    const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
+    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
+    const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
+    // A pending Session can wait long before it takes the Message, as after
+    // Ctrl-R recovery: the conversation shows it at once, as on an idle send.
+    const before: queued_line.Drawn = .{ .admission = 10, .position = 20 };
+    try std.testing.expect(showsAtAdmission(30, waiting, before, alone, false));
+    // Work under way holds it: it waits in the queued row.
+    try std.testing.expect(!showsAtAdmission(30, waiting, before, alone, true));
+    // An older Message waits, which the queued row shows: this one waits
+    // with it, so the conversation shows both in order once taken.
+    try std.testing.expect(!showsAtAdmission(34, waiting, before, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
+    // Taken or excluded by the page's end, or shown already.
+    var taken = waiting;
+    taken.state = .applied;
+    try std.testing.expect(!showsAtAdmission(30, taken, before, .{}, false));
+    try std.testing.expect(!showsAtAdmission(30, waiting, .{ .admission = 12, .position = 30 }, alone, false));
+}
+
+/// Writes a page and returns the newest Message a person or script sent
+/// that it or an earlier read showed while it waited (`Taking.drawn`). The
+/// sink learns each one as it shows (`drew`).
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !queued_line.Drawn {
     const historical = page.facts.direction == .backward;
+    var from = taking.from;
+    var drawn = taking.drawn;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+        if (!historical and item.value == .stop) {
+            compact_tools.* = false;
+            if (from) |position| try excludedAtStop(requests, store, session, item, position, sink, colour);
+        }
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
         sink.item(item);
         switch (item.value) {
             .admission => |value| {
                 if (historical and value.state == .applied) continue;
+                // A person's or script's Message shows live when it is
+                // taken: as its row, or at the stop that excluded it. Until
+                // then it waits above the input, unless it is taken next;
+                // one waiting at the opening too. The opening shows one a
+                // stop excluded, labelled.
+                if (value.sender == null and (!historical or value.state == .queued)) {
+                    if (!historical and from == null and value.state != .applied) from = item.position - 1;
+                    if (!showsAtAdmission(item.position, value, drawn, page.facts.queued, page.facts.work.work.state.holdsQueue())) continue;
+                    drawn = .{ .admission = value.admission, .position = item.position };
+                    sink.drew(drawn.admission);
+                }
                 compact_tools.* = false;
-                try message(requests, store, session, item, value, historical, sink, colour);
+                try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour);
             },
             .user => |value| {
-                if (!historical) continue; // Live Admission already showed it.
+                // Live, another Session's Message showed as its Admission,
+                // and one shown while it waited never shows again.
+                if (!historical and (value.sender != null or value.admission <= drawn.admission)) continue;
                 compact_tools.* = false;
-                try message(requests, store, session, item, value, false, sink, colour);
+                try message(requests, store, session, item, value, .none, sink, colour);
             },
             .assistant => |reference| {
                 compact_tools.* = false;
@@ -1332,7 +1556,11 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // Successful content aggregates assistant rows, never a second answer.
                 if (outcome.code.eql("completed")) continue;
                 compact_tools.* = false;
-                try workEnded(sink, outcome.code.slice());
+                // A failed outcome's content is its report.
+                var report: ReportBytes = undefined;
+                report.len = 0;
+                if (outcome.content) |reference| try content(requests, store, session, item, reference, &report);
+                try workEnded(sink, outcome.code.slice(), if (outcome.content != null) report.bytes[0..report.len] else null);
             },
             .stop => {
                 compact_tools.* = false;
@@ -1351,5 +1579,34 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sendFailed(sink, failed.target);
             },
         }
+    }
+    return drawn;
+}
+
+/// Shows the Messages a person or script sent that a live page's stop
+/// excluded, oldest first and labelled, before the stop's own line: those
+/// waiting just before it, at or below its cutoff and admitted after `from`.
+/// One shown while it waited is labelled here too: the stop is what asks the
+/// person to send it again. Their bytes belong to no item.
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool) !void {
+    var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from };
+    var first = true;
+    while (true) {
+        const page = switch (try requests.activityPage(store, session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| {
+            var value = switch (item.value) {
+                .admission => |value| value,
+                else => continue,
+            };
+            if (value.sender != null or value.state != .queued or value.admission > stop.value.stop.cutoff) continue;
+            if (first) sink.excluding(item.position);
+            first = false;
+            value.state = .excluded;
+            try message(requests, store, session, item, value, .lasting(false), sink, colour);
+        }
+        cursor = page.continuation() orelse return;
     }
 }

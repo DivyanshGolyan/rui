@@ -129,9 +129,7 @@ def prove_timeout_feedback(state):
             assert outputs == [result], replay
             instructions = replay["instructions"]
             assert instructions == fixture.model_instructions(workspace, store=store, session=session), instructions
-            assert instructions.count("\n\nSession instructions:\n") == 1, instructions
-            quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\nRui address", 1)[0]
-            assert json.loads(quoted_path) == str(workspace), quoted_path
+            assert fixture.instructions_workspace(instructions) == str(workspace), instructions
             if effective is None:
                 # The model and the saved result get exactly the outcome and the
                 # nonempty stream: no empty stderr section, no retirement note.
@@ -325,7 +323,7 @@ def main():
         # Result despite optional full-output retention failure. No spillover
         # pathname is needed to address or complete this content.
         session = second_session
-        page_request = {"version": "1", "kind": "conversation_page",
+        page_request = {"version": "4", "kind": "conversation_page",
                         "store": str(retention_store), "session": session, "end": "0",
                         "before_position": "0", "before_ordinal": "0"}
         head, body = raw_request(fields["socket"], "/v1/conversation-page",
@@ -336,7 +334,7 @@ def main():
         # The truncated result spans several content windows; read them all.
         content = b""
         while True:
-            content_request = {"version": "1", "kind": "conversation_content",
+            content_request = {"version": "4", "kind": "conversation_content",
                                "store": str(retention_store), "session": session,
                                "position": result_item["position"], "ordinal": result_item["ordinal"],
                                "start": str(len(content))}

@@ -27,7 +27,7 @@ def check_failure_retention(root_owner, read_status):
         cases = ((0, False, False, False), (7, False, False, False),
                  (0, True, False, False), (0, False, True, False), (0, False, True, True))
         for status_code, cleanup_fails, nested, before_lock in cases:
-            reported = '{"version":"1","type":"host_status","status":"owned_unavailable"}'
+            reported = '{"version":"4","type":"host_status","status":"owned_unavailable"}'
             command.write_text(f"#!{sys.executable}\nimport sys\nprint({reported!r})\nprint('status diagnostic', file=sys.stderr)\nsys.exit({status_code})\n")
             command.chmod(0o700)
             destination = base / f"{status_code}-{cleanup_fails}-{nested}-{before_lock}"
@@ -65,7 +65,7 @@ def check_failure_retention(root_owner, read_status):
                                     failure = error
                                     raise
                                 raise AssertionError("status command failure was suppressed")
-                            assert read_status(store, os.environ) == {"version": "1", "type": "host_status", "status": "owned_unavailable"}
+                            assert read_status(store, os.environ) == {"version": "4", "type": "host_status", "status": "owned_unavailable"}
                             raise failure
                     except AssertionError as error:
                         assert error is failure, "retention or cleanup replaced the original failure"
@@ -74,7 +74,7 @@ def check_failure_retention(root_owner, read_status):
                 assert (store / "rui.sqlite3").read_bytes() == b"private saved work"
                 assert f"retained native observation failure state: {root}" in output.getvalue()
                 captured = json.loads((root / "probe.log").read_text())
-                assert captured["stdout"] == '{"version":"1","type":"host_status","status":"owned_unavailable"}\n'
+                assert captured["stdout"] == '{"version":"4","type":"host_status","status":"owned_unavailable"}\n'
                 assert captured["stderr"] == "status diagnostic\n" and captured["returncode"] == status_code
                 metadata = json.loads(next(root.glob("observation-failure-*.json")).read_text())
                 assert metadata["failure"] == "AssertionError"
@@ -309,8 +309,8 @@ while True:
 os.set_blocking(1, True)
 os.write(held, str(count).encode())
 # Main-screen bytes, then the committed frame that offers the choice.
-tail = (b't' * 65536 + b'\\x1b[?2026h\\x1b[H\\x1b[2J? Run Bash \\xc2\\xb7 probe\\r\\n'
-        b'Type a + Enter to allow once \\xc2\\xb7 d + Enter to deny\\r\\n> \\x1b[3;3H\\x1b[?2026l')
+tail = (b't' * 65536 + b'\\x1b[?2026h\\x1b[H\\x1b[2J? probe\\r\\n'
+        b'  \\xe2\\x80\\xba Allow once      Deny\\r\\n\\x1b[?2026l')
 while tail:
     tail = tail[os.write(1, tail):]
 termios.tcdrain(1)
@@ -335,9 +335,9 @@ os.read(release, 1)
         assert caller.poll() is None
         output = action_ready(ready_read, master, timeout=5)
         owner = sys.modules[action_ready.__module__]
-        assert "Type a + Enter to allow once · d + Enter to deny" in output, output
+        assert "› Allow once" in output, output
         assert owner.terminal_capture(master).plain.startswith(
-            "q" * count + "t" * 65536 + "? Run Bash · probe\n"), "final presentation bytes lost"
+            "q" * count + "t" * 65536 + "? probe\n"), "final presentation bytes lost"
         assert os.read(ready_read, 1) == b"x", "collector consumed future readiness"
         os.write(release_write, b"x")
         _, errors = caller.communicate(timeout=5)

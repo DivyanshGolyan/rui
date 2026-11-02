@@ -5,6 +5,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
+const draft_layout = @import("draft_layout.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
@@ -58,30 +59,40 @@ fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
     return if (result.col == 0 and result.row != 0) result.row else result.row +| 1;
 }
 
-/// The draft's caret cell when vaxis prints `prefix` with grapheme wrapping.
-pub fn caret(layout: Layout, prefix: []const u8) struct { row: u16, col: u16 } {
-    var screen: vaxis.Screen = undefined;
-    const result = layout.measuring(&screen).print(&.{.{ .text = prefix }}, .{ .wrap = .grapheme, .commit = false });
-    return .{ .row = result.row, .col = result.col };
-}
+/// The draft as the input draws it, for `draft_layout`: whole clusters
+/// measured as the terminal measures them. The screen has already shown
+/// tabs as one space and refused clusters the terminal cannot draw.
+pub const DraftPieces = struct {
+    bytes: []const u8,
+    method: gwidth.Method,
+    at: usize = 0,
 
-/// Draft rows, including an empty row after a final newline or exact fill.
-pub fn draftRows(layout: Layout, draft: []const u8) u16 {
-    return caret(layout, draft).row +| 1;
-}
+    pub fn next(self: *DraftPieces) ?draft_layout.Piece {
+        if (self.at == self.bytes.len) return null;
+        var clusters = unicode.graphemeIterator(self.bytes[self.at..]);
+        const cluster = clusters.next().?.bytes(self.bytes[self.at..]);
+        self.at += cluster.len;
+        const kind = draft_layout.kindOf(cluster);
+        return .{ .len = cluster.len, .cells = if (kind == .newline) 0 else gwidth.gwidth(cluster, self.method), .kind = kind };
+    }
+};
 
 /// Leading spaces and a list or role marker stay in the first row;
 /// continuation rows start under the text after them, up to half the width.
 /// A user line never hangs left of its body column: position alone must
-/// distinguish user text where the terminal shows no attributes.
-fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16 } {
+/// distinguish user text where the terminal shows no attributes. `quoted`:
+/// the marker begins an Action's description (`?`), its command (`$`) or a
+/// later line of it or its stdin (`│`).
+fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cells: u16, quoted: bool = false } {
     var bytes: usize = 0;
     while (bytes < line.len and line[bytes] == ' ') bytes += 1;
     var cells: usize = bytes;
-    for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*", "$" }) |glyph| {
+    var quoted = false;
+    for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*", "$", "│" }) |glyph| {
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
+            quoted = std.mem.eql(u8, glyph, "?") or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
             break;
         }
     }
@@ -89,7 +100,7 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
         if (user and width >= 4 and std.mem.startsWith(u8, line, "  ")) return .{ .bytes = 2, .cells = 2 };
         return .{ .bytes = 0, .cells = 0 };
     }
-    return .{ .bytes = bytes, .cells = @intCast(cells) };
+    return .{ .bytes = bytes, .cells = @intCast(cells), .quoted = quoted };
 }
 
 /// Retained style byte, display-only: bits 0-2 bold, italic and underline,
@@ -142,6 +153,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         dirty: bool = true,
         /// Reserve the right margin for sidenotes at `sidenote_width` and wider.
         sidenotes: bool = false,
+        /// An Action: each wrapped row of its description, command or stdin
+        /// starts with `┆`, so no row of that text can pass for a field, nor
+        /// a wrapped row for a new `│` line.
+        quotes: bool = false,
 
         pub fn append(self: *Self, input: []const u8) !void {
             if (!styled) return self.appendText(input);
@@ -339,7 +354,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
             const split = hanging(self.bytes[offset..end], body.width, user);
             if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain);
-            return rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
+            const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
+            if (commit and self.quotes and split.quoted) for (1..rows) |index| {
+                const mark = body.child(.{ .x_off = split.cells - 2, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
+                _ = mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(offset + split.bytes - 2, colour, plain) }, .{ .wrap = .none });
+            };
+            return rows;
         }
 
         /// Prints bytes as style runs, a bounded batch of segments at a time:
@@ -549,7 +569,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
 const TestScreen = struct {
     screen: vaxis.Screen,
-    cells: [40 * 12]vaxis.Cell = @splat(.{}),
+    cells: [40 * 14]vaxis.Cell = @splat(.{}),
 
     fn window(self: *TestScreen, width: u16, height: u16) vaxis.Window {
         @memset(&self.cells, .{});
@@ -570,13 +590,45 @@ const TestScreen = struct {
     }
 };
 
+test "an Action's wrapped description, command and stdin rows carry a wrap mark, so none passes for a field or a new line" {
+    const pad: [30]u8 = @splat(' ');
+    const text = "? Probe" ++ pad ++ "$ rm -rf x\n  $ echo a" ++ pad ++ "Time limit: 1 min\n  │ x" ++ pad ++ "stdin:\n  Time limit: 5 s\n";
+    const command = std.mem.indexOf(u8, text, "\n  $").? + 1;
+    for ([_]bool{ false, true }) |quotes| {
+        errdefer std.debug.print("quotes={}\n", .{quotes});
+        var view: Sized(256, false) = .{ .quotes = quotes };
+        try view.append(text);
+        try view.prepare();
+        var test_screen: TestScreen = undefined;
+        // From the command's second row too, so its first row is above the window.
+        for ([_]Position{ .{}, .{ .offset = command, .row = 1 } }) |from| {
+            const drawn = view.draw(test_screen.window(24, 20), from, true, false, .{});
+            var storage: [128]u8 = undefined;
+            var spoofs: usize = 0;
+            for (0..drawn.rows) |index| {
+                const row = test_screen.row(@intCast(index), &storage);
+                if (std.mem.indexOf(u8, row, "Time limit: 1 min") == null and std.mem.indexOf(u8, row, "stdin:") == null) continue;
+                spoofs += 1;
+                try std.testing.expect(std.mem.startsWith(u8, row, if (quotes) "  ┆ " else "    "));
+            }
+            try std.testing.expectEqual(@as(usize, 2), spoofs);
+            // The description's wrapped row cannot pass for the command.
+            if (from.offset == 0) try std.testing.expectEqualStrings(if (quotes) "┆ $ rm -rf x" else "  $ rm -rf x", test_screen.row(1, &storage));
+            // The field itself carries no mark.
+            var field = false;
+            for (0..drawn.rows) |index| field = field or std.mem.eql(u8, test_screen.row(@intCast(index), &storage), "  Time limit: 5 s");
+            try std.testing.expect(field);
+        }
+    }
+}
+
 test "vaxis wraps reading text at words with hanging indentation" {
     var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n• one two three four\n中中中中中中中中Z");
+    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n• one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
-    const drawn = view.draw(test_screen.window(16, 12), .{}, true, false, .{});
+    const drawn = view.draw(test_screen.window(16, 14), .{}, true, false, .{});
     const expected = [_][]const u8{
         "  The plain rui",  "  command isn't", "  on PATH",
         "0123456789abcdef", "next",
@@ -586,12 +638,15 @@ test "vaxis wraps reading text at words with hanging indentation" {
         "  four",
         "中中中中中中中中",
         "Z",
+        // An Action's content mark hangs like a list marker.
+        "  │ alpha beta",
+        "    gamma",
     };
-    try std.testing.expectEqual(@as(usize, 12), drawn.rows);
+    try std.testing.expectEqual(@as(usize, 14), drawn.rows);
     try std.testing.expectEqual(Position.end, drawn.next);
     var storage: [64]u8 = undefined;
     for (expected, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
-    try std.testing.expectEqual(@as(usize, 12), view.measure(layout, .{}, 99).rows);
+    try std.testing.expectEqual(@as(usize, 14), view.measure(layout, .{}, 99).rows);
     // A word keeps its punctuation across a style change.
     var styled: Sized(64, true) = .{};
     try styled.append("ab \x1b[4mcd\x1b[0m.");
@@ -601,12 +656,10 @@ test "vaxis wraps reading text at words with hanging indentation" {
     var wide: Sized(64, false) = .{};
     try wide.append("abc中");
     try std.testing.expectEqual(@as(u16, 2), wide.lineRows(.{ .width = 4, .method = .unicode }, 0));
-    // Draft rows wrap at cells; the caret follows a wrapped wide cluster.
-    const draft: Layout = .{ .width = 5, .method = .unicode };
-    try std.testing.expectEqual(@as(u16, 2), draftRows(draft, "abcd中"));
-    try std.testing.expectEqual(@as(u16, 2), caret(draft, "abcd中").col);
-    try std.testing.expectEqual(@as(u16, 2), draftRows(draft, "abcde"));
-    try std.testing.expectEqual(@as(u16, 2), draftRows(draft, "ab\n"));
+    // A draft's wide cluster moves whole to the next row.
+    const whole = draft_layout.shape(DraftPieces{ .bytes = "abcd中", .method = .unicode }, 5, 7, 0);
+    try std.testing.expectEqual(@as(usize, 2), whole.lines);
+    try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
 
 test "positions move by laid-out rows and never skip the first unseen row" {

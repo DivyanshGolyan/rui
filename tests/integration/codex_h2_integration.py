@@ -17,7 +17,7 @@ import codex_integration as codex
 import model_fixture as fixture
 import transport_h2_integration as h2_fixture
 import host_process
-from host_process import HostDiagnostics, retain_failure_state, start_ready_process
+from host_process import HostDiagnostics, dispose_all, retain_failure_state, start_ready_process
 import os_semantics
 
 
@@ -139,6 +139,15 @@ def run(*, observed=False, intake=100):
             request = json.loads(body)
             assert request["text"] == {"verbosity": "low"}, request
             assert request["parallel_tool_calls"] is False, request
+        # The codec's headers follow h2's and content-type, ahead of the
+        # credential path's fields.
+        for index, headers in enumerate(endpoint.request_headers):
+            regular = [name for name in headers if not name.startswith(b":")]
+            assert regular == [b"content-length", b"accept-encoding", b"content-type",
+                               b"accept", b"session-id", b"originator",
+                               b"authorization", b"chatgpt-account-id", b"user-agent",
+                               *([b"x-openai-fedramp"] if index == 2 else [])], regular
+            assert headers[b"accept"] == b"text/event-stream", headers
         session_ids = {headers[b"session-id"] for headers in endpoint.request_headers}
         assert len(session_ids) == 1 and re.fullmatch(rb"[0-9a-f]{32}", next(iter(session_ids)))
         for headers in endpoint.request_headers[:2]:
@@ -189,8 +198,100 @@ def run(*, observed=False, intake=100):
             incoming_error.add_note("Codex H2 cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
+def openai_base_url_run():
+    """RUI_OPENAI_BASE_URL sends the OpenAI key to the Responses endpoint
+    under that base, over TLS, and nowhere else. The model list holds a
+    stream of its own: with one execution place and a peer allowing one
+    stream per connection, a message completes while the list is held."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-openai-base.")).resolve()
+    private = root / "private"
+    private.mkdir(mode=0o700)
+    key_file = private / "openai.key"
+    key_file.write_text(codex.OPENAI_KEY + "\n")
+    key_file.chmod(0o600)
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
+        "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(root / "cert.pem", root / "key.pem")
+    tls.set_alpn_protocols(["h2"])
+    endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
+    endpoint.models_release = threading.Event()
+    endpoint.max_streams = 1
+    endpoint.models = json.dumps({"object": "list", "data": [
+        {"id": "gpt-6-sol", "object": "model", "created": 1, "owned_by": "openai"},
+        {"id": "custom-model", "object": "model", "created": 2, "owned_by": "you"},
+    ]}).encode()
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "store"
+    host = None
+    complete = False
+    try:
+        # A served provider uses system trust, which this certificate joins.
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1"], env={
+            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
+            "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
+        })
+        def model_list():
+            return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+        assert model_list()[0]["source"] == "pending", model_list()
+        configuration = fixture.command(
+            "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
+            "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",
+        )
+        assert configuration["answer"]["status"] == "accepted", configuration
+        session = configuration["answer"]["session"]
+        fixture.message(root, store, "custom-base", session, "custom-base")
+        observation, answer, _ = fixture.wait_for_result_release(store, "custom-base", session, time.monotonic() + 20)
+        assert observation["result"]["status"] == "completed", observation
+        assert answer == b"answer-custom-base", answer
+        # The Host fetched the key's model list once at start and keeps it.
+        assert model_list()[0]["source"] == "pending", model_list()
+        endpoint.models_release.set()
+        listed = fixture.wait_for(
+            lambda: (value if (value := model_list())[0]["source"] != "pending" else None),
+            "the OpenAI model list", timeout=20)
+        assert listed == [{"provider": "openai", "source": "live", "models": [
+            {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}], listed
+        # The key goes only to the list and the Responses endpoint beside it.
+        assert [(headers[b":method"], headers[b":path"]) for headers in endpoint.request_headers] == [
+            (b"GET", b"/custom/v1/models"), (b"POST", b"/custom/v1/responses")], endpoint.request_headers
+        for headers in endpoint.request_headers:
+            assert headers[b":authority"].startswith(b"localhost:"), headers
+            assert headers[b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), headers
+            assert b"chatgpt-account-id" not in headers, headers
+        assert b"content-length" not in endpoint.request_headers[0], endpoint.request_headers[0]
+        # One stream per connection: the held list and the message each
+        # needed their own.
+        assert len(endpoint.connections) == 2, endpoint.connections
+        print("openai base URL passed: the key goes over TLS to /custom/v1/models and /custom/v1/responses under RUI_OPENAI_BASE_URL, a message completes beside a held model list at one execution place, and the live list comes back")
+        complete = True
+    finally:
+        def retire():
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "OpenAI base URL endpoint thread did not retire"
+        cleaned = False
+        try:
+            # Every disposal runs; a body failure stays primary.
+            dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, retire)
+            cleaned = True
+        finally:
+            if complete and cleaned:
+                shutil.rmtree(root)
+            else:
+                retain_failure_state("OpenAI base URL failure state", root)
+
+
 if __name__ == "__main__":
     host_process.enter()
+    if os_semantics.SSL_CERT_FILE_TRUST:
+        openai_base_url_run()
+    else:
+        print("openai base URL TLS case not run: Darwin system trust ignores SSL_CERT_FILE; unit tests cover the URL rules")
     run()
     run(observed=True)
     run(intake=10)

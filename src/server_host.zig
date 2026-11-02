@@ -2,13 +2,18 @@ const std = @import("std");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
+const environment = @import("environment.zig");
+const SessionEnvironments = @import("SessionEnvironments.zig");
 const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
+const model_list = @import("model_list.zig");
+const signal_stack = @import("signal_stack.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider = @import("provider.zig");
+const providers_module = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -89,6 +94,7 @@ pub const Hooks = struct {
         bash_preparation,
         bash_preparation_after_captures,
         bash_spawn,
+        bash_arguments,
         bash_service,
         bash_capture_read,
         bash_capture_write,
@@ -219,6 +225,7 @@ pub const Hooks = struct {
             .preparation = self.fails(.bash_preparation),
             .preparation_after_captures = self.fails(.bash_preparation_after_captures),
             .spawn = self.fails(.bash_spawn),
+            .arguments = self.fails(.bash_arguments),
             .service = self.fails(.bash_service),
             .capture_read = self.fails(.bash_capture_read),
             .capture_write = self.fails(.bash_capture_write),
@@ -254,9 +261,10 @@ pub const Host = struct {
     instance: protocol.InstanceId = undefined,
     hooks: Hooks = .{},
     limits: Limits = .{},
-    provider_endpoint: ?[]const u8 = null,
-    provider_ca_file: ?[]const u8 = null,
-    authentication: ?model_adapter.Authentication = null,
+    /// What this Host serves, owned by its caller for the Host's life.
+    providers: *const providers_module.Providers = &providers_module.none,
+    /// The OpenAI API key's model list, fetched once at start.
+    model_lists: ModelLists = .{},
     auth_worker: ?*AuthWorker = null,
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
@@ -274,7 +282,10 @@ pub const Host = struct {
     /// every slot change and nothing else.
     slot_changes: u64 = 0,
     bash_path: []const u8 = default_bash_path,
-    bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
+    bash_facts: environment.HostFacts = bash.default_facts,
+    /// Each Session's client environment; null in owner tests, whose Bash
+    /// then starts from the Host facts alone.
+    environments: ?*SessionEnvironments = null,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
     /// The Store directory for optional failed-response records; null in
@@ -329,6 +340,71 @@ pub const Host = struct {
         defer self.launch_mutex.unlock(self.io);
         if (!self.launchAllowed()) return error.HostDispatchSuppressed;
         try launch(context);
+    }
+};
+
+/// The OpenAI API key's model list: the execution owner fetches it once as
+/// the Host starts and publishes it here, where it stays until the Host
+/// stops. The key is read once at start, so the list never needs fetching
+/// again. ChatGPT has no public list; its list is always the table.
+pub const ModelLists = struct {
+    io: std.Io = undefined,
+    allocator: std.mem.Allocator = undefined,
+    providers: *const providers_module.Providers = &providers_module.none,
+    mutex: std.Io.Mutex = .init,
+    /// A live list's IDs are exact length, from `allocator`.
+    openai: model_list.List = .table,
+
+    pub fn deinit(self: *ModelLists) void {
+        switch (self.openai) {
+            .live => |ids| self.allocator.free(ids.bytes),
+            .table, .pending, .table_fallback => {},
+        }
+        self.* = .{};
+    }
+
+    /// Under the lock: intake renders while execution sets.
+    pub fn set(self: *ModelLists, list: model_list.List) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.debug.assert(self.openai == .pending);
+        self.openai = list;
+    }
+
+    /// Publishes a fetched answer: its IDs, kept, or why there are none.
+    pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
+        const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
+            stderr.print("rui: OpenAI model list unavailable ({s}); the picker shows Rui's models\n", .{@errorName(err)});
+            break :failed .table_fallback;
+        };
+        self.set(list);
+    }
+
+    /// The IDs of `body`, exact length from `allocator`. Its scratch is
+    /// mapped for the call, off the caller's stack.
+    noinline fn keep(allocator: std.mem.Allocator, body: anyerror![]const u8) ![]const u8 {
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        const ids = try arena.allocator().create(model_list.IdBuffer);
+        const parsed = try model_list.parseOpenAi(arena.allocator(), try body, ids);
+        return allocator.dupe(u8, parsed.bytes);
+    }
+
+    /// Each served provider's list, borrowed under the lock for `write`.
+    pub fn render(self: *ModelLists, out: *std.Io.Writer) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var entries: [std.enums.values(protocol.Provider).len]model_list.Entry = undefined;
+        var count: usize = 0;
+        for (std.enums.values(protocol.Provider)) |name| {
+            if (!self.providers.serves(name)) continue;
+            entries[count] = .{ .provider = name, .list = switch (name) {
+                .codex => .table,
+                .openai => self.openai,
+            } };
+            count += 1;
+        }
+        try model_list.writeProviders(out, entries[0..count]);
     }
 };
 
@@ -979,7 +1055,7 @@ fn appendOptionalSigned(
 
 /// A managed Transfer's connection reuse and request correlation, for tests.
 pub inline fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    if (host.authentication != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
+    if (host.providers.chatgpt() != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
 }
 
 noinline fn writeCodexTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {

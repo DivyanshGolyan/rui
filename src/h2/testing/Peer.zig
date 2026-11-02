@@ -77,7 +77,9 @@ pub const Stream = struct {
     connection: *Connection,
     id: i32,
     index: u32,
+    method: std.ArrayList(u8),
     path: std.ArrayList(u8),
+    content_length: std.ArrayList(u8),
     authorization: std.ArrayList(u8),
     accept_encoding: std.ArrayList(u8),
     body: std.ArrayList(u8),
@@ -265,7 +267,9 @@ pub fn stop(self: *Peer) void {
     }
     self.connections.deinit(self.allocator);
     for (self.streams.items) |stream| {
+        stream.method.deinit(self.allocator);
         stream.path.deinit(self.allocator);
+        stream.content_length.deinit(self.allocator);
         stream.authorization.deinit(self.allocator);
         stream.accept_encoding.deinit(self.allocator);
         stream.body.deinit(self.allocator);
@@ -531,7 +535,9 @@ fn onBeginHeaders(session: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame
         .connection = connection,
         .id = frame.*.hd.stream_id,
         .index = @intCast(peer.streams.items.len),
+        .method = .empty,
         .path = .empty,
+        .content_length = .empty,
         .authorization = .empty,
         .accept_encoding = .empty,
         .body = .empty,
@@ -554,8 +560,12 @@ fn onHeader(session: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, name
     const name_vec = c.nghttp2_rcbuf_get_buf(name);
     const value_vec = c.nghttp2_rcbuf_get_buf(value);
     const field = name_vec.base[0..name_vec.len];
-    const target = if (std.mem.eql(u8, field, ":path"))
+    const target = if (std.mem.eql(u8, field, ":method"))
+        &stream.method
+    else if (std.mem.eql(u8, field, ":path"))
         &stream.path
+    else if (std.mem.eql(u8, field, "content-length"))
+        &stream.content_length
     else if (std.mem.eql(u8, field, "authorization"))
         &stream.authorization
     else if (std.mem.eql(u8, field, "accept-encoding"))

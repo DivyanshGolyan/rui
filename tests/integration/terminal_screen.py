@@ -68,6 +68,9 @@ class ScreenCapture:
         self.alternate = False
         self.plain = ""
         self.plain_total = 0
+        # Each complete OSC 52 sequence, as written; pyte drops them.
+        self.clipboard = []
+        self.clipboard_pending = ""
 
     def plain_since(self, total):
         """Main-screen text written after `plain_total` was `total`."""
@@ -99,9 +102,26 @@ class ScreenCapture:
                         self.plain = (self.plain + visible)[-LIMIT // 4:]
                         self.plain_total += len(visible)
 
+    def collect_clipboard(self, text):
+        self.clipboard_pending += text
+        while True:
+            start = self.clipboard_pending.find("\x1b]52;")
+            if start < 0:
+                self.clipboard_pending = self.clipboard_pending[-4:]
+                return
+            end = self.clipboard_pending.find("\x1b\\", start)
+            if end < 0:
+                self.clipboard_pending = self.clipboard_pending[start:]
+                assert len(self.clipboard_pending) < LIMIT, "unbounded clipboard sequence"
+                return
+            self.clipboard.append(self.clipboard_pending[start:end + 2])
+            self.clipboard_pending = self.clipboard_pending[end + 2:]
+
     def feed(self, data):
         self.received_bytes += len(data)
-        self.pending += self.decoder.decode(data)
+        text = self.decoder.decode(data)
+        self.collect_clipboard(text)
+        self.pending += text
         assert len(self.pending.encode()) < LIMIT, "unbounded terminal output"
         while True:
             match = BOUNDARY.search(self.pending)

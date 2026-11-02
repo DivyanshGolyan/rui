@@ -6,8 +6,12 @@ import subprocess
 import tempfile
 import unittest
 
+import fake_rui
+import release
+
 
 ROOT = Path(__file__).resolve().parents[2]
+NEXT = "Next: rui auth login codex (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)"
 FAKE_ZIG = '''#!/usr/bin/env python3
 import json, os, pathlib, re, sys
 args = sys.argv[1:]
@@ -43,7 +47,7 @@ prefix = pathlib.Path(args[args.index("--prefix") + 1])
 (prefix / "bin").mkdir()
 generation = os.environ.get("TEST_GENERATION", "first")
 binary = prefix / "bin/rui"
-binary.write_text("#!/bin/sh\\nprintf '%s\\\\n' '" + generation + "'\\n")
+binary.write_text(os.environ["TEST_RUI_SCRIPT"].replace("GENERATION", generation))
 binary.chmod(0o755)
 if os.environ.get("TEST_INVALID_BUILD"):
     (prefix / "bin/rui").write_text("#!/bin/sh\\nexit 3\\n")
@@ -55,12 +59,16 @@ class InstallTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="rui install ")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        # Resolved, so that git's top level matches install.sh's checkout path on macOS.
+        self.root = Path(self.temporary.name).resolve()
         self.repo = self.root / "source checkout"
         self.repo.mkdir()
         shutil.copy2(ROOT / "install.sh", self.repo / "install.sh")
+        (self.repo / "release").mkdir()
+        shutil.copy2(ROOT / "release/publish.sh", self.repo / "release/publish.sh")
         (self.repo / "src").mkdir()
         shutil.copy2(ROOT / "src/fetch_dependencies.sh", self.repo / "src/fetch_dependencies.sh")
+        (self.repo / "src/store.zig").write_text("pub const schema_version: u32 = 40;\n")
         self.manifest = '.{\n    .minimum_zig_version = "0.17.0",\n    .dependencies = .{\n'
         for name in ("openssl", "sqlite", "nghttp2", "utf8proc"):
             self.manifest += f'''        .{name} = .{{
@@ -100,6 +108,8 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
             **os.environ, "HOME": str(self.home), "ZIG_GLOBAL_CACHE_DIR": str(self.cache),
             "PATH": f"{self.tools}:{self.bin}:{os.environ['PATH']}",
             "ZIG_LOCAL_PKG_DIR": str(self.root / "selected packages"),
+            # An unreleased build: the report names it by its revision file.
+            "TEST_RUI_SCRIPT": fake_rui.script("rui unreleased (0000000)", "40", "GENERATION"),
         }
 
     def install(self, *args, **environment):
@@ -108,23 +118,60 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
             env={**self.environment, **environment}, capture_output=True, text=True, timeout=20,
         )
 
+    def report(self, result):
+        """What the installer said after publishing: the lines after its build output."""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split("\n\n", 1)[1].splitlines()
+
+    def commit(self):
+        """Commit the fixture checkout, so its build is named by a short revision."""
+        def git(*args):
+            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=self.repo,
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        with open(self.repo / "history", "a") as history:
+            history.write("commit\n")
+        git("add", "-A")
+        git("commit", "-qm", "fixture")
+        return git("rev-parse", "--short", "HEAD")
+
     def test_install_update_preserves_data_and_complete_previous_build(self):
         sentinels = [self.home / ".zshrc", self.home / ".config/rui/credentials",
                      self.home / ".local/share/rui/store/saved"]
         for path in sentinels:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("keep")
-        first = self.install()
-        self.assertEqual(first.returncode, 0, first.stderr)
+        before = self.commit()
+        self.assertEqual(self.report(self.install()), [f"Installed Rui {before} at ~/.local/bin/rui.", NEXT])
         previous = (self.bin / "rui").resolve()
+        after = self.commit()
         second = self.install(TEST_GENERATION="second")
-        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.report(second), [f"Updated Rui from {before} to {after}. Saved work and sign-in were kept."])
         self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "second\n")
         self.assertEqual(subprocess.check_output([previous], text=True), "first\n")
         self.assertTrue(((self.bin / "rui").resolve().parent.parent / "THIRD_PARTY_NOTICES.md").exists())
         self.assertEqual([path.read_text() for path in sentinels], ["keep"] * 3)
-        self.assertIn("running Host keeps its old executable", second.stdout)
         self.assertEqual((self.repo / "build.zig.zon").read_text(), self.manifest)
+
+    def test_source_install_reads_the_store_format_from_the_checkout(self):
+        source = (ROOT / "src/store.zig").read_text()
+        (self.repo / "src/store.zig").write_text(source)
+        supported = int(release.SCHEMA.search(source)[1])
+        fake_rui.saved_work(self.home, supported - 1)
+        self.assertEqual(self.report(self.install())[1:3], [
+            f"Rui source archive cannot open your saved work in ~/.local/share/rui/store: that Store uses format "
+            f"{supported - 1}, and this version uses format {supported}. Nothing was changed or deleted. Choose one:",
+            f"  Keep using it with a Rui build that opens format {supported - 1}. Earlier builds stay in ~/.local/lib/rui."])
+
+    def test_missing_schema_declaration_refuses_before_building(self):
+        (self.bin / "rui").write_text("previous rui")
+        (self.repo / "src/store.zig").write_text("const schema_version = 40;\n")
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("src/store.zig declares no schema_version. No installation changed.", result.stderr)
+        self.assertNotIn("Building", result.stdout)
+        self.assertEqual((self.bin / "rui").read_text(), "previous rui")
+        self.assertFalse((self.home / ".local/lib/rui").exists())
 
     def test_update_over_a_build_with_the_retired_evaluator_leaves_it_untouched(self):
         earlier = self.home / ".local/lib/rui/install.earlier/bin"
@@ -266,11 +313,11 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         shadow = self.tools / "rui"
         shadow.write_text("#!/bin/sh\nexit 0\n")
         shadow.chmod(0o755)
-        result = self.install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Your PATH currently selects: {shadow}", result.stdout)
-        self.assertIn('export PATH="$HOME/.local/bin:$PATH"', result.stdout)
-        self.assertIn("rehash", result.stdout)
+        self.assertEqual(self.report(self.install()), [
+            "Installed Rui source archive at ~/.local/bin/rui.",
+            f"Your PATH finds another rui first, at {shadow}. Put ~/.local/bin before it in your PATH, "
+            "then run hash -r (Bash) or rehash (Zsh).",
+            NEXT.replace("Next: rui", "Next: ~/.local/bin/rui")])
 
 
 if __name__ == "__main__":
