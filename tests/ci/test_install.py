@@ -66,9 +66,9 @@ class InstallTest(unittest.TestCase):
         shutil.copy2(ROOT / "install.sh", self.repo / "install.sh")
         (self.repo / "release").mkdir()
         shutil.copy2(ROOT / "release/publish.sh", self.repo / "release/publish.sh")
-        (self.repo / "src").mkdir()
+        (self.repo / "src/store").mkdir(parents=True)
         shutil.copy2(ROOT / "src/fetch_dependencies.sh", self.repo / "src/fetch_dependencies.sh")
-        (self.repo / "src/store.zig").write_text("pub const schema_version: u32 = 40;\n")
+        (self.repo / "src/store/schema.zig").write_text("pub const schema_version: u32 = 40;\n")
         self.manifest = '.{\n    .minimum_zig_version = "0.17.0",\n    .dependencies = .{\n'
         for name in ("openssl", "sqlite", "nghttp2", "utf8proc"):
             self.manifest += f'''        .{name} = .{{
@@ -154,8 +154,8 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         self.assertEqual((self.repo / "build.zig.zon").read_text(), self.manifest)
 
     def test_source_install_reads_the_store_format_from_the_checkout(self):
-        source = (ROOT / "src/store.zig").read_text()
-        (self.repo / "src/store.zig").write_text(source)
+        source = (ROOT / "src/store/schema.zig").read_text()
+        (self.repo / "src/store/schema.zig").write_text(source)
         supported = int(release.SCHEMA.search(source)[1])
         fake_rui.saved_work(self.home, supported - 1)
         self.assertEqual(self.report(self.install())[1:3], [
@@ -165,10 +165,10 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
 
     def test_missing_schema_declaration_refuses_before_building(self):
         (self.bin / "rui").write_text("previous rui")
-        (self.repo / "src/store.zig").write_text("const schema_version = 40;\n")
+        (self.repo / "src/store/schema.zig").write_text("const schema_version = 40;\n")
         result = self.install()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("src/store.zig declares no schema_version. No installation changed.", result.stderr)
+        self.assertIn("src/store/schema.zig declares no schema_version. No installation changed.", result.stderr)
         self.assertNotIn("Building", result.stdout)
         self.assertEqual((self.bin / "rui").read_text(), "previous rui")
         self.assertFalse((self.home / ".local/lib/rui").exists())

@@ -94,7 +94,7 @@ This source map locates the existing owners; file boundaries are not part of the
 
 | Responsibility | Start here |
 | --- | --- |
-| Durable admission, settings, results and recovery | `src/store.zig`: `Store` owns SQLite transactions and canonical facts. |
+| Durable admission, settings, results and recovery | `src/store/Store.zig`: `Store` owns SQLite transactions and canonical facts; its entry points call into one file per domain under `src/store/domain/`, and `src/store.zig` is the surface code outside `src/store/` imports. |
 | Wire vocabulary, routes and size bounds | `src/protocol.zig`: request parsing, the command table and its routes, the reply and request vocabulary, and one JSON shape per reply and request. Each writer writes its shape and each size bound is derived from that same shape. |
 | Caller request capture and recovery | `src/client.zig`: typed capture, generated/explicit identity, durable records and original-byte transmission. `src/cli.zig` selects HOME/preferences and presentation. |
 | Reply decoding | `src/protocol_reply.zig`: decodes each reply against its `src/protocol.zig` shape, accepting or rejecting its bytes, into facts the caller owns after the reply buffer is reused. |
@@ -107,8 +107,8 @@ This source map locates the existing owners; file boundaries are not part of the
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
 | Model capability | `src/model_capability.zig`: Codex identifier syntax, the reasoning-effort grammar and the model table, one row per release-supported ID with its default effort, `max` support, parallel tool-call policy and context window. |
-| Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store.zig` reads its inputs under one Store lock. |
-| Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store.zig` records into it where its commit counter advances. |
+| Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
+| Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
 | Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
 | Desktop notifications | `src/attention.zig` decides which states are news and words them, and what program status record each Session has; `src/SessionTerminal.zig` owns focus and the program status probe, and writes both. |
 | Functional cores | The `cores` list in `src/logic_tests.zig`; `src/core_boundary.zig` defines what a core may name. |

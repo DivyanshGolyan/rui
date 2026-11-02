@@ -69,7 +69,7 @@ RULES = (
       "tests/integration/product_defaults.py"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "CLI selection and otherwise unnamed native caller checks"),
-    (("src/store.zig",), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
+    (("src/store.zig", "src/store/*"), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
      "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance"),
     (("tests/integration/peer_integration.py",), ("check",), ("check",),
      "Peer round trip through installed Bash, runtime address and capture recovery"),
