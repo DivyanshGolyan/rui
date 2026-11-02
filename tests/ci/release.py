@@ -11,6 +11,8 @@ import re
 import subprocess
 import sys
 
+from release_numbers import digest_rows, drifted_row_fix
+
 TAG = re.compile(r"v0\.([0-9]+)\.([0-9]+)")
 SCHEMA = re.compile(r"^pub const schema_version: u32 = ([0-9]+);$", re.M)
 PUBLISH = re.compile(r"^@PUBLISH@\n", re.M)
@@ -51,8 +53,30 @@ def plan(sha):
     if not match:
         raise SystemExit(f"{path} has no schema_version declaration")
     schema = int(match[1])
+    refuse_drifted_schema(sha, path, schema, releases)
     patch = max((patch + 1 for minor, patch, _ in releases.values() if minor == schema), default=0)
     return f"0.{schema}.{patch}"
+
+
+def refuse_drifted_schema(sha, path, schema, releases):
+    """Refuse to ship schema S again with a different bootstrap than its last release.
+
+    Schema PRs share main's unreleased number and update its digest in place,
+    so a promotion between two such edits ships S with one digest while main
+    holds another. Releasing main as S again would publish a Store format that
+    refuses the Stores S already created.
+    """
+    shipped = [tag for tag, (minor, _, _) in releases.items() if minor == schema]
+    if not shipped:
+        return
+    last = max(shipped, key=lambda tag: releases[tag][1])
+    if not git("ls-tree", "--name-only", last, "--", path):
+        return
+    released = digest_rows(git("show", f"{last}:{path}")).get(schema)
+    current = digest_rows(git("show", f"{sha}:{path}")).get(schema)
+    if released is not None and current is not None and released != current:
+        raise SystemExit(f"{sha} would ship {last}'s schema with another bootstrap; "
+                         + drifted_row_fix(schema, released, current))
 
 
 def installer(template, version, digests, publish):
