@@ -977,6 +977,11 @@ fn drawFrame(self: *Self) !void {
 /// the list on this draft. Null when nothing matches.
 fn commandList(self: *const Self) ?slash_commands_shared.List {
     if (self.commands_closed) |closed| if (closed == self.input.revision) return null;
+    return self.suggestion();
+}
+
+/// The list the draft calls for, shown or closed.
+fn suggestion(self: *const Self) ?slash_commands_shared.List {
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
     const list = slash_commands.suggest(self.input.composition().bytes, context) orelse return null;
@@ -1004,7 +1009,8 @@ fn moveListRow(self: *Self, down: bool) bool {
 fn tabCompletion(context: *const anyopaque, _: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
     if (slash_commands.suggest(self.input.composition().bytes, .{}) == null) return null;
-    const list = self.commandList() orelse return "";
+    // Tab completes after Esc closed the list too, from its first row.
+    const list = self.suggestion() orelse return "";
     return list.completion(self.listRow());
 }
 
@@ -1173,8 +1179,8 @@ fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     switch (action) {
         // A shown list takes the arrows, as the overview's model list does.
-        .previous, .next => if (screen.inputRow() != .draft or !(self.moveListRow(action == .next) or try self.moveSelection(action == .next))) try self.scroll(action == .next, false),
-        .scroll_up, .scroll_down => if (screen.inputRow() != .draft or !self.moveListRow(action == .scroll_down)) try self.scroll(action == .scroll_down, false),
+        .previous, .next => if (screen.inputRow() != .draft or !((screen.listed and self.moveListRow(action == .next)) or try self.moveSelection(action == .next))) try self.scroll(action == .next, false),
+        .scroll_up, .scroll_down => if (screen.inputRow() != .draft or !screen.listed or !self.moveListRow(action == .scroll_down)) try self.scroll(action == .scroll_down, false),
         .page_up, .page_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
         .older, .newer => if (self.input.press(action == .older) == .typed) {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
@@ -1559,14 +1565,16 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
         } else try self.beginMessage(.{ .message = ticket }),
         // Enter in a shown list takes its highlighted entry: it runs the
         // command that entry completes, or adds the word another follows.
-        .command => if (self.commandList()) |list| {
-            var line: [512]u8 = undefined;
-            switch (list.enter(self.input.composition().bytes, self.listRow(), &line)) {
-                .run => |text| {
-                    self.slashCommand(text);
+        // Only a list the latest frame drew: a screen too short for one
+        // shows none, and Enter there runs the line as typed.
+        .command => if (if (screen.listed) self.commandList() else null) |list| {
+            const taken = list.enter(self.listRow());
+            switch (self.input.append(taken.rest)) {
+                .refused => |why| self.notice = refusedNotice(why),
+                else => if (taken.runs) {
+                    self.slashCommand(self.input.composition().bytes);
                     self.input.clear();
                 },
-                .add => |rest| self.input.append(rest),
             }
         } else {
             self.slashCommand(self.input.composition().bytes);
@@ -1575,14 +1583,18 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
-            .refused => |why| self.notice = switch (why) {
-                .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
-                .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
-                .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
-            },
+            .refused => |why| self.notice = refusedNotice(why),
             .none, .append, .redraw, .submit => {},
         },
     }
+}
+
+fn refusedNotice(why: keymap.Refusal) []const u8 {
+    return switch (why) {
+        .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
+        .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+        .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+    };
 }
 
 /// Joins a completed Admission, or launches a requested retry, and follows
@@ -2175,7 +2187,11 @@ fn startChange(self: *Self) bool {
     if (!self.statusShown() or self.input.composition().bytes.len != 0) return false;
     var buffer: [status_page.max_draft_bytes]u8 = undefined;
     // Up and Down select only changeable rows.
-    self.input.append(status_page.draft(self.inspection.selected, &self.inspection.facts, &buffer).?);
+    switch (self.input.append(status_page.draft(self.inspection.selected, &self.inspection.facts, &buffer).?)) {
+        // A value too long for the draft says so, as a list word does.
+        .refused => |why| self.notice = refusedNotice(why),
+        else => {},
+    }
     return true;
 }
 
@@ -2938,6 +2954,26 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
+test "Up, Down and Enter take a row only from a list the latest frame drew" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // Typed since the latest frame, so never seen: Down scrolls rather
+    // than moving a hidden highlight, and Enter runs the line as typed.
+    try stepKeys(held, "/\x1b[B");
+    try std.testing.expectEqual(@as(usize, 0), self.listRow());
+    try stepKeys(held, "\x15/he\r");
+    try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice.?);
+    // Drawn: Enter takes the highlighted /help.
+    try stepKeys(held, "/he");
+    try held.settle();
+    try std.testing.expect(held.screen.listed);
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.notice == null or !std.mem.startsWith(u8, self.notice.?, "! Unknown command"));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+}
+
 test "Esc closes the command list first only when the latest frame drew it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -3487,6 +3523,9 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     // Enter on a choice row lists its choices; Down and Enter take one and run it.
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqualStrings("/configure --reasoning-effort ", held.self.input.composition().bytes);
+    // The list the next frame draws takes the arrows and Enter.
+    held.self.dirty = true;
+    try held.settle();
     const list = held.self.commandList().?;
     for (list.shown()) |entry| try std.testing.expectEqual(std.mem.eql(u8, entry.word, "high"), std.mem.eql(u8, entry.description, "current"));
     try sendKeys(&held.self, "\x1b[B\r");

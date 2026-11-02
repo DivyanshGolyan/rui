@@ -73,11 +73,12 @@ pub fn complete(self: *Self, completion: Editor.Completion) void {
 }
 
 /// Adds `text` at the draft's end, as Tab's completion does.
-pub fn append(self: *Self, text: []const u8) void {
+pub fn append(self: *Self, text: []const u8) Editor.KeyOutcome {
     const editor = &self.editors[self.active];
     const edits = editor.edits;
-    _ = editor.append(text);
+    const outcome = editor.append(text);
     if (editor.edits != edits) self.changed();
+    return outcome;
 }
 
 pub fn composition(self: *const Self) View {

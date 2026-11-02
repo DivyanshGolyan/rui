@@ -825,7 +825,7 @@ fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, l
     const column = list.descriptionColumn();
     for (list.shown()[first..][0..rows], first..) |entry, index| {
         var text = self.style(.user);
-        text.reverse = index == highlight;
+        text.reverse = index == list.row(highlight);
         const cells = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index - first)), .height = 1 });
         _ = cells.printSegment(.{ .text = entry.shown, .style = text }, .{ .wrap = .none });
         if (entry.description.len != 0 and column < cells.width) _ = cells.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = entry.description, .style = self.style(.quiet) }, .{ .wrap = .none });

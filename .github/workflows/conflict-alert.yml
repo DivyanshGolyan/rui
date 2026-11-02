@@ -2,7 +2,7 @@ name: Conflict alert
 on:
   push:
     branches: [main]
-  # Auto-land's GITHUB_TOKEN fast-forward emits no push event, so it dispatches this.
+  # Re-check open PRs by hand.
   workflow_dispatch:
 permissions:
   contents: read

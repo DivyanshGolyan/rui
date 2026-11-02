@@ -78,6 +78,11 @@ fn run(init: std.process.Init) !void {
         return printHelp(init.io, .{ .resource = resource });
     }
     const command = cli_args.find(resource, args[2]) orelse {
+        var operation: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
+            stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
+            return error.InvalidArguments;
+        };
         stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
         return error.InvalidArguments;
     };
@@ -191,7 +196,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
-        .host_start, .host_stop, .host_status => try host(init, command, parsed),
+        .host_start, .host_pause, .host_status => try host(init, command, parsed),
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
@@ -460,7 +465,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) return startHost(init, selected, false, try parsed.number(usize, "active-capacity"), null);
-    if (command == .host_stop) return stopHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
+    if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
     switch (status) {
@@ -494,11 +499,11 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
     try output.finish();
 }
 
-fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
+fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
     const target = explicit_instance orelse switch (client.hostStatus(io, selected)) {
         .ready => |ready| ready.instance,
         .unavailable, .owned_unavailable => {
-            stderr.diagnostic("rui: no ready Host identity to stop. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
+            stderr.diagnostic("rui: no ready Host identity to pause. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
             return error.HostStopUnconfirmed;
         },
         .incompatible => return error.IncompatibleHost,
@@ -508,30 +513,30 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     const hex = std.fmt.bytesToHex(target, .lower);
     var notice_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
     var notice = std.Io.Writer.fixed(&notice_bytes);
-    try notice.writeAll("rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store ");
+    try notice.writeAll("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store ");
     try TerminalText.writeShellWord(&notice, paths.store.slice());
     try notice.print(" --instance {s}\n", .{&hex});
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
     const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
-        stderr.diagnostic("rui: stop reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
+        stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
         return err;
     };
     switch (outcome) {
         .acknowledged => {
             var output: JsonOutput = undefined;
             const writer = output.init(io, .stdout);
-            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_stop\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
+            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
             try writer.print(",\"instance\":\"{s}\",\"retirement\":\"unconfirmed\"}}\n", .{&hex});
             try output.finish();
         },
         .instance_changed => {
-            stderr.diagnostic("rui: Host instance changed; replacement was not stopped. Inspect rui host status before any new intent.\n", .{});
+            stderr.diagnostic("rui: Host instance changed; replacement was not paused. Inspect rui host status before any new intent.\n", .{});
             return error.HostInstanceChanged;
         },
         .unavailable => {
-            stderr.diagnostic("rui: Host stop unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
+            stderr.diagnostic("rui: Host pause unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
             return error.HostStopUnconfirmed;
         },
     }
@@ -544,7 +549,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
     switch (client.hostStatus(io, selected)) {
         .ready => |ready| return reportStartedHost(io, ready, quiet, capacity),
         .incompatible => {
-            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host stop, then run this rui again; saved work is unchanged.\n", .{});
+            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
             return error.IncompatibleHost;
         },
         .access_failure => return error.StoreAccessFailed,
@@ -661,7 +666,7 @@ fn reportStartedHost(io: std.Io, ready: @FieldType(protocol_reply.HostStatus, "r
     if (capacity) |requested| if (requested != ready.active_capacity) notice: {
         var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
-        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means stopping this Host and all its work: rui host stop --store ", .{ ready.active_capacity, requested }) catch break :notice;
+        notice.print("rui: the running Host keeps active capacity {d}; --active-capacity {d} applies only to a new Host. Changing it means pausing this Host and all its work: rui host pause --store ", .{ ready.active_capacity, requested }) catch break :notice;
         TerminalText.writeShellWord(&notice, ready.store.slice()) catch break :notice;
         notice.writeByte('\n') catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
@@ -1194,6 +1199,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         .provider = entry.binding.provider.slice(),
         .model = entry.binding.model.slice(),
         .login_at = entry.login_at,
+        .explicit = !(new_session_selection.Intent{ .store = options.store, .provider = options.provider, .model = options.model }).needsPreferences(),
     });
 }
 
@@ -1282,7 +1288,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
     };
     const provider = std.meta.stringToEnum(protocol.Provider, selected.provider.slice()).?;
     if (protocol.routeOf(ready.capabilities.providers, provider) == .unserved) {
-        stderr.diagnostic("rui: the running Host does not serve {s}; it was not restarted. Stop it with rui host stop, then run rui again.\n", .{@tagName(provider)});
+        stderr.diagnostic("rui: the running Host does not serve {s}; it was not restarted. Pause it with rui host pause, then run rui again.\n", .{@tagName(provider)});
         return error.HostModelUnavailable;
     }
     entry.binding = selected;
@@ -1647,10 +1653,11 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
-        // The saved effort is a default too, so only a fully explicit
-        // configuration skips the saved defaults.
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null or !input.reasoning_effort.present) blk: {
-            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider, --model and --reasoning-effort reads saved defaults");
+        // The saved effort comes with the saved defaults: a configuration
+        // naming both provider and model reads none, so a script that
+        // spells them never depends on the preferences file.
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
+            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
             break :blk try preferences.load(home);
         } else .{} };
         binding = try snapshot.resolveUnprompted();
@@ -2010,7 +2017,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         },
         .setup => {
             const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
-            var setup_args: [8][]const u8 = undefined;
+            var setup_args: [setup_capacity][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
@@ -2035,7 +2042,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         },
         .configure, .effort, .rename => {
             const typed_usage = liveUsage(command.name);
-            var arguments: [20][]const u8 = undefined;
+            var arguments: [live_capacity][]const u8 = undefined;
             const spelled = liveArguments(command.name, argument, &arguments) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
             const accepted = try liveConfigure(init, requests_context, live, spelled, typed_usage);
@@ -2051,7 +2058,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
 /// The /configure arguments a command spells. /effort LEVEL is
 /// `--reasoning-effort LEVEL`; /rename NAME is `--label` with the whole
 /// name as one value, decoded as /configure decodes a quoted one.
-fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[20][]const u8) ![]const []const u8 {
+fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[live_capacity][]const u8) ![]const []const u8 {
     switch (name) {
         .configure => return arguments[0..try interactiveTokens(argument, arguments)],
         .effort => {
@@ -2088,7 +2095,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         errdefer std.debug.print("short={s}\n", .{case.short});
         var values: [2][]const u8 = undefined;
         var lines: [2][64]u8 = undefined;
-        var storage: [2][20][]const u8 = undefined;
+        var storage: [2][live_capacity][]const u8 = undefined;
         for ([_][]const u8{ case.short, case.spelled }, &values, &lines, &storage) |text, *value, *line, *arguments| {
             @memcpy(line[0..text.len], text);
             const command = slash_commands.parse(line[0..text.len]).command;
@@ -2104,7 +2111,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         var line: [64]u8 = undefined;
         @memcpy(line[0..text.len], text);
         const command = slash_commands.parse(line[0..text.len]).command;
-        var arguments: [20][]const u8 = undefined;
+        var arguments: [live_capacity][]const u8 = undefined;
         try std.testing.expectError(error.InvalidInteractiveArguments, liveArguments(command.name, line[text.len - command.argument.len .. text.len], &arguments));
         try std.testing.expect(std.mem.indexOf(u8, liveUsage(command.name), text[0..7]) != null);
     }
@@ -2171,6 +2178,24 @@ fn saveEffortDefault(init: std.process.Init, level: []const u8) !void {
 // Decode command arguments into the editor's borrowed line. Removing quotes
 // and escapes only shrinks it, so each returned slice remains valid until the
 // next prompt reuses the input buffer. This is not shell expansion.
+/// Room for every /setup option at once, so a valid line never reads as
+/// too long.
+const setup_capacity = cli_args.live_setup.tokenCapacity();
+/// Room for every /configure option at once, plus the option /effort and
+/// /rename spell in front of their value.
+const live_capacity = 1 + cli_args.live_configure.tokenCapacity();
+
+test "/setup takes every option in one line" {
+    var line = "--store /path/to/store --provider codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
+    var tokens: [setup_capacity][]const u8 = undefined;
+    const count = try interactiveTokens(&line, &tokens);
+    try std.testing.expectEqual(@as(usize, 10), count);
+    var nothing = std.heap.FixedBufferAllocator.init(&.{});
+    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator());
+    try std.testing.expectEqualStrings("high", parsed.get("reasoning-effort").?);
+    try std.testing.expectEqualStrings("/path/to/store", parsed.get("store").?);
+}
+
 fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
     return decodeInteractive(input, tokens, true);
 }

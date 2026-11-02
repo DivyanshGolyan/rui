@@ -27,7 +27,7 @@ Installation keeps Stores, credentials, shell profiles and earlier builds, becau
 It starts and stops nothing.
 It reports only what needs action: a running Host and the command that can stop it, a Store format the new build cannot open, and a `PATH` that does not select the new command.
 A running Host keeps its old executable.
-To use the new one, let the Host's work finish, run the `host stop` command the installer printed, wait for `rui host status` to report unavailable, then start `rui` again.
+To use the new one, let the Host's work finish, run the `host pause` command the installer printed, wait for `rui host status` to report unavailable, then start `rui` again.
 
 If your shell still runs an older `rui`, check `type -a rui`, then run `rehash` in Zsh or `hash -r` in Bash.
 
