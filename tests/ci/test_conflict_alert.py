@@ -10,8 +10,9 @@ MAIN = "a" * 40
 class FakeGitHub:
     """PRs as number -> (head, mergeable, test-merge base); stale reads give an old clean answer."""
 
-    def __init__(self, prs, comments=None, stale=0, failing=()):
+    def __init__(self, prs, comments=None, stale=0, failing=(), failing_after=1):
         self.prs, self.comments, self.failing = prs, comments or {}, set(failing)
+        self.failing_after = failing_after  # Reads of a failing PR that succeed first; 1 = the warm-up read.
         self.stale = dict.fromkeys(prs, stale)
         self.posted, self.listed, self.reads = [], [], dict.fromkeys(prs, 0)
 
@@ -33,7 +34,7 @@ class FakeGitHub:
             return {"parents": [{"sha": parts[-1].split("-")[0]}]}
         number = int(parts[-1])
         self.reads[number] += 1
-        if number in self.failing and self.reads[number] > 1:  # The warm-up read succeeds.
+        if number in self.failing and self.reads[number] > self.failing_after:
             raise subprocess.CalledProcessError(1, "gh", stderr="HTTP 502")
         head, mergeable, base = self.prs[number]
         if self.stale[number]:
@@ -82,6 +83,10 @@ class ConflictAlertTest(unittest.TestCase):
 
     def test_one_failing_pr_does_not_stop_the_rest(self):
         github = FakeGitHub({1: ("h1", False, MAIN), 2: ("h2", False, MAIN)}, failing=[1])
+        self.assertEqual(run(github), ([2], [1]))
+
+    def test_a_failing_warm_up_read_does_not_stop_the_rest(self):
+        github = FakeGitHub({1: ("h1", False, MAIN), 2: ("h2", False, MAIN)}, failing=[1], failing_after=0)
         self.assertEqual(run(github), ([2], [1]))
 
 

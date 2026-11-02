@@ -65,7 +65,10 @@ def alert(api, repo, main_sha, sleep=time.sleep):
     """
     numbers = [pr["number"] for pr in pages(api, f"repos/{repo}/pulls?state=open&base=main")]
     for number in numbers:  # Start GitHub computing every PR's mergeability before waiting on any.
-        api("GET", f"repos/{repo}/pulls/{number}")
+        try:
+            api("GET", f"repos/{repo}/pulls/{number}")
+        except subprocess.CalledProcessError:
+            pass  # Only a head start: the judging read below retries this PR and reports its failure.
     alerted, unjudged = [], []
     for number in numbers:
         try:
