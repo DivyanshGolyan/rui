@@ -105,7 +105,7 @@ pub fn build(b: *std.Build) void {
     const codec_runtime_test_step = b.step("test-codec-runtime", "Run the codec sandbox's own tests against tiny modules");
     const codec_runtime_tests = b.addTest(.{
         .root_module = addCodecRuntime(b, target, .ReleaseSafe, true),
-        .filters = if (test_filter) |filter| &.{filter} else &.{},
+        .filters = test_filters,
     });
     codec_runtime_tests.root_module.addAnonymousImport("codec_runtime_fixture", .{
         .root_source_file = addWasmModule(b, "codec-runtime-fixture", "src/codec_runtime/fixture.zig").getEmittedBin(),
