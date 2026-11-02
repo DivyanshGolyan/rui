@@ -1407,7 +1407,8 @@ def overview_cases():
         fixture.wait_for(draining(master, lambda: len(endpoint.requests) == 4), "held Turn sent")
         record, = set(records.glob("*.json")) - before
         held = fixture.observe(store, record.stem)["target"]
-        overview_frame(master, lambda frame: re.search(r"[●*] Hold for a stop", frame), keys=b"\x1b")
+        # The Session is yours and working, so its mark is the spinner.
+        overview_frame(master, lambda frame: re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏*] Hold for a stop", frame), keys=b"\x1b")
         overview_frame(master, lambda frame: f"Stop {held}? ctrl+x yes" in frame, keys=b"\x18")
         overview_frame(master, lambda frame: re.search(r"[■#] Hold for a stop", frame), keys=b"\x18")
         work = fixture.command("session", "inspect", "--store", store, "--session", held)["work"]["state"]
