@@ -204,3 +204,38 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
         .request_id = .{},
     }, .{});
 }
+
+/// Settles `binding` with `items`, raw provider items judged in order, of
+/// which the last is a message whose whole text is `answer`.
+pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, answer: []const u8) !void {
+    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+    const source = try tmp.dir.createFile(std.testing.io, "items-output", .{ .read = true, .truncate = true });
+    defer source.close(std.testing.io);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "items-metadata", .{ .used = &used, .limit = 1 << 20 }, false, &retained);
+    defer metadata.deinit();
+    var offset: u64 = 0;
+    for (items, 0..) |bytes, ordinal| {
+        try source.writeStreamingAll(std.testing.io, bytes);
+        try source.sync(std.testing.io);
+        _ = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
+        offset += bytes.len;
+    }
+    try metadata.sealForRead();
+    try storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = offset,
+        .metadata = metadata.file,
+        .item_count = items.len,
+        .call_count = 0,
+        .answer_item_ordinal = items.len - 1,
+        .answer_length = answer.len,
+        .answer_digest = protocol.contentDigest(answer),
+        .response_id = .{},
+        .model_evidence = testing_absent_model_evidence,
+        .request_id = .{},
+    }, .{});
+}

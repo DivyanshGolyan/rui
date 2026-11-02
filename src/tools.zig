@@ -34,6 +34,206 @@ pub fn offer(tool: Tool) Offer {
     };
 }
 
+/// Every tool call is shown as one line, its description: what the call
+/// set out to do, in the base-verb form of "Run parser tests". `describe`
+/// is the one place a call becomes that line, and its switch covers every
+/// tool, so a tool cannot join the catalog without one. A function tool
+/// asks the model for it (Bash's required `description` argument); a tool
+/// the provider hosts takes no arguments of ours, so its line is written
+/// from what the provider reports the call did.
+pub const Description = protocol.Bounded(protocol.max_tool_description_bytes);
+
+/// One call, as `describe` needs it.
+pub const Call = union(Tool) {
+    /// Arguments the parser accepted, whose description it required.
+    bash: *const BashArguments,
+    web_search: WebSearchCall,
+};
+
+/// What a web search call did: its action and the decoded bytes of its
+/// strings, of which the first `WebSearchCall.excerpt_bytes` are enough.
+/// A string Rui could not read is empty, since the line only shows it.
+pub const WebSearchCall = struct {
+    action: codec_abi.HostedAction,
+    target: []const u8 = "",
+    pattern: []const u8 = "",
+
+    pub const excerpt_bytes = 2 * protocol.max_tool_description_bytes;
+};
+
+pub fn describe(call: Call) Description {
+    const out: Description = switch (call) {
+        .bash => |arguments| arguments.description,
+        .web_search => |search| describeWebSearch(search),
+    };
+    std.debug.assert(protocol.ToolPresentation.validDescription(out.slice()));
+    return out;
+}
+
+fn describeWebSearch(call: WebSearchCall) Description {
+    var target_text: Excerpt = .{};
+    var pattern_text: Excerpt = .{};
+    target_text.read(call.target);
+    pattern_text.read(call.pattern);
+    var page = target_text.slice();
+    if (call.action == .open_page or call.action == .find_in_page) {
+        for ([_][]const u8{ "https://", "http://" }) |scheme| if (std.ascii.startsWithIgnoreCase(page, scheme)) {
+            page = page[scheme.len..];
+            break;
+        };
+        if (std.ascii.startsWithIgnoreCase(page, "www.")) page = page[4..];
+    }
+    const quoted = target_text.slice();
+    const found = pattern_text.slice();
+    var out: Description = .{};
+    switch (call.action) {
+        .search => if (quoted.len != 0) compose(&out, &.{ "Search “", "”" }, &.{quoted}) else compose(&out, &.{"Search the web"}, &.{}),
+        .open_page => if (page.len != 0) compose(&out, &.{ "Open ", "" }, &.{page}) else compose(&out, &.{"Open a page"}, &.{}),
+        .find_in_page => if (found.len != 0 and page.len != 0)
+            compose(&out, &.{ "Find “", "” in ", "" }, &.{ found, page })
+        else if (found.len != 0)
+            compose(&out, &.{ "Find “", "”" }, &.{found})
+        else if (page.len != 0)
+            compose(&out, &.{ "Find in ", "" }, &.{page})
+        else
+            compose(&out, &.{"Find in a page"}, &.{}),
+        .none => compose(&out, &.{"Search the web"}, &.{}),
+    }
+    return out;
+}
+
+/// The first bytes of a string, on one line: each line break, control and
+/// other separator becomes a space, and runs of spaces and the ends are
+/// trimmed. Enough is kept to fill a description.
+const Excerpt = struct {
+    bytes: [WebSearchCall.excerpt_bytes]u8 = undefined,
+    len: usize = 0,
+
+    fn read(self: *Excerpt, bytes: []const u8) void {
+        const raw = bytes[0..@min(bytes.len, WebSearchCall.excerpt_bytes)];
+        const length = raw.len;
+        // A cut scalar at the end is dropped; anything else invalid means
+        // the source was not what it claimed, and shows nothing.
+        var valid = length;
+        while (valid > 0 and !std.unicode.utf8ValidateSlice(raw[0..valid])) valid -= 1;
+        if (length - valid > 3) return;
+        var scalars = std.unicode.Utf8View.initUnchecked(raw[0..valid]).iterator();
+        var space = false;
+        while (scalars.nextCodepointSlice()) |encoded| {
+            const scalar = std.unicode.utf8Decode(encoded) catch unreachable;
+            const blank = scalar < 0x20 or scalar == 0x7f or switch (scalar) {
+                ' ', 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
+                else => false,
+            };
+            if (blank) {
+                space = self.len != 0;
+                continue;
+            }
+            if (space) self.append(" ");
+            space = false;
+            self.append(encoded);
+        }
+    }
+
+    fn append(self: *Excerpt, encoded: []const u8) void {
+        @memcpy(self.bytes[self.len..][0..encoded.len], encoded);
+        self.len += encoded.len;
+    }
+
+    fn slice(self: *const Excerpt) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// `literals` around `values`, alternating and starting with a literal,
+/// within the description bound: a value that does not fit is cut at a
+/// scalar and ends in "…", and the first value yields room to the second
+/// down to half of what the values share.
+fn compose(out: *Description, comptime literals: []const []const u8, values: []const []const u8) void {
+    std.debug.assert(literals.len == values.len + 1 or (values.len == 0 and literals.len == 1));
+    comptime var fixed: usize = 0;
+    inline for (literals) |literal| fixed += literal.len;
+    const room = out.bytes.len - fixed;
+    var widths: [2]usize = .{ 0, 0 };
+    switch (values.len) {
+        0 => {},
+        1 => widths[0] = @min(values[0].len, room),
+        2 => {
+            widths[1] = @min(values[1].len, @max(room / 2, room -| values[0].len));
+            widths[0] = @min(values[0].len, room - widths[1]);
+        },
+        else => unreachable,
+    }
+    var writer = std.Io.Writer.fixed(&out.bytes);
+    inline for (literals, 0..) |literal, index| {
+        writer.writeAll(literal) catch unreachable;
+        if (index < values.len) writeCut(&writer, values[index], widths[@min(index, widths.len - 1)]);
+    }
+    out.len = writer.end;
+}
+
+/// `text` within `width` bytes: whole, or its scalars that fit and "…".
+fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
+    if (text.len <= width) return writer.writeAll(text) catch unreachable;
+    const ellipsis = "…";
+    var end = width -| ellipsis.len;
+    while (end > 0 and (text[end] & 0xc0) == 0x80) end -= 1;
+    // A cut after a word reads as the word's end, not a blank before "…".
+    while (end > 0 and text[end - 1] == ' ') end -= 1;
+    writer.writeAll(text[0..end]) catch unreachable;
+    writer.writeAll(ellipsis) catch unreachable;
+}
+
+test "a web search call's description says what it did, on one line, within the bound" {
+    const repeat = struct {
+        fn of(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
+            comptime {
+                var result: [text.len * count]u8 = undefined;
+                for (0..count) |index| @memcpy(result[index * text.len ..][0..text.len], text);
+                const final = result;
+                return &final;
+            }
+        }
+    }.of;
+    const Case = struct { action: codec_abi.HostedAction, target: ?[]const u8 = null, pattern: ?[]const u8 = null, expected: []const u8 };
+    const long = (comptime repeat("a", 120));
+    for ([_]Case{
+        .{ .action = .search, .target = "zig 0.17 release notes", .expected = "Search “zig 0.17 release notes”" },
+        .{ .action = .search, .target = " \n\t ", .expected = "Search the web" },
+        .{ .action = .search, .expected = "Search the web" },
+        .{ .action = .search, .target = (comptime repeat("a", 83)) ++ " bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .expected = "Search “" ++ (comptime repeat("a", 83)) ++ "…”" },
+        .{ .action = .none, .target = "ignored", .expected = "Search the web" },
+        .{ .action = .search, .target = "  two\r\nlines\u{2028}here  ", .expected = "Search “two lines here”" },
+        .{ .action = .open_page, .target = "https://www.ziglang.org/download/", .expected = "Open ziglang.org/download/" },
+        .{ .action = .open_page, .target = "HTTP://example.com", .expected = "Open example.com" },
+        .{ .action = .open_page, .expected = "Open a page" },
+        .{ .action = .find_in_page, .target = "https://ziglang.org/notes", .pattern = "Io.Writer", .expected = "Find “Io.Writer” in ziglang.org/notes" },
+        .{ .action = .find_in_page, .pattern = "Io.Writer", .expected = "Find “Io.Writer”" },
+        .{ .action = .find_in_page, .target = "ziglang.org", .expected = "Find in ziglang.org" },
+        .{ .action = .find_in_page, .expected = "Find in a page" },
+        .{ .action = .search, .target = long, .expected = "Search “" ++ (comptime repeat("a", 84)) ++ "…”" },
+        // A cut never splits a scalar.
+        .{ .action = .search, .target = "a" ++ (comptime repeat("é", 60)), .expected = "Search “a" ++ (comptime repeat("é", 41)) ++ "…”" },
+        // Two long values share the room; a short first one leaves the rest.
+        .{ .action = .find_in_page, .target = long, .pattern = long, .expected = "Find “" ++ (comptime repeat("a", 40)) ++ "…” in " ++ (comptime repeat("a", 39)) ++ "…" },
+        .{ .action = .find_in_page, .target = long, .pattern = "x", .expected = "Find “x” in " ++ (comptime repeat("a", 81)) ++ "…" },
+        // Bytes that are not UTF-8 show nothing; a scalar cut at the
+        // excerpt's end is dropped.
+        .{ .action = .search, .target = "\xff\xfe\xfd\xfc", .expected = "Search the web" },
+        .{ .action = .search, .target = "q\xe2\x82", .expected = "Search “q”" },
+    }) |case| {
+        const description = describe(.{ .web_search = .{ .action = case.action, .target = case.target orelse "", .pattern = case.pattern orelse "" } });
+        try std.testing.expectEqualStrings(case.expected, description.slice());
+        try std.testing.expect(description.slice().len <= protocol.max_tool_description_bytes);
+    }
+}
+
+test "a Bash call is described by the description its arguments carry" {
+    var arguments: BashArguments = .{};
+    try arguments.description.set("Run parser tests");
+    try std.testing.expectEqualStrings("Run parser tests", describe(.{ .bash = &arguments }).slice());
+}
+
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
     description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},

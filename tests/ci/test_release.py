@@ -44,9 +44,10 @@ class PlanTest(unittest.TestCase):
         git("clone", "-q", str(root / "remote.git"), str(root / "work"))
         os.chdir(root / "work")
 
-    def commit(self, schema, path="src/store/schema.zig"):
+    def commit(self, schema, path="src/store/schema.zig", digest=None):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(f"const x = 1;\npub const schema_version: u32 = {schema};\n")
+        row = "" if digest is None else f"    .{{ .schema_version = {schema}, .digest = 0x{digest:016x} }},\n"
+        Path(path).write_text(f"const x = 1;\npub const schema_version: u32 = {schema};\n{row}")
         with open("history", "a") as history:
             history.write(f"{schema}\n")
         git("add", "-A")
@@ -78,6 +79,16 @@ class PlanTest(unittest.TestCase):
         # Unrelated tags do not count toward the patch number.
         self.publish(third, [("v0.36.x", second), ("w0.36.4", second)])
         self.assertEqual(self.plan(third), "0.36.0")
+
+    def test_refuses_to_ship_a_released_schema_whose_bootstrap_changed(self):
+        shipped = self.commit(48, digest=0xaa)
+        drifted = self.commit(48, digest=0xbb)
+        self.publish(drifted, [("v0.48.0", shipped)])
+        with self.assertRaisesRegex(SystemExit, "restore row 48 to 0x00000000000000aa, set schema_version to 49"):
+            self.plan(drifted)
+        repaired = self.commit(48, digest=0xaa)
+        self.publish(repaired, [("v0.48.0", shipped)])
+        self.assertEqual(self.plan(repaired), "0.48.1", "an unchanged bootstrap ships again under its number")
 
     def test_revisions_before_the_store_split_read_the_format_from_src_store_zig(self):
         before = self.commit(35, "src/store.zig")

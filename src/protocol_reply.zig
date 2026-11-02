@@ -21,7 +21,8 @@ pub const ConversationPage = struct {
     pub const Item = struct {
         position: u64,
         ordinal: u64,
-        kind: enum { user, assistant, tool_result },
+        kind: protocol.ConversationItemKind,
+        /// Empty for a Hosted Call, which has none.
         content: CommandObservation.ContentReference,
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null, // Host wall-clock second; User items only.
@@ -42,7 +43,7 @@ pub const ConversationPage = struct {
             position: JsonString(20),
             ordinal: JsonString(20),
             kind: JsonEnum(@FieldType(Item, "kind")),
-            content: struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) },
+            content: ?struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) } = null,
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
             sender: ?JsonPeer = null, // User items only.
@@ -81,18 +82,24 @@ pub const ConversationPage = struct {
         var position = cursor.before_position;
         var ordinal = cursor.before_ordinal;
         for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
-            item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = try mutationId(row.content.bytes, true), .digest = undefined } };
+            const hosted = row.kind.value == .hosted_call;
+            if (hosted == (row.content != null)) return error.InvalidConversationPage;
+            item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") } };
             item.presentation = if (row.presentation) |p| p.value else null;
             item.admitted_at = if (row.admitted_at) |second| try mutationId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
-            if ((item.kind == .tool_result) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
+            if ((item.kind == .tool_result or hosted) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
                 (item.kind != .user and item.sender != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
-            if (item.presentation) |p| if (p.publication_position != item.position) return error.InvalidConversationPage;
+            if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
+            if (row.content) |reference| {
+                item.content.bytes = try mutationId(reference.bytes, true);
+                if (!reference.display.eql("omitted") or reference.sha256.slice().len != 64) return error.InvalidConversationPage;
+                _ = std.fmt.hexToBytes(&item.content.digest, reference.sha256.slice()) catch return error.InvalidConversationPage;
+            }
             if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or item.content.bytes > protocol.max_sqlite_content_bytes or
-                ((item.kind == .tool_result) != (item.ordinal != 0)) or !row.content.display.eql("omitted") or row.content.sha256.slice().len != 64 or
+                ((item.kind == .tool_result) != (item.ordinal != 0)) or
                 (position != 0 and (item.position > position or (item.position == position and item.ordinal >= ordinal)))) return error.InvalidConversationPage;
-            _ = std.fmt.hexToBytes(&item.content.digest, row.content.sha256.slice()) catch return error.InvalidConversationPage;
             position = item.position;
             ordinal = item.ordinal;
         }
@@ -215,7 +222,7 @@ pub const ActivityPage = struct {
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
         const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -285,6 +292,10 @@ pub const ActivityPage = struct {
                 .tool_result => |result| {
                     if (result.presentation.value.publication_position != fact.position) return error.InvalidActivityPage;
                     fact.value = .{ .tool_result = .{ .content = try content(result.content), .presentation = result.presentation.value } };
+                },
+                .hosted_call => |call| {
+                    if (call.presentation.value.publication_position != fact.position or call.presentation.value.description == null) return error.InvalidActivityPage;
+                    fact.value = .{ .hosted_call = call.presentation.value };
                 },
                 .call => |call| {
                     var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined };
@@ -3408,4 +3419,38 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     }
     try std.testing.expectEqual(bytes, try file.length(io));
     std.debug.print("Current facts={d}B, fixed scanner/token/input=16384B, capture={d}B; 4x257 rows, no population allocation\n", .{ @sizeOf(Current), bytes });
+}
+
+test "a hosted call travels as its presentation alone, in the conversation and the activity" {
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Search \"zig\"");
+    const presentation: protocol.ToolPresentation = .{ .description = description, .code = .failed, .publication_position = 7 };
+    const conversation = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"9\",\"items\":[" ++
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":\"Search \\\"zig\\\"\",\"code\":\"failed\",\"publication_position\":\"7\"}}],\"more\":false}";
+    const page = try ConversationPage.parse(conversation, .{ .end = 0 });
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    try std.testing.expectEqual(protocol.ConversationItemKind.hosted_call, page.items[0].kind);
+    try std.testing.expectEqual(@as(u64, 0), page.items[0].content.bytes);
+    try std.testing.expectEqualDeep(presentation, page.items[0].presentation.?);
+    // A hosted call has no content, needs its line, and sits at ordinal 0.
+    for ([_][]const u8{
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"display\":\"omitted\"},\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":null,\"code\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\"}",
+        "{\"position\":\"7\",\"ordinal\":\"1\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"assistant\"}",
+    }) |item| {
+        var buffer: [1024]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"9\",\"items\":[{s}],\"more\":false}}", .{item});
+        try std.testing.expectError(error.InvalidConversationPage, ConversationPage.parse(bytes, .{ .end = 0 }));
+    }
+
+    var facts: protocol.ActivityFacts = .{ .end = 9, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    try facts.work.workspace.set("/w");
+    facts.items[0] = .{ .position = 7, .at = 5, .value = .{ .hosted_call = presentation } };
+    var activity_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&activity_buffer);
+    try facts.writeJson(&writer);
+    const activity = try ActivityPage.parse(writer.buffered(), .{});
+    try std.testing.expectEqualDeep(presentation, activity.facts.items[0].value.hosted_call);
 }

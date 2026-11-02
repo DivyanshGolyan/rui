@@ -25,7 +25,17 @@ pub const OutputRecordTag = enum(u8) {
     extras = 9,
     /// One raw `"key":value` member of a provider bag, as received.
     member = 10,
+    /// A hosted tool call's action and outcome, and the encoded range of
+    /// its target string's contents (empty when it has none). Precedes its
+    /// item's record, like a call's fields.
+    action = 11,
+    /// The encoded range of a find_in_page action's pattern, after its
+    /// call's action record.
+    pattern = 12,
 };
+
+/// What a hosted tool call did; see `codec_abi.HostedAction`.
+pub const HostedAction = enum(u8) { none = 0, search = 1, open_page = 2, find_in_page = 3 };
 
 /// What a part holds. `opaque_block` is a block Rui does not read: its
 /// whole object lives in its part bag.
@@ -73,6 +83,9 @@ pub const OutputMetadataRecord = struct {
     scope: BagScope = .item,
     /// A message item record's phase in Rui's form.
     phase: NeutralPhase = .unphased,
+    /// An action record's action and outcome.
+    action: HostedAction = .none,
+    call_failed: bool = false,
 
     /// One past the record's last encoded byte.
     pub fn end(self: *const OutputMetadataRecord) !u64 {
@@ -143,11 +156,15 @@ pub const OutputMetadataWriter = struct {
         std.debug.assert(record.tag != .text or record.kind == .message);
         bytes[2] = @intFromBool(record.usage != null);
         std.debug.assert(!record.omit_reasoning_text or (record.tag == .item and record.kind == .reasoning));
-        bytes[3] = @intFromBool(record.omit_reasoning_text);
+        std.debug.assert((record.action == .none and !record.call_failed) or record.tag == .action);
+        std.debug.assert((record.tag != .action and record.tag != .pattern) or record.kind == .web_search_call);
+        // An action record holds its outcome and action where other
+        // records hold the replay rule and part kind.
+        bytes[3] = @intFromBool(record.omit_reasoning_text or record.call_failed);
         std.debug.assert(record.tag == .part or (record.part_kind == .opaque_block and record.part_array == .none));
         std.debug.assert(record.tag != .part or record.part_array != .none);
         std.debug.assert(record.scope == .item or record.tag == .extras or record.tag == .member);
-        bytes[4] = @backingInt(record.part_kind);
+        bytes[4] = if (record.tag == .action) @backingInt(record.action) else @backingInt(record.part_kind);
         bytes[5] = @backingInt(record.scope);
         bytes[6] = @backingInt(record.part_array);
         std.debug.assert(record.phase == .unphased or (record.tag == .item and record.kind == .message));
@@ -232,11 +249,15 @@ pub const OutputMetadataRecords = struct {
 
 fn decodeRecord(bytes: *const [output_metadata_record_bytes]u8) !OutputMetadataRecord {
     if (bytes[2] > 1 or (bytes[2] == 1 and bytes[0] != @backingInt(OutputRecordTag.usage))) return error.CorruptOutputMetadata;
-    if (bytes[3] > 1 or (bytes[3] == 1 and (bytes[0] != @backingInt(OutputRecordTag.item) or
+    const is_action = bytes[0] == @backingInt(OutputRecordTag.action);
+    const is_hosted = is_action or bytes[0] == @backingInt(OutputRecordTag.pattern);
+    if (is_hosted and bytes[1] != @backingInt(OutputItemKind.web_search_call)) return error.CorruptOutputMetadata;
+    if (bytes[3] > 1 or (bytes[3] == 1 and !is_action and (bytes[0] != @backingInt(OutputRecordTag.item) or
         bytes[1] != @backingInt(OutputItemKind.reasoning)))) return error.CorruptOutputMetadata;
     const is_part = bytes[0] == @backingInt(OutputRecordTag.part);
     const is_bag = bytes[0] == @backingInt(OutputRecordTag.extras) or bytes[0] == @backingInt(OutputRecordTag.member);
-    if (bytes[4] > 4 or bytes[5] > 1 or bytes[6] > 2 or (!is_part and (bytes[4] != 0 or bytes[6] != 0)) or
+    if (bytes[4] > 4 or bytes[5] > 1 or bytes[6] > 2 or (!is_part and !is_action and (bytes[4] != 0 or bytes[6] != 0)) or
+        (is_action and (bytes[4] > 3 or bytes[6] != 0)) or
         (is_part and bytes[6] == 0) or (!is_bag and bytes[5] != 0)) return error.CorruptOutputMetadata;
     if (bytes[7] > 2 or (bytes[7] != 0 and (bytes[0] != @backingInt(OutputRecordTag.item) or
         bytes[1] != @backingInt(OutputItemKind.message)))) return error.CorruptOutputMetadata;
@@ -261,6 +282,8 @@ fn decodeRecord(bytes: *const [output_metadata_record_bytes]u8) !OutputMetadataR
             8 => .part,
             9 => .extras,
             10 => .member,
+            11 => .action,
+            12 => .pattern,
             else => return error.CorruptOutputMetadata,
         },
         .kind = switch (bytes[1]) {
@@ -278,8 +301,10 @@ fn decodeRecord(bytes: *const [output_metadata_record_bytes]u8) !OutputMetadataR
         .id_digest = if (usage == null) bytes[40..72].* else @splat(0),
         .content_digest = bytes[72..104].*,
         .usage = usage,
-        .omit_reasoning_text = bytes[3] == 1,
-        .part_kind = @fromBackingInt(@intCast(bytes[4])),
+        .omit_reasoning_text = bytes[3] == 1 and !is_action,
+        .call_failed = bytes[3] == 1 and is_action,
+        .action = if (is_action) @fromBackingInt(@intCast(bytes[4])) else .none,
+        .part_kind = if (is_action) .opaque_block else @fromBackingInt(@intCast(bytes[4])),
         .scope = @fromBackingInt(@intCast(bytes[5])),
         .part_array = @fromBackingInt(@intCast(bytes[6])),
         .phase = @fromBackingInt(@intCast(bytes[7])),
@@ -417,6 +442,35 @@ test "a metadata record's replay-rule byte is set only on a reasoning item recor
         if (reader.next()) |record| {
             try std.testing.expect(valid);
             try std.testing.expectEqual(flag == 1, record.?.omit_reasoning_text);
+        } else |err| {
+            try std.testing.expect(!valid);
+            try std.testing.expectEqual(error.CorruptOutputMetadata, err);
+        }
+    };
+}
+
+test "an action record holds its action and outcome, only on a web search call" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_]OutputRecordTag{ .action, .pattern, .item }) |tag| for ([_]OutputItemKind{ .web_search_call, .function_call }) |kind| for (0..5) |action| for (0..2) |failed| {
+        var bytes: [output_metadata_record_bytes]u8 = @splat(0);
+        bytes[0] = @backingInt(tag);
+        bytes[1] = @backingInt(kind);
+        bytes[3] = @intCast(failed);
+        bytes[4] = @intCast(action);
+        const file = try tmp.dir.createFile(std.testing.io, "record", .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, &bytes);
+        var reader = try OutputMetadataReader.init(std.testing.io, file, 1);
+        const valid = switch (tag) {
+            .action => kind == .web_search_call and action <= 3,
+            .pattern => kind == .web_search_call and action == 0 and failed == 0,
+            else => action == 0 and failed == 0,
+        };
+        if (reader.next()) |record| {
+            try std.testing.expect(valid);
+            try std.testing.expectEqual(tag == .action and failed == 1, record.?.call_failed);
+            try std.testing.expectEqual(if (tag == .action) @as(HostedAction, @fromBackingInt(@intCast(action))) else .none, record.?.action);
         } else |err| {
             try std.testing.expect(!valid);
             try std.testing.expectEqual(error.CorruptOutputMetadata, err);
