@@ -2255,10 +2255,10 @@ test "a conversation ended by its Host stopping says how to start it again" {
         const ending = (try rig.press("\x1b[H\n")).?;
         const resume_line = "\nResume: rui session resume --store $'/store' k7m2qx\n";
         if (stopped) {
-            const written = try finishedWith(rig, ending, error.HostStopped, &buffer);
+            const written = try finishedWith(rig, ending, {}, error.HostStopped, &buffer);
             try std.testing.expectEqualStrings("\nrui: The Host stopped. Run rui host start --store $'/store', then resume this Session.\n" ++ resume_line, written);
         } else {
-            const written = try finishedWith(rig, ending, error.FileNotFound, &buffer);
+            const written = try finishedWith(rig, ending, {}, error.FileNotFound, &buffer);
             try std.testing.expectEqualStrings(resume_line, written);
         }
     }
