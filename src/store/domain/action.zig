@@ -190,49 +190,70 @@ pub fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding,
     out.timeout_ms = @intCast(timeout_ms);
 }
 
-pub fn revokeActionSenderLocked(self: *Store, binding: ActionAttemptBinding) !void {
-    const statement = try store_core.cached(self, "UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND " ++ action_attempted_sql ++ " RETURNING session_ref");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.action_id);
-    try sqlite.bindU64(statement, 2, binding.parent_operation_id);
-    _ = try store_core.stepTouching(self, statement);
+/// The Session of the Attempt `binding` names, while it is attempted.
+const attempt_session = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM action_operation action JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
+    .Args = struct { action_id: u64, parent_operation_id: u64 },
+    .Row = struct { session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+
+const revoke_sender = rsql.Write(.{
+    .sql = "UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND session_ref=@session(?3) AND " ++ action_attempted_sql,
+    .Args = struct { action_id: u64, parent_operation_id: u64, session: rsql.SessionHead },
+    // Its round read the Attempt, under the single writer.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Clears the Attempt's sender handle, when `binding` names an attempted
+/// Action; otherwise changes nothing.
+pub fn revokeActionSender(a: anytype, binding: ActionAttemptBinding) !void {
+    var found: attempt_session.Result = undefined;
+    a.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &found);
+    try a.run();
+    const row = found orelse return a.abandon(.{});
+    a.write(revoke_sender, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .session = row.session });
+    try a.commit();
 }
 
-pub fn actionSupersededByStopLocked(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
-    const statement = try store_core.cached(
-        self,
-        "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
-            "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.command_seq LIMIT 1) " ++
-            "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-            "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.action_id);
-    try sqlite.bindU64(statement, 2, binding.parent_operation_id);
-    const step = c.sqlite3_step(statement);
-    if (step != c.SQLITE_ROW) return if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed;
-    if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
-    var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
-    try sqlite.readText(statement, 0, &command_key);
-    return .{ .command_key = command_key };
+/// The first Session stop, in command order, that selected the Turn of the
+/// attempted Action `binding` names, or null.
+const superseding_stop = rsql.Read(.{
+    .sql = "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
+        "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.command_seq LIMIT 1) AS command_key " ++
+        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql,
+    .Args = struct { action_id: u64, parent_operation_id: u64 },
+    .Row = struct { command_key: ?protocol.Bounded(protocol.max_key_bytes) },
+    .cardinality = .one,
+});
+
+pub fn actionSupersededByStop(a: anytype, binding: ActionAttemptBinding) !?SupersedingControl {
+    var stop: superseding_stop.Result = undefined;
+    a.read(superseding_stop, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &stop);
+    try a.run();
+    return .{ .command_key = stop.command_key orelse return null };
 }
 
-pub fn validateActionDispatchLocked(self: *Store, binding: ActionAttemptBinding) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
-            "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-            "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
-            "AND action.resolution_code IS NULL",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.action_id);
-    try sqlite.bindU64(statement, 2, binding.parent_operation_id);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
-    if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-    if (c.sqlite3_column_int64(statement, 0) != binding.turn_id) return error.StaleActionAttemptBinding;
-    if (c.sqlite3_column_int(statement, 1) != 0) return error.SupersededByControl;
+/// The unresolved Attempt `binding` names: its Turn, and whether a Session
+/// stop selected that Turn.
+const dispatch_facts = rsql.Read(.{
+    .sql = "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
+        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
+    .Args = struct { action_id: u64, parent_operation_id: u64 },
+    .Row = struct { turn_id: rsql.Positive, stopped: bool },
+    .cardinality = .optional,
+});
+
+pub fn validateActionDispatch(a: anytype, binding: ActionAttemptBinding) !void {
+    var facts: dispatch_facts.Result = undefined;
+    a.read(dispatch_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &facts);
+    try a.run();
+    const found = facts orelse return error.StaleActionAttemptBinding;
+    if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
+    if (found.stopped) return error.SupersededByControl;
 }
 
 /// What settling the Attempt `binding` names depends on: its Session, its

@@ -312,19 +312,28 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     // A read whose keys allow one row takes no step to look for a second.
                     switch (S.cardinality) {
                         .one => {
-                            destination.* = try nextRow(S.Row, statement) orelse return error.CorruptStore;
-                            if (!S.keyed and try nextRow(S.Row, statement) != null) return error.CorruptStore;
+                            if (!try nextRow(statement)) return error.CorruptStore;
+                            try sqlite.decodeRow(S.Row, statement, destination);
+                            if (!S.keyed and try nextRow(statement)) return error.CorruptStore;
                         },
                         .optional => {
-                            destination.* = try nextRow(S.Row, statement);
-                            if (!S.keyed and destination.* != null and try nextRow(S.Row, statement) != null) return error.CorruptStore;
+                            if (!try nextRow(statement)) {
+                                destination.* = null;
+                                return;
+                            }
+                            // At most 1 KiB (`rsql.Read`), so the copy is small.
+                            var row: S.Row = undefined;
+                            try sqlite.decodeRow(S.Row, statement, &row);
+                            destination.* = row;
+                            if (!S.keyed and try nextRow(statement)) return error.CorruptStore;
                         },
                         .at_most => |max| {
-                            destination.* = .{};
-                            while (try nextRow(S.Row, statement)) |row| {
+                            destination.len = 0;
+                            while (try nextRow(statement)) {
                                 if (destination.len == max) return error.CorruptStore;
-                                destination.items[destination.len] = row;
+                                try sqlite.decodeRow(S.Row, statement, &destination.items[destination.len]);
                                 destination.len += 1;
+                                if (S.keyed) break;
                             }
                         },
                     }
@@ -360,10 +369,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     };
 }
 
-fn nextRow(comptime Row: type, statement: *c.sqlite3_stmt) Failure!?Row {
+/// Steps `statement`: true at a row, false at its end.
+fn nextRow(statement: *c.sqlite3_stmt) Failure!bool {
     return switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => try sqlite.decodeRow(Row, statement),
-        c.SQLITE_DONE => null,
+        c.SQLITE_ROW => true,
+        c.SQLITE_DONE => false,
         else => error.StatementFailed,
     };
 }

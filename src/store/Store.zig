@@ -572,13 +572,17 @@ pub const Store = struct {
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.none, action_domain.revokeActionSenderLocked(self, binding));
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.none, action_domain.actionSupersededByStopLocked(self, binding));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.actionSupersededByStop(&access, binding));
     }
 
     pub fn withActionDispatchHandoff(
@@ -589,7 +593,9 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatchLocked(self, binding));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
         // Launch failures are effect outcomes, not canonical faults; the
         // caller settles or fences them. The handoff still runs under the lock.
         try handoff(context);

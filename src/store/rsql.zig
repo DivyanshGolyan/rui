@@ -246,9 +246,9 @@ pub const SessionHead = struct {
     next_position: Positive,
 };
 
-/// How many rows a read returns. Nothing is unbounded. A second row of a
-/// `.one` or `.optional` read is looked for only when its keys do not
-/// already rule it out (`pinsOneRow`).
+/// How many rows a read returns. Nothing is unbounded. A row past the
+/// first is looked for only when its keys do not already rule it out
+/// (`pinsOneRow`).
 pub const Cardinality = union(enum) {
     /// Exactly one; none, or a second, is `CorruptStore`.
     one,
@@ -282,6 +282,8 @@ pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
 pub fn Read(comptime spec: ReadSpec) type {
     comptime {
         if (statementError(.read, spec.sql, spec.Args, spec.Row)) |message| @compileError(message ++ ": " ++ spec.sql);
+        // `.one` and `.at_most` decode in place; an `.optional` Row is copied once.
+        if (spec.cardinality == .optional and @sizeOf(spec.Row) > 1024) @compileError("rsql: a Row over 1 KiB is never copied; read it .one or .at_most(1): " ++ spec.sql);
     }
     return struct {
         pub const kind: StatementKind = .read;

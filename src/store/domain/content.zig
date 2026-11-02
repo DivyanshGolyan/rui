@@ -350,7 +350,9 @@ fn resolveContentReference(self: *Store, reference: ContentReference, private: b
     defer sqlite.resetCached(statement);
     try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, null);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return @intCast((try sqlite.decodeRow(lookup_content.Row, statement)).content_id.get());
+    var row: lookup_content.Row = undefined;
+    try sqlite.decodeRow(lookup_content.Row, statement, &row);
+    return @intCast(row.content_id.get());
 }
 
 /// A content hash and one window of the bytes it hashes. Declared as
