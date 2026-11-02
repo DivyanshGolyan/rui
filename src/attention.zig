@@ -11,39 +11,49 @@ const TerminalText = @import("TerminalText.zig");
 /// Most urgent first: a listing that brings several names the first.
 pub const Kind = enum { approval, failed, finished };
 
-/// A state that wants the person, by what it is about: a finish or failure
-/// by its Turn, so a later Turn's is news again even within the same second;
-/// a wait by its earliest Action awaiting a decision, so one Action's wait is
-/// one wait as its Bash ends and the approval state begins.
-pub const Attention = union(Kind) {
-    approval: ?u64,
-    failed: ?u64,
-    finished: ?u64,
+/// A state that wants the person, placed in the order its Session reached
+/// it: by Turn, then within a Turn each wait by its earliest Action awaiting
+/// a decision, and the Turn's finish or failure after every wait. Action ids
+/// grow, and the earliest one awaiting moves only forward as decisions
+/// land, so one Action's wait is one wait as its Bash ends and the approval
+/// state begins, and a later Turn's finish is news again even within the
+/// same second.
+pub const Attention = struct {
+    kind: Kind,
+    turn: u64,
+    step: u64,
 
     /// An Action waits for a decision in the approval state, and beside
     /// running Bash while `approvals` counts one. A stop is the person's own
     /// doing.
     pub fn of(work: session_work.Work) ?Attention {
+        const turn = work.turn orelse 0;
+        const wait: Attention = .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 };
         return switch (work.state) {
-            .approval => .{ .approval = work.first_action },
-            .bash => |bash| if (bash.approvals != 0) .{ .approval = work.first_action } else null,
-            .failed => .{ .failed = work.turn },
-            .finished => .{ .finished = work.turn },
+            .approval => wait,
+            .bash => |bash| if (bash.approvals != 0) wait else null,
+            .failed => .{ .kind = .failed, .turn = turn, .step = std.math.maxInt(u64) },
+            .finished => .{ .kind = .finished, .turn = turn, .step = std.math.maxInt(u64) },
             else => null,
         };
     }
+
+    fn after(self: Attention, other: Attention) bool {
+        return self.turn > other.turn or (self.turn == other.turn and self.step > other.step);
+    }
 };
 
-/// Records a read of a Session's work in `seen`, the last state that wanted
-/// the person any read showed, and returns the news: each state that wants
-/// the person is news once, however many reads, by however many screens,
-/// show it. Work under way, a stop, or a stale read between leaves `seen`,
-/// so a finish read again after them is not news again.
+/// Records a read of a Session's work in `seen`, the latest state that
+/// wanted the person any read showed, and returns the news: each state that
+/// wants the person is news once, however many reads, by however many
+/// screens, show it. Work under way, a stop, or a stale read leaves `seen`:
+/// a slower screen's read of an earlier wait, after a newer finish was seen,
+/// is neither news nor able to make that finish news again.
 pub fn observe(seen: *?Attention, work: session_work.Work) ?Kind {
     const now = Attention.of(work) orelse return null;
-    if (seen.*) |held| if (std.meta.eql(held, now)) return null;
+    if (seen.*) |held| if (!now.after(held)) return null;
     seen.* = now;
-    return now;
+    return now.kind;
 }
 
 /// How a terminal shows a notification. OSC 9 (iTerm2, kitty, WezTerm,
@@ -131,7 +141,7 @@ test "each finish, failure and approval is news once, and stopping or working is
     try std.testing.expectEqual(Kind.finished, news(finished, .{ .state = .{ .finished = .{ .since = 10 } }, .turn = 2 }).?);
     try std.testing.expectEqual(Kind.failed, news(.{ .state = .{ .failed = .{ .since = 10, .code = .{}, .resets_at = null } }, .turn = 1 }, .{ .state = .{ .failed = .{ .since = 10, .code = .{}, .resets_at = null } }, .turn = 2 }).?);
     try std.testing.expectEqual(Kind.approval, news(.{ .state = .{ .bash = .{ .since = 3, .call = 0, .description = null, .running = 1, .approvals = 0 } } }, .{ .state = .{ .approval = .{ .since = 4 } }, .first_action = 7 }).?);
-    try std.testing.expectEqual(Kind.failed, news(finished, .{ .state = .{ .failed = .{ .since = 10, .code = .{}, .resets_at = null } } }).?);
+    try std.testing.expectEqual(Kind.failed, news(finished, .{ .state = .{ .failed = .{ .since = 10, .code = .{}, .resets_at = null } }, .turn = 2 }).?);
     try std.testing.expectEqual(@as(?Kind, null), news(finished, .{ .state = .{ .stopped = .{ .since = 12, .cause = .stop } } }));
     try std.testing.expectEqual(@as(?Kind, null), news(.{ .state = .{ .approval = .{ .since = 3 } }, .first_action = 7 }, .{ .state = .{ .working = .{ .since = 4 } } }));
     // An Action beside running Bash waits for approval; when the Bash ends
@@ -150,6 +160,23 @@ test "each finish, failure and approval is news once, and stopping or working is
     try std.testing.expectEqual(Kind.finished, observe(&seen, finished).?);
     try std.testing.expectEqual(@as(?Kind, null), observe(&seen, .{ .state = .{ .working = .{ .since = 5 } }, .turn = 1 }));
     try std.testing.expectEqual(@as(?Kind, null), observe(&seen, finished));
+}
+
+test "a delayed read of an earlier wait neither notifies nor makes the finish after it news again" {
+    const waiting: Work = .{ .state = .{ .approval = .{ .since = 4 } }, .turn = 3, .first_action = 7 };
+    const finished: Work = .{ .state = .{ .finished = .{ .since = 9 } }, .turn = 3 };
+    var seen: ?Attention = null;
+    // The overview's listing reads the wait; the conversation reads the
+    // finish; the listing read before the finish applies late; the
+    // conversation polls again.
+    try std.testing.expectEqual(Kind.approval, observe(&seen, waiting).?);
+    try std.testing.expectEqual(Kind.finished, observe(&seen, finished).?);
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, waiting));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, finished));
+    // An earlier Turn's outcome read late is old news too; the next Turn's
+    // wait is new.
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, .{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }));
+    try std.testing.expectEqual(Kind.approval, observe(&seen, .{ .state = .{ .approval = .{ .since = 10 } }, .turn = 4, .first_action = 9 }).?);
 }
 
 test "of every work state, only a finish, a failure and an Action awaiting approval want the person" {
