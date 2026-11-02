@@ -2209,6 +2209,7 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
     var traversal = protocol_reply.SessionTraversal.init(null);
     var asked: usize = 0;
     var failed: usize = 0;
+    var first_failure: ?anyerror = null;
     while (true) {
         const page = readSessionPage(init, store, null, traversal.cursor) catch |err| {
             if (asked != 0) stderr.diagnostic("rui: the Session listing failed after {d} stops ({s}); Sessions it had not listed yet were not stopped.\n", .{ asked, @errorName(err) });
@@ -2219,21 +2220,31 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
             asked += 1;
             stopListedSession(init, parsed, store, row.reference.slice(), directory) catch |err| {
                 failed += 1;
-                stderr.diagnostic("rui: {s} not stopped ({s}).\n", .{ row.reference.slice(), @errorName(err) });
+                first_failure = first_failure orelse err;
             };
         }
         if (!traversal.advance(&page)) break;
     }
     if (asked == 0) stderr.diagnostic("rui: no Session in this Store has work to stop.\n", .{});
-    if (failed != 0) {
-        stderr.diagnostic("rui: {d} of {d} stops failed.\n", .{ failed, asked });
-        return error.MutationNotAccepted;
+    if (first_failure) |err| {
+        stderr.diagnostic("rui: {d} of {d} stops failed or are unconfirmed; each is named above.\n", .{ failed, asked });
+        return err;
     }
 }
 
+/// Says on stderr what a failed stop means: never saved, refused by the
+/// Host, or unconfirmed, which only its saved request may retry.
 fn stopListedSession(init: std.process.Init, parsed: *const cli_args.Parsed, store: []const u8, session: []const u8, directory: []const u8) !void {
-    var captured = try client.captureSessionStop(init.io, .{ .store = store, .session = session }, .{ .generated = directory });
-    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
+    var captured = client.captureSessionStop(init.io, .{ .store = store, .session = session }, .{ .generated = directory }) catch |err| {
+        stderr.diagnostic("rui: {s} not stopped: its stop was not saved ({s}).\n", .{ session, @errorName(err) });
+        return err;
+    };
+    sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null) catch |err| {
+        // A refusal already printed its saved answer and replay command.
+        if (err != error.MutationNotAccepted)
+            stderr.diagnostic("rui: not sure {s} stopped ({s}). Check with: rui request recover {s}\n", .{ session, @errorName(err), captured.identity().key.slice() });
+        return err;
+    };
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {

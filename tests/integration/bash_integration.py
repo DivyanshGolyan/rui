@@ -1018,7 +1018,7 @@ def main():
         )
     )
     stop_all_marker = state / "stop-all-marker"
-    for name in ("stop-all-a", "stop-all-b"):
+    for name in ("stop-all-a", "stop-all-b", "stop-all-lost"):
         responses.append(
             fixture.sse_tool_calls(
                 f"{name}-calls",
@@ -1487,6 +1487,24 @@ def main():
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
         assert (nothing.returncode, nothing.stdout) == (0, ""), nothing
         assert nothing.stderr == "rui: no Session in this Store has work to stop.\n", nothing
+        # A stop saved but whose reply is lost is unconfirmed, never "not
+        # stopped", and names the handle that recovers its saved answer.
+        lost = configure(state, store, "stop-all-lost-config")
+        fixture.message(state, store, "stop-all-lost-message", lost, "execute")
+        fixture.wait_for(lambda: action_for(store, lost), "stop-all-lost stoppable Action")
+        dropped = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store), "--test-drop-reply", "after-commit"],
+                                 env=stop_all_env, text=True, capture_output=True, timeout=15)
+        assert dropped.returncode == 1 and dropped.stdout == "", dropped
+        handle = re.search(r"^request: (\S+) ", dropped.stderr, re.M).group(1)
+        assert f"rui: not sure {lost} stopped (" in dropped.stderr, dropped
+        assert f"Check with: rui request recover {handle}\n" in dropped.stderr, dropped
+        assert "not stopped:" not in dropped.stderr, dropped
+        fixture.wait_for(lambda: resolution(store, lost) == "cancelled", "saved stop of the lost reply")
+        recovered = subprocess.run([str(fixture.RUI), "request", "recover", handle],
+                                   env=stop_all_env, text=True, capture_output=True, timeout=15)
+        assert recovered.returncode == 0, recovered
+        assert json.loads(recovered.stdout)["context"]["session"] == lost, recovered
+        assert not stop_all_marker.exists()
 
         session = configure(state, store, "prelaunch-stop-config")
         fixture.message(state, store, "prelaunch-stop-message", session, "execute")
