@@ -7056,8 +7056,9 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // A draft typed under it stays when Esc closes it, and so do the held
-    // start settings: Esc returns to the Sessions first.
-    const draft = try typeText(&state, "/re");
+    // start settings: Esc returns to the Sessions first. (Over a shown
+    // command list, Esc closes the list first.)
+    const draft = try typeText(&state, "fix the build");
     try expectEffects(&.{}, try press(&state, draft, .clear));
     try std.testing.expect(state.panel == null);
     try std.testing.expect(!state.settings.empty());
