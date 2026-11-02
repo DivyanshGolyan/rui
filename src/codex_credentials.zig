@@ -131,8 +131,8 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scr
 }
 
 /// The owner-only file at absolute `path`, whose parent must be a private
-/// directory reached without symlinks, read into `buffer`; null when it does
-/// not exist. The caller wipes the returned bytes.
+/// directory, read into `buffer`; null when it does not exist. The caller
+/// wipes the returned bytes.
 pub fn readPrivate(path: []const u8, buffer: []u8) !?[]u8 {
     var owner = Owner.open(path) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -167,7 +167,10 @@ const Owner = struct {
             std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, ".."))
             return error.InvalidCredentialPath;
         const parent_path = std.fs.path.dirname(path) orelse return error.InvalidCredentialPath;
-        var parent = try openAbsoluteNoSymlinks(parent_path);
+        // Symlinks above the parent are followed, as macOS's /var ->
+        // /private/var needs; the parent itself must not be one. Someone able
+        // to change a link above it could move real directories there.
+        var parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{ .iterate = true, .follow_symlinks = false });
         errdefer parent.close(io);
         try validatePrivate(parent);
         var result: Owner = .{ .parent = parent, .name = undefined, .name_len = basename.len };
@@ -322,20 +325,6 @@ const Owner = struct {
         if (std.c.fsync(self.parent.handle) != 0) return error.DirectorySyncFailed;
     }
 };
-
-fn openAbsoluteNoSymlinks(path: []const u8) !std.Io.Dir {
-    var current = try std.Io.Dir.openDirAbsolute(io, "/", .{ .iterate = true, .follow_symlinks = false });
-    errdefer current.close(io);
-    var parts = std.mem.tokenizeScalar(u8, path, '/');
-    while (parts.next()) |part| {
-        if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, ".."))
-            return error.InvalidCredentialPath;
-        const next = try current.openDir(io, part, .{ .iterate = true, .follow_symlinks = false });
-        current.close(io);
-        current = next;
-    }
-    return current;
-}
 
 fn validatePrivate(dir: std.Io.Dir) !void {
     const stat = try dir.stat(io);
@@ -546,6 +535,25 @@ test "unsafe paths and credential aliases fail closed" {
     defer private.close(io);
     try private.symLink(io, "missing", "auth", .{});
     try std.testing.expectError(error.SymLinkLoop, install(path, &record, null, &scratch));
+}
+
+test "a symlinked ancestor is followed and a symlinked parent is refused" {
+    var scratch: Scratch = undefined;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const real = try testPath(&tmp, "auth", &path_buffer);
+    const root = std.fs.path.dirname(std.fs.path.dirname(real).?).?;
+    try tmp.dir.symLink(io, ".", "link", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "private", "alias", .{ .is_directory = true });
+    var record = try testRecord("acct", 0);
+    var through_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const through = try std.fmt.bufPrint(&through_buffer, "{s}/link/private/auth", .{root});
+    try install(through, &record, null, &scratch);
+    try std.testing.expectEqual(@as(u64, 1), (try testLoad(real, &scratch)).generation);
+    var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias/auth", .{root});
+    if (testLoad(alias, &scratch)) |_| return error.TestUnexpectedResult else |_| {}
 }
 
 test "releasing a lease wipes its secrets and writes nothing past them" {
