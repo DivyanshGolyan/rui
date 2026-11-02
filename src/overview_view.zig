@@ -25,6 +25,8 @@ const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
+const slash_commands = @import("slash_commands.zig");
+pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
 const work_line = @import("work_line.zig");
 const unicode = @import("terminal_unicode");
@@ -813,7 +815,7 @@ pub const State = struct {
     /// The picker shows only over an empty draft, one row.
     pub fn shownPicker(self: *const State) ?*const Picker {
         const picker = if (self.picker) |*open| open else return null;
-        return if (layout(self, 1).picker.len() != 0) picker else null;
+        return if (layout(self, 1, 0).picker.len() != 0) picker else null;
     }
 
     /// What the next Session starts on: what `/configure` holds, else the
@@ -1896,22 +1898,33 @@ fn enter(state: *State, text: []const u8, effects: *Effects) void {
         if (!state.request(.start, null)) return;
         return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding() } });
     }
-    const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
-    if (std.mem.eql(u8, name, "/exit")) return effects.add(.exit);
-    if (std.mem.eql(u8, name, "/model")) {
-        if (std.mem.trim(u8, text[name.len..], " ").len != 0) return state.say(.attention, "! /model takes nothing; it lists the models", .{});
-        state.picker = .{};
-        // Visible equals actionable: a picker the screen cannot show never opens.
-        if (state.shownPicker() == null) {
-            state.picker = null;
-            return state.say(.attention, "! Screen too small for /model", .{});
-        }
-        effects.add(.clear_draft);
-        return askModels(state, effects);
+    const command = switch (commands.parse(text)) {
+        .unknown => return state.say(.attention, unknown_command, .{}),
+        .misused => |name| return state.say(.attention, "! Usage: {s}", .{commands.usage.get(name)}),
+        .command => |command| command,
+    };
+    switch (command.name) {
+        .exit => effects.add(.exit),
+        .model => {
+            state.picker = .{};
+            // Visible equals actionable: a picker the screen cannot show never opens.
+            if (state.shownPicker() == null) {
+                state.picker = null;
+                return state.say(.attention, "! Screen too small for /model", .{});
+            }
+            effects.add(.clear_draft);
+            askModels(state, effects);
+        },
+        .configure => if (configure(state, command.argument)) effects.add(.clear_draft),
     }
-    if (!std.mem.eql(u8, name, "/configure")) return state.say(.attention, "! Unknown; try /model /configure /exit", .{});
-    if (configure(state, text[name.len..])) effects.add(.clear_draft);
 }
+
+/// What Enter on a name the overview does not know says: its commands.
+const unknown_command = blk: {
+    var text: []const u8 = "! Unknown; try";
+    for (std.enums.values(commands.Name)) |name| text = text ++ " /" ++ @tagName(name);
+    break :blk text;
+};
 
 fn pickerMove(state: *const State, picker: *Picker, action: Action) void {
     const count = state.menu.entries.len;
@@ -2442,6 +2455,8 @@ pub const Layout = struct {
     /// The rule's row; `size.height` when the screen is too small for the
     /// input.
     input: u16 = 0,
+    /// The command list, between the rule and the draft.
+    commands: Rows = .{},
 
     pub const Rows = struct {
         start: u16 = 0,
@@ -2453,21 +2468,26 @@ pub const Layout = struct {
     };
 };
 
-/// The rows of `state`'s screen when the draft takes `draft_rows` rows.
-/// The picker takes the rows right above the input, as many as it needs;
-/// the list keeps the rest, and at least the selected Session's row, which
-/// Ctrl-X stops.
-pub fn layout(state: *const State, draft_rows: u16) Layout {
+/// The rows of `state`'s screen when the draft takes `draft_rows` rows and
+/// `command_rows` commands match its command word. As in a conversation,
+/// the commands list between the rule and the draft, in rows the draft's
+/// cap leaves. The picker takes the rows right above the input, as many as
+/// it needs; the Sessions keep the rest, and at least the selected
+/// Session's row, which Ctrl-X stops.
+pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout {
     const height = state.size.height;
     if (height == 0 or state.size.width == 0) return .{};
     const top: u16 = @intCast(@min(topRows(state), height));
-    const input: u16 = if (height >= 6 and state.size.width >= 6) height - 2 - draft_rows else height;
-    var picker: Layout.Rows = .{ .start = input, .end = input };
     const kept: u16 = @intFromBool(state.selected != null and state.rows.items.len != 0);
+    const fits = height >= 6 and state.size.width >= 6;
+    const below = if (fits) height - 2 - draft_rows else height;
+    const listed: u16 = if (fits) @intCast(@min(command_rows, draft_layout.cap(height) -| draft_rows, below -| (top + 1 + kept))) else 0;
+    const input = below - listed;
+    var picker: Layout.Rows = .{ .start = input, .end = input };
     if (state.picker != null and top + 1 + kept < input) {
         picker.start = input - @as(u16, @intCast(pickerFit(state, input - (top + 1 + kept)).used()));
     }
-    return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input };
+    return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input, .commands = .{ .start = input + 1, .end = below + 1 } };
 }
 
 /// The top's rows: the title, the alarm bands or else the headline, the
@@ -2526,19 +2546,50 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
     if (fits) input.plan(&painter, draft, height);
     // The picker shows only over an empty draft, as `shownPicker` assumes.
     std.debug.assert(state.picker == null or draft.bytes.len == 0);
-    const at = layout(state, if (fits) @intCast(input.view.rows) else 0);
+    const matches = commandList(state, draft);
+    const at = layout(state, if (fits) @intCast(input.view.rows) else 0, if (matches) |listed| listed.count else 0);
     @memcpy(lines[0..at.top], top[0..at.top]);
     if (fits) {
         lines[at.input] = try ruleLine(&painter, input.view);
-        try composer(&painter, state, draft, &input, lines[at.input + 1 .. height - 1]);
+        if (at.commands.len() != 0) try commandLines(&painter, matches.?, lines[at.commands.start..at.commands.end]);
+        try composer(&painter, state, draft, &input, lines[at.commands.end .. height - 1]);
         lines[height - 1] = try hints(&painter, state, draft);
         screen.draft_anchor = input.lines[0].start;
-        if (state.inputMode() == .compose) screen.cursor = .{ .row = @intCast(at.input + 1 + input.shape.caret_line - input.view.first), .column = @intCast(@min(width - 1, 3 + input.shape.caret_column)) };
+        if (state.inputMode() == .compose) screen.cursor = .{ .row = @intCast(at.commands.end + input.shape.caret_line - input.view.first), .column = @intCast(@min(width - 1, 3 + input.shape.caret_column)) };
     }
     if (at.picker.len() != 0) try pickerLines(&painter, state, &state.picker.?, lines[at.picker.start..at.picker.end]);
     if (at.list.len() != 0) try list(&painter, state, lines[at.list.start..at.list.end]);
     screen.pulses = painter.pulsed;
     return screen;
+}
+
+/// The commands the draft's command word starts, while the person types
+/// one; null for any other draft or when none matches.
+pub fn commandList(state: *const State, draft: Draft) ?commands.Matches {
+    if (state.inputMode() != .compose) return null;
+    const matches = commands.Matches.of(draft.bytes) orelse return null;
+    return if (matches.count != 0) matches else null;
+}
+
+/// One row per command, as a conversation lists them: its usage, then its
+/// description, quiet, at one column. When more match than rows fit, the
+/// last row counts the rest.
+fn commandLines(painter: *Painter, matches: commands.Matches, lines: [][]const Span) error{OutOfMemory}!void {
+    var listing = matches;
+    const shown = slash_commands.named(matches.count, lines.len);
+    const room = painter.width -| 2;
+    for (lines[0..shown]) |*line| {
+        const name = listing.next().?;
+        painter.begin(false);
+        const usage = commands.usage.get(name);
+        _ = try painter.put(1, usage, room, .{ .colour = .strong });
+        if (room > commands.description_column) _ = try painter.put(1 + commands.description_column, commands.table.get(name).description.?, room - commands.description_column, .{ .colour = .quiet });
+        line.* = try painter.finish();
+    }
+    if (shown == lines.len) return;
+    painter.begin(false);
+    _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, slash_commands.more, .{matches.count - shown}), room, .{ .colour = .quiet });
+    lines[shown] = try painter.finish();
 }
 
 /// Builds one line's spans left to right, sanitizing and clipping text.
@@ -3014,7 +3065,9 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
         const used = try painter.put(1, text.written(), room -| painter.measure(suffix), .{ .colour = .quiet });
         _ = try painter.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
     } else if (draft.bytes.len != 0) {
-        const text = try std.fmt.allocPrint(painter.arena, "enter start {s} esc clear", .{dot});
+        // As Enter reads it: a draft that opens with one slash is a command.
+        const enter_does = if (draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//")) "run" else "start";
+        const text = try std.fmt.allocPrint(painter.arena, "enter {s} {s} esc clear", .{ enter_does, dot });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
         const stop = if (stoppable(state, row.reference, row.state.asOf(state.now_ms))) try std.fmt.allocPrint(painter.arena, " {s} " ++ session_line.stop_hint, .{dot}) else "";
@@ -4128,10 +4181,74 @@ test "the composer starts text with one slash from //, as a conversation does" {
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
     try expectEffects(&.{}, try submit(&state, draft));
-    try expectNotice(&state, "! Unknown; try /model /configure /exit");
+    try expectNotice(&state, "! Unknown; try /configure /exit /model");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
+}
+
+/// The rendered lines of `state` with `draft` at `width` by `height`.
+fn draftLines(state: *State, draft: Draft, width: u16, height: u16) ![]u8 {
+    var screen = try sizedRender(state, draft, width, height, .{}, 0);
+    defer screen.deinit();
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer text.deinit();
+    try screen.write(&text.writer);
+    return text.toOwnedSlice();
+}
+
+fn expectLines(text: []const u8, first: usize, expected: []const []const u8) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    for (0..first) |_| _ = lines.next();
+    for (expected) |line| try std.testing.expectEqualStrings(line, std.mem.trimEnd(u8, lines.next().?, " "));
+}
+
+test "typing / lists the overview's commands between the rule and the draft, as a conversation does" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const all = try draftLines(&state, try typeText(&state, "/"), 80, 24);
+    defer std.testing.allocator.free(all);
+    try expectLines(all, 19, &.{
+        " /configure [OPTIONS]  hold settings for the next Session",
+        " /exit                 leave; Host work continues",
+        " /model                choose the model new Sessions use",
+        " › /",
+        " enter run · esc clear",
+    });
+    // Typing narrows the list; Tab completes the one left.
+    const narrowed = try draftLines(&state, try typeText(&state, "/m"), 80, 24);
+    defer std.testing.allocator.free(narrowed);
+    try expectLines(narrowed, 21, &.{ " /model                choose the model new Sessions use", " › /m" });
+    try std.testing.expectEqualStrings("odel", commands.complete("/m").?);
+    try std.testing.expectEqualStrings("onfigure ", commands.complete("/c").?);
+    // No list for text, `//`, a word past its command, or a name no command
+    // starts.
+    for ([_][]const u8{ "fix it", "//home", "/model ", "/status" }) |text| {
+        errdefer std.debug.print("draft={s}\n", .{text});
+        try std.testing.expect(commandList(&state, try typeText(&state, text)) == null);
+    }
+}
+
+test "a short screen lists the commands it has rows for and counts the rest" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    // At 11 rows the draft's cap is 3 rows: the draft and two list rows,
+    // the second counting the rest.
+    const text = try draftLines(&state, try typeText(&state, "/"), 80, 11);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, " /configure [OPTIONS]  hold settings for the next Session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " +2 more · type to narrow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "/exit ") == null);
+}
+
+test "Enter runs a command by the overview's table and names its usage when misused" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/model now")));
+    try expectNotice(&state, "! Usage: /model");
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/exit now")));
+    try expectNotice(&state, "! Usage: /exit");
+    try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit ")));
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {
@@ -4183,7 +4300,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
         .{ "/configure --label \"open", configure_usage },
         // The Host would admit it; its Turns would fail at the provider.
         .{ "/configure --model \"gpt 5\"", "! Not a model ID; session configure -h" },
-        .{ "/status", "! Unknown; try /model /configure /exit" },
+        .{ "/status", "! Unknown; try /configure /exit /model" },
     }) |case| {
         draft = try typeText(&state, case[0]);
         try expectEffects(&.{}, try submit(&state, draft));

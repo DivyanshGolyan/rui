@@ -3,7 +3,7 @@ const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const keymap = @import("keymap.zig");
-const slash_commands = @import("slash_commands.zig");
+const slash_commands = @import("slash_commands.zig").conversation;
 const Self = @This();
 
 pub const capacity = 65_536;

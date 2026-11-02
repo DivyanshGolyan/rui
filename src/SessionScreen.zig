@@ -777,7 +777,7 @@ pub const Footer = struct {
     status: []const u8 = "",
     notice: []const u8 = "",
     /// The commands the draft's command word starts, listed above the input.
-    commands: ?slash_commands.Matches = null,
+    commands: ?slash_commands.conversation.Matches = null,
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
     queued: ?Queued = null,
@@ -794,21 +794,21 @@ pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line
 /// One row per command, its usage aligned and its description quiet. When
 /// more match than rows fit, the last row counts the rest, unless it is
 /// the only row: then it shows the first command.
-fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, commands: slash_commands.Matches, overflow: *[32]u8) void {
+fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, commands: slash_commands.conversation.Matches, overflow: *[32]u8) void {
     var matches = commands;
     const total = matches.count;
-    const rows: usize = if (total <= layout.list_height) total else if (layout.list_height >= 2) layout.list_height - 1 else layout.list_height;
+    const rows = slash_commands.named(total, layout.list_height);
     for (0..rows) |index| {
         const name = matches.next().?;
-        const usage = slash_commands.usage.get(name);
+        const usage = slash_commands.conversation.usage.get(name);
         _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index)), .height = 1 }).print(&.{
             .{ .text = usage, .style = self.style(.user) },
-            .{ .text = slash_commands.padding[usage.len..] },
-            .{ .text = slash_commands.table.get(name).description.?, .style = self.style(.quiet) },
+            .{ .text = slash_commands.conversation.padding[usage.len..] },
+            .{ .text = slash_commands.conversation.table.get(name).description.?, .style = self.style(.quiet) },
         }, .{ .wrap = .none });
     }
     if (rows == total or rows == layout.list_height) return;
-    const text = std.fmt.bufPrint(overflow, "+{d} more · type to narrow", .{total - rows}) catch unreachable;
+    const text = std.fmt.bufPrint(overflow, slash_commands.more, .{total - rows}) catch unreachable;
     _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(rows)), .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
 }
 
@@ -1545,13 +1545,13 @@ test "a command list of one row shows a command, not only how many match" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const calls: View.Live = .{};
-    const footer: Footer = .{ .commands = slash_commands.Matches.of("/").? };
+    const footer: Footer = .{ .commands = slash_commands.conversation.Matches.of("/").? };
     var buffer: [256]u8 = undefined;
     for ([_]u16{ 6, 9, 24 }) |rows| {
         errdefer std.debug.print("rows={d}\n", .{rows});
         _ = try screen.render(&out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, footer, &calls);
         try std.testing.expect(screen.listed);
-        try std.testing.expect(screenHas(screen, slash_commands.usage.get(.configure), &buffer));
+        try std.testing.expect(screenHas(screen, slash_commands.conversation.usage.get(.configure), &buffer));
     }
 }
 
