@@ -914,7 +914,8 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     // a conversation: arrows move it and Enter picks; typing goes to the
     // draft, which leaves the picker.
     if (self.state.choosingSignIn()) switch (TerminalEditor.select(view.keys, decoded)) {
-        .none => return null,
+        // A key the choice ignores still takes the step, as in the composer.
+        .none => return self.event(.{ .composed = .{ .outcome = .none, .draft = self.composerDraft() } }),
         .action => |action| return self.event(.{ .composed = .{ .outcome = .{ .action = action }, .draft = self.composerDraft() } }),
         .left => return self.event(.{ .composed = .{ .outcome = .{ .action = .left }, .draft = self.composerDraft() } }),
         .right => return self.event(.{ .composed = .{ .outcome = .{ .action = .right }, .draft = self.composerDraft() } }),
@@ -1561,7 +1562,7 @@ test "/model reads the lists on the worker, the sign-in choice takes the arrows,
     try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
 }
 
-test "an arrow at the sign-in choice cancels a stop prompt like any other key" {
+test "any key at the sign-in choice cancels a stop prompt, arrows and ignored keys alike" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
@@ -1577,7 +1578,8 @@ test "an arrow at the sign-in choice cancels a stop prompt like any other key" {
     try std.testing.expect(overview.state.choosingSignIn());
     try std.testing.expect(try rig.press("\x18") == null);
     try std.testing.expect(overview.state.prompt != null);
-    for ([_][]const u8{ "\x1b[D", "\x1b[C" }) |arrow| {
+    // Arrows, and keys the choice ignores: Backspace, Delete, Tab.
+    for ([_][]const u8{ "\x1b[D", "\x1b[C", "\x7f", "\x1b[3~", "\t" }) |arrow| {
         try std.testing.expect(try rig.press(arrow) == null);
         try std.testing.expect(overview.state.prompt == null);
         // Ctrl-X asks again rather than stopping.
