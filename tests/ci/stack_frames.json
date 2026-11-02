@@ -4,7 +4,8 @@
     "main thread": {"anchor": "server.serve", "chain_ceiling": 45056},
     "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 32768},
     "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 32768},
-    "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672}
+    "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672},
+    "model list fetch": {"anchor": "server_host.ModelLists.fetchIds", "chain_ceiling": 24576}
   },
   "host_modules": [
     "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "change_ring",

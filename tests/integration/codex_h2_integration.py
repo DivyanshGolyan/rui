@@ -237,7 +237,7 @@ def openai_base_url_run():
                      ["providers"][0]["source"] != "pending" else None),
             "the OpenAI model list", timeout=20)
         assert listed["providers"] == [{"provider": "openai", "source": "live", "models": [
-            {"id": "gpt-6-sol", "listed": True}, {"id": "custom-model", "listed": False}]}], listed
+            {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}], listed
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
             "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",

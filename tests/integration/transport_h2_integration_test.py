@@ -574,7 +574,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         requests = [{b":method": b"GET", b":path": b"/custom/v1/models", b":authority": b"localhost:1", b"authorization": bearer},
                     {b":method": b"POST", b":path": b"/custom/v1/responses", b":authority": b"localhost:1", b"authorization": bearer}]
         listed = {"providers": [{"provider": "openai", "source": "live", "models": [
-            {"id": "gpt-6-sol", "listed": True}, {"id": "custom-model", "listed": False}]}]}
+            {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}]}
 
         def shutdown():
             calls.append("shutdown")

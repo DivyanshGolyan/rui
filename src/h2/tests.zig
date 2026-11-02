@@ -1448,6 +1448,23 @@ test "exchange: the total deadline ends a request the peer never answers" {
     try std.testing.expectEqual(@as(usize, 1), peer.streams().len);
 }
 
+test "exchange: an owner's stop flag stops a request in flight" {
+    const Stop = struct {
+        var flag: std.atomic.Value(bool) = .init(false);
+        fn handle(_: *Peer, _: *Peer.Stream) void {
+            flag.store(true, .release);
+        }
+    };
+    var peer: PeerThread = undefined;
+    try peer.start(.{ .on_request = Stop.handle });
+    defer peer.stop();
+    var response: [64]u8 = undefined;
+    var request = exchangeRequest(peer.peer.url(), &response);
+    request.stop = &Stop.flag;
+    try std.testing.expectError(error.Interrupted, h2.exchange(std.testing.io, request));
+    try peer.join();
+}
+
 test "exchange: cancellation stops a request in flight" {
     const Cancel = struct {
         var requested: std.atomic.Value(bool) = .init(false);

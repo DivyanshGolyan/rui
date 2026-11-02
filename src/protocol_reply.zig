@@ -447,7 +447,7 @@ pub const ModelList = struct {
             id: []const u8,
             /// Whether Rui's table knows the model; otherwise it runs with
             /// default limits.
-            listed: bool,
+            known: bool,
         },
     },
 };
@@ -474,8 +474,8 @@ test "a model list reply parses what the Host writes" {
     var out = std.Io.Writer.fixed(&bytes);
     try out.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out, &.{
-        .{ .provider = .codex, .source = .table },
-        .{ .provider = .openai, .source = .live, .ids = .{ .bytes = "gpt-6-luna\nwhisper-1\n" } },
+        .{ .provider = .codex, .list = .table },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nwhisper-1\n" } } },
     });
     try out.writeAll(protocol.model_list_reply.tail);
     const list = try parseModelList(arena.allocator(), out.buffered());
@@ -484,8 +484,8 @@ test "a model list reply parses what the Host writes" {
     try std.testing.expectEqual(model_capability.models.len, list.providers[0].models.len);
     try std.testing.expectEqual(model_list.Source.live, list.providers[1].source);
     try std.testing.expectEqualStrings("whisper-1", list.providers[1].models[1].id);
-    try std.testing.expect(list.providers[1].models[0].listed and !list.providers[1].models[1].listed);
-    try std.testing.expectError(error.InvalidModelList, parseModelList(arena.allocator(), "{\"version\":\"4\",\"type\":\"model_list\",\"providers\":[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"listed\":false}]}]}"));
+    try std.testing.expect(list.providers[1].models[0].known and !list.providers[1].models[1].known);
+    try std.testing.expectError(error.InvalidModelList, parseModelList(arena.allocator(), "{\"version\":\"4\",\"type\":\"model_list\",\"providers\":[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]}"));
     try std.testing.expectError(error.InvalidModelList, parseModelList(arena.allocator(), "{\"version\":\"4\",\"type\":\"host_info\",\"providers\":[]}"));
 }
 
