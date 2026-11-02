@@ -25,11 +25,11 @@ By default, Bash runs without asking (`bypass`). To review each command first, e
 /configure --permission-mode ask
 ```
 
-Rui then shows each proposed command and its working directory. Type `a` and Enter to allow it once, or `d` and Enter to deny it. Pasted choices do not grant approval.
+Rui then shows each proposed command above an Allow once / Deny choice, with Allow once highlighted. ← and → move the highlight and Enter confirms it. Enter confirms only the option on screen. An arrow or Enter pressed before the choice is ready decides nothing: Rui says `! Not ready; nothing authorized.` and the choice counts keys again once it is redrawn. Every key spends that readiness, an arrow included, so after ← or → Enter counts once the moved highlight is drawn. Typing or pasting never decides: it goes to your draft, where slash commands still run, and Esc or Ctrl-G returns to the choice. A command that arrives while you are writing a message leaves your draft in place, so the Enter meant for it approves nothing; Esc or Ctrl-G shows the choice.
 
 ## Input
 
-You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, redirect a file into `rui session send --to ID < FILE`. If a submission is uncertain, Ctrl-R retries that same request instead of creating a new one.
+You can edit and paste multiline text at the prompt. On an empty prompt, Ctrl-P brings back the last message you sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past your newest message the prompt is empty again. Messages from other Sessions never come back this way. There is no completion. For input longer than 64 KiB, redirect a file into `rui session send --to ID < FILE`. If a submission is uncertain, Ctrl-R retries that same request instead of creating a new one.
 
 ## Screen and scrolling
 
@@ -75,7 +75,7 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 To list this release's supported model IDs, run `rui session configure --help`. The list is compiled into Rui and needs no Host or credentials. It does not mean that your account can use every listed model.
 
-Without `--model`, a new Session uses your saved default. With no saved default, it uses `gpt-6-luna`.
+Without `--model`, a new Session uses your saved default. With no saved default, it uses `gpt-6.1-sol`.
 
 If Host startup warns that a saved model default is unsupported, pick a listed ID:
 
@@ -87,7 +87,7 @@ To remove the saved default instead, run `rui defaults configure --clear-model`.
 
 ## Context compaction
 
-When model context grows too large, Rui compacts it. Compaction never deletes saved conversation history. All eight release-supported Codex model IDs start compaction at an estimated 244,800 tokens. Unknown model names have no automatic threshold unless you set one. A context-overflow error from the provider can still start compaction.
+When model context grows too large, Rui compacts it. Compaction never deletes saved conversation history. All eight release-supported Codex model IDs start compaction at an estimated 244,800 tokens. A model Rui does not list is assumed to have a 128,000-token context, so it starts compaction at an estimated 115,200 tokens unless you set a threshold. A context-overflow error from the provider can still start compaction.
 
 To change the threshold for the current Session, enter:
 

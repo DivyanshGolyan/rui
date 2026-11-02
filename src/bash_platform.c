@@ -119,14 +119,18 @@ static int make_pipe(int fds[2]) {
 #endif
 }
 
-/* Launch Bash as the leader of a new process group with /dev/null stdin or
-   a supplied read-only file, and piped stdout/stderr. The child starts with an empty signal mask and every
-   signal at its default action, whatever the Host thread blocked or the Host
-   inherited as ignored; caught handlers never survive exec anyway. /dev/null
-   is opened by the spawn itself, so the Host keeps no inheritable descriptor.
-   Other descriptors keep their own close-on-exec flags. A path without '/'
-   is searched on the Host's PATH. Returns 0 or errno; on success the parent
-   owns both read ends, close-on-exec. The input descriptor remains borrowed. */
+/* Launch Bash as the leader of a new session, so also of a new process group,
+   with no controlling terminal: a password or other prompt that opens
+   /dev/tty fails at once instead of stopping in the background of the Host's
+   terminal. Stdin is /dev/null or a supplied read-only file, and
+   stdout/stderr are pipes. The child starts with an empty signal mask and
+   every signal at its default action, whatever the Host thread blocked or
+   the Host inherited as ignored; caught handlers never survive exec anyway.
+   /dev/null is opened by the spawn itself, so the Host keeps no inheritable
+   descriptor. Other descriptors keep their own close-on-exec flags. A path
+   without '/' is searched on the Host's PATH. Returns 0 or errno; on success
+   the parent owns both read ends, close-on-exec. The input descriptor
+   remains borrowed. */
 int rui_bash_spawn(const char *path, char *const argv[], char *const envp[], const char *cwd,
                    pid_t *pid, int *stdout_read, int *stderr_read, int stdin_read) {
     int out[2], err_pipe[2];
@@ -155,8 +159,7 @@ int rui_bash_spawn(const char *path, char *const argv[], char *const envp[], con
     if (result == 0) result = posix_spawnattr_init(&attributes);
     if (result == 0) have_attributes = 1;
     if (result == 0) result = posix_spawnattr_setflags(&attributes,
-        POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
-    if (result == 0) result = posix_spawnattr_setpgroup(&attributes, 0);
+        POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
     if (result == 0) result = posix_spawnattr_setsigmask(&attributes, &empty);
     if (result == 0) result = posix_spawnattr_setsigdefault(&attributes, &all);
     if (result == 0) result = posix_spawnp(pid, path, &actions, &attributes, argv, envp);

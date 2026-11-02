@@ -485,6 +485,12 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(combined["targets"], ["check"])
             self.assertEqual(combined["native_targets"], ["check"])
 
+    def test_installer_report_runs_the_fixture_that_pins_its_json_reader(self):
+        result = select(["release/publish.sh"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["host-status-integration"])
+        self.assertEqual(result["native_targets"], ["host-status-integration"])
+        self.assertTrue(result["mac_required"])
+
     def test_existing_fixture_target_and_new_fixture_fallback(self):
         result = select(["tests/integration/host_stop_integration.py"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["host-stop-integration"])
@@ -601,6 +607,27 @@ class SelectionTest(unittest.TestCase):
                                  workflow.count('uses: actions/checkout@'))
                 if name == 'qualify-macos.yml':
                     self.assertIn('workflow_call:', workflow)
+                # A save the token refuses only warns; restore-only setup is quiet.
+                self.assertEqual(workflow.count("publish-caches: 'false'"),
+                                 workflow.count('uses: ./.github/actions/setup'))
+        for path in Path('.github/workflows').glob('*.yml'):
+            if path.name not in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
+                self.assertNotIn('publish-caches', path.read_text(), f'{path.name} must keep publishing')
+        setup = Path('.github/actions/setup/action.yml').read_text()
+        self.assertNotIn('actions/cache/save@', setup)
+        steps = re.findall(r'(?m)^    - uses: actions/cache(/restore)?@.*\n((?:      .*\n)+)', setup)
+        def guard(body):
+            return re.search(r'(?m)^      if: \$\{\{ (.*) \}\}$', body).group(1)
+        def contents(body):
+            return re.sub(r'(?m)^      (?:if|id): .*\n', '', body)
+        saves = [body for restore, body in steps if not restore]
+        restores = [body for restore, body in steps if restore]
+        self.assertEqual(len(saves), setup.count('uses: actions/cache@'))
+        self.assertEqual(len(saves), len(restores))
+        for save, restore in zip(saves, restores):
+            self.assertRegex(guard(save), r"^inputs\.publish-caches == 'true'(?: && [^|]*)?$")
+            self.assertEqual(guard(restore), guard(save).replace("publish-caches == 'true'", "publish-caches != 'true'", 1))
+            self.assertEqual(contents(restore), contents(save))
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):
@@ -1039,15 +1066,27 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     # reap and caller pipe EOF must not authorize root deletion.
                     peers = dict(line.split() for line in (root / "peer-pids").read_text().splitlines())
                     held = int(peers["dispatch_integration.py.release"])
-                    census = run(["ps", "-axo", "pid=,pgid="], capture_output=True,
-                                 text=True, check=True, timeout=5)
-                    for row in census.stdout.splitlines():
-                        pid, member_group = map(int, row.split())
-                        if member_group == group and pid != held:
+
+                    # A census misses members forked while it ran, such as a
+                    # peer that waits forever for a start the killed driver
+                    # never makes (#638). Signal each census until the held
+                    # descendant is the only live member; killed members
+                    # fork no more.
+                    def signal_others():
+                        census = run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
+                                     text=True, check=True, timeout=5)
+                        others = [int(pid) for pid, member_group, state in
+                                  (row.split() for row in census.stdout.splitlines())
+                                  if int(member_group) == group and int(pid) != held
+                                  and not state.startswith("Z")]
+                        for pid in others:
                             try:
                                 os.kill(pid, sig)
                             except ProcessLookupError:
                                 pass
+                        return others
+                    wait_for(signal_others, f"driver group {group} to keep only its held descendant",
+                             interval=.005, timeout=5, ready=lambda others: not others)
 
                 def census_then_deliver(*args, **kwargs):
                     nonlocal observed_live
@@ -1130,7 +1169,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
         expected = {
             "admission_integration.sh release", "dispatch_integration.py release",
             "bash_owner_integration.py release", "bash_integration.py release",
-            "peer_integration.py release", "sender_identity_integration.py release",
+            "peer_integration.py release", "bash_environment_integration.py release",
+            "sender_identity_integration.py release",
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",

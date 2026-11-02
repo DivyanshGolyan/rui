@@ -20,13 +20,21 @@ pub const tools = "bash";
 /// Permission mode for a fresh Session.
 pub const permission_mode = "bypass";
 
+/// Provider for a fresh peer-created Session when no explicit or saved
+/// provider applies. Bare `rui` asks instead when several are ready.
+pub const provider = "codex";
+
 /// Model for a fresh Session when no explicit or saved model applies. It needs
 /// a row in `model_capability.models`, which checks this at compile time.
-pub const recommended_model = "gpt-6-luna";
+pub const recommended_model = "gpt-6.1-sol";
 
-/// Automatic compaction begins at this percentage of a known model's context.
-/// Unknown models have no automatic threshold.
+/// Automatic compaction begins at this percentage of a model's context.
 pub const compaction_trigger_percent: u64 = 90;
+
+/// Tokens of context assumed for a model the table does not list. Small on
+/// purpose: compacting early costs a summary, compacting late costs a request
+/// the provider refuses.
+pub const unlisted_context_window: u64 = 128000;
 
 /// Extra compaction headroom when a Session sets no output reservation.
 pub const output_reservation: u64 = 0;
@@ -38,7 +46,9 @@ test "approved product defaults" {
     try std.testing.expectEqual(@as(usize, 100), intake_capacity);
     try std.testing.expectEqualStrings("bash", tools);
     try std.testing.expectEqualStrings("bypass", permission_mode);
-    try std.testing.expectEqualStrings("gpt-6-luna", recommended_model);
+    try std.testing.expectEqualStrings("codex", provider);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", recommended_model);
     try std.testing.expectEqual(@as(u64, 90), compaction_trigger_percent);
+    try std.testing.expectEqual(@as(u64, 128000), unlisted_context_window);
     try std.testing.expectEqual(@as(u64, 0), output_reservation);
 }

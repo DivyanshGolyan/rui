@@ -72,16 +72,16 @@ def actor_after_classification(diagnostics, began_ns, deadline, pending_phase, s
 
 
 def instance(store):
-    match = re.fullmatch(r"ready ([0-9a-f]{32}) \d+ true (?:true|false) (?:true|false) [1-9]\d* \d+", status(store))
+    match = re.fullmatch(r"ready ([0-9a-f]{32}) \d+ true [a-z_]+ [1-9]\d* \d+", status(store))
     assert match, status(store)
     return match.group(1)
 
 
 def request(sock, store, identity=None, *, extra=b""):
-    body = json.dumps({"version": "1", "kind": "host_stop", "store": str(store.resolve())}).encode()
+    body = json.dumps({"version": "4", "kind": "host_stop", "store": str(store.resolve())}).encode()
     header = (
         b"POST /v1/control/host-stop HTTP/1.1\r\nHost: local\r\n"
-        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n"
+        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
     )
     if identity is not None:
@@ -285,10 +285,11 @@ def main():
                     fields = {"sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
                         "configuration": {name: {"state": "value", "value": "x" * 8192} if name == "instructions" else {"state": "omitted"}
                             for name in ("workspace", "provider", "model", "instructions", "tools", "permission_mode", "output_schema")}}
-                    body = json.dumps({"version": "1", "kind": kind, "store": str(store),
+                    body = json.dumps({"version": "4", "kind": kind, "store": str(store),
                         "key": f"late-{kind}-{phase}", "session": session, **fields}).encode()
                     header = (f"POST /v1/{kind} HTTP/1.1\r\nHost: local\r\n".encode()
-                        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n"
+                        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\n"
+                        + (b"X-Rui-Environment-Bytes: 0\r\n" if kind == "message" else b"")
                         + f"Content-Length: {len(body)}\r\n\r\n".encode())
                     upload = socket.socket(socket.AF_UNIX)
                     uploads.append((upload, b"\r\n" + body if phase == "header" else body[-3:]))
@@ -386,7 +387,7 @@ def main():
             current_cli = subprocess.run([RUI, "host", "stop", "--store", store],
                                          capture_output=True, text=True, timeout=10)
             assert current_cli.returncode == 0 and json.loads(current_cli.stdout) == {
-                "version": "1", "type": "host_stop", "status": "acknowledged", "store": str(store.resolve()),
+                "version": "4", "type": "host_stop", "status": "acknowledged", "store": str(store.resolve()),
                 "instance": newer, "retirement": "unconfirmed",
             }, current_cli
             notice = current_cli.stderr

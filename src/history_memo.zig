@@ -23,6 +23,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
+const codecs = @import("codecs.zig");
 
 /// Default ceiling on memo file bytes. They are not charged to the request
 /// scratch budget, whose idle use and request-to-response reuse are part of
@@ -63,8 +64,8 @@ pub const Memo = struct {
     history_position: u64,
     /// The producing view's final tool-group scan cursor.
     tool_group_cursor: u64,
-    /// Whether the span emitted any entry (the next one needs a comma).
-    input_comma: bool,
+    /// The codec's encoder state where the span ends.
+    carry: codecs.Carry,
     /// Exact span length; the file must have exactly this length.
     length: u64,
     /// `Hasher` digest of the span's bytes, set by `Table.commit`.
@@ -83,7 +84,7 @@ pub const Memo = struct {
             self.admission_position == other.admission_position and
             self.history_position == other.history_position and
             self.tool_group_cursor == other.tool_group_cursor and
-            self.input_comma == other.input_comma and
+            std.meta.eql(self.carry, other.carry) and
             self.length == other.length and
             self.digest == other.digest;
     }
@@ -274,10 +275,16 @@ pub const Table = struct {
     pub fn writeChunk(_: *const Table, io: std.Io, write: *Write, request: std.Io.File, limit: usize, window: []u8) !usize {
         const count: usize = @intCast(@min(write.memo.length - write.written, limit, window.len));
         if (try request.readPositionalAll(io, window[0..count], write.span_start + write.written) != count) return error.EndOfStream;
-        write.hasher.update(window[0..count]);
-        try write.file.writePositionalAll(io, window[0..count], write.written);
-        write.written += count;
+        try appendChunk(io, write, window[0..count]);
         return count;
+    }
+
+    /// Append span bytes the caller already read from the request.
+    pub fn appendChunk(io: std.Io, write: *Write, bytes: []const u8) !void {
+        std.debug.assert(bytes.len <= write.memo.length - write.written);
+        write.hasher.update(bytes);
+        try write.file.writePositionalAll(io, bytes, write.written);
+        write.written += bytes.len;
     }
 
     /// Keep the completely written span as its Session's memo.
@@ -366,7 +373,7 @@ fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_posi
         .admission_position = admission_position,
         .history_position = admission_position - 1,
         .tool_group_cursor = 0,
-        .input_comma = length != 0,
+        .carry = codecs.initialCarry(.@"openai-responses/1"),
         .length = length,
         .digest = 0,
     };

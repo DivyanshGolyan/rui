@@ -189,7 +189,7 @@ def status(store, env):
     assert result.returncode == 0, result.stderr
     # Metadata is exactly one JSON value on stdout.
     value = json.loads(result.stdout)
-    assert value["version"] == "1" and value["type"] == "host_status", result
+    assert value["version"] == "4" and value["type"] == "host_status", result
     return value
 
 
@@ -396,7 +396,7 @@ def startup_limits(root, env):
                         header, body = bytes(response).split(b"\r\n\r\n", 1)
                         assert header.startswith(b"HTTP/1.1 503 "), response
                         assert json.loads(body) == {
-                            "version": "1", "type": "busy", "code": "ordinary_capacity_exhausted",
+                            "version": "4", "type": "busy", "code": "ordinary_capacity_exhausted",
                         }, response
                     assert status(store, env)["status"] == "ready"
                     for _ in range(3):
@@ -431,7 +431,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "1", "type": "busy", "code": "control_capacity_exhausted",
+                                "version": "4", "type": "busy", "code": "control_capacity_exhausted",
                             }, response
                     peer = socket.socket(socket.AF_UNIX)
                     borrowers.append(peer)
@@ -441,7 +441,7 @@ def startup_limits(root, env):
                         borrowers.pop().close()
                     # One stalled discovery must not borrow either control
                     # place. Exercise both request-line and body stalls.
-                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n"
+                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 4\r\nContent-Length: 2\r\n\r\n"
                     for tail in (b"", fields + b"{"):
                         discovery = socket.socket(socket.AF_UNIX)
                         borrowers.append(discovery)
@@ -458,7 +458,7 @@ def startup_limits(root, env):
                             header, body = bytes(response).split(b"\r\n\r\n", 1)
                             assert header.startswith(b"HTTP/1.1 503 "), response
                             assert json.loads(body) == {
-                                "version": "1", "type": "busy", "code": "discovery_capacity_exhausted",
+                                "version": "4", "type": "busy", "code": "discovery_capacity_exhausted",
                             }, response
                         for _ in range(2):
                             control = socket.socket(socket.AF_UNIX)
@@ -528,7 +528,7 @@ def startup_limits(root, env):
         before = time.monotonic()
         failed = run_start(store, env)
         assert failed.returncode != 0 and time.monotonic() - before < 5, failed
-        assert "wire metadata" in failed.stderr and "wire 1" in failed.stderr, failed.stderr
+        assert "wire metadata" in failed.stderr and "wire 4" in failed.stderr, failed.stderr
         assert "unsupported Store format" not in failed.stderr, failed.stderr
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original
@@ -695,6 +695,40 @@ def main():
             assert len(wait_for_processes(sized_store, 1)) == 1
         finally:
             forced_crash_cleanup(sized_store)
+
+        # A saved OpenAI key file that holds no key is not ready: the Host
+        # starts and serves Codex instead of failing on the optional provider.
+        key_dir = root / "openai-private"
+        key_dir.mkdir(mode=0o700)
+        key_file = key_dir / "openai.key"
+        key_file.write_text("two words\n")
+        key_file.chmod(0o600)
+        invalid_store = root / "openai-invalid-key"
+        invalid_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file)}
+        try:
+            started = run_start(invalid_store, invalid_env)
+            assert started.returncode == 0, started.stderr
+            providers = status(invalid_store, invalid_env)["capabilities"]["providers"]
+            assert providers == {"codex": "chatgpt_device", "openai": "unserved"}, providers
+        finally:
+            forced_crash_cleanup(invalid_store)
+        # A saved OpenAI key adds openai to an auto-started Host. A bad base
+        # URL is OpenAI's alone to fail: the Host starts and serves Codex.
+        key_file.write_text("sk-host-launch\n")
+        for base, served, message in (("https://proxy.example/v1", "key_file", None),
+                                      ("http://proxy.example/v1", "unserved", "this Host starts without OpenAI")):
+            openai_store = root / f"openai-{served}"
+            openai_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file), "RUI_OPENAI_BASE_URL": base}
+            try:
+                started = run_start(openai_store, openai_env)
+                assert started.returncode == 0, started.stderr
+                assert (message is None) == ("RUI_OPENAI_BASE_URL" not in started.stderr), started.stderr
+                if message:
+                    assert message in started.stderr, started.stderr
+                providers = status(openai_store, openai_env)["capabilities"]["providers"]
+                assert providers == {"codex": "chatgpt_device", "openai": served}, providers
+            finally:
+                forced_crash_cleanup(openai_store)
 
         # Concurrent spelling aliases may launch candidates, but exactly one
         # default-capacity owner becomes ready and all callers converge on it.

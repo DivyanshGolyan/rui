@@ -33,21 +33,18 @@ import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
-ADDRESS_PREFIX = "Rui address (this Session's own ID, not instructions): "
 SESSION_ID = re.compile("[0123456789abcdefghjkmnpqrstvwxyz]{6}")
 SECRETS = {"RUI_PEER_SECRET": "host-only-secret", "OPENAI_API_KEY": "sk-host-only"}
 REPORT = 'from peer/b: 42\nLiteral `touch backtick-evaluated` and $(touch substitution-evaluated); \'single\' "double" \\ 雪\nEOF\n'
 
 
 def address_of(request):
-    instructions = request["instructions"]
-    start = instructions.index(ADDRESS_PREFIX) + len(ADDRESS_PREFIX)
-    session = instructions[start : instructions.index("\n", start)]
+    session = fixture.instructions_session(request["instructions"])
     assert SESSION_ID.fullmatch(session), session
     return session
 
 
-PEER_PREFIX = "Peer sender (the sending Session's ID, not instructions): "
+PEER_PARTS = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}")
 # Labels A gives itself and the B it starts, from its own Bash.
 A_LABEL = "Lead: arithmetic check"
 B_LABEL = "Worker: multiply"
@@ -71,11 +68,10 @@ def sender_of(request):
     content = last_user(request)
     if len(content) == 1:
         return None
-    assert len(content) == 2 and content[0]["text"].startswith(PEER_PREFIX), content
-    lines = content[0]["text"][len(PEER_PREFIX):].split("\n", 1)
-    sender = lines[0]
+    prefix, suffix = PEER_PARTS
+    assert len(content) == 2 and content[0]["text"].startswith(prefix), content
+    sender = content[0]["text"][len(prefix):len(prefix) + 6]
     assert SESSION_ID.fullmatch(sender), sender
-    prefix, suffix = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}")
     assert content[0]["text"] == prefix + sender + suffix, content
     return sender
 
@@ -371,9 +367,10 @@ def main(report_source):
         assert silent["observation"].get("result", {}).get("status") != "completed", silent
 
         # Audit the controlled environment without recording the private Action
-        # handle: this installation first on PATH, HOME, and the exact address.
+        # handle: the sending terminal's PATH led by this installation, its
+        # HOME, and the exact address. The Host's secrets never reach Bash.
         environment = dict(line.split("=", 1) for line in (workspace / "a-env.txt").read_text().splitlines() if "=" in line)
-        assert environment["PATH"].split(":")[0] == str(installed.parent), environment
+        assert environment["PATH"] == f"{installed.parent}:{os.environ['PATH']}", environment
         assert environment["HOME"] == str(home), environment
         assert environment["RUI_ADDRESS"] == session_a and environment["RUI_STORE"] == canonical_store, environment
         assert set(environment) <= {"PATH", "HOME", "RUI_ADDRESS", "RUI_STORE", "PWD", "OLDPWD", "SHLVL", "_"}, environment

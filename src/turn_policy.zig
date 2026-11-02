@@ -93,10 +93,17 @@ pub fn forcedPurpose(prior: ?Previous, trigger: ?u64) ?Purpose {
 }
 
 pub fn nextPurpose(facts: CompactionFacts) Purpose {
-    if (forcedPurpose(facts.previous, facts.trigger)) |purpose| return purpose;
-    if (!facts.context_changed) return .assistant_response;
-    const pressure = (facts.usage_tokens orelse 0) +| (facts.uncovered_bytes / 4) +| facts.output_reservation;
+    const pressure = comparedPressure(facts) orelse return forcedPurpose(facts.previous, facts.trigger) orelse .assistant_response;
     return if (pressure >= facts.trigger.?) .compaction else .assistant_response;
+}
+
+/// The estimated tokens the next model call starts from, when automatic
+/// compaction decides that call by comparing them with its trigger: the last
+/// accepted usage, four bytes per token of what came after it, and the
+/// headroom. Null when the call's purpose does not depend on them.
+pub fn comparedPressure(facts: CompactionFacts) ?u64 {
+    if (forcedPurpose(facts.previous, facts.trigger) != null or !facts.context_changed) return null;
+    return (facts.usage_tokens orelse 0) +| (facts.uncovered_bytes / 4) +| facts.output_reservation;
 }
 
 test "output facts do not encode the Turn continuation decision" {
@@ -150,4 +157,20 @@ test "compaction purpose respects recovery prefix and both sides of pressure" {
     facts.trigger = std.math.maxInt(u64);
     facts.usage_tokens = std.math.maxInt(u64) - 1;
     try std.testing.expectEqual(Purpose.compaction, nextPurpose(facts));
+}
+
+test "a compared pressure decides compaction exactly when it reaches the trigger" {
+    const previous = [_]?Previous{ null, .{ .purpose = .assistant_response, .context_overflow = false, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .assistant_response, .context_overflow = true, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = false, .same_input_prefix = true }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = false, .same_input_prefix = false } };
+    // Whether each previous Operation leaves the purpose to pressure, as the
+    // base commit's nextPurpose decided before it compared.
+    const compares = [_]bool{ false, true, false, false, false, true };
+    for (previous, compares) |prior, open| for ([_]?u64{ null, 1, 100 }) |trigger| for ([_]bool{ false, true }) |changed| for ([_]u64{ 0, 99, 100, 400 }) |bytes| {
+        const facts: CompactionFacts = .{ .previous = prior, .trigger = trigger, .context_changed = changed, .usage_tokens = 0, .uncovered_bytes = bytes, .output_reservation = 0 };
+        const pressure = comparedPressure(facts);
+        try std.testing.expectEqual(open and trigger != null and changed, pressure != null);
+        if (pressure) |value| {
+            try std.testing.expectEqual(bytes / 4, value);
+            try std.testing.expectEqual(value >= trigger.?, nextPurpose(facts) == .compaction);
+        }
+    };
 }

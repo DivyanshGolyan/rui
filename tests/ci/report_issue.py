@@ -35,6 +35,9 @@ ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", r
 # A failing assertion can print its diagnostics between the test's name and its
 # FAIL record; the record never lies past the next numbered test.
 ZIG_FAIL = re.compile(r"^\d+/\d+ (\S[^\n]*?)\.\.\.(?:(?!\n\d+/\d+ ).)*?FAIL \((\w+)\)$", re.M | re.S)
+# A unittest failure: its id, then its traceback up to the next separator. A
+# subtest's parameters follow the id and stay out of the signature.
+UNITTEST = re.compile(r"^(?:ERROR|FAIL): \w+ \(([\w.]+)\)[^\n]*\n-{70}\n(.*?)(?=^[=-]{70}$|\Z)", re.M | re.S)
 GATE = re.compile(r"^([a-z][\w-]*(?: [\w-]+)*) gate failed: (.+)$", re.M)
 CARETS = re.compile(r"[\s~^]+")
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
@@ -159,6 +162,12 @@ def failure_causes(log, cases):
         found.append(Cause(f"zig test '{test}' {how}", zig_paths(test), detail))
     for test, error in ZIG_FAIL.findall(log):
         found.append(Cause(f"zig test '{test}' failed ({error})", zig_paths(test)))
+    for test, output in UNITTEST.findall(log):
+        modules = sorted(Path("tests").rglob(test.split(".", 1)[0] + ".py"))
+        paths = [str(modules[0])] if len(modules) == 1 else []
+        raised = raising_line(list(tracebacks(output)), paths[0]) if paths else None
+        failure = f"{raised[0]} raised {raised[1].split(':', 1)[0]}" if raised else "failed"
+        found.append(Cause(f"python test '{test}': {failure}", paths, raised[1] if raised else ""))
     for gate, message in GATE.findall(log):
         found.append(Cause(f"{gate} gate failed: {message}"))
     # A record the logs explain elsewhere (a Zig binary's case) adds nothing.
@@ -226,10 +235,15 @@ def file_cause(repository, issues, cause, workflow, sha, url, retried, labels):
 
 
 def job_log(repository, job_id):
-    """A job's full log, or None after three failed downloads."""
+    """A job's full log, or None after three failed downloads.
+
+    Job logs carry ANSI colour codes, and gh refuses to print a response with
+    escape sequences unless allowed, even into a pipe. That refusal filed
+    every red as "log unavailable" (#631, #638).
+    """
     for delay in (*LOG_RETRY_DELAYS, None):
         try:
-            return gh("api", f"repos/{repository}/actions/jobs/{job_id}/logs")
+            return gh("api", "--allow-escape-sequences", f"repos/{repository}/actions/jobs/{job_id}/logs")
         except subprocess.CalledProcessError as failure:
             print(f"::warning::Log of job {job_id} unavailable: {(failure.stderr or '').strip()}")
         if delay is None:

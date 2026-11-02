@@ -1,4 +1,5 @@
 test {
+    _ = @import("api_key.zig");
     _ = @import("attempt.zig");
     _ = @import("codex_auth.zig");
     _ = @import("codex_credentials.zig");
@@ -9,6 +10,7 @@ test {
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
     _ = @import("os/socket.zig");
+    _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("protocol.zig");
     _ = @import("protocol_reply.zig");
@@ -20,6 +22,7 @@ test {
     _ = @import("server.zig");
     _ = @import("server_execution.zig");
     _ = @import("server_host.zig");
+    _ = @import("SessionEnvironments.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
     _ = @import("bash.zig");
@@ -28,8 +31,10 @@ test {
     _ = @import("failed_responses.zig");
     _ = @import("provider.zig");
     _ = @import("provider_selection.zig");
+    _ = @import("providers.zig");
     _ = @import("preferences.zig");
-    _ = @import("provider_output.zig");
+    _ = @import("output_decode.zig");
+    _ = @import("output_format.zig");
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
     _ = @import("client.zig");

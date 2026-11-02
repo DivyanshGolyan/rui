@@ -16,9 +16,15 @@ partial: [4]u8 = undefined,
 partial_length: u3 = 0,
 partial_need: u3 = 0,
 allow_paste: bool = true,
+/// What a typed Tab adds to the draft at its end in place of a tab, or null
+/// to add the tab. Null by default: only the conversation completes commands.
+completion: ?*const fn (draft: []const u8) ?[]const u8 = null,
 /// Why the line is withheld until Enter, which reports it. It withholds
 /// edits, never changes what a key means.
 rejected: ?keymap.Refusal = null,
+/// Counts changes to the draft's bytes or its rejection. A caret move
+/// changes neither.
+edits: u32 = 0,
 paste_start: struct { cursor: usize = 0, length: usize = 0 } = .{},
 /// This editor saw the current marked paste begin. A replacement editor
 /// receiving the rest of a paste rejects it rather than adopting it.
@@ -45,6 +51,64 @@ pub fn getAttributes() std.posix.TermiosGetError!Attributes {
         .NOTTY => return error.NotATerminal,
         else => |err| return std.posix.unexpectedErrno(err),
     };
+}
+
+/// Puts the terminal in prompt mode: bytes arrive one at a time, unechoed,
+/// with no line editing, flow control or signals (Ctrl+C is a byte). Returns
+/// the attributes `leavePromptMode` restores.
+fn enterPromptMode() !Attributes {
+    const original = try getAttributes();
+    var mode = original;
+    mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
+    mode.c_iflag &= ~@as(termios.tcflag_t, termios.IXON);
+    mode.c_cc[termios.VMIN] = 1;
+    mode.c_cc[termios.VTIME] = 0;
+    try setAttributes(.FLUSH, mode);
+    return original;
+}
+
+/// Discards the prompt's queued input and restores `original` exactly.
+/// NOW would also leave Darwin's PENDIN set when re-entering canonical mode.
+fn leavePromptMode(original: Attributes) error{TerminalRestoreFailed}!void {
+    setAttributes(.FLUSH, original) catch return error.TerminalRestoreFailed;
+}
+
+/// One line from the terminal with nothing shown, for a secret. Enter ends
+/// it, Backspace edits it, Ctrl+C cancels it and Ctrl+D on an empty line is
+/// null. As with `readLine`, no line is returned unless the terminal's own
+/// settings were restored. The caller zeroes `buffer`.
+pub fn readSecretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
+    const original = try enterPromptMode();
+    const result = secretLine(io, buffer, prompt);
+    try leavePromptMode(original);
+    return result;
+}
+
+fn secretLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
+    // Prompt only once echo is off, so a key typed the moment the prompt
+    // shows is never echoed.
+    try std.Io.File.stdout().writeStreamingAll(io, prompt);
+    var chunk: [64]u8 = undefined;
+    defer std.crypto.secureZero(u8, &chunk);
+    var length: usize = 0;
+    errdefer std.crypto.secureZero(u8, buffer[0..length]);
+    while (true) {
+        const count = std.Io.File.stdin().readStreaming(io, &.{&chunk}) catch |err| switch (err) {
+            error.EndOfStream => return if (length == 0) null else buffer[0..length],
+            else => return err,
+        };
+        for (chunk[0..count]) |byte| switch (byte) {
+            '\r', '\n' => return buffer[0..length],
+            0x03 => return error.SecretEntryInterrupted,
+            0x04 => if (length == 0) return null,
+            0x08, 0x7f => length -|= 1,
+            else => {
+                if (length == buffer.len) return error.StreamTooLong;
+                buffer[length] = byte;
+                length += 1;
+            },
+        };
+    }
 }
 
 pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.TermiosSetError!void {
@@ -75,13 +139,7 @@ fn validScalar(point: u21, multiline: bool) bool {
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
 pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
-    const original = try getAttributes();
-    var mode = original;
-    mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
-    mode.c_iflag &= ~@as(termios.tcflag_t, termios.IXON);
-    mode.c_cc[termios.VMIN] = 1;
-    mode.c_cc[termios.VTIME] = 0;
-    try setAttributes(.FLUSH, mode);
+    const original = try enterPromptMode();
 
     // Always attempt both effects, even when rendering or input fails. Do
     // not return an accepted line if either cleanup step is unconfirmed.
@@ -96,10 +154,7 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
             else => break :blk error.TerminalCleanupFailed,
         };
     };
-    // Discard this prompt's queued input before restoring exact attributes.
-    // NOW also leaves Darwin's PENDIN set when re-entering canonical mode.
-    const restored = setAttributes(.FLUSH, original);
-    restored catch return error.TerminalRestoreFailed;
+    try leavePromptMode(original);
     disabled catch return error.TerminalCleanupFailed;
     return try result;
 }
@@ -196,7 +251,9 @@ const line_keys: keymap.Keymap(enum { interrupt, eof }) = .init(.{
     .ctrl_c = .interrupt,
     .ctrl_d = .eof,
     .ctrl_g = null,
+    .ctrl_n = null,
     .ctrl_o = null,
+    .ctrl_p = null,
     .ctrl_r = null,
     .ctrl_x = null,
     .up = null,
@@ -286,6 +343,84 @@ pub fn frozenAction(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(key
     };
 }
 
+/// What one input means at a choice drawn in place of the draft, through the
+/// draft's own classification: a typed `Key` means what `keys` says, the
+/// arrows and Enter are the choice's own, typed text and a marked paste begin
+/// typing, a chord, control or malformed input is refused, and the draft's
+/// other unmodified edit keys do nothing. Nothing here edits.
+pub fn Selection(comptime A: type) type {
+    return union(enum) { none, action: A, left, right, enter, text, refused };
+}
+
+pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(keys).Action) {
+    const value = switch (decoded) {
+        .none, .report => return .none,
+        .invalid => return .refused,
+        .event => |value| value,
+    };
+    const pressed = switch (value.event) {
+        .paste_start => return .text,
+        .paste_end => return .refused,
+        .key_press => |pressed| pressed,
+        else => return .none,
+    };
+    if (value.pasted) return .text;
+    return switch (classify(pressed)) {
+        .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else .none,
+        .enter => .enter,
+        // The draft's other edit keys have no use at a choice; a Ctrl or
+        // Alt chord among them is refused like any other chord.
+        .edit => |command| switch (command) {
+            .left => .left,
+            .right => .right,
+            else => if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) .refused else .none,
+        },
+        .chord, .control => .refused,
+        .text => |text| if (text.len != 0) .text else .none,
+        .none => .none,
+    };
+}
+
+test "a choice takes its arrows and Enter, the screen's keys and typing, and refuses chords" {
+    const Name = keymap.Key;
+    const Case = struct { bytes: []const u8, expected: Selection(Name) };
+    for ([_]Case{
+        .{ .bytes = "\x1b[D", .expected = .left },
+        .{ .bytes = "\x1b[C", .expected = .right },
+        .{ .bytes = "\r", .expected = .enter },
+        .{ .bytes = "\x1b[A", .expected = .{ .action = .up } },
+        .{ .bytes = "\x1b[6~", .expected = .{ .action = .page_down } },
+        .{ .bytes = "\x07", .expected = .{ .action = .ctrl_g } },
+        .{ .bytes = "\x12", .expected = .{ .action = .ctrl_r } },
+        .{ .bytes = "a", .expected = .text },
+        .{ .bytes = "/", .expected = .text },
+        .{ .bytes = "\xc3\xa9", .expected = .text },
+        .{ .bytes = "\x1b[200~", .expected = .text },
+        .{ .bytes = "\x1ba", .expected = .refused },
+        .{ .bytes = "\x1c", .expected = .refused },
+        .{ .bytes = "\x1b[113;5u", .expected = .refused },
+        // The draft's other edit keys have no use at a choice; a chord
+        // among them is refused.
+        .{ .bytes = "\x01", .expected = .refused },
+        .{ .bytes = "\x1b[1;3D", .expected = .refused },
+        .{ .bytes = "\x1b\x7f", .expected = .refused },
+        .{ .bytes = "\x7f", .expected = .none },
+        .{ .bytes = "\t", .expected = .none },
+    }) |case| {
+        errdefer std.debug.print("bytes={any}\n", .{case.bytes});
+        var stream: Input = .{};
+        var last: Selection(Name) = .none;
+        for (case.bytes) |byte| {
+            var decoded = stream.feed(byte, 0);
+            while (decoded != .none) : (decoded = stream.next()) {
+                const selection = select(keymap.every, decoded);
+                if (selection != .none) last = selection;
+            }
+        }
+        try std.testing.expectEqual(case.expected, last);
+    }
+}
+
 fn take(self: *Editor, decoded: Input.Decoded) KeyOutcome {
     const value = switch (decoded) {
         .none, .report => return .none,
@@ -336,7 +471,9 @@ pub fn refuse(self: *Editor) void {
 }
 
 fn reject(self: *Editor, reason: keymap.Refusal) void {
-    if (self.rejected == null) self.rejected = reason;
+    if (self.rejected != null) return;
+    self.rejected = reason;
+    self.edits +%= 1;
 }
 
 /// Every encoding of every `Key`: the one place a key's name meets the
@@ -348,7 +485,9 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .ctrl_c = &.{.{ .code = 'c', .mods = .{ .ctrl = true } }},
     .ctrl_d = &.{.{ .code = 'd', .mods = .{ .ctrl = true } }},
     .ctrl_g = &.{.{ .code = 'g', .mods = .{ .ctrl = true } }},
+    .ctrl_n = &.{.{ .code = 'n', .mods = .{ .ctrl = true } }},
     .ctrl_o = &.{.{ .code = 'o', .mods = .{ .ctrl = true } }},
+    .ctrl_p = &.{.{ .code = 'p', .mods = .{ .ctrl = true } }},
     .ctrl_r = &.{.{ .code = 'r', .mods = .{ .ctrl = true } }},
     .ctrl_x = &.{.{ .code = 'x', .mods = .{ .ctrl = true } }},
     // Terminals in the alternate screen also deliver mouse wheel and
@@ -383,7 +522,7 @@ fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
         .home => if (self.length == 0) null else self.move(self.lineStart()),
         .end => if (self.length == 0) null else self.move(self.lineEnd()),
         .ctrl_d => if (self.length == 0) null else self.deleteNext(),
-        .escape, .ctrl_c, .ctrl_g, .ctrl_o, .ctrl_r, .ctrl_x, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
+        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
     };
 }
 
@@ -399,46 +538,92 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) KeyOutcome {
         self.reject(.invalid);
         return .none;
     }
+    const press = classify(value);
+    switch (press) {
+        .key => |key_name| return self.edit(key_name) orelse .{ .action = key_name },
+        .enter => return if (self.rejected) |why| .{ .refused = why } else .submit,
+        else => {},
+    }
+    if (self.rejected != null) return .none;
+    switch (press) {
+        .key, .enter => unreachable,
+        .edit => |command| return switch (command) {
+            .tab => self.tab(),
+            .newline => self.insert('\n', true),
+            .left => self.move(self.previous(self.cursor)),
+            .right => self.move(self.next(self.cursor)),
+            .line_start => self.move(self.lineStart()),
+            .line_end => self.move(self.lineEnd()),
+            .delete_next => self.deleteNext(),
+            .delete_previous => self.deletePrevious(),
+            .delete_to_line_start => self.deleteTo(self.lineStart()),
+            .delete_to_line_end => self.deleteTo(self.lineEnd()),
+            .delete_word => self.backwardWord(true),
+            .delete_word_part => self.backwardWord(false),
+            .word_left => self.moveWord(false),
+            .word_right => self.moveWord(true),
+        },
+        .chord => return .{ .refused = .unbound },
+        .control => {
+            self.reject(.invalid);
+            return .none;
+        },
+        .text => |text| return self.insertText(text, false),
+        .none => return .none,
+    }
+}
+
+/// An edit the draft makes with a typed key.
+const Edit = enum { tab, newline, left, right, line_start, line_end, delete_next, delete_previous, delete_to_line_start, delete_to_line_end, delete_word, delete_word_part, word_left, word_right };
+
+/// What one typed (not pasted) key is, before the draft or a choice gives it
+/// a use: the one classification both share.
+const Press = union(enum) {
+    /// A named screen key.
+    key: Key,
+    enter,
+    edit: Edit,
+    /// An unbound Alt, Super, Hyper or Meta chord: dropped whole and reported.
+    chord,
+    /// An unbound Ctrl key, C0 control or invalid scalar: never text.
+    control,
+    text: []const u8,
+    none,
+};
+
+fn classify(value: vaxis.Key) Press {
     // Every binding matches exact modifiers. Vaxis's looser match accepts a
     // key's associated text or shifted key and drops Shift, so Ctrl-Shift-J
     // with text j would send and Shift-Enter with text CR would too.
-    if (named(value)) |key_name| return self.edit(key_name) orelse .{ .action = key_name };
-    if (value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return if (self.rejected) |why| .{ .refused = why } else .submit;
-    if (self.rejected != null) return .none;
-    if (value.matchExact(vaxis.Key.tab, .{})) return self.insert('\t', false);
+    if (named(value)) |key_name| return .{ .key = key_name };
+    if (value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return .enter;
+    if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return self.insert('\n', true);
-    if (value.matchExact(vaxis.Key.left, .{})) return self.move(self.previous(self.cursor));
-    if (value.matchExact(vaxis.Key.right, .{})) return self.move(self.next(self.cursor));
-    if (value.matchExact('a', .{ .ctrl = true })) return self.move(self.lineStart());
-    if (value.matchExact('e', .{ .ctrl = true })) return self.move(self.lineEnd());
-    if (value.matchExact(vaxis.Key.delete, .{})) return self.deleteNext();
-    if (value.matchExact(vaxis.Key.backspace, .{})) return self.deletePrevious();
-    if (value.matchExact('u', .{ .ctrl = true })) return self.deleteTo(self.lineStart());
-    if (value.matchExact('k', .{ .ctrl = true })) return self.deleteTo(self.lineEnd());
-    if (value.matchExact('w', .{ .ctrl = true })) return self.backwardWord(true);
-    if (value.matchExact(vaxis.Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return self.backwardWord(false);
-    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(vaxis.Key.left, .{ .alt = true })) return self.moveWord(false);
-    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(vaxis.Key.right, .{ .alt = true })) return self.moveWord(true);
+    if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return .{ .edit = .newline };
+    if (value.matchExact(vaxis.Key.left, .{})) return .{ .edit = .left };
+    if (value.matchExact(vaxis.Key.right, .{})) return .{ .edit = .right };
+    if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
+    if (value.matchExact('e', .{ .ctrl = true })) return .{ .edit = .line_end };
+    if (value.matchExact(vaxis.Key.delete, .{})) return .{ .edit = .delete_next };
+    if (value.matchExact(vaxis.Key.backspace, .{})) return .{ .edit = .delete_previous };
+    if (value.matchExact('u', .{ .ctrl = true })) return .{ .edit = .delete_to_line_start };
+    if (value.matchExact('k', .{ .ctrl = true })) return .{ .edit = .delete_to_line_end };
+    if (value.matchExact('w', .{ .ctrl = true })) return .{ .edit = .delete_word };
+    if (value.matchExact(vaxis.Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return .{ .edit = .delete_word_part };
+    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(vaxis.Key.left, .{ .alt = true })) return .{ .edit = .word_left };
+    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(vaxis.Key.right, .{ .alt = true })) return .{ .edit = .word_right };
     // Any Alt, Super, Hyper or Meta chord the bindings above do not consume,
     // on a character, a control or a named key such as Enter, is dropped
     // whole and reported. Its bare key (ESC . as ".", ESC ^A as Ctrl-A) was
     // never typed, and the draft around it was: an Esc pressed just before
     // a key arrives as one chord.
-    if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .{ .refused = .unbound };
+    if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .chord;
     // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
     // those are not text, so an unbound one rejects the input.
     const control = value.codepoint < 0x20 and value.codepoint != vaxis.Key.enter and value.codepoint != vaxis.Key.tab and value.codepoint != vaxis.Key.escape;
-    if (value.mods.ctrl or control) {
-        self.reject(.invalid);
-        return .none;
-    }
-    if (!validScalar(value.codepoint, false)) {
-        self.reject(.invalid);
-        return .none;
-    }
-    if (value.text) |text| return self.insertText(text, false);
+    if (value.mods.ctrl or control or !validScalar(value.codepoint, false)) return .control;
+    if (value.text) |text| return .{ .text = text };
     return .none;
 }
 
@@ -524,6 +709,44 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
     }
 }
 
+/// Completes a clean command word; a partial character or a rejected draft
+/// takes the tab as it always did.
+fn tab(self: *Editor) KeyOutcome {
+    const completion = self.completion orelse return self.insert('\t', false);
+    if (self.partial_length != 0 or self.rejected != null) return self.insert('\t', false);
+    const added = completion(self.buffer[0..self.length]) orelse return self.insert('\t', false);
+    if (added.len == 0) return .none;
+    self.cursor = self.length;
+    return switch (self.insertText(added, false)) {
+        .append => .redraw,
+        else => |outcome| outcome,
+    };
+}
+
+test "Tab over a partial character or a rejected draft does what it did before completion" {
+    const Complete = struct {
+        fn status(_: []const u8) ?[]const u8 {
+            return "atus";
+        }
+    };
+    // A lead byte waiting for the rest of its character, or a NUL.
+    for ([_][]const u8{ "\xc3", "\x00" }) |state| {
+        errdefer std.debug.print("state={any}\n", .{state});
+        var storage: [2][64]u8 = undefined;
+        var editors = [_]Editor{ .{ .buffer = &storage[0] }, .{ .buffer = &storage[1], .completion = Complete.status } };
+        for (&editors) |*editor| {
+            var stream: Input = .{};
+            for ("/st") |byte| _ = editor.feed(&stream, byte);
+            if (state[0] == 0) _ = editor.feed(&stream, 0) else _ = editor.insert(state[0], false);
+            try std.testing.expect(editor.partial_length != 0 or editor.rejected != null);
+            _ = editor.feed(&stream, '\t');
+        }
+        try std.testing.expectEqualStrings(editors[0].buffer[0..editors[0].length], editors[1].buffer[0..editors[1].length]);
+        try std.testing.expectEqual(editors[0].partial_length, editors[1].partial_length);
+        try std.testing.expectEqual(editors[0].rejected, editors[1].rejected);
+    }
+}
+
 fn insertText(self: *Editor, text: []const u8, pasted_input: bool) KeyOutcome {
     var event: KeyOutcome = .none;
     for (text) |byte| {
@@ -591,6 +814,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
     std.mem.copyBackwards(u8, self.buffer[self.cursor + self.partial_length .. self.length + self.partial_length], self.buffer[self.cursor..self.length]);
     @memcpy(self.buffer[self.cursor .. self.cursor + self.partial_length], self.partial[0..self.partial_length]);
     self.length += self.partial_length;
+    self.edits +%= 1;
     self.cursor += self.partial_length;
     self.partial_length = 0;
     if (!at_end) {
@@ -650,6 +874,7 @@ fn erase(self: *Editor, from: usize, to: usize) KeyOutcome {
     if (self.rejected != null or from == to) return .none;
     std.mem.copyForwards(u8, self.buffer[from .. self.length - (to - from)], self.buffer[to..self.length]);
     self.length -= to - from;
+    self.edits +%= 1;
     // Removing a separator may join the suffix to the preceding cluster.
     // Snap to the first boundary at or after the erased range's start.
     self.cursor = if (from == 0) 0 else self.next(from - 1);

@@ -74,6 +74,8 @@ const cases = [_]Case{
     .{ .name = "Down clamps to shorter line", .before = "abcde\nxy!", .caret = 4, .after = "abcde\nxy!", .cursor = 9, .event = .redraw, .wires = .{ bytes("\x1bOB"), bytes("\x1b[B"), no_case27, no_raw } },
     .{ .name = "Home", .event = .redraw, .cursor = 0, .wires = .{ bytes("\x1bOH"), bytes("\x1b[H"), no_case27, no_raw } },
     .{ .name = "Home on an empty draft", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .{ .action = .home }, .wires = .{ bytes("\x1bOH"), bytes("\x1b[H"), no_case27, no_raw } },
+    .{ .name = "Ctrl-P", .event = .{ .action = .ctrl_p }, .wires = .{ no_alt, bytes("\x1b[112;5u"), bytes("\x1b[27;5;112~"), bytes("\x10") } },
+    .{ .name = "Ctrl-N", .event = .{ .action = .ctrl_n }, .wires = .{ no_alt, bytes("\x1b[110;5u"), bytes("\x1b[27;5;110~"), bytes("\x0e") } },
     .{ .name = "Ctrl-R", .event = .{ .action = .ctrl_r }, .wires = .{ no_alt, bytes("\x1b[114;5u"), bytes("\x1b[27;5;114~"), bytes("\x12") } },
     .{ .name = "Ctrl-X", .event = .{ .action = .ctrl_x }, .wires = .{ no_alt, bytes("\x1b[120;5u"), bytes("\x1b[27;5;120~"), bytes("\x18") } },
     .{ .name = "Ctrl-A", .event = .redraw, .cursor = 0, .wires = .{ no_alt, bytes("\x1b[97;5u"), bytes("\x1b[27;5;97~"), bytes("\x01") } },

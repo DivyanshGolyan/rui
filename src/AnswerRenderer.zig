@@ -112,7 +112,7 @@ fn flushPrefix(self: *Renderer) !void {
     var fence_indent: usize = 0;
     while (fence_indent < prefix.len and fence_indent < 3 and prefix[fence_indent] == ' ') : (fence_indent += 1) {}
     if (std.mem.startsWith(u8, prefix[fence_indent..], "```")) {
-        if (!self.literal_line and fenceInfo(prefix[fence_indent + 3 ..])) {
+        if (!self.literal_line and openingFence(prefix)) {
             @memcpy(self.fence_bytes[0..prefix.len], prefix);
             self.fence_len = prefix.len;
             self.fence_pending = true;
@@ -157,6 +157,12 @@ fn fenceCandidate(prefix: []const u8) bool {
     return std.mem.startsWith(u8, prefix[indent..], "```");
 }
 
+fn openingFence(line: []const u8) bool {
+    var indent: usize = 0;
+    while (indent < line.len and indent < 3 and line[indent] == ' ') : (indent += 1) {}
+    return std.mem.startsWith(u8, line[indent..], "```") and fenceInfo(line[indent + 3 ..]);
+}
+
 fn fenceInfo(info: []const u8) bool {
     for (info) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-' and byte != '+') return false;
@@ -169,6 +175,54 @@ fn closingFence(line: []const u8) bool {
     while (indent < line.len and indent < 3 and line[indent] == ' ') : (indent += 1) {}
     return std.mem.eql(u8, line[indent..], "```");
 }
+
+/// Finds an answer's last complete fenced code block as its bytes pass,
+/// by the fence lines that make the renderer show a block as code.
+pub const LastCode = struct {
+    pub const Range = struct { start: u64, length: u64 };
+
+    // A line this long is never a fence line, as in the renderer.
+    line: [prefix_limit]u8 = undefined,
+    line_len: usize = 0,
+    offset: u64 = 0,
+    line_start: u64 = 0,
+    body: ?u64 = null,
+    last: ?Range = null,
+
+    pub fn feed(self: *LastCode, bytes: []const u8) void {
+        for (bytes) |byte| {
+            self.offset += 1;
+            if (byte != '\n') {
+                if (self.line_len < prefix_limit) {
+                    self.line[self.line_len] = byte;
+                    self.line_len += 1;
+                }
+                continue;
+            }
+            self.endLine(true);
+            self.line_start = self.offset;
+            self.line_len = 0;
+        }
+    }
+
+    /// The last block's content without its final line ending, or null.
+    /// A closing fence may end the answer without one; an opening fence
+    /// needs its line ending.
+    pub fn finish(self: *LastCode) ?Range {
+        self.endLine(false);
+        return self.last;
+    }
+
+    fn endLine(self: *LastCode, opens: bool) void {
+        if (self.line_len >= prefix_limit) return;
+        const line = self.line[0..self.line_len];
+        if (self.body) |start| {
+            if (!closingFence(line)) return;
+            self.last = .{ .start = start, .length = (self.line_start - start) -| 1 };
+            self.body = null;
+        } else if (opens and openingFence(line)) self.body = self.offset;
+    }
+};
 
 fn fencedByte(self: *Renderer, byte: u8) !void {
     if (!self.fence_literal and self.fence_len == fence_limit) {
@@ -1060,4 +1114,37 @@ test "sixteen MiB answer uses fixed parser and output storage" {
     try renderer.finish();
     try std.testing.expectEqual(@as(u64, 16 * 1024 * 1024), discard.fullCount());
     try std.testing.expect(@sizeOf(Renderer) < 5 * 1024);
+}
+
+test "the last code block is the last complete fenced block" {
+    const long_opener = "```" ++ @as([prefix_limit - 3]u8, @splat('a'));
+    const cases = [_]struct { []const u8, ?[]const u8 }{
+        .{ "Run:\n```sh\nzig build\n```\nthen\n```\nfirst\nsecond\n```\nDone.\n", "first\nsecond" },
+        .{ "No code here.\n", null },
+        .{ "```py\nunclosed\n", null },
+        .{ "```a\nA\n```\n```b\nunclosed\n", "A" },
+        .{ "```\nx\n```", "x" },
+        .{ "  ```zig\n  code\n   ```\n", "  code" },
+        .{ "```\n```\n", "" },
+        .{ "```", null },
+        .{ "````\nx\n````\n", null },
+        .{ "```a b\nx\n```\n", null },
+        .{ "```\nx\n```  \ny\n```\n", "x\n```  \ny" },
+        .{ long_opener ++ "\nx\n```\n", null },
+        .{ long_opener[0 .. prefix_limit - 1] ++ "\nx\n```\n", "x" },
+    };
+    for (cases) |case| {
+        // Whole, and a byte at a time: where a window ends never matters.
+        for ([_]bool{ false, true }) |bytewise| {
+            var code: LastCode = .{};
+            if (bytewise) {
+                for (0..case[0].len) |index| code.feed(case[0][index..][0..1]);
+            } else code.feed(case[0]);
+            const found = code.finish();
+            if (case[1]) |expected| {
+                const range = found.?;
+                try std.testing.expectEqualStrings(expected, case[0][@intCast(range.start)..][0..@intCast(range.length)]);
+            } else try std.testing.expect(found == null);
+        }
+    }
 }

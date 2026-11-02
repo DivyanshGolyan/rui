@@ -13,6 +13,8 @@ const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
+const codec_abi = @import("codec_abi.zig");
+const codecs = @import("codecs.zig");
 
 pub const nghttp2_version = h2.nghttp2_version;
 pub const openssl_version = h2.openssl_version;
@@ -29,7 +31,14 @@ pub const PreparedRequest = struct {
     length: u64,
     charged: u64,
     structured_output: bool,
-    session_affinity: [16]u8,
+    /// The Session's provider, whose endpoint the request goes to.
+    provider: protocol.Provider,
+    /// The codec the Session pinned, which also classifies the answer's
+    /// error body.
+    codec: protocol.Codec,
+    /// The codec's headers, which `Transfer.start` sends ahead of the
+    /// Host's own and copies, so the Transfer does not keep them.
+    headers: codec_abi.Headers,
 
     pub fn deinit(self: *PreparedRequest, io: std.Io, budget: ScratchBudget) void {
         self.file.close(io);
@@ -38,12 +47,21 @@ pub const PreparedRequest = struct {
     }
 };
 
-pub const ObservationNames = struct {
-    request_id: []const u8 = "",
-    model: []const u8 = "",
-    alternate_model: []const u8 = "",
-    turn_state: []const u8 = "",
-};
+/// The field every Transfer sends first, ahead of the codec's headers.
+const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
+
+/// The request fields the Host writes itself, which no codec header names:
+/// `content_type` and model_adapter.Headers' credential, user-agent, FedRAMP
+/// and turn-state fields.
+pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp", "x-codex-turn-state" };
+
+/// Whether the Host or h2 writes a field of this name itself.
+pub fn hostField(name: []const u8) bool {
+    for (host_request_fields ++ h2.owned_fields) |owned| {
+        if (std.mem.eql(u8, name, owned)) return true;
+    }
+    return false;
+}
 
 pub const max_turn_state_bytes = 4096;
 
@@ -63,12 +81,13 @@ pub const TurnStateKey = struct {
 
 /// One per Reactor, so a Transfer holds a pointer instead of copies.
 pub const HeaderObservation = struct {
-    names: ObservationNames = .{},
+    names: codec_abi.ObservedHeaders = .{},
     turn_state: ?TurnStateSink = null,
 };
 
 pub const Options = struct {
-    endpoint: []const u8,
+    /// Each served provider's endpoint.
+    endpoints: std.EnumArray(protocol.Provider, ?[]const u8),
     ca_file: ?[]const u8 = null,
     /// The most Transfers alive at once.
     capacity: usize,
@@ -77,6 +96,17 @@ pub const Options = struct {
     scratch_path: []const u8,
     /// The scratch account every request and response of this Host charges.
     budget: ScratchBudget,
+    /// Where `startModelList` sends its GET, if anywhere.
+    model_list_url: ?[]const u8 = null,
+};
+
+/// The one request a Reactor makes besides model Transfers: an OpenAI key's
+/// model list, once at Host start. Its answer lands in its owner's buffer,
+/// with no scratch file or budget charge, and it holds a stream, and so
+/// at most one connection, beyond the Transfers' capacity until it ends.
+pub const ModelListFetch = struct {
+    stream: h2.Stream,
+    finished: bool,
 };
 
 /// Per-launch fault hooks, each through a production path.
@@ -194,12 +224,14 @@ pub const Credentials = struct {
 
 pub const Reactor = struct {
     client: h2.Client,
-    endpoint: h2.Endpoint,
+    endpoints: std.EnumArray(protocol.Provider, ?h2.Endpoint),
     io: std.Io,
     observation: HeaderObservation,
     scratch_path: []const u8,
     budget: ScratchBudget,
     credentials: Credentials,
+    model_list_endpoint: ?h2.Endpoint,
+    model_list: ?*ModelListFetch,
 
     /// In final storage: h2's Client is pointer-stable. Host startup has
     /// already run `checkLibraries` and `validateEndpoint`.
@@ -211,26 +243,71 @@ pub const Reactor = struct {
             return error.InvalidProviderCaFile;
         self.* = .{
             .client = undefined,
-            .endpoint = undefined,
+            .endpoints = .initFill(null),
             .io = io,
             .observation = options.observation,
             .scratch_path = options.scratch_path,
             .budget = options.budget,
             .credentials = .{ .allocator = allocator },
+            .model_list_endpoint = null,
+            .model_list = null,
         };
+        // The model list holds a stream of its own, so it never waits
+        // behind a model request or makes one wait behind it.
+        const streams = std.math.add(usize, options.capacity, @intFromBool(options.model_list_url != null)) catch
+            return error.TransportCapacityTooLarge;
         try self.client.init(allocator, io, .{
-            .stream_capacity = std.math.cast(u32, options.capacity) orelse return error.TransportCapacityTooLarge,
+            .stream_capacity = std.math.cast(u32, streams) orelse return error.TransportCapacityTooLarge,
             .inactivity_ns = interval_ns,
             .connect_timeout_ns = interval_ns,
             .trust = if (options.ca_file) |path| .{ .ca_file = path } else .system,
             .proxy = h2.proxyFromEnvironment(),
         });
         errdefer self.client.deinit();
-        self.endpoint = try self.client.addEndpoint(options.endpoint);
+        for (options.endpoints.values, &self.endpoints.values) |url, *endpoint| {
+            if (url) |value| endpoint.* = try self.client.addEndpoint(value);
+        }
+        if (options.model_list_url) |url| self.model_list_endpoint = try self.client.addEndpoint(url);
+    }
+
+    /// Launches the model list GET with `fields`, which `prepare` copies
+    /// except borrowed ones; `response` is borrowed until it ends.
+    pub fn startModelList(self: *Reactor, fetch: *ModelListFetch, fields: []const h2.Field, response: []u8) !void {
+        std.debug.assert(self.model_list == null);
+        fetch.* = .{ .stream = .idle, .finished = false };
+        try self.client.prepare(&fetch.stream, .{
+            .endpoint = self.model_list_endpoint.?,
+            .method = .get,
+            .fields = fields,
+            .body = .{ .bytes = "" },
+            .sink = .{ .buffer = response },
+        });
+        self.model_list = fetch;
+        self.client.launch(&fetch.stream);
+    }
+
+    /// The model list once its stream has ended, handed over once: its
+    /// owner reads the answer, then calls `endModelList`.
+    pub fn finishedModelList(self: *Reactor) ?*ModelListFetch {
+        const fetch = self.model_list orelse return null;
+        return if (fetch.finished) fetch else null;
+    }
+
+    /// Whether the model list still holds a stream.
+    pub fn modelListPending(self: *const Reactor) bool {
+        return self.model_list != null;
+    }
+
+    /// Cancels the model list if it is live and releases its stream.
+    pub fn endModelList(self: *Reactor) void {
+        const fetch = self.model_list orelse return;
+        self.client.cancel(&fetch.stream);
+        fetch.stream.deinit();
+        self.model_list = null;
     }
 
     pub fn deinit(self: *Reactor) void {
-        std.debug.assert(self.credentials.head == null);
+        std.debug.assert(self.credentials.head == null and self.model_list == null);
         self.client.deinit();
         self.* = undefined;
     }
@@ -263,7 +340,11 @@ pub const Reactor = struct {
     /// A finished stream with an impossible status is an error: the
     /// caller fences, since no settlement can be derived from it.
     pub fn nextCompletion(self: *Reactor, fail_seal: bool) error{InvalidHttpEvidence}!?Completion {
-        const stream = self.client.nextFinished() orelse return null;
+        var stream = self.client.nextFinished() orelse return null;
+        if (self.model_list) |fetch| if (stream == &fetch.stream) {
+            fetch.finished = true;
+            stream = self.client.nextFinished() orelse return null;
+        };
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
         var outcome = try transfer.outcome();
         switch (outcome) {
@@ -279,6 +360,8 @@ pub const Reactor = struct {
 
     /// h2's receiver, inside `drive` on the execution thread.
     pub fn observe(self: *Reactor, stream: *h2.Stream, event: h2.Event) h2.Verdict {
+        // The model list's buffer bounds its body; it observes no header.
+        if (self.model_list) |fetch| if (stream == &fetch.stream) return .accept;
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
         switch (event) {
             .head => |head| {
@@ -436,7 +519,8 @@ const HeaderContext = struct {
     /// An error refuses the block: an invalid value, or no memory for it.
     fn field(self: *HeaderContext, observation: *const HeaderObservation, name: []const u8, raw: []const u8, now_seconds: i64) error{ InvalidValue, OutOfMemory }!void {
         const value = std.mem.trim(u8, raw, " \t");
-        if (std.ascii.eqlIgnoreCase(name, "retry-after")) {
+        // h2 delivers field names lowercase (RFC 9113 8.2.1, enforced by nghttp2).
+        if (std.mem.eql(u8, name, "retry-after")) {
             if (transport_policy.parseRetryAfter(value, now_seconds)) |constraint| switch (constraint) {
                 .delay_ms => |delay| {
                     self.retry_after_ms = @max(self.retry_after_ms, delay);
@@ -450,7 +534,7 @@ const HeaderContext = struct {
             return;
         }
         const names = &observation.names;
-        if (names.turn_state.len != 0 and std.ascii.eqlIgnoreCase(name, names.turn_state)) {
+        if (names.turn_state.len != 0 and std.mem.eql(u8, name, names.turn_state)) {
             if (!self.successful_block or self.turn_state_seen) return;
             self.turn_state_seen = true;
             if (value.len == 0 or value.len > max_turn_state_bytes) return;
@@ -458,11 +542,11 @@ const HeaderContext = struct {
             if (observation.turn_state) |sink| sink.capture(sink.context, self.turn_state, value);
             return;
         }
-        const observed: Observed.Name = if (names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, names.request_id))
+        const observed: Observed.Name = if (names.request_id.len != 0 and std.mem.eql(u8, name, names.request_id))
             .request_id
-        else if (names.model.len != 0 and std.ascii.eqlIgnoreCase(name, names.model))
+        else if (names.model.len != 0 and std.mem.eql(u8, name, names.model))
             .model
-        else if (names.alternate_model.len != 0 and std.ascii.eqlIgnoreCase(name, names.alternate_model))
+        else if (names.alternate_model.len != 0 and std.mem.eql(u8, name, names.alternate_model))
             .alternate_model
         else
             return;
@@ -513,7 +597,7 @@ const Observed = struct {
 pub const Transfer = struct {
     stream: h2.Stream,
     reactor: *Reactor,
-    request: PreparedRequest,
+    request: RetainedRequest,
     /// Until h2 retires the request body or the Transfer ends.
     request_open: bool = true,
     response: ResponseCapture,
@@ -534,23 +618,36 @@ pub const Transfer = struct {
         faults: Faults = .{},
     };
 
-    /// Opens the response capture, then prepares the stream with the
-    /// request's fields plus `content-type: application/json`. Touches no
-    /// socket; `Reactor.launch` is the handoff. Unlink failure still hands
-    /// back the named owner through `retained_response`.
+    /// What a Transfer keeps of its request.
+    const RetainedRequest = struct {
+        file: std.Io.File,
+        charged: u64,
+        structured_output: bool,
+        codec: protocol.Codec,
+    };
+
+    /// Opens the response capture, then prepares the stream with
+    /// `content-type: application/json`, the request's codec headers and
+    /// the options' fields, in that order. Takes the request's file and
+    /// charge. Touches no socket; `Reactor.launch` is the handoff. Unlink
+    /// failure still hands back the named owner through
+    /// `retained_response`.
     pub fn start(
         self: *Transfer,
         reactor: *Reactor,
-        request: PreparedRequest,
+        request: *const PreparedRequest,
         binding: attempt.AttemptBinding,
         options: StartOptions,
         retained_response: *?named_scratch.Owner,
     ) !void {
         errdefer if (options.credential) |shared| reactor.credentials.release(shared);
-        if (options.fields.len + 1 > h2.max_fields) return error.TooManyProviderHeaders;
+        const count = 1 + request.headers.count + options.fields.len;
+        if (count > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
-        fields[0] = .{ .name = "content-type", .value = "application/json", .borrowed = true };
-        @memcpy(fields[1..][0..options.fields.len], options.fields);
+        fields[0] = content_type;
+        for (fields[1..][0..request.headers.count], request.headers.names[0..request.headers.count], 0..) |*field, name, index|
+            field.* = .{ .name = codecs.headerName(request.codec, name), .value = request.headers.value(index) };
+        @memcpy(fields[1 + request.headers.count ..][0..options.fields.len], options.fields);
         const response = ResponseCapture.init(
             reactor.io,
             reactor.scratch_path,
@@ -563,7 +660,7 @@ pub const Transfer = struct {
         self.* = .{
             .stream = .idle,
             .reactor = reactor,
-            .request = request,
+            .request = .{ .file = request.file, .charged = request.charged, .structured_output = request.structured_output, .codec = request.codec },
             .response = response,
             .headers = .{ .turn_state = options.turn_state },
             .credential = options.credential,
@@ -573,8 +670,8 @@ pub const Transfer = struct {
             self.* = undefined;
         }
         try reactor.client.prepare(&self.stream, .{
-            .endpoint = reactor.endpoint,
-            .fields = fields[0 .. options.fields.len + 1],
+            .endpoint = reactor.endpoints.get(request.provider).?,
+            .fields = fields[0..count],
             .body = .{ .file = .{
                 .handle = request.file.handle,
                 .length = request.length + @intFromBool(options.faults.request_read),
@@ -609,7 +706,7 @@ pub const Transfer = struct {
     fn retireRequest(self: *Transfer) void {
         if (!self.request_open) return;
         self.request_open = false;
-        // Not `deinit`: the request's other facts outlive its file.
+        // Its other facts outlive its file.
         self.request.file.close(self.reactor.io);
         self.reactor.budget.release(self.request.charged);
     }
@@ -666,6 +763,10 @@ pub const Transfer = struct {
     pub fn hasStructuredOutput(self: *const Transfer) bool {
         return self.request.structured_output;
     }
+
+    pub fn codec(self: *const Transfer) protocol.Codec {
+        return self.request.codec;
+    }
 };
 
 fn policyCause(cause: h2.Cause) transport_policy.Cause {
@@ -705,7 +806,7 @@ test "idle reactor reports zero finished transfers and no completion" {
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     try reactor.init(std.testing.allocator, std.testing.io, .{
-        .endpoint = "http://127.0.0.1:1/responses",
+        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",
@@ -766,8 +867,13 @@ test "a Transfer that fails to start releases its credential use" {
     reactor.credentials = .{ .allocator = std.testing.allocator };
     var transfer: Transfer = undefined;
     var retained: ?named_scratch.Owner = null;
-    const too_many: [h2.max_fields]h2.Field = @splat(.{ .name = "x-field", .value = "" });
-    try std.testing.expectError(error.TooManyProviderHeaders, transfer.start(&reactor, undefined, undefined, .{
+    var request: PreparedRequest = undefined;
+    request.provider = .codex;
+    request.codec = .@"openai-responses/1";
+    const settings: codec_abi.Settings = .{ .effort = null, .session_affinity = @splat(0), .model_length = 0 };
+    codecs.requestHeaders(request.codec, &settings, &request.headers);
+    const too_many: [h2.max_fields - 1]h2.Field = @splat(.{ .name = "x-field", .value = "" });
+    try std.testing.expectError(error.TooManyProviderHeaders, transfer.start(&reactor, &request, undefined, .{
         .fields = &too_many,
         .credential = try reactor.credentials.share("token", "account"),
     }, &retained));

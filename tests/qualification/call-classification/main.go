@@ -349,7 +349,7 @@ func verifyRejectedReferences(inspection map[string]any, expected []call, valid 
 		if row["call_ordinal"] != strconv.Itoa(valid+index) || row["code"] != code {
 			return nil, fmt.Errorf("rejected call %d order/code mismatch: %v", index, row)
 		}
-		for field, text := range map[string]string{"item_id": candidate.ItemID, "name": candidate.Name, "call_id": candidate.ID, "arguments": candidate.Arguments} {
+		for field, text := range map[string]string{"name": candidate.Name, "call_id": candidate.ID, "arguments": candidate.Arguments} {
 			actual, ok := row[field].(map[string]any)
 			expectedReference := contentReference(text)
 			if !ok || actual["type"] != expectedReference["type"] || actual["bytes"] != expectedReference["bytes"] || actual["sha256"] != expectedReference["sha256"] {
@@ -357,7 +357,7 @@ func verifyRejectedReferences(inspection map[string]any, expected []call, valid 
 			}
 		}
 	}
-	return map[string]any{"status": "passed", "calls_checked": len(rows), "references_per_call": 4}, nil
+	return map[string]any{"status": "passed", "calls_checked": len(rows), "references_per_call": 3}, nil
 }
 
 func verifyFullCallHistory(report map[string]any, expected []call, valid int, actionIDs []string) (map[string]any, error) {
@@ -374,7 +374,7 @@ func verifyFullCallHistory(report map[string]any, expected []call, valid int, ac
 		if !ok {
 			return nil, fmt.Errorf("Full report tool call %d is malformed", index)
 		}
-		for field, want := range map[string]string{"item_id": expected[index].ItemID, "name": expected[index].Name, "call_id": expected[index].ID, "arguments": expected[index].Arguments} {
+		for field, want := range map[string]string{"name": expected[index].Name, "call_id": expected[index].ID, "arguments": expected[index].Arguments} {
 			content, ok := item[field].(map[string]any)
 			got, textOK := content["text"].(string)
 			if !ok || !textOK || got != want {
