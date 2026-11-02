@@ -170,8 +170,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 /// and the draft line the previous frame showed first.
 /// `anchor` is the byte that started the composer's first shown line last
 /// frame. `edits` counts changes to its bytes and never repeats for a new
-/// draft.
-pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0, edits: u32 = 0 };
+/// draft. `listed` is the previous frame's `Screen.listed`.
+pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0, edits: u32 = 0, listed: bool = false };
 
 /// Where the next input goes, which the shell's route and `render` both
 /// read: the composer, the composer frozen while a start waits, or the
@@ -1824,7 +1824,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
             .clear => if (prompt != null) {} else if (picker) |shown| switch (shown.step) {
                 .sign_in => shown.step = .models,
                 .models => state.closePicker(),
-            } else if (commandsShown(state, value.draft)) {
+            } else if (value.draft.listed and commandList(state, value.draft) != null) {
                 state.commands_closed = value.draft.edits;
             } else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
@@ -2327,6 +2327,9 @@ pub const Screen = struct {
     /// The byte the composer's first shown line starts at, for the next
     /// frame's `Draft.anchor`.
     draft_anchor: usize = 0,
+    /// It showed the draft's command list, for the next frame's
+    /// `Draft.listed`: Esc closes only a list the person saw.
+    listed: bool = false,
     /// A mark it drew changes with the frame: the shell draws the next one
     /// in `pulse_interval_ms`.
     pulses: bool = false,
@@ -2562,9 +2565,10 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
     @memcpy(lines[0..at.top], top[0..at.top]);
     if (fits) {
         lines[at.input] = try ruleLine(&painter, input.view);
-        if (at.commands.len() != 0) try commandLines(&painter, matches.?, lines[at.commands.start..at.commands.end]);
+        screen.listed = at.commands.len() != 0;
+        if (screen.listed) try commandLines(&painter, matches.?, lines[at.commands.start..at.commands.end]);
         try composer(&painter, state, draft, &input, lines[at.commands.end .. height - 1]);
-        lines[height - 1] = try hints(&painter, state, draft);
+        lines[height - 1] = try hints(&painter, state, draft, screen.listed);
         screen.draft_anchor = input.lines[0].start;
         if (state.inputMode() == .compose) screen.cursor = .{ .row = @intCast(at.commands.end + input.shape.caret_line - input.view.first), .column = @intCast(@min(width - 1, 3 + input.shape.caret_column)) };
     }
@@ -2581,12 +2585,6 @@ pub fn commandList(state: *const State, draft: Draft) ?commands.Matches {
     if (state.commands_closed) |closed| if (closed == draft.edits) return null;
     const matches = commands.Matches.of(draft.bytes) orelse return null;
     return if (matches.count != 0) matches else null;
-}
-
-/// The screen shows the draft's command list: a command word is one row.
-fn commandsShown(state: *const State, draft: Draft) bool {
-    const matches = commandList(state, draft) orelse return false;
-    return layout(state, 1, matches.count).commands.len() != 0;
 }
 
 /// One row per command, as a conversation lists them: its usage, then its
@@ -3055,7 +3053,8 @@ fn composer(painter: *Painter, state: *const State, draft: Draft, input: *const 
     }
 }
 
-fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory}![]const Span {
+/// The line under the input. `listed`: this frame shows the command list.
+fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) error{OutOfMemory}![]const Span {
     painter.begin(false);
     const room = painter.width -| 2;
     const dot = painter.glyphs.dot;
@@ -3086,7 +3085,7 @@ fn hints(painter: *Painter, state: *const State, draft: Draft) error{OutOfMemory
         // What Enter and Esc do to this draft, as `enter` and `compose` read it.
         const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
         const enter_does: []const u8 = if (!slashed) "enter start " else if (commands.parse(draft.bytes) == .command) "enter run " else "";
-        const esc_does: []const u8 = if (commandsShown(state, draft)) "esc close" else "esc clear";
+        const esc_does: []const u8 = if (listed) "esc close" else "esc clear";
         const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
     } else if (state.selectedRow()) |row| {
@@ -4279,7 +4278,7 @@ test "Esc closes a shown command list and keeps the draft; Enter closes it too; 
     var state = try opened(&mixed);
     defer state.deinit();
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    var draft: Draft = .{ .bytes = "/m", .cursor = 2, .edits = 2 };
+    var draft: Draft = .{ .bytes = "/m", .cursor = 2, .edits = 2, .listed = true };
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
     try std.testing.expect(commandList(&state, draft) != null);
     try expectEffects(&.{}, try press(&state, draft, .clear));
@@ -4288,6 +4287,7 @@ test "Esc closes a shown command list and keeps the draft; Enter closes it too; 
     defer std.testing.allocator.free(shown);
     try expectLines(shown, 22, &.{ " › /m", " esc clear" });
     // With the list closed, Esc clears the draft.
+    draft.listed = false;
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     // An edit opens it again; Enter on a name no command is closes it.
     draft = .{ .bytes = "/mo", .cursor = 3, .edits = 3 };
@@ -4298,6 +4298,20 @@ test "Esc closes a shown command list and keeps the draft; Enter closes it too; 
     const runs = try draftLines(&state, try typeText(&state, "/exit "), 80, 24);
     defer std.testing.allocator.free(runs);
     try expectLines(runs, 23, &.{" enter run · esc clear"});
+}
+
+test "a command word wrapped past the draft's cap shows no list, and Esc clears it" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    // At 8x9 `/configure` fills the draft's three-row cap.
+    const draft = try typeText(&state, "/configure");
+    var screen = try sizedRender(&state, draft, 8, 9, .{}, 0);
+    defer screen.deinit();
+    try std.testing.expect(!screen.listed);
+    try std.testing.expect(commandList(&state, draft) != null);
+    var shown = draft;
+    shown.listed = screen.listed;
+    try expectEffects(&.{.clear_draft}, try press(&state, shown, .clear));
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {

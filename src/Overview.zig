@@ -308,6 +308,8 @@ draft: [SessionInput.capacity]u8 = undefined,
 /// The byte the latest frame's first composer line starts at, kept first by
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
+/// The shown frame listed the draft's commands.
+listed: bool = false,
 /// The worker's descriptors: it writes one byte as its job ends.
 done: [2]c_int = .{ -1, -1 },
 /// Signal wakes.
@@ -614,7 +616,7 @@ fn sendStatuses(self: *Self) void {
 }
 
 fn composerDraft(self: *const Self) view.Draft {
-    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits };
+    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits, .listed = self.listed };
 }
 
 /// Takes the queued job at `index` out of the queue.
@@ -971,6 +973,7 @@ fn draw(self: *Self, frame: u64) !?Next {
     var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
     errdefer screen.deinit();
     self.draft_anchor = screen.draft_anchor;
+    self.listed = screen.listed;
     self.frame.clearRetainingCapacity();
     var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
     // Waiting reports and a notification go first, through the frame's
