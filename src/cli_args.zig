@@ -268,6 +268,14 @@ pub const Definition = struct {
     /// Values are consumed before interpreting help; `--model --help` is data.
     /// Hex spellings decode into their named option, through `allocator`,
     /// unless help is requested. Semantic decoding stays with each handler.
+    /// The most tokens an invocation can spell: every option once, with its
+    /// value when it takes one.
+    pub fn tokenCapacity(comptime self: Definition) usize {
+        var count: usize = 0;
+        for (self.options) |option| count += if (option.argument == null) 1 else 2;
+        return count;
+    }
+
     pub fn parse(self: Definition, args: []const []const u8, allocator: std.mem.Allocator) Error!Parsed {
         var parsed: Parsed = .{ .definition = self };
         var hexed: u64 = 0;

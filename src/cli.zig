@@ -1973,7 +1973,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         },
         .setup => {
             const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
-            var setup_args: [8][]const u8 = undefined;
+            var setup_args: [setup_capacity][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
@@ -1998,7 +1998,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         },
         .configure, .effort, .rename => {
             const typed_usage = liveUsage(command.name);
-            var arguments: [20][]const u8 = undefined;
+            var arguments: [live_capacity][]const u8 = undefined;
             const spelled = liveArguments(command.name, argument, &arguments) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
             const accepted = try liveConfigure(init, requests_context, live, spelled, typed_usage);
@@ -2014,7 +2014,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
 /// The /configure arguments a command spells. /effort LEVEL is
 /// `--reasoning-effort LEVEL`; /rename NAME is `--label` with the whole
 /// name as one value, decoded as /configure decodes a quoted one.
-fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[20][]const u8) ![]const []const u8 {
+fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[live_capacity][]const u8) ![]const []const u8 {
     switch (name) {
         .configure => return arguments[0..try interactiveTokens(argument, arguments)],
         .effort => {
@@ -2051,7 +2051,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         errdefer std.debug.print("short={s}\n", .{case.short});
         var values: [2][]const u8 = undefined;
         var lines: [2][64]u8 = undefined;
-        var storage: [2][20][]const u8 = undefined;
+        var storage: [2][live_capacity][]const u8 = undefined;
         for ([_][]const u8{ case.short, case.spelled }, &values, &lines, &storage) |text, *value, *line, *arguments| {
             @memcpy(line[0..text.len], text);
             const command = slash_commands.parse(line[0..text.len]).command;
@@ -2067,7 +2067,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         var line: [64]u8 = undefined;
         @memcpy(line[0..text.len], text);
         const command = slash_commands.parse(line[0..text.len]).command;
-        var arguments: [20][]const u8 = undefined;
+        var arguments: [live_capacity][]const u8 = undefined;
         try std.testing.expectError(error.InvalidInteractiveArguments, liveArguments(command.name, line[text.len - command.argument.len .. text.len], &arguments));
         try std.testing.expect(std.mem.indexOf(u8, liveUsage(command.name), text[0..7]) != null);
     }
@@ -2134,6 +2134,24 @@ fn saveEffortDefault(init: std.process.Init, level: []const u8) !void {
 // Decode command arguments into the editor's borrowed line. Removing quotes
 // and escapes only shrinks it, so each returned slice remains valid until the
 // next prompt reuses the input buffer. This is not shell expansion.
+/// Room for every /setup option at once, so a valid line never reads as
+/// too long.
+const setup_capacity = cli_args.live_setup.tokenCapacity();
+/// Room for every /configure option at once, plus the option /effort and
+/// /rename spell in front of their value.
+const live_capacity = 1 + cli_args.live_configure.tokenCapacity();
+
+test "/setup takes every option in one line" {
+    var line = "--store /path/to/store --provider codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
+    var tokens: [setup_capacity][]const u8 = undefined;
+    const count = try interactiveTokens(&line, &tokens);
+    try std.testing.expectEqual(@as(usize, 10), count);
+    var nothing = std.heap.FixedBufferAllocator.init(&.{});
+    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator());
+    try std.testing.expectEqualStrings("high", parsed.get("reasoning-effort").?);
+    try std.testing.expectEqualStrings("/path/to/store", parsed.get("store").?);
+}
+
 fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
     return decodeInteractive(input, tokens, true);
 }
