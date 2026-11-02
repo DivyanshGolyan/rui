@@ -36,12 +36,21 @@ class ImportArchitectureTest(unittest.TestCase):
                 "lazy.zig": 'pub fn f() void {}\ntest "never named by a test" {}',
                 "plain.zig": 'pub fn f() void {}',
             }
+            files["module.zig"] = ('const production = @import("production.zig");\nconst Nested = struct { pub const deep = '
+                                   '@import("deep.zig"); };\npub fn f() void { _ = production; }\ntest { _ = Nested.deep; }')
+            files["production.zig"] = 'test "a module root counts only what its tests name" {}'
+            files["deep.zig"] = 'test "a nested alias" {}'
             for name, source in files.items():
                 (root / "src" / name).write_text(source)
-            with self.assertRaisesRegex(ValueError, r"tests may never compile[^\n]*\n  src/lazy\.zig$"):
-                tests_reached(root, ("src/tests.zig",), ())
-            (root / "src/used.zig").write_text(files["used.zig"] + '\ntest { _ = lazy; }')
-            tests_reached(root, ("src/tests.zig",), ())
+            (root / "build.zig").write_text('b.path("src/tests.zig"); b.path("src/module.zig");')
+            roots = (("src/tests.zig",), ("src/module.zig",))
+            with self.assertRaisesRegex(ValueError, r"tests may never compile[^\n]*\n  src/lazy\.zig\n  src/production\.zig$"):
+                tests_reached(root, *roots)
+            (root / "src/used.zig").write_text(files["used.zig"] + '\ntest { _ = lazy; _ = @import("production.zig"); }')
+            tests_reached(root, *roots)
+            (root / "build.zig").write_text('b.path("src/tests.zig");')
+            with self.assertRaisesRegex(ValueError, r"no longer builds test roots \['src/module.zig'\]"):
+                tests_reached(root, *roots)
 
     def test_baseline_test_only_and_new_cycle_controls(self):
         with tempfile.TemporaryDirectory() as directory, patch(

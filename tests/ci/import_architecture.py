@@ -67,9 +67,11 @@ def scoped_imports(source):
             if not literal.startswith('"') or tokens[i + 3] != ")":
                 raise ValueError("architecture check requires literal @import")
             (production if test_depth is None else tested).add(json.loads(literal))
-            if depth == 0 and i >= 3 and tokens[i - 3] == "const" and tokens[i - 1] == "=":
+            if test_depth is None and i >= 3 and tokens[i - 3] == "const" and tokens[i - 1] == "=":
                 aliases[tokens[i - 2]] = json.loads(literal)
         elif test_depth is not None:
+            # Zig forbids a local from shadowing a declaration. A name after
+            # "." still counts, since nested aliases are reached that way.
             named.add(token)
     tested.update(target for name, target in aliases.items() if name in named)
     return production, tested, has_tests
@@ -113,6 +115,9 @@ def graph(root, roots=ROOTS, read_source=None):
 def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
     """Every Zig file under src/ and tests/ that declares tests is named by a
     test reached from a test root, so its tests cannot silently stop running."""
+    build = (root / "build.zig").read_text()
+    if stale := [name for name in (*test_only, *modules) if f'b.path("{name}")' not in build]:
+        raise ValueError(f"build.zig no longer builds test roots {stale}; update TEST_ONLY_ROOTS/MODULE_TEST_ROOTS")
     scanned = {path.resolve(): scoped_imports(path.read_text())
                for directory in ("src", "tests") for path in (root / directory).rglob("*.zig")}
     reached = set()
@@ -131,7 +136,7 @@ def tests_reached(root, test_only=TEST_ONLY_ROOTS, modules=MODULE_TEST_ROOTS):
                        for path, (_, _, has_tests) in scanned.items() if has_tests and path not in reached)
     if unreached:
         raise ValueError("no test names these files, so their tests may never compile; import each "
-                         "from a test in src/tests.zig or src/logic_tests.zig:\n"
+                         "from a test that a test root reaches (src/tests.zig, for example):\n"
                          + "\n".join(f"  {name}" for name in unreached))
 
 
