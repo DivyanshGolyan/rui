@@ -390,7 +390,9 @@ pub const Store = struct {
     ) ModelInterruptionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{InterruptionTargetChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.interruptModel(&access, command, faults))) catch .infrastructure_failure;
     }
 
     pub fn decidePermission(
@@ -400,7 +402,9 @@ pub const Store = struct {
     ) PermissionDecisionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure;
     }
 
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {

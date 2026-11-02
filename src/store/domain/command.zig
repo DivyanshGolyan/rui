@@ -430,97 +430,269 @@ fn saveSessionStopRejection(
     return .{ .rejected = .{ .replayed = false, .code = code } };
 }
 
-pub fn interruptModelLocked(
-    self: *Store,
+/// A Session a command names, as a round reads it: its head, and the
+/// provider a Message's model check needs.
+const target_session = rsql.Read(.{
+    .sql = "SELECT session_ref,workspace_key,next_position,provider FROM session WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { session: rsql.SessionHead, provider: protocol.Provider },
+    .cardinality = .optional,
+});
+
+/// Queues reading the Session `session` names when it is a valid
+/// reference; otherwise `destination` is null at once.
+fn readTarget(a: anytype, session: []const u8, destination: *target_session.Result) void {
+    destination.* = null;
+    if (protocol.validSessionId(session)) a.read(target_session, .{ .session = session }, destination);
+}
+
+/// Whether a command's Turn, Operation or Action id can name a row.
+fn validId(id: u64) bool {
+    return id != 0 and id <= std.math.maxInt(i64);
+}
+
+/// The Operation an interruption names: its Turn and Session, whether it
+/// is unresolved, and whether it is still its open Turn's Operation.
+const interruption_operation = rsql.Read(.{
+    .sql = "SELECT o.turn_id,o.session_ref,o.resolution_code IS NULL AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id " ++
+        "AND t.session_ref=o.session_ref AND t.operation_id=o.operation_id AND t.outcome_code IS NULL) AS current FROM model_operation o WHERE o.operation_id=?1",
+    .Args = struct { operation_id: u64 },
+    .Row = struct { turn_id: rsql.Positive, session_ref: protocol.Bounded(protocol.max_session_bytes), unresolved: bool, current: bool },
+    .cardinality = .optional,
+});
+
+/// Whether the Session has a Message that no Turn took and no Session
+/// stop excludes, which an interrupted Turn leaves open to take.
+const applicable_pending = rsql.Read(.{
+    .sql = "SELECT EXISTS(SELECT 1 FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>coalesce((" ++
+        session_stop_cutoff_sql ++ "),0)) AS pending",
+    .Args = struct { session: []const u8 },
+    .Row = struct { pending: bool },
+    .cardinality = .one,
+});
+
+/// What an interruption names, saved with its command. Ids are text, as
+/// a rejected command's may name no row.
+const interruption_target = rsql.Read(.{
+    .sql = "SELECT session_ref,turn_id,operation_id FROM model_interruption_command WHERE command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { session_ref: protocol.Bounded(protocol.max_session_bytes), turn_id: protocol.Bounded(20), operation_id: protocol.Bounded(20) },
+    .cardinality = .one,
+});
+
+const save_interruption = rsql.Write(.{
+    .sql = "INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation_id) VALUES(?1,?2,?3,?4)",
+    .Args = struct { key: []const u8, session: []const u8, turn_id: []const u8, operation_id: []const u8 },
+    // A replay was classified first, so the key is free.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Interrupts the unresolved Operation `operation_id` of `session`'s
+/// Session, for the command `command_key`.
+const interrupt_operation = rsql.Write(.{
+    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ ",interrupted_by_command_key=?2," ++
+        model_settlement_domain.operation_resolved_now_sql ++ " WHERE operation_id=?1 AND session_ref=@session(?3) AND resolution_code IS NULL",
+    .Args = struct { operation_id: u64, command_key: []const u8, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.InterruptionTargetChanged } },
+});
+
+fn modelInterruptionTarget(row: *const interruption_target.Row) error{CorruptStore}!ModelInterruptionTarget {
+    var target: ModelInterruptionTarget = .{ .session = .{}, .turn_id = 0, .operation_id = 0 };
+    target.session.set(row.session_ref.slice()) catch unreachable;
+    target.turn_id = std.fmt.parseInt(u64, row.turn_id.slice(), 10) catch return error.CorruptStore;
+    target.operation_id = std.fmt.parseInt(u64, row.operation_id.slice(), 10) catch return error.CorruptStore;
+    return target;
+}
+
+fn interruptionRejection(
     command: *const protocol.ModelInterruptionCommand,
-    faults: Faults,
-) !ModelInterruptionReply {
-    try store_core.begin(self);
+    target: target_session.Result,
+    operation: interruption_operation.Result,
+) ?protocol.ModelInterruptionRejection {
+    if (!protocol.validSessionId(command.session.slice())) return .invalid_session_reference;
+    if (!validId(command.turn_id) or !validId(command.operation_id)) return .invalid_target;
+    if (target == null) return .unknown_session;
+    const found = operation orelse return .unknown_operation;
+    if (found.turn_id.get() != command.turn_id or !found.session_ref.eql(command.session.slice())) return .target_mismatch;
+    if (!found.unresolved) return .operation_resolved;
+    if (!found.current) return .target_mismatch;
+    return null;
+}
+
+/// Round 1 reads the saved answer, the Session, the Operation with its
+/// Turn, and whether a pending Message keeps the Turn open. A replay reads
+/// the saved target in a round of its own. The decision is
+/// `interruptionRejection`; the write round saves the command and its
+/// target, interrupts the Operation and closes the Turn when nothing is
+/// pending, then commits.
+pub fn interruptModel(a: anytype, command: *const protocol.ModelInterruptionCommand, faults: Faults) !ModelInterruptionReply {
     const digest = command.semanticDigest();
-    const replay = try classifyReplay(self, protocol.ModelInterruptionRejection, .model_interruption, command.key.slice(), command.session.slice(), &digest);
-    if (replay == .accepted or replay == .rejected) {
-        const saved_target = try readModelInterruptionTarget(self, command.key.slice());
-        if (!saved_target.session.eql(command.session.slice()) or
-            saved_target.turn_id != command.turn_id or
-            saved_target.operation_id != command.operation_id) return error.CorruptStore;
-    }
-    switch (replay) {
-        .fresh => {},
-        .conflict => return .conflict,
-        .accepted => return .{ .accepted = .{ .replayed = true } },
-        .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
-    }
-
-    var rejection: ?protocol.ModelInterruptionRejection = null;
-    if (!protocol.validSessionId(command.session.slice())) {
-        rejection = .invalid_session_reference;
-    } else if (command.turn_id == 0 or command.operation_id == 0 or
-        command.turn_id > std.math.maxInt(i64) or command.operation_id > std.math.maxInt(i64))
-    {
-        rejection = .invalid_target;
-    } else if (try turn_domain.sessionNextPosition(self, command.session.slice()) == null) {
-        rejection = .unknown_session;
-    }
-
-    if (rejection == null) {
-        const operation = try store_core.cached(
-            self,
-            "SELECT turn_id,session_ref,resolution_code FROM model_operation WHERE operation_id=?1",
-        );
-        defer sqlite.resetCached(operation);
-        try sqlite.bindU64(operation, 1, command.operation_id);
-        const result = c.sqlite3_step(operation);
-        if (result == c.SQLITE_DONE) {
-            rejection = .unknown_operation;
-        } else if (result != c.SQLITE_ROW) {
-            return error.InterruptionTargetReadFailed;
-        } else {
-            const turn_value = c.sqlite3_column_int64(operation, 0);
-            var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-            try sqlite.readText(operation, 1, &session);
-            if (turn_value <= 0 or @as(u64, @intCast(turn_value)) != command.turn_id or
-                !session.eql(command.session.slice()))
-            {
-                rejection = .target_mismatch;
-            } else if (c.sqlite3_column_type(operation, 2) != c.SQLITE_NULL) {
-                rejection = .operation_resolved;
-            }
+    const session = command.session.slice();
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, command.key.slice(), &saved);
+    var target: target_session.Result = null;
+    var operation: interruption_operation.Result = null;
+    var pending: applicable_pending.Result = .{ .pending = false };
+    if (validId(command.turn_id) and validId(command.operation_id)) {
+        readTarget(a, session, &target);
+        if (protocol.validSessionId(session)) {
+            a.read(interruption_operation, .{ .operation_id = command.operation_id }, &operation);
+            a.read(applicable_pending, .{ .session = session }, &pending);
         }
     }
-
-    if (rejection) |code| {
-        return saveModelInterruptionAnswer(self, command, &digest, false, @tagName(code), faults);
+    try a.run();
+    const replay = try classify(protocol.ModelInterruptionRejection, &saved, .model_interruption, session, &digest);
+    if (replay != .fresh) {
+        if (replay != .conflict) {
+            var saved_target: interruption_target.Result = undefined;
+            a.read(interruption_target, .{ .key = command.key.slice() }, &saved_target);
+            try a.run();
+            const named = try modelInterruptionTarget(&saved_target);
+            if (!named.session.eql(session) or named.turn_id != command.turn_id or named.operation_id != command.operation_id) return error.CorruptStore;
+        }
+        try a.abandon(.{});
+        return switch (replay) {
+            .fresh => unreachable,
+            .conflict => .conflict,
+            .accepted => .{ .accepted = .{ .replayed = true } },
+            .rejected => |code| .{ .rejected = .{ .replayed = true, .code = code } },
+        };
     }
-    try store_core.touch(self, command.session.slice());
 
-    const current_turn = try store_core.cached(
-        self,
-        "SELECT 1 FROM turn WHERE turn_id=?1 AND session_ref=?2 AND operation_id=?3 AND outcome_code IS NULL",
-    );
-    defer sqlite.resetCached(current_turn);
-    try sqlite.bindU64(current_turn, 1, command.turn_id);
-    try sqlite.bindText(current_turn, 2, command.session.slice());
-    try sqlite.bindU64(current_turn, 3, command.operation_id);
-    const current_result = c.sqlite3_step(current_turn);
-    if (current_result == c.SQLITE_DONE) {
-        return saveModelInterruptionAnswer(
-            self,
-            command,
-            &digest,
-            false,
-            @tagName(protocol.ModelInterruptionRejection.target_mismatch),
-            faults,
-        );
-    }
-    if (current_result != c.SQLITE_ROW) return error.InterruptionTargetReadFailed;
-
-    try insertModelInterruptionCommand(self, command, &digest, .{ .accepted = true });
-    try interruptOperation(self, command.operation_id, command.key.slice());
-    if (!try hasApplicablePendingMessage(self, command.session.slice())) {
-        if (!try turn_domain.closeTurn(self, command.turn_id, command.operation_id, .cancelled)) return error.InterruptionTargetChanged;
+    const rejection = interruptionRejection(command, target, operation);
+    var answer = StoredAnswer{ .accepted = rejection == null };
+    if (rejection) |code| try answer.code.set(@tagName(code));
+    try queueCommand(a, command.key.slice(), .model_interruption, session, &digest, null, null, &answer);
+    var turn_buffer: [20]u8 = undefined;
+    var operation_buffer: [20]u8 = undefined;
+    a.write(save_interruption, .{
+        .key = command.key.slice(),
+        .session = session,
+        .turn_id = try std.fmt.bufPrint(&turn_buffer, "{d}", .{command.turn_id}),
+        .operation_id = try std.fmt.bufPrint(&operation_buffer, "{d}", .{command.operation_id}),
+    });
+    if (rejection == null) {
+        const head = target.?.session;
+        a.write(interrupt_operation, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
+        if (!pending.pending) try turn_domain.queueClose(a, try a.positions(head), command.turn_id, .cancelled);
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
+    const code = rejection orelse {
+        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
+        return .{ .accepted = .{ .replayed = false } };
+    };
+    return .{ .rejected = .{ .replayed = false, .code = code } };
+}
+
+/// The Action a permission decision names, with its Turn.
+const decision_action = rsql.Read(.{
+    .sql = "SELECT a.session_ref,a.authorized,a.resolution_code IS NULL AS unresolved,t.outcome_code IS NULL AS turn_open,t.turn_id FROM action_operation a " ++
+        "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
+    .Args = struct { action_id: u64 },
+    .Row = struct { session_ref: protocol.Bounded(protocol.max_session_bytes), authorized: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive },
+    .cardinality = .optional,
+});
+
+const save_decision = rsql.Write(.{
+    .sql = "INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)",
+    .Args = struct { key: []const u8, action_id: []const u8, decision: protocol.PermissionDecision },
+    // A replay was classified first, so the key is free.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const allow_action = rsql.Write(.{
+    .sql = "UPDATE action_operation SET authorized=1,decided_at=@now WHERE action_id=?1 AND session_ref=@session(?2) AND authorized=0 AND resolution_code IS NULL",
+    .Args = struct { action_id: u64, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
+});
+
+const deny_action = rsql.Write(.{
+    .sql = "UPDATE action_operation SET resolution_code='denied',resolution_content_id=?2,acceptance_position=?3,resolved_at=@now " ++
+        "WHERE action_id=?1 AND session_ref=@session(?4) AND resolution_code IS NULL",
+    .Args = struct { action_id: u64, content_id: u64, position: u64, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
+});
+
+/// A denied Action's result.
+const denial_text = "Permission denied.";
+
+/// `denial_text`'s identity, hashed when the Host is built.
+const denial: content_domain.Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes(denial_text, false);
+};
+
+fn decisionRejection(
+    command: *const protocol.PermissionDecisionCommand,
+    target: target_session.Result,
+    action: decision_action.Result,
+) ?protocol.PermissionDecisionRejection {
+    if (!protocol.validSessionId(command.session.slice())) return .invalid_session_reference;
+    if (!validId(command.action_id)) return .invalid_target;
+    if (target == null) return .unknown_session;
+    const found = action orelse return .unknown_action;
+    if (!found.session_ref.eql(command.session.slice())) return .target_mismatch;
+    if (found.authorized or !found.unresolved or !found.turn_open) return .action_not_pending;
+    return null;
+}
+
+/// Round 1 reads the saved answer, the Session, the Action with its Turn
+/// and, for a denial, its result text's row. The decision is
+/// `decisionRejection`; the write round saves the command and its target,
+/// then authorizes or denies the Action, and commits.
+pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionCommand, faults: Faults) !PermissionDecisionReply {
+    const digest = command.semanticDigest();
+    const session = command.session.slice();
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, command.key.slice(), &saved);
+    var target: target_session.Result = null;
+    var action: decision_action.Result = null;
+    var content = denial;
+    if (validId(command.action_id)) {
+        readTarget(a, session, &target);
+        if (protocol.validSessionId(session)) a.read(decision_action, .{ .action_id = command.action_id }, &action);
+    }
+    if (command.decision == .deny) content_domain.lookup(a, &content);
+    try a.run();
+    switch (try classify(protocol.PermissionDecisionRejection, &saved, .permission_decision, session, &digest)) {
+        .fresh => {},
+        .conflict => {
+            try a.abandon(.{});
+            return .conflict;
+        },
+        .accepted => {
+            try a.abandon(.{});
+            return .{ .accepted = .{ .replayed = true } };
+        },
+        .rejected => |code| {
+            try a.abandon(.{});
+            return .{ .rejected = .{ .replayed = true, .code = code } };
+        },
+    }
+
+    const rejection = decisionRejection(command, target, action);
+    var answer = StoredAnswer{ .accepted = rejection == null };
+    if (rejection) |code| try answer.code.set(@tagName(code));
+    try queueCommand(a, command.key.slice(), .permission_decision, session, &digest, null, null, &answer);
+    var action_buffer: [20]u8 = undefined;
+    a.write(save_decision, .{ .key = command.key.slice(), .action_id = try std.fmt.bufPrint(&action_buffer, "{d}", .{command.action_id}), .decision = command.decision });
+    if (rejection == null) {
+        const head = target.?.session;
+        switch (command.decision) {
+            .allow_once => a.write(allow_action, .{ .action_id = command.action_id, .session = head }),
+            .deny => {
+                if (faults.content_import) return error.InjectedContentImportFailure;
+                const positions = try a.positions(head);
+                const content_id = try content_domain.importBytes(a, &content, denial_text);
+                a.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
+                turn_domain.queueContinuation(a, action.?.turn_id.get(), head);
+            },
+        }
+    }
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
     if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
     return .{ .accepted = .{ .replayed = false } };
 }
@@ -537,140 +709,6 @@ fn interruptOperation(self: *Store, operation_id: u64, command_key: []const u8) 
     try sqlite.bindText(update, 2, command_key);
     try sqlite.expectDone(update);
     if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
-}
-
-fn saveModelInterruptionAnswer(
-    self: *Store,
-    command: *const protocol.ModelInterruptionCommand,
-    digest: *const [32]u8,
-    accepted: bool,
-    code: []const u8,
-    faults: Faults,
-) !ModelInterruptionReply {
-    var answer = StoredAnswer{ .accepted = accepted };
-    try answer.code.set(code);
-    try insertModelInterruptionCommand(self, command, digest, answer);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
-    if (accepted) return .{ .accepted = .{ .replayed = false } };
-    return .{ .rejected = .{
-        .replayed = false,
-        .code = std.meta.stringToEnum(protocol.ModelInterruptionRejection, code) orelse unreachable,
-    } };
-}
-
-fn insertModelInterruptionCommand(
-    self: *Store,
-    command: *const protocol.ModelInterruptionCommand,
-    digest: *const [32]u8,
-    answer: StoredAnswer,
-) !void {
-    try insertCommand(
-        self,
-        command.key.slice(),
-        .model_interruption,
-        command.session.slice(),
-        digest,
-        null,
-        null,
-        answer,
-    );
-    var turn_buffer: [20]u8 = undefined;
-    const turn = try std.fmt.bufPrint(&turn_buffer, "{d}", .{command.turn_id});
-    var operation_buffer: [20]u8 = undefined;
-    const operation = try std.fmt.bufPrint(&operation_buffer, "{d}", .{command.operation_id});
-    const insert = try store_core.cached(
-        self,
-        "INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation_id) VALUES(?1,?2,?3,?4)",
-    );
-    defer sqlite.resetCached(insert);
-    try sqlite.bindText(insert, 1, command.key.slice());
-    try sqlite.bindText(insert, 2, command.session.slice());
-    try sqlite.bindText(insert, 3, turn);
-    try sqlite.bindText(insert, 4, operation);
-    try sqlite.expectDone(insert);
-}
-
-pub fn decidePermissionLocked(
-    self: *Store,
-    command: *const protocol.PermissionDecisionCommand,
-    faults: Faults,
-) !PermissionDecisionReply {
-    try store_core.begin(self);
-    const digest = command.semanticDigest();
-    switch (try classifyReplay(self, protocol.PermissionDecisionRejection, .permission_decision, command.key.slice(), command.session.slice(), &digest)) {
-        .fresh => {},
-        .conflict => return .conflict,
-        .accepted => return .{ .accepted = .{ .replayed = true } },
-        .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
-    }
-    var rejection: ?protocol.PermissionDecisionRejection = null;
-    var turn_id: ?u64 = null;
-    if (!protocol.validSessionId(command.session.slice())) rejection = .invalid_session_reference else if (command.action_id == 0 or
-        command.action_id > std.math.maxInt(i64)) rejection = .invalid_target else if (try turn_domain.sessionNextPosition(self, command.session.slice()) == null) rejection = .unknown_session;
-    if (rejection == null) {
-        const action = try store_core.cached(
-            self,
-            "SELECT a.session_ref,a.authorized,a.resolution_code,t.outcome_code,t.turn_id FROM action_operation a " ++
-                "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
-                "JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
-        );
-        defer sqlite.resetCached(action);
-        try sqlite.bindU64(action, 1, command.action_id);
-        const row = c.sqlite3_step(action);
-        if (row == c.SQLITE_DONE) rejection = .unknown_action else if (row != c.SQLITE_ROW) return error.ActionReadFailed else {
-            var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-            try sqlite.readText(action, 0, &session);
-            if (!session.eql(command.session.slice())) rejection = .target_mismatch else if (c.sqlite3_column_int(action, 1) != 0 or
-                c.sqlite3_column_type(action, 2) != c.SQLITE_NULL or
-                c.sqlite3_column_type(action, 3) != c.SQLITE_NULL) rejection = .action_not_pending;
-            turn_id = @intCast(try sqlite.readNullablePositiveI64(action, 4) orelse return error.CorruptStore);
-        }
-    }
-    var answer = StoredAnswer{ .accepted = rejection == null };
-    if (rejection) |code| try answer.code.set(@tagName(code));
-    try insertCommand(self, command.key.slice(), .permission_decision, command.session.slice(), &digest, null, null, answer);
-    var action_buffer: [20]u8 = undefined;
-    const action_text = try std.fmt.bufPrint(&action_buffer, "{d}", .{command.action_id});
-    const save = try store_core.cached(self, "INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)");
-    defer sqlite.resetCached(save);
-    try sqlite.bindText(save, 1, command.key.slice());
-    try sqlite.bindText(save, 2, action_text);
-    try sqlite.bindText(save, 3, @tagName(command.decision));
-    try sqlite.expectDone(save);
-    if (rejection == null) {
-        try store_core.touch(self, command.session.slice());
-        switch (command.decision) {
-            .allow_once => {
-                const update = try store_core.cached(self, "UPDATE action_operation SET authorized=1,decided_at=unixepoch() WHERE action_id=?1 AND authorized=0 AND resolution_code IS NULL");
-                defer sqlite.resetCached(update);
-                try sqlite.bindU64(update, 1, command.action_id);
-                try sqlite.expectDone(update);
-                if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-            },
-            .deny => {
-                const result_content_id = try content_domain.importBytesContent(self, "Permission denied.", false, faults.content_import);
-                const position = try turn_domain.claimSessionPosition(self, command.session.slice());
-                const update = try store_core.cached(
-                    self,
-                    "UPDATE action_operation SET resolution_code='denied',resolution_content_id=?2,acceptance_position=?3,resolved_at=unixepoch() " ++
-                        "WHERE action_id=?1 AND resolution_code IS NULL",
-                );
-                defer sqlite.resetCached(update);
-                try sqlite.bindU64(update, 1, command.action_id);
-                try sqlite.bindI64(update, 2, result_content_id);
-                try sqlite.bindU64(update, 3, position);
-                try sqlite.expectDone(update);
-                if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-                try turn_domain.recordContinuation(self, turn_id.?, command.session.slice());
-            },
-        }
-    }
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
-    if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
-    if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
-    return .{ .accepted = .{ .replayed = false } };
 }
 
 pub fn observeCommandLocked(self: *Store, key: []const u8) !CommandObservation {
@@ -974,22 +1012,6 @@ pub fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
     const count = c.sqlite3_column_int64(statement, 0);
     if (count < 0) return error.CorruptStore;
     return @intCast(count);
-}
-
-fn hasApplicablePendingMessage(self: *Store, session_ref: []const u8) !bool {
-    const cutoff = try latestSessionStopCutoff(self, session_ref);
-    const statement = try store_core.cached(
-        self,
-        "SELECT 1 FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 LIMIT 1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindU64(statement, 2, cutoff);
-    return switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => true,
-        c.SQLITE_DONE => false,
-        else => error.MessageAdmissionReadFailed,
-    };
 }
 
 pub fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
