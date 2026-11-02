@@ -160,13 +160,16 @@ const y = @import("after.zig");
             "src/store/tests.zig": 'test { _ = @import("../server.zig"); }',
             "src/protocol.zig": "const value = 1;",
             "src/server.zig": 'const store = @import("store.zig");',
+            "src/store/wire/mysql.zig": 'const std = @import("std");',
+            "src/logic_tests.zig": 'test { _ = @import("store/wire/mysql.zig"); }',
         }
         for name, text, error in (
                 ("src/unreached.zig", 'test { _ = @import("store/domain/a.zig"); }', "import src/store.zig instead"),
                 ("src/h2/deep.zig", 'const s = @import("../store/Store.zig");', "import src/store.zig instead"),
                 ("src/tests.zig", 'test { _ = @import("store/tests.zig"); }', "import src/store.zig instead"),
                 ("src/store/domain/a.zig", 'test { _ = @import("../../store.zig"); }', "import each other directly"),
-                ("src/store/schema.zig", 'const facade = @import("../store.zig");', "import each other directly")):
+                ("src/store/schema.zig", 'const facade = @import("../store.zig");', "import each other directly"),
+                ("src/store/wire/mysql.zig", 'const s = @import("../Store.zig");', "imports only wire/")):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = self.store_tree(directory, files)
                 store_boundary(root)
@@ -183,6 +186,7 @@ const y = @import("after.zig");
                 "src/store/Store.zig": "pub fn enter() void {}",
                 "src/store/domain/a.zig": "pub fn f() void {}",
                 "src/store/tests.zig": access.format(listing),
+                "src/store/wire/mysql.zig": "pub fn decode() void {}",
             })
             store_access_sources(root)
             (root / "src/store/domain/b.zig").write_text("pub fn g() void {}")
