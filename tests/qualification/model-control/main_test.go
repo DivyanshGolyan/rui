@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"rui.local/qualification/measurement"
 )
 
 func timingRecord(key, kind, queued, locked, complete, reply, queueWait, lockWait, service, postReply, total string) map[string]any {
@@ -189,18 +191,18 @@ func TestOperationPhaseTimestampRequiresOneExactRecord(t *testing.T) {
 }
 
 func TestOrderedRawRequestBodies(t *testing.T) {
-	inspection, err := json.Marshal(inspectRequest{Version: "4", Kind: "inspect_session", Store: "store", Session: "k7m2qx"})
+	inspection, err := json.Marshal(inspectRequest{Version: measurement.WireVersion, Kind: "inspect_session", Store: "store", Session: "k7m2qx"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(inspection), `{"version":"4","kind":"inspect_session","store":"store","session":"k7m2qx"}`; got != want {
+	if got, want := string(inspection), `{"version":"`+measurement.WireVersion+`","kind":"inspect_session","store":"store","session":"k7m2qx"}`; got != want {
 		t.Fatalf("inspection = %s, want %s", got, want)
 	}
-	result, err := json.Marshal(readResultRequest{Version: "4", Kind: "read_result", Store: "store", Key: "key"})
+	result, err := json.Marshal(readResultRequest{Version: measurement.WireVersion, Kind: "read_result", Store: "store", Key: "key"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(result), `{"version":"4","kind":"read_result","store":"store","key":"key"}`; got != want {
+	if got, want := string(result), `{"version":"`+measurement.WireVersion+`","kind":"read_result","store":"store","key":"key"}`; got != want {
 		t.Fatalf("read result = %s, want %s", got, want)
 	}
 }

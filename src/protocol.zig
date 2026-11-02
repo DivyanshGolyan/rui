@@ -6,6 +6,10 @@ const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "4";
+/// Versions a newer and an older Host speak, for tests that refuse them.
+pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
+pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
+const wire_number = std.fmt.parseInt(u32, wire_version, 10) catch unreachable;
 pub const max_key_bytes = 128;
 pub const max_session_bytes = 128;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
@@ -123,10 +127,12 @@ pub const ContentField = struct {
     }
 };
 
+/// The catalog, in its one canonical order: `bash` runs locally as Actions;
+/// `web_search` is hosted, run by the provider inside a response.
 pub const ToolsField = struct {
     state: FieldState = .omitted,
-    count: u1 = 0,
-    values: [1]enum { bash } = undefined,
+    count: u2 = 0,
+    values: [2]enum { bash, web_search } = undefined,
 };
 
 pub const Configuration = struct {
@@ -903,6 +909,7 @@ pub const SessionRow = struct {
     provider: Provider = .codex,
     model: Bounded(max_model_bytes) = .{},
     bash: bool = false,
+    web_search: bool = false,
     permission_mode: PermissionMode = .ask,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
@@ -915,13 +922,13 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"reference\":",       Hole{ .string = max_session_bytes },        ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                    "\",\"model\":",           Hole{ .string = max_model_bytes },
-        ",\"tools\":",           Hole{ .text = "[\"bash\"]".len },           ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"label\":",         Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"",      Hole.decimal,
-        "\",\"revision\":\"",    Hole.decimal,                               "\",\"end\":\"",           Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },      ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",           Hole{ .json = PeerFacts },                  "}",
+        "{\"reference\":",       Hole{ .string = max_session_bytes },             ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                         "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",           Hole{ .text = "[\"bash\",\"web_search\"]".len }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"label\":",         Hole{ .optional_string = max_label_bytes },      ",\"created_at\":\"",      Hole.decimal,
+        "\",\"revision\":\"",    Hole.decimal,                                    "\",\"end\":\"",           Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },           ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",           Hole{ .json = PeerFacts },                       "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
@@ -935,12 +942,17 @@ pub const SessionRow = struct {
         try writeShape(out, json_shape, .{
             self.reference.slice(),                           self.workspace.slice(),
             self.provider,                                    self.model.slice(),
-            if (self.bash) "[\"bash\"]" else "[]",            self.permission_mode,
+            self.toolsJson(),                                 self.permission_mode,
             if (self.label) |*label| label.slice() else null, self.created_at,
             self.revision,                                    self.end,
             self.first_message,                               &self.work,
             &self.peers,
         });
+    }
+
+    fn toolsJson(self: *const SessionRow) []const u8 {
+        if (self.bash) return if (self.web_search) "[\"bash\",\"web_search\"]" else "[\"bash\"]";
+        return if (self.web_search) "[\"web_search\"]" else "[]";
     }
 };
 
@@ -1928,14 +1940,21 @@ const Parser = struct {
             try self.expectByte(',');
             try self.expectKey("value");
             try self.expectByte('[');
-            if (!try self.consumeIf(']')) {
+            // Each tool at most once, in catalog order, so one catalog has
+            // one spelling and one digest.
+            tools.count = 0;
+            if (!try self.consumeIf(']')) while (true) {
                 var value: Bounded(16) = .{};
                 try self.readSmallString(&value);
-                if (!value.eql("bash")) return error.UnknownTool;
-                tools.values[0] = .bash;
-                tools.count = 1;
-                try self.expectByte(']');
-            }
+                const Tool = @typeInfo(@FieldType(ToolsField, "values")).array.child;
+                const tool = std.meta.stringToEnum(Tool, value.slice()) orelse return error.UnknownTool;
+                if (tools.count != 0 and @backingInt(tool) <= @backingInt(tools.values[tools.count - 1])) return error.InvalidJsonShape;
+                tools.values[tools.count] = tool;
+                tools.count += 1;
+                if (try self.consumeIf(']')) break;
+                if (tools.count == tools.values.len) return error.InvalidJsonShape;
+                try self.expectByte(',');
+            };
         } else return error.InvalidFieldState;
         try self.expectByte('}');
     }
@@ -3052,7 +3071,7 @@ test "ingress unknown write failure keeps submitted charge until close" {
 }
 
 test "observation needs no scratch at a full budget" {
-    const json = "{\"version\":\"4\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
+    const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
     var source: MetadataSource = .{ .input = json };
     var used = std.atomic.Value(u64).init(3);
     var retained: ?named_scratch.Owner = null;
@@ -3080,7 +3099,7 @@ test "Conversation content stream wire requires start zero and literal true" {
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"4\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
@@ -3108,7 +3127,7 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"4\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
@@ -3184,7 +3203,7 @@ test "configuration token heuristics and effort parse sparsely and bind idempote
     var omitted_digest: [32]u8 = undefined;
     for (cases, 0..) |case, index| {
         var buffer: [2048]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"4\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
         var source: MetadataSource = .{ .input = json };
@@ -3235,7 +3254,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
         var buffer: [1024]u8 = undefined;
         const json = try std.fmt.bufPrint(
             &buffer,
-            "{{\"version\":\"4\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+            "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
                 "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{s},\"model\":{{\"state\":\"omitted\"}}," ++
                 "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}}," ++
                 "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}{s}}}",
@@ -3269,19 +3288,23 @@ test "configuration provider envelope preserves exact spelling and omission" {
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
-test "configuration tools accept only an empty catalog or Bash" {
-    const cases = [_]struct { value: []const u8, count: u1 = 0, failure: ?anyerror = null }{
+test "configuration tools accept each catalog tool once, in catalog order" {
+    const cases = [_]struct { value: []const u8, count: u2 = 0, first: ?@typeInfo(@FieldType(ToolsField, "values")).array.child = null, failure: ?anyerror = null }{
         .{ .value = "[]" },
-        .{ .value = "[\"bash\"]", .count = 1 },
+        .{ .value = "[\"bash\"]", .count = 1, .first = .bash },
+        .{ .value = "[\"web_search\"]", .count = 1, .first = .web_search },
+        .{ .value = "[\"bash\",\"web_search\"]", .count = 2, .first = .bash },
         .{ .value = "[\"edit\"]", .failure = error.UnknownTool },
         .{ .value = "[\"Bash\"]", .failure = error.UnknownTool },
         .{ .value = "[\"none\"]", .failure = error.UnknownTool },
         .{ .value = "[\"bash\",\"bash\"]", .failure = error.InvalidJsonShape },
-        .{ .value = "[\"bash\",\"edit\"]", .failure = error.InvalidJsonShape },
+        .{ .value = "[\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
+        .{ .value = "[\"bash\",\"edit\"]", .failure = error.UnknownTool },
+        .{ .value = "[\"bash\",\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
     };
     for (cases) |case| {
         var buffer: [1024]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"4\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
             "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
             "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"value\",\"value\":{s}}}," ++
             "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
@@ -3299,7 +3322,7 @@ test "configuration tools accept only an empty catalog or Bash" {
         } else {
             const request = try parseForTest(&parser);
             try std.testing.expectEqual(case.count, request.configure.configuration.tools.count);
-            if (case.count == 1) try std.testing.expectEqual(.bash, request.configure.configuration.tools.values[0]);
+            if (case.first) |first| try std.testing.expectEqual(first, request.configure.configuration.tools.values[0]);
         }
     }
 }
@@ -3307,24 +3330,24 @@ test "configuration tools accept only an empty catalog or Bash" {
 test "Session inspection selects a closed report profile or exact failed response stream" {
     const cases = [_]struct { json: []const u8, expected: ?ReportProfile, failed_response: ?FailedResponseExport = null }{
         .{
-            .json = "{\"version\":\"4\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
+            .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
             .expected = .current,
         },
         .{
-            .json = "{\"version\":\"4\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"full\"}",
+            .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"full\"}",
             .expected = .full,
         },
         .{
-            .json = "{\"version\":\"4\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
+            .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
             .expected = null,
         },
         .{
-            .json = "{\"version\":\"4\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"body\",\"operation\":\"106\",\"attempt\":\"1\"}",
+            .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"body\",\"operation\":\"106\",\"attempt\":\"1\"}",
             .expected = .current,
             .failed_response = .{ .operation = 106, .attempt = 1, .part = .body },
         },
         .{
-            .json = "{\"version\":\"4\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"metadata\",\"operation\":\"42\",\"attempt\":\"3\"}",
+            .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"metadata\",\"operation\":\"42\",\"attempt\":\"3\"}",
             .expected = .current,
             .failed_response = .{ .operation = 42, .attempt = 3, .part = .metadata },
         },
@@ -3350,14 +3373,14 @@ test "Session inspection selects a closed report profile or exact failed respons
 }
 
 test "Session listing wire distinguishes all, exact workspace, continuation, since and invalid cursor" {
-    const head = "{\"version\":\"4\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"";
     const since = ",\"since\":\"abababababababababababababababab.42\"";
     const Case = struct { json: []const u8, workspace: ?[]const u8 = null, after: u64 = 0, ceiling: u64 = 0, since: ?u64 = null, through: ?u64 = null, failure: ?anyerror = null };
     const cases = [_]Case{
         .{ .json = head ++ "}" },
-        .{ .json = "{\"version\":\"4\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
-        .{ .json = "{\"version\":\"4\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
-        .{ .json = "{\"version\":\"4\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12 },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .failure = error.InvalidCursor },
         // A token's first page, and a changed continuation through the
         // first page's generation after the last reference it gave.
         .{ .json = head ++ since ++ "}", .since = 42 },
@@ -3365,7 +3388,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
         .{ .json = head ++ since ++ ",\"through\":\"42\",\"after_reference\":\"k7m2qx\"}", .since = 42, .through = 42 },
         // A full continuation carries no token; a changed one never ends
         // before its token, and names a Session.
-        .{ .json = "{\"version\":\"4\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"8\",\"ceiling\":\"12\"" ++ since ++ "}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"41\",\"after_reference\":\"k7m2qx\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2qX\"}", .failure = error.InvalidCursor },
         .{ .json = head ++ since ++ ",\"through\":\"48\",\"after_reference\":\"k7m2q\"}", .failure = error.InvalidCursor },
@@ -3398,7 +3421,7 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
 }
 
 test "peer wire rejects old sender strings, malformed addresses and missing handles" {
-    const prefix = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
     const cases = [_]struct { json: []const u8, failure: anyerror }{
         .{ .json = prefix ++ "\"peer\",\"sender_handle\":null", .failure = error.InvalidJsonShape },
         .{ .json = prefix ++ "{\"store\":\"/s\"},\"sender_handle\":null", .failure = error.InvalidJsonShape },
@@ -3420,7 +3443,7 @@ test "incremental ingress streams fragmented content and transfers charged custo
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
     const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
     const suffix = "\"}}";
@@ -3464,7 +3487,7 @@ test "initial Message ingress retains text custody and rejects extra content bef
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":";
     const between = ",\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":";
     const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
@@ -3521,10 +3544,10 @@ test "only a creating Message carries require_model, and it binds the digest" {
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const creating = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+    const creating = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
         "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
-    const addressed = "{\"version\":\"4\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+    const addressed = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
         .{ .bytes = creating ++ "}" },
         .{ .bytes = creating ++ ",\"require_model\":false}" },
@@ -3573,7 +3596,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const configure = "{\"version\":\"4\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
+    const configure = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
         "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"}," ++
         "\"instructions\":{\"state\":\"value\",\"value\":\"first\\n\"},\"tools\":{\"state\":\"omitted\"}," ++
         "\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"value\",\"value\":\"{}\"}}";

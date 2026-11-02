@@ -4,7 +4,7 @@ const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 
 pub const ModelOperationKind = @import("turn_policy.zig").Purpose;
-pub const OutputItemKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4 };
+pub const OutputItemKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4, web_search_call = 5 };
 pub const OutputRecordTag = enum(u8) {
     item = 1,
     /// A message's text: its text parts' decoded text back to back, as one
@@ -268,6 +268,7 @@ fn decodeRecord(bytes: *const [output_metadata_record_bytes]u8) !OutputMetadataR
             2 => .message,
             3 => .function_call,
             4 => .compaction,
+            5 => .web_search_call,
             else => return error.CorruptOutputMetadata,
         },
         .ordinal = if (usage == null) std.mem.readInt(u64, bytes[8..16], .little) else 0,
@@ -403,7 +404,7 @@ pub const JsonStringSource = struct {
 test "a metadata record's replay-rule byte is set only on a reasoning item record" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    for (0..256) |flag| for ([_]OutputRecordTag{ .item, .member, .name }) |tag| for ([_]OutputItemKind{ .reasoning, .message, .function_call, .compaction }) |kind| {
+    for (0..256) |flag| for ([_]OutputRecordTag{ .item, .member, .name }) |tag| for ([_]OutputItemKind{ .reasoning, .message, .function_call, .compaction, .web_search_call }) |kind| {
         var bytes: [output_metadata_record_bytes]u8 = @splat(0);
         bytes[0] = @backingInt(tag);
         bytes[1] = @backingInt(kind);

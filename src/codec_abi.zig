@@ -34,8 +34,8 @@ pub const ObservedHeaders = struct {
 
 /// The neutral items of a request, in the order the Host yields them:
 /// settings, instructions, the history items, history_end,
-/// compaction_trigger (compaction requests only), tools_start, one tool per
-/// enabled tool, text_format, request_end.
+/// compaction_trigger (compaction requests only), tools_start, one tool or
+/// web_search per enabled tool, text_format, request_end.
 pub const ItemKind = enum(u8) {
     /// The frozen settings, the model included. Handle 0: that same model,
     /// which the codec writes by a content piece so the Host escapes it.
@@ -60,6 +60,9 @@ pub const ItemKind = enum(u8) {
     tools_start,
     /// Handles 0-2: name, description, parameter schema (JSON text).
     tool,
+    /// The provider's hosted web search, with live page access. No handles;
+    /// a codec whose provider hosts none declines it.
+    web_search,
     /// Handle 0, when present: the output schema (JSON text).
     text_format,
     request_end,
@@ -85,7 +88,7 @@ pub const ItemKind = enum(u8) {
 /// Rui's closed effort grammar.
 pub const Effort = enum(u8) { none, low, medium, high, xhigh, max };
 pub const Author = enum(u8) { user, instruction };
-pub const OutputKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4 };
+pub const OutputKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4, web_search_call = 5 };
 pub const Phase = enum(u8) { unphased = 0, commentary = 1, final_answer = 2 };
 pub const PartKind = enum(u8) { opaque_block = 0, output_text = 1, refusal = 2, summary_text = 3, reasoning_text = 4 };
 pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };
@@ -107,6 +110,7 @@ pub const Item = union(ItemKind) {
     compaction_trigger,
     tools_start,
     tool,
+    web_search,
     text_format,
     request_end,
 };

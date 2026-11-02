@@ -304,6 +304,8 @@ def land(branch, sha, main_sha):
             return False
         raise SystemExit(f"Push of {sha} to main failed:\n{pushed.stderr}")
     print(f"Fast-forwarded main from {main_sha} to {sha}; stable unchanged")
+    # This push emits no push event, so PRs it left conflicting hear of it through a dispatch.
+    dispatch("conflict-alert.yml", run_exists=lambda: False)
     return True
 
 
