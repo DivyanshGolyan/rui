@@ -96,6 +96,17 @@ pub const Options = struct {
     scratch_path: []const u8,
     /// The scratch account every request and response of this Host charges.
     budget: ScratchBudget,
+    /// Where `startModelList` sends its GET, if anywhere.
+    model_list_url: ?[]const u8 = null,
+};
+
+/// The one request a Reactor makes besides model Transfers: an OpenAI key's
+/// model list, once at Host start. Its answer lands in its owner's buffer,
+/// with no scratch file or budget charge, and it holds a stream, and so
+/// at most one connection, beyond the Transfers' capacity until it ends.
+pub const ModelListFetch = struct {
+    stream: h2.Stream,
+    finished: bool,
 };
 
 /// Per-launch fault hooks, each through a production path.
@@ -219,6 +230,8 @@ pub const Reactor = struct {
     scratch_path: []const u8,
     budget: ScratchBudget,
     credentials: Credentials,
+    model_list_endpoint: ?h2.Endpoint,
+    model_list: ?*ModelListFetch,
 
     /// In final storage: h2's Client is pointer-stable. Host startup has
     /// already run `checkLibraries` and `validateEndpoint`.
@@ -236,9 +249,15 @@ pub const Reactor = struct {
             .scratch_path = options.scratch_path,
             .budget = options.budget,
             .credentials = .{ .allocator = allocator },
+            .model_list_endpoint = null,
+            .model_list = null,
         };
+        // The model list holds a stream of its own, so it never waits
+        // behind a model request or makes one wait behind it.
+        const streams = std.math.add(usize, options.capacity, @intFromBool(options.model_list_url != null)) catch
+            return error.TransportCapacityTooLarge;
         try self.client.init(allocator, io, .{
-            .stream_capacity = std.math.cast(u32, options.capacity) orelse return error.TransportCapacityTooLarge,
+            .stream_capacity = std.math.cast(u32, streams) orelse return error.TransportCapacityTooLarge,
             .inactivity_ns = interval_ns,
             .connect_timeout_ns = interval_ns,
             .trust = if (options.ca_file) |path| .{ .ca_file = path } else .system,
@@ -248,10 +267,47 @@ pub const Reactor = struct {
         for (options.endpoints.values, &self.endpoints.values) |url, *endpoint| {
             if (url) |value| endpoint.* = try self.client.addEndpoint(value);
         }
+        if (options.model_list_url) |url| self.model_list_endpoint = try self.client.addEndpoint(url);
+    }
+
+    /// Launches the model list GET with `fields`, which `prepare` copies
+    /// except borrowed ones; `response` is borrowed until it ends.
+    pub fn startModelList(self: *Reactor, fetch: *ModelListFetch, fields: []const h2.Field, response: []u8) !void {
+        std.debug.assert(self.model_list == null);
+        fetch.* = .{ .stream = .idle, .finished = false };
+        try self.client.prepare(&fetch.stream, .{
+            .endpoint = self.model_list_endpoint.?,
+            .method = .get,
+            .fields = fields,
+            .body = .{ .bytes = "" },
+            .sink = .{ .buffer = response },
+        });
+        self.model_list = fetch;
+        self.client.launch(&fetch.stream);
+    }
+
+    /// The model list once its stream has ended, handed over once: its
+    /// owner reads the answer, then calls `endModelList`.
+    pub fn finishedModelList(self: *Reactor) ?*ModelListFetch {
+        const fetch = self.model_list orelse return null;
+        return if (fetch.finished) fetch else null;
+    }
+
+    /// Whether the model list still holds a stream.
+    pub fn modelListPending(self: *const Reactor) bool {
+        return self.model_list != null;
+    }
+
+    /// Cancels the model list if it is live and releases its stream.
+    pub fn endModelList(self: *Reactor) void {
+        const fetch = self.model_list orelse return;
+        self.client.cancel(&fetch.stream);
+        fetch.stream.deinit();
+        self.model_list = null;
     }
 
     pub fn deinit(self: *Reactor) void {
-        std.debug.assert(self.credentials.head == null);
+        std.debug.assert(self.credentials.head == null and self.model_list == null);
         self.client.deinit();
         self.* = undefined;
     }
@@ -284,7 +340,11 @@ pub const Reactor = struct {
     /// A finished stream with an impossible status is an error: the
     /// caller fences, since no settlement can be derived from it.
     pub fn nextCompletion(self: *Reactor, fail_seal: bool) error{InvalidHttpEvidence}!?Completion {
-        const stream = self.client.nextFinished() orelse return null;
+        var stream = self.client.nextFinished() orelse return null;
+        if (self.model_list) |fetch| if (stream == &fetch.stream) {
+            fetch.finished = true;
+            stream = self.client.nextFinished() orelse return null;
+        };
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
         var outcome = try transfer.outcome();
         switch (outcome) {
@@ -300,6 +360,8 @@ pub const Reactor = struct {
 
     /// h2's receiver, inside `drive` on the execution thread.
     pub fn observe(self: *Reactor, stream: *h2.Stream, event: h2.Event) h2.Verdict {
+        // The model list's buffer bounds its body; it observes no header.
+        if (self.model_list) |fetch| if (stream == &fetch.stream) return .accept;
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
         switch (event) {
             .head => |head| {

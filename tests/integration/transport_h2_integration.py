@@ -51,6 +51,12 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.eager_sse = eager_sse
         self.observed_shape = observed_shape
         self.answers = {}
+        # The body a GET of a model list is answered with; None answers 404.
+        self.models = None
+        # Set: a model list GET waits unanswered until the event is set.
+        self.models_release = None
+        # Set: each connection allows this many concurrent streams.
+        self.max_streams = None
         self.isolation = isolation
         self.stream_ids = {}
         self.resets = []
@@ -213,6 +219,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
         sock.settimeout(45)
         conn = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=False))
         conn.initiate_connection()
+        if self.server.max_streams is not None:
+            conn.update_settings({h2.settings.SettingCodes.MAX_CONCURRENT_STREAMS: self.server.max_streams})
         if self.server.refuse_at == "headers" and not self.server.refused:
             conn.update_settings({h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: 0})
         sock.sendall(conn.data_to_send())
@@ -220,19 +228,34 @@ class StreamHandler(socketserver.BaseRequestHandler):
         pending = []
         outgoing_bodies = {}
         held_bodies = {}
+        held_models = []
+
+        def answer_models(stream_id):
+            models = self.server.models
+            payload = models if models is not None else b"{}"
+            conn.send_headers(stream_id, [
+                (":status", "200" if models is not None else "404"),
+                ("content-type", "application/json"), ("content-length", str(len(payload))),
+            ])
+            outgoing_bodies[stream_id] = payload
         with self.server.lock:
             self.server.connections.append(self.client_address)
         while True:
             try:
                 data = sock.recv(65536)
             except TimeoutError:
-                if not held_bodies:
+                if not held_bodies and not held_models:
                     return
                 data = None  # Polling for release.
             except OSError:
                 return
             if data == b"":
                 return
+            if held_models and self.server.models_release.is_set():
+                for stream_id in held_models:
+                    answer_models(stream_id)
+                held_models.clear()
+                sock.settimeout(45)
             if held_bodies and self.server.release.is_set():
                 outgoing_bodies.update(held_bodies)
                 held_bodies.clear()
@@ -250,6 +273,15 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         conn.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.REFUSED_STREAM)
                         # Reopen upload credit so the replay can send its body.
                         conn.update_settings({h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: 65535})
+                        continue
+                    if dict(event.headers)[b":method"] == b"GET":
+                        # A model list: it has no body and is not a model request.
+                        release = self.server.models_release
+                        if release is not None and not release.is_set():
+                            held_models.append(event.stream_id)
+                            sock.settimeout(0.05)  # Poll for release.
+                        else:
+                            answer_models(event.stream_id)
                         continue
                     bodies[event.stream_id] = bytearray()
                 elif isinstance(event, h2.events.DataReceived):
@@ -369,6 +401,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         self.server.resets.append(event.stream_id)
                     outgoing_bodies.pop(event.stream_id, None)
                     held_bodies.pop(event.stream_id, None)
+                    if event.stream_id in held_models:
+                        held_models.remove(event.stream_id)
                     if self.server.isolation and event.stream_id == self.server.stream_ids["isolation-target"]:
                         payload, _, _ = dispatch.sse_answer(
                             "sibling", "reasoning-sibling", "message-sibling", "unaffected sibling",

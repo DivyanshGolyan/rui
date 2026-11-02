@@ -6,6 +6,7 @@ const failure_class = @import("failure_class.zig");
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
+const model_list = @import("model_list.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_decode = @import("output_decode.zig");
 const output_format = @import("output_format.zig");
@@ -383,6 +384,16 @@ const Workspace = struct {
     /// An HTTP error body's classification, live while it is classified.
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
+    /// The OpenAI key's model list while its one GET is live.
+    model_list: ModelListWork,
+};
+
+/// The model list GET's own parts: the Reactor holds its stream, and these
+/// its credential use and answer buffer until it ends. Zero bytes are none.
+const ModelListWork = struct {
+    fetch: provider.ModelListFetch,
+    credential: ?*provider.SharedCredential,
+    response: ?[]u8,
 };
 
 /// The codec whose headers the Reactor observes: every provider's, so far.
@@ -455,6 +466,11 @@ pub fn executionMain(host: *Host) void {
     const budget = host.retention.sharedBudget().narrowed(
         if (host.hooks.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
     );
+    const model_list_url: ?[]const u8 = if (host.providers.modelListKey()) |served|
+        std.fmt.allocPrint(host.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch null
+    else
+        null;
+    defer if (model_list_url) |url| host.allocator.free(url);
     var reactor_storage: provider.Reactor = undefined;
     // With no slots no Transfer can start, so a zero-capacity Host runs no
     // transport (h2 requires a positive stream capacity).
@@ -474,6 +490,7 @@ pub fn executionMain(host: *Host) void {
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
+            .model_list_url = model_list_url,
         }) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
@@ -481,6 +498,11 @@ pub fn executionMain(host: *Host) void {
         break :reactor &reactor_storage;
     } else null;
     defer if (reactor) |active| active.deinit();
+    if (reactor) |active| startModelList(host, active, &workspace.model_list) else if (host.providers.modelListKey() != null) {
+        // No slot can run, so nothing is fetched: the table stands.
+        host.model_lists.set(.table);
+    }
+    defer if (reactor) |active| endModelList(active, &workspace.model_list);
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     defer shutdownExecution(host, slots, workspace);
@@ -636,7 +658,7 @@ const NativeTurn = struct {
     pub fn hasTransport(self: *const NativeTurn) bool {
         if (slotsHaveTransport(self.slots)) return true;
         const reactor = self.reactor orelse return false;
-        return reactor.hasConnections();
+        return reactor.hasConnections() or reactor.modelListPending();
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
@@ -742,7 +764,12 @@ const NativeTurn = struct {
     }
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
-        return callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace);
+        if (callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace)) return true;
+        // The model list ends inside `nextCompletion`, which skips it.
+        const reactor = self.reactor orelse return false;
+        if (reactor.finishedModelList() == null) return false;
+        finishModelList(self.host, reactor, &self.workspace.model_list);
+        return true;
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -763,6 +790,50 @@ const NativeTurn = struct {
         );
     }
 };
+
+/// Launches the OpenAI key's model list on the Reactor, with the key's
+/// own request fields and endpoint rule. One that cannot start leaves the
+/// table, and says why.
+noinline fn startModelList(host: *Host, reactor: *provider.Reactor, work: *ModelListWork) void {
+    const served = host.providers.modelListKey() orelse return;
+    if (reactor.model_list_endpoint == null) return host.model_lists.publish(error.OutOfMemory);
+    const key = served.credential.key_file;
+    var headers: model_adapter.Headers = undefined;
+    headers.initKey(served.endpoint, host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err|
+        return host.model_lists.publish(err);
+    work.credential = headers.takeCredential();
+    defer headers.deinit();
+    work.response = std.heap.page_allocator.alloc(u8, model_list.max_response_bytes) catch |err| {
+        endModelList(reactor, work);
+        return host.model_lists.publish(err);
+    };
+    reactor.startModelList(&work.fetch, headers.fields(), work.response.?) catch |err| {
+        endModelList(reactor, work);
+        return host.model_lists.publish(err);
+    };
+}
+
+/// Publishes the ended GET's answer, then releases it.
+noinline fn finishModelList(host: *Host, reactor: *provider.Reactor, work: *ModelListWork) void {
+    const stream = &reactor.finishedModelList().?.stream;
+    const body: anyerror![]const u8 = if (stream.end().?.cause != .complete)
+        error.ModelListTransportFailed
+    else if (stream.status() != 200)
+        error.ModelListRefused
+    else
+        work.response.?[0..@intCast(stream.responseLength())];
+    host.model_lists.publish(body);
+    endModelList(reactor, work);
+}
+
+/// Cancels a live GET and releases its stream, credential use and buffer.
+fn endModelList(reactor: *provider.Reactor, work: *ModelListWork) void {
+    reactor.endModelList();
+    if (work.credential) |shared| reactor.credentials.release(shared);
+    work.credential = null;
+    if (work.response) |response| std.heap.page_allocator.free(response);
+    work.response = null;
+}
 
 const callServiceOneCompletion = serviceOneCompletion;
 const callAdvanceBashPreparation = advanceBashPreparation;

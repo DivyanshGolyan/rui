@@ -570,15 +570,19 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         calls = []
         primary = AssertionError("original OpenAI base URL body failure")
         secondary = RuntimeError("endpoint shutdown failure")
-        headers = {b":path": b"/custom/v1/responses", b":authority": b"localhost:1",
-                   b"authorization": ("Bearer " + codex_h2.codex.OPENAI_KEY).encode()}
+        bearer = ("Bearer " + codex_h2.codex.OPENAI_KEY).encode()
+        requests = [{b":method": b"GET", b":path": b"/custom/v1/models", b":authority": b"localhost:1", b"authorization": bearer},
+                    {b":method": b"POST", b":path": b"/custom/v1/responses", b":authority": b"localhost:1", b"authorization": bearer}]
+        listed = {"providers": [{"provider": "openai", "source": "live", "models": [
+            {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}]}
+        pending = {"providers": [{"provider": "openai", "source": "pending", "models": []}]}
 
         def shutdown():
             calls.append("shutdown")
             if fail_shutdown:
                 raise secondary
 
-        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=[headers],
+        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=requests, connections=["list", "message"],
                                    serve_forever=lambda: None, shutdown=shutdown,
                                    server_close=lambda: calls.append("close"))
         thread = SimpleNamespace(start=lambda: None, is_alive=lambda: False,
@@ -587,7 +591,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         def start(*args, **kwargs):
             if fail_start:
                 raise primary
-            return SimpleNamespace(pid=1), {}
+            return SimpleNamespace(pid=1), {"socket": "/fixture/socket"}
 
         def message(*args):
             if fail_body:
@@ -608,6 +612,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     (codex_h2.h2_fixture, "Endpoint", lambda *a, **k: endpoint),
                     (codex_h2.threading, "Thread", lambda **kwargs: thread),
                     (codex_h2, "start_ready_process", start),
+                    (codex_h2.h2_fixture, "closed_host_request", lambda *a: listed if endpoint.models_release.is_set() else pending),
                     (codex_h2.fixture, "command", lambda *a: {"answer": {"status": "accepted", "session": "s"}}),
                     (codex_h2.fixture, "message", message),
                     (codex_h2.fixture, "wait_for_result_release", lambda *a: (
