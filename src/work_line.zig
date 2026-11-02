@@ -114,7 +114,7 @@ pub fn of(words: *[max_words_bytes]u8, state: *const WorkState, operation: ?u64,
 fn escaped(buffer: *[max_words_bytes]u8, text: []const u8) []const u8 {
     std.debug.assert(text.len <= session_work.max_description_bytes);
     var out = std.Io.Writer.fixed(buffer);
-    var line: TerminalText = .{ .mode = .line };
+    var line: TerminalText = .{ .mode = .label };
     line.feed(&out, text) catch unreachable;
     line.finish(&out) catch unreachable;
     return out.buffered();

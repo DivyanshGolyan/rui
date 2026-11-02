@@ -677,7 +677,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
-    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
     try indented.feed(state.suffix);
@@ -715,7 +715,7 @@ pub const Live = struct {
         const state = toolState(entry.presentation.code);
         var writer = std.Io.Writer.fixed(buffer);
         try writer.print("{s} ", .{state.glyph});
-        var text: Text = .{ .mode = .line };
+        var text: Text = .{ .mode = .label };
         try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
         try text.finish(&writer);
         try writer.writeAll(state.suffix);
@@ -879,7 +879,7 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !Actio
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     if (arguments.description.len != 0) {
         try indented.feed(" ");
-        var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+        var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
         try label.feed(arguments.description.slice());
         try label.finish();
     }

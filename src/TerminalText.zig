@@ -1,7 +1,11 @@
 const std = @import("std");
 const Self = @This();
 
-pub const Mode = enum { line, multiline };
+/// `line` shows an exact value inline, so it also quotes `"` and `\`;
+/// `label` is one line of prose, such as a tool call's description, which
+/// shows `"` as written since no escape it makes contains one; `multiline`
+/// keeps line breaks and tabs.
+pub const Mode = enum { line, label, multiline };
 
 /// The most bytes one input byte becomes: an escaped byte is `\xNN`.
 pub const max_bytes_per_byte = "\\x00".len;
@@ -65,7 +69,7 @@ test "Session shell selectors use the complete bare ID" {
 fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
     if (self.utf8_len == 0) {
         if (value < 0x80) {
-            if (self.mode == .line) {
+            if (self.mode != .multiline) {
                 switch (value) {
                     '\n' => return out.writeAll("\\n"),
                     '\t' => return out.writeAll("\\t"),
@@ -73,8 +77,8 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
                     else => {},
                 }
             }
-            if (self.mode == .line) {
-                if (value == '"') return out.writeAll("\\\"");
+            if (self.mode != .multiline) {
+                if (value == '"' and self.mode == .line) return out.writeAll("\\\"");
                 if (value == '\\') return out.writeAll("\\\\");
             }
             if (!isControl(value) or
@@ -121,6 +125,15 @@ test "natural Unicode stays readable while controls and ambiguous command bytes 
     for (input) |value| try text.feed(&output.writer, &.{value});
     try text.finish(&output.writer);
     try std.testing.expectEqualStrings("Don’t café " ++ "\\\"quoted\\\" " ++ "\\\\u202e\\u202e\\n\\t\\x1b\\xff", output.written());
+}
+
+test "a label shows its quotes as written and escapes the rest as a line does" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var text: Self = .{ .mode = .label };
+    try text.feed(&output.writer, "Run grep \"a\\b\" \u{202e}\t\x1b");
+    try text.finish(&output.writer);
+    try std.testing.expectEqualStrings("Run grep \"a\\\\b\" \\u202e\\t\\x1b", output.written());
 }
 
 test "TerminalText line bytes are independent of chunk boundaries and incomplete UTF-8 stays visible" {
