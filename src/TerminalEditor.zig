@@ -17,7 +17,7 @@ partial_length: u3 = 0,
 partial_need: u3 = 0,
 allow_paste: bool = true,
 /// What a typed Tab adds to the draft at its end in place of a tab, or null
-/// to add the tab. Null by default: only the conversation completes commands.
+/// to add the tab. Null by default: a screen with commands sets it.
 completion: ?*const fn (draft: []const u8) ?[]const u8 = null,
 /// Why the line is withheld until Enter, which reports it. It withholds
 /// edits, never changes what a key means.
