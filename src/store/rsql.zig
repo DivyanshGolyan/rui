@@ -122,7 +122,10 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 /// portable or on an unknown or malformed marker:
 ///
 ///   @octets(x)           bytes in x: `length(CAST(x AS BLOB))`
-///   @charset(c,'set')    only these characters: `c NOT GLOB '*[^set]*'`
+///   @charset(c,'set')    only these characters: `(c NOT GLOB '*[^set]*' AND
+///                        length(c)=length(CAST(c AS BLOB)))`. GLOB stops
+///                        at a NUL; the set is ASCII, so characters equal
+///                        bytes exactly when no NUL hides the rest
 ///   @initial(c,'set')    first character in the set: `c GLOB '[set]*'`
 ///   @same(a,b)           null-safe equality: `(a IS b)`
 ///   @distinct(a,b)       its negation: `(a IS NOT b)`
@@ -172,7 +175,7 @@ fn marker(comptime name: []const u8, comptime arguments: []const []const u8, com
     const first = renderSqlite(arguments[0]);
     return switch (kind) {
         .octets => "length(CAST(" ++ first ++ " AS BLOB))",
-        .charset => first ++ " NOT GLOB '*[^" ++ characterSet(arguments[1], text) ++ "]*'",
+        .charset => "(" ++ first ++ " NOT GLOB '*[^" ++ characterSet(arguments[1], text) ++ "]*' AND length(" ++ first ++ ")=length(CAST(" ++ first ++ " AS BLOB)))",
         .initial => first ++ " GLOB '[" ++ characterSet(arguments[1], text) ++ "]*'",
         .same => "(" ++ first ++ " IS " ++ renderSqlite(arguments[1]) ++ ")",
         .distinct => "(" ++ first ++ " IS NOT " ++ renderSqlite(arguments[1]) ++ ")",
@@ -269,7 +272,7 @@ fn skipSpace(comptime text: []const u8, comptime from: usize) usize {
 
 test "each marker renders its SQLite spelling" {
     try std.testing.expectEqualStrings("length(CAST(workspace AS BLOB))<=4096", comptime render(.sqlite, "@octets(workspace)<=4096"));
-    try std.testing.expectEqualStrings("provider NOT GLOB '*[^a-z0-9_-]*'", comptime render(.sqlite, "@charset(provider,'a-z0-9_-')"));
+    try std.testing.expectEqualStrings("(provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))", comptime render(.sqlite, "@charset(provider,'a-z0-9_-')"));
     try std.testing.expectEqualStrings("provider GLOB '[a-z]*'", comptime render(.sqlite, "@initial(provider,'a-z')"));
     try std.testing.expectEqualStrings("(action_kind IS 1)", comptime render(.sqlite, "@same(action_kind,1)"));
     try std.testing.expectEqualStrings("(resolution_code IS NOT 'denied')", comptime render(.sqlite, "@distinct(resolution_code,'denied')"));
@@ -277,7 +280,7 @@ test "each marker renders its SQLite spelling" {
 
 test "markers nest, and text outside them is copied" {
     try std.testing.expectEqualStrings(
-        "x IS NULL OR (length(CAST(x AS BLOB))=6 AND x NOT GLOB '*[^a-f]*') AND '@octets(y)'='@'",
+        "x IS NULL OR (length(CAST(x AS BLOB))=6 AND (x NOT GLOB '*[^a-f]*' AND length(x)=length(CAST(x AS BLOB)))) AND '@octets(y)'='@'",
         comptime render(.sqlite, "x IS NULL OR (@octets(x)=6 AND @charset(x,'a-f')) AND '@octets(y)'='@'"),
     );
     try std.testing.expectEqualStrings("(length(CAST(a AS BLOB)) IS b)", comptime render(.sqlite, "@same(@octets(a), b)"));

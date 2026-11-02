@@ -22,7 +22,7 @@ pub const schema_version: u32 = 46;
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
-    .{ .schema_version = 46, .digest = 0x07b5f8ede42e5bb7 },
+    .{ .schema_version = 46, .digest = 0x375b4aacaf22074a },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -169,7 +169,7 @@ pub const tables = [_]Table{
     .{
         .name = "session",
         .columns = &.{
-            .{ .name = "session_ref", .type = .{ .text = null }, .check = "length(session_ref)=6 AND @octets(session_ref)=6 AND @charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
+            .{ .name = "session_ref", .type = .{ .text = null }, .check = "@octets(session_ref)=6 AND @charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
             // The Session's immutable binding: grammar version and its options.
@@ -345,8 +345,9 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "session_ref", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "turn_id", .type = .{ .text = null }, .check = "length(turn_id) BETWEEN 1 AND 20" },
-            .{ .name = "operation_id", .type = .{ .text = null }, .check = "length(operation_id) BETWEEN 1 AND 20" },
+            // A u64 in decimal: ASCII digits, so bytes and characters agree.
+            .{ .name = "turn_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(turn_id,'0-9')" },
+            .{ .name = "operation_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(operation_id,'0-9')" },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
@@ -540,7 +541,7 @@ pub const tables = [_]Table{
             .{ .name = "attempt_ordinal", .type = .int, .default = "0", .check = "attempt_ordinal IN (0,1)" },
             .{ .name = "bash_timeout_override_ms", .type = .int, .nullable = true, .check = "bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0" },
             .{ .name = "bash_timeout_ms", .type = .int, .nullable = true, .check = "bash_timeout_ms IS NULL OR bash_timeout_ms>0" },
-            .{ .name = "sender_handle", .type = .{ .text = null }, .nullable = true, .check = "sender_handle IS NULL OR (length(sender_handle)=32 AND @charset(sender_handle,'0-9a-f'))" },
+            .{ .name = "sender_handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .nullable = true, .check = "@charset(sender_handle,'0-9a-f')" },
             .{
                 .name = "resolution_code",
                 .type = .{ .tag = &.{ "denied", "cancelled", "succeeded", "failed", "timed_out", "indeterminate", "storage_failed", "spawn_failed", "infrastructure_shutdown" } },
@@ -576,7 +577,7 @@ pub const tables = [_]Table{
         .name = "permission_decision_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "action_id", .type = .{ .text = null }, .check = "length(action_id) BETWEEN 1 AND 20" },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
             .{ .name = "decision", .type = .{ .tag = &.{ "allow_once", "deny" } } },
         },
         .primary_key = &.{"command_key"},
@@ -697,7 +698,8 @@ fn columnDefinition(comptime dialect: rsql.Dialect, comptime table: Table, compt
         .bytes => "BLOB",
     };
     if (primary) text = text ++ " PRIMARY KEY";
-    if (!primary and !column.nullable) text = text ++ " NOT NULL";
+    // Also on a key: SQLite lets a rowid table's non-integer key be NULL.
+    if (!column.nullable) text = text ++ " NOT NULL";
     if (column.default) |value| text = text ++ " DEFAULT " ++ value;
     for (table.uniques) |unique| {
         if (eqlList(unique, only)) text = text ++ " UNIQUE";
