@@ -802,6 +802,11 @@ fn setNonblocking(fd: std.posix.fd_t) !void {
         std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SocketFlagsFailed;
 }
 
+fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.Transport {
+    if (!served.any()) return .none;
+    return if (served.modelListKey() != null) .requests_and_model_list else .requests;
+}
+
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
 pub fn serve(
@@ -830,7 +835,7 @@ pub fn serve(
         active_capacity,
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
-        served.any(),
+        descriptorTransport(served),
         served.chatgpt() != null,
         os.tag,
     );
@@ -868,7 +873,7 @@ pub fn serve(
         active_capacity,
         intake_capacity,
         3,
-        served.any(),
+        descriptorTransport(served),
         served.chatgpt() != null,
         os.tag,
     );

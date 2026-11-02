@@ -102,8 +102,8 @@ pub const Options = struct {
 
 /// The one request a Reactor makes besides model Transfers: an OpenAI key's
 /// model list, once at Host start. Its answer lands in its owner's buffer,
-/// with no scratch file or budget charge, and it holds one of the
-/// Reactor's streams until it ends.
+/// with no scratch file or budget charge, and it holds a stream, and so
+/// at most one connection, beyond the Transfers' capacity until it ends.
 pub const ModelListFetch = struct {
     stream: h2.Stream,
     finished: bool,
@@ -252,8 +252,12 @@ pub const Reactor = struct {
             .model_list_endpoint = null,
             .model_list = null,
         };
+        // The model list holds a stream of its own, so it never waits
+        // behind a model request or makes one wait behind it.
+        const streams = std.math.add(usize, options.capacity, @intFromBool(options.model_list_url != null)) catch
+            return error.TransportCapacityTooLarge;
         try self.client.init(allocator, io, .{
-            .stream_capacity = std.math.cast(u32, options.capacity) orelse return error.TransportCapacityTooLarge,
+            .stream_capacity = std.math.cast(u32, streams) orelse return error.TransportCapacityTooLarge,
             .inactivity_ns = interval_ns,
             .connect_timeout_ns = interval_ns,
             .trust = if (options.ca_file) |path| .{ .ca_file = path } else .system,
