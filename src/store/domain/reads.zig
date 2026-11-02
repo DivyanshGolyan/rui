@@ -31,17 +31,82 @@ const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coale
     "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
     "AND count(coalesce(call.acceptance_position,action.acceptance_position))=count(*) " ++
     "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), ";
-const activity_sql = public_tool_groups_sql ++
-    "entries AS (SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission WHERE session_ref=?1 " ++
-    "UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN (1,3) " ++
-    "UNION ALL SELECT session_position,0,4,NULL FROM model_output_item WHERE session_ref=?1 AND item_kind=3 " ++
-    "UNION ALL SELECT sender_position,0,8,admission_id FROM message_admission WHERE sender_session_ref=?1), " ++
-    "completions AS (SELECT groups.position AS position,call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
-    "UNION ALL SELECT outcome_position,0,6,turn_id FROM turn WHERE session_ref=?1 AND outcome_code IS NOT NULL " ++
-    "UNION ALL SELECT position,0,7,NULL FROM session_stop WHERE session_ref=?1 " ++
-    // Each compound keeps within the Store's four-term limit.
-    "UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1), " ++
-    "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions) ";
+
+/// An Activity source row `last`, a rejected call or a resolved Action of
+/// `operation`, is where that Operation's tool group completes: every call
+/// has its accepted result, one per call item, and none was accepted later.
+/// It reads only that Operation's calls, so a seek by acceptance position
+/// finds a group's results without grouping the Session's history.
+fn toolGroupCompletesAtLast(comptime operation: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM model_operation op WHERE op.operation_id=" ++ operation ++ " AND op.session_ref=?1 AND " ++
+        store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ ") " ++
+        "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=" ++ operation ++ ")=" ++
+        "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=" ++ operation ++ " AND item.item_kind=3) " ++
+        "AND NOT EXISTS(SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
+        "WHERE c.operation_id=" ++ operation ++ " AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL " ++
+        "OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL OR coalesce(c.acceptance_position,a.acceptance_position)>last.acceptance_position))";
+}
+
+/// Each Activity source, as (position, ordinal, kind, id) rows matching
+/// `filter`, which names a source's position and ordinal through `range`.
+/// Every source seeks an index on (Session, position), so a filter on
+/// position reads only the rows it keeps. The sources come in three groups,
+/// each within the Store's four-term compound limit.
+fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime order: []const u8) [3][]const u8 {
+    return .{
+        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission INDEXED BY message_admission_position " ++
+            "WHERE session_ref=?1 AND " ++ range("admission_position", "0") ++
+            " UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry " ++
+            "WHERE session_ref=?1 AND entry_kind IN (1,3) AND " ++ range("session_position", "0") ++
+            " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item INDEXED BY model_output_call_history " ++
+            "WHERE session_ref=?1 AND item_kind=3 AND " ++ range("session_position", "0") ++
+            " UNION ALL SELECT sender_position,0,8,admission_id FROM message_admission WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++ order,
+        // A tool group's results sit at its last acceptance, one per call,
+        // ordered by call.
+        "SELECT last.acceptance_position AS position,call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last " ++
+            "JOIN model_tool_call call ON call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++
+            range("last.acceptance_position", "call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id") ++
+            " UNION ALL SELECT last.acceptance_position,call.call_ordinal+1,5,NULL FROM action_operation last " ++
+            "JOIN model_tool_call call ON call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++
+            range("last.acceptance_position", "call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
+            " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn INDEXED BY turn_outcome_position WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ range("outcome_position", "0") ++
+            " UNION ALL SELECT position,0,7,NULL FROM session_stop INDEXED BY session_stop_position WHERE session_ref=?1 AND " ++ range("position", "0") ++ order,
+        "SELECT sender_position AS position,0 AS ordinal,9 AS kind,NULL AS id FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++ order,
+    };
+}
+
+fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const u8) []const u8 {
+    _ = ordinal;
+    return position ++ " IS NOT NULL";
+}
+
+/// The Activity row at position ?3 and ordinal ?4 through end ?2: each
+/// source seeks that one position.
+const activity_item_sql = blk: {
+    const sources = activitySources(anyActivityPosition, "");
+    break :blk std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), " ++
+        "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions UNION ALL {s}) " ++
+        "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ sources[0], sources[1], sources[2] });
+};
+
+/// One Activity page, at most 17 rows past cursor (?3, ?4) through end ?2,
+/// in `forward` order. Each source group keeps its own first 17 rows, read
+/// in order from its indexes, and the page takes the first 17 of those:
+/// the cost follows the page, not the Session's history.
+fn activityPageSql(comptime forward: bool) [:0]const u8 {
+    const Range = struct {
+        fn after(comptime position: []const u8, comptime ordinal: []const u8) []const u8 {
+            return position ++ ">=?3 AND " ++ position ++ "<=?2 AND (" ++ position ++ ">?3 OR " ++ ordinal ++ ">?4)";
+        }
+        fn before(comptime position: []const u8, comptime ordinal: []const u8) []const u8 {
+            return position ++ "<=?3 AND (" ++ position ++ "<?3 OR " ++ ordinal ++ "<?4)";
+        }
+    };
+    const order = if (forward) " ORDER BY 1,2 LIMIT 17" else " ORDER BY 1 DESC,2 DESC LIMIT 17";
+    const sources = activitySources(if (forward) Range.after else Range.before, order);
+    return std.fmt.comptimePrint("SELECT position,ordinal FROM ({s}) UNION ALL SELECT position,ordinal FROM ({s}) " ++
+        "UNION ALL SELECT position,ordinal FROM ({s}){s}", .{ sources[0], sources[1], sources[2], order });
+}
 /// Nullable columns permit corruption detection; no writer may omit one.
 /// Each partial index is empty in a sound Store, so every activity read
 /// checks the whole Session in a few steps, however long its history.
@@ -311,7 +376,11 @@ pub fn publicConversationContentLocked(self: *Store, session: []const u8, positi
             // one at the greatest position: times order nothing.
             "(SELECT coalesce(a.resolved_at,op.resolved_at) FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
             "WHERE c.operation_id=op.operation_id ORDER BY coalesce(c.acceptance_position,a.acceptance_position) DESC LIMIT 1) " ++
-            "FROM model_operation op " ++
+            // Only an Operation with an acceptance at the position can
+            // complete there.
+            "FROM (SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position=?2 " ++
+            "UNION ALL SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position=?2) last " ++
+            "CROSS JOIN model_operation op ON op.operation_id=last.operation_id " ++
             "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
             "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
             "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND call.call_ordinal+1=?3 " ++
@@ -481,26 +550,30 @@ pub fn activityPageLocked(self: *Store, request: *const protocol.ActivityPage, p
         };
     }
     page.end = end;
-    const statement = try store_core.cached(self, activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
-        "(?3=0 OR (?5=0 AND (position>?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal>?4))) OR " ++
-        "(?5=1 AND (position<?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal<?4)))) " ++
-        "ORDER BY CASE WHEN ?5=0 THEN position END,CASE WHEN ?5=0 THEN ordinal END," ++
-        "CASE WHEN ?5=1 THEN position END DESC,CASE WHEN ?5=1 THEN ordinal END DESC LIMIT 17");
+    // The cursor as a bound on (position, ordinal): a whole position is
+    // passed or kept by the largest ordinal, and a backward page with
+    // no cursor starts after the end's last row.
+    const forward = request.direction == .forward;
+    const statement = if (forward) try store_core.cached(self, comptime activityPageSql(true)) else try store_core.cached(self, comptime activityPageSql(false));
     defer sqlite.resetCached(statement);
+    const whole: u64 = std.math.maxInt(i64);
     try sqlite.bindText(statement, 1, request.session.slice());
     try sqlite.bindU64(statement, 2, end);
-    try sqlite.bindU64(statement, 3, request.position);
-    try sqlite.bindNullableU64(statement, 4, request.ordinal);
-    try sqlite.bindU64(statement, 5, @backingInt(request.direction));
+    try sqlite.bindU64(statement, 3, if (forward or request.position != 0) request.position else end);
+    try sqlite.bindU64(statement, 4, if (forward) request.ordinal orelse whole else if (request.position == 0) whole else request.ordinal orelse 0);
+    page.read_through = try readThroughLocked(self, request.session.slice());
     while (true) {
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) break;
         if (result != c.SQLITE_ROW) return error.ActivityReadFailed;
+        const position = try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
         if (page.count == page.items.len) {
             page.more = true;
+            // The row after a backward page's oldest says whether the
+            // unseen rows reach past it.
+            page.beyond_unseen = !forward and if (page.read_through) |read| @as(u64, @intCast(position)) > read else true;
             break;
         }
-        const position = try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
         const ordinal = c.sqlite3_column_int64(statement, 1);
         if (ordinal < 0) return error.CorruptStore;
         page.items[page.count] = (try activityItemLocked(self, request.session.slice(), end, @intCast(position), @intCast(ordinal))).item;
@@ -518,6 +591,26 @@ pub fn activityPageLocked(self: *Store, request: *const protocol.ActivityPage, p
     const work = (try report_domain.readWorkLocked(self, request.session.slice(), session.created_at, try store_core.readUnixMilliseconds(self.io))).work;
     page.work.work = .fromCore(work);
     page.work.revision = session.revision;
+}
+
+fn readThroughLocked(self: *Store, session: []const u8) !?u64 {
+    const statement = try store_core.cached(self, "SELECT read_through FROM session WHERE session_ref=?1");
+    defer sqlite.resetCached(statement);
+    try sqlite.bindText(statement, 1, session);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SessionReadFailed;
+    return if (try sqlite.readNullablePositiveI64(statement, 0)) |position| @intCast(position) else null;
+}
+
+pub fn markReadLocked(self: *Store, request: *const protocol.MarkRead) !void {
+    const session = request.session.slice();
+    const statement = try store_core.cached(self, "UPDATE session SET read_through=?2 WHERE session_ref=?1 AND ?2<next_position AND (read_through IS NULL OR read_through<?2)");
+    defer sqlite.resetCached(statement);
+    try sqlite.bindText(statement, 1, session);
+    try sqlite.bindU64(statement, 2, request.position);
+    try sqlite.expectDone(statement);
+    if (c.sqlite3_changes(self.database) == 1) return;
+    const next_position = (try turn_domain.sessionNextPosition(self, session)) orelse return error.SessionNotFound;
+    if (request.position >= next_position) return error.PositionNotReached;
 }
 
 pub fn personMessageLocked(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
@@ -547,8 +640,20 @@ pub fn personMessageLocked(self: *Store, request: *const protocol.ReadPersonMess
 // This projection shares the page's canonical capture, not Current's active
 // Turn lifetime. It is staged until the frontend acknowledges that page.
 fn readCallActivityLocked(self: *Store, session: []const u8, position: u64, ordinal: ?u64) !protocol.CallActivity {
-    const statement = try store_core.cached(self, public_tool_groups_sql ++
-        "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM model_operation op " ++
+    // A group still waiting has an Action without its result; one that
+    // completes after the page has an acceptance after it. Only those
+    // Operations are grouped, not the Session's history.
+    const statement = try store_core.cached(self, "WITH ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
+        "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
+        "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
+        "groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
+        "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+        "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+        "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
+        "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+        "AND count(coalesce(call.acceptance_position,action.acceptance_position))=count(*) " ++
+        "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+        "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
         "LEFT JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
         "LEFT JOIN groups ON groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
         "AND (groups.position IS NULL OR groups.position>?2 OR (groups.position=?2 AND ?3 IS NOT NULL AND call.call_ordinal+1>?3))) " ++
@@ -654,7 +759,7 @@ const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 
 
 fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64, ordinal: u64) !ActivityIdentity {
     if (ordinal == 0 and position <= end) try validateAssistantEntries(self, session, position, position);
-    const statement = try store_core.cached(self, activity_sql ++ "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2");
+    const statement = try store_core.cached(self, activity_item_sql);
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session);
     try sqlite.bindU64(statement, 2, end);
