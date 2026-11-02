@@ -20,7 +20,7 @@ import threading
 import time
 
 import host_process
-from host_process import STORE_SCHEMA, HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for, wait_for_execution_release
+from host_process import HeldReplies, STORE_SCHEMA, HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, hold, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -157,7 +157,7 @@ def successful_sse(index, answer=None):
     )
 
 
-class SuccessfulEndpoint(TestHTTPServer):
+class SuccessfulEndpoint(HeldReplies, TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, large_answer_bytes=0):
@@ -182,8 +182,7 @@ class SuccessfulHandler(http.server.BaseHTTPRequestHandler):
             self.server.requests += 1
             index = self.server.requests
             self.server.condition.notify_all()
-        if not self.server.release.wait(10):
-            raise RuntimeError("successful fixture response was never released")
+        hold(self.server, self.server.release, "successful fixture response")
         marker = "RUI_STREAMED_ANSWER_MARKER"
         if self.server.large_answer_bytes and index == 1:
             body_parts = successful_sse(index, marker).split(marker.encode())

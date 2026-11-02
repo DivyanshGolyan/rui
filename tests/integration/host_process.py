@@ -642,6 +642,32 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
             super().finish_request(request, client_address)
 
 
+def hold(server, release, what):
+    """Wait for a held reply's release. The case releases it by its own
+    deadlines, so the hold keeps no clock of its own (a 10 s one let the
+    reply fail first and Rui retry, on a slow Mac). Closing the endpoint
+    ends it."""
+    while not release.wait(0.1):
+        if server.closing.is_set():
+            raise RuntimeError(f"{what} was never released")
+
+
+class HeldReplies:
+    """An endpoint whose closing ends every held reply."""
+
+    def __init__(self, *args, **kwargs):
+        self.closing = threading.Event()
+        super().__init__(*args, **kwargs)
+
+    def shutdown(self):
+        self.closing.set()
+        super().shutdown()
+
+    def server_close(self):
+        self.closing.set()
+        super().server_close()
+
+
 H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 _h2_connection_lock = threading.Lock()
 

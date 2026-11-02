@@ -229,8 +229,9 @@ class CauseTest(unittest.TestCase):
 class FakeGitHub:
     """Records gh calls; serves jobs, logs and open issues."""
 
-    def __init__(self, jobs=(), logs=None, issues=()):
+    def __init__(self, jobs=(), logs=None, issues=(), timeline=(), compare='ahead'):
         self.jobs, self.logs, self.issues, self.calls = list(jobs), logs or {}, list(issues), []
+        self.timeline, self.compare = list(timeline), compare
 
     def __call__(self, *args):
         self.calls.append(args)
@@ -246,6 +247,10 @@ class FakeGitHub:
                     'the response contains terminal escape sequences; '
                     'pass --allow-escape-sequences to output it anyway'))
             return log
+        if args[0] == 'api' and '/timeline' in args[1]:
+            return json.dumps([self.timeline])
+        if args[0] == 'api' and '/compare/' in args[1]:
+            return json.dumps({'status': self.compare})
         if args[0] == 'api':
             return json.dumps([{'jobs': self.jobs}])
         if args[:2] == ('issue', 'create'):
@@ -321,6 +326,26 @@ class ReportTest(unittest.TestCase):
         self.assertEqual([call[2] for call in fake.made('reopen')], ['6'])
         [comment] = fake.made('comment')
         self.assertTrue(comment[comment.index('--body') + 1].startswith('Failed again after its fix.'))
+
+    def test_a_failure_on_a_commit_without_the_fix_leaves_the_issue_closed(self):
+        signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'
+        closed = [issue(6, signature, [], ['W'], 'b' * 40, state='CLOSED')]
+        for timeline in ([dict(event='closed', commit_id='f' * 40)],
+                         [dict(event='commented', body=f"Fixed by {'f' * 40} (Fix it), landed on main."),
+                          dict(event='closed', commit_id=None)]):
+            fake = FakeGitHub([dict(id=1, name='j', conclusion='failure')], {1: BASH}, closed,
+                              timeline, compare='behind')
+            self.run_main(fake)
+            self.assertIn(('api', f"repos/o/r/compare/{'f' * 40}...{'c' * 40}"), fake.calls)
+            self.assertEqual(fake.made('reopen'), [])
+            self.assertEqual(fake.made('edit'), [])
+            [comment] = fake.made('comment')
+            self.assertIn(f"predates its fix `{'f' * 40}`", comment[comment.index('--body') + 1])
+
+            fake = FakeGitHub([dict(id=1, name='j', conclusion='failure')], {1: BASH}, closed,
+                              timeline, compare='ahead')
+            self.run_main(fake)
+            self.assertEqual([call[2] for call in fake.made('reopen')], ['6'])
 
     def test_passing_jobs_are_read_only_for_retried_failures_on_landing_tips(self):
         retried = (logged('::warning::check failed (exit 1); one automatic retry. A pass after this retry '
