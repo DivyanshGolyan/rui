@@ -25,6 +25,7 @@ const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
+const test_poll = @import("test_poll");
 const store_testing = @import("testing.zig");
 const turn_domain = @import("domain/turn.zig");
 const c = sqlite.c;
@@ -1249,8 +1250,8 @@ test "every Access in one transaction dates its rows with the transaction's seco
             try a.apply();
         }
 
-        fn clockSecond() !i64 {
-            return @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
+        fn clockPassed(dated: i64) !bool {
+            return @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000) > dated;
         }
     };
     const entry = try store_core.enter(&storage, .none);
@@ -1259,7 +1260,7 @@ test "every Access in one transaction dates its rows with the transaction's seco
     try Nested.date(&storage, first.slice());
     const dated = try store_core.transactionSecond(&storage);
     // The clock moves on to a later second before the second Access dates.
-    while (try Nested.clockSecond() == dated) try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), dated, Nested.clockPassed);
     try Nested.date(&storage, second.slice());
     try store_core.commit(&storage);
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(DISTINCT created_at) FROM session"));
