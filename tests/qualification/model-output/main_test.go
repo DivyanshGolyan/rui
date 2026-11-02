@@ -185,14 +185,14 @@ func TestExpectedCapacityRequestDigest(t *testing.T) {
 }
 
 func TestOutputAuditQualifiesEverySemanticCount(t *testing.T) {
-	valid := outputAudit{CanonicalOutputItems: 33, PrivateContentRows: 34, AssistantProjections: 1}
+	valid := outputAudit{CanonicalOutputItems: 33, PrivateContentRows: 35, AssistantProjections: 1}
 	if !outputAuditValid(valid, 32) || outputCaseStatus("passed", true) != "passed" {
 		t.Fatal("valid output audit was rejected")
 	}
 	mutations := []outputAudit{
-		{CanonicalOutputItems: 32, PrivateContentRows: 34, AssistantProjections: 1},
-		{CanonicalOutputItems: 33, PrivateContentRows: 33, AssistantProjections: 1},
-		{CanonicalOutputItems: 33, PrivateContentRows: 34, AssistantProjections: 2},
+		{CanonicalOutputItems: 32, PrivateContentRows: 35, AssistantProjections: 1},
+		{CanonicalOutputItems: 33, PrivateContentRows: 34, AssistantProjections: 1},
+		{CanonicalOutputItems: 33, PrivateContentRows: 35, AssistantProjections: 2},
 	}
 	for _, audit := range mutations {
 		if outputAuditValid(audit, 32) {
