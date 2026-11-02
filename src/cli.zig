@@ -2185,27 +2185,29 @@ test "local recovery enumeration observes cancellation before skipping invalid r
 
 fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (parsed.has("all")) return stopAllSessions(init, parsed);
-    const io = init.io;
-    var input = client.SessionStopInput{ .store = "", .session = parsed.get("session").? };
-    if (input.session.len == 0) return usage();
+    const session = parsed.get("session").?;
+    if (session.len == 0) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const target = try captureTarget(init, parsed, &directory_buffer);
-    var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
+    try sendSessionStop(init, parsed, .{ .store = store, .session = session }, try captureTarget(init, parsed, &directory_buffer));
+}
+
+fn sendSessionStop(init: std.process.Init, parsed: *const cli_args.Parsed, input: client.SessionStopInput, target: client.CaptureTarget) !void {
+    var captured = try client.captureSessionStop(init.io, input, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
 }
 
 /// Stops every Session in the Store that Ctrl-X could stop, a listing page at
-/// a time. Each stop is its own generated capture, recoverable like a single
-/// `session stop`. A failed stop is named on stderr and does not keep the
-/// rest from stopping; the command fails after trying them all, or at a
-/// listing page that fails, saying later pages were not read.
+/// a time. Each stop is the same generated capture a single `session stop`
+/// sends, named on stderr before its own request line, so that line says how
+/// to recover it. A failed stop does not keep the rest from stopping; the
+/// command fails after trying them all, or at a listing page that fails.
 fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = try requestDirectory(init, &directory_buffer);
+    const target: client.CaptureTarget = .{ .generated = try requestDirectory(init, &directory_buffer) };
     var traversal = protocol_reply.SessionTraversal.init(null);
     var asked: usize = 0;
     var failed: usize = 0;
@@ -2217,8 +2219,11 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
         };
         for (page.rows[0..page.count]) |*row| {
             if (!overview_view.rules.get(row.work.state).stoppable) continue;
+            const session = row.reference.slice();
             asked += 1;
-            stopListedSession(init, parsed, store, row.reference.slice(), directory) catch |err| {
+            stderr.diagnostic("rui: stopping {s}\n", .{session});
+            sendSessionStop(init, parsed, .{ .store = store, .session = session }, target) catch |err| {
+                stderr.diagnostic("rui: stopping {s} failed ({s}).\n", .{ session, @errorName(err) });
                 failed += 1;
                 first_failure = first_failure orelse err;
             };
@@ -2227,26 +2232,9 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
     }
     if (asked == 0) stderr.diagnostic("rui: no Session in this Store has work to stop.\n", .{});
     if (first_failure) |err| {
-        stderr.diagnostic("rui: {d} of {d} stops failed or are unconfirmed; each is named above.\n", .{ failed, asked });
+        stderr.diagnostic("rui: {d} of {d} stops failed.\n", .{ failed, asked });
         return err;
     }
-}
-
-/// Says on stderr what a failed stop means: never saved, refused by the
-/// Host, or unconfirmed, which only its saved request may retry.
-fn stopListedSession(init: std.process.Init, parsed: *const cli_args.Parsed, store: []const u8, session: []const u8, directory: []const u8) !void {
-    var captured = client.captureSessionStop(init.io, .{ .store = store, .session = session }, .{ .generated = directory }) catch |err| {
-        stderr.diagnostic("rui: {s} not stopped: its stop was not saved ({s}).\n", .{ session, @errorName(err) });
-        return err;
-    };
-    // The send closes the capture and undefines it, so the handle is copied first.
-    const handle = captured.identity().key;
-    sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null) catch |err| {
-        // A refusal already printed its saved answer and replay command.
-        if (err != error.MutationNotAccepted)
-            stderr.diagnostic("rui: not sure {s} stopped ({s}). Check with: rui request recover {s}\n", .{ session, @errorName(err), handle.slice() });
-        return err;
-    };
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
