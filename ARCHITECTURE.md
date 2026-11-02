@@ -1718,6 +1718,7 @@ Matching retries recover the original selection/answer, including idle stops; ob
 A fresh stop needs a fresh key.
 Callers retain key and exact inputs before sending, without managing Turn identity or coordinating Session reuse for retries.
 Concurrent Session use remains outside the expected workflow.
+`rui session stop --all` reads the Session listing and sends one ordinary Session stop, with its own generated key, for each Session the overview's Ctrl-X could stop; it adds no cross-Session stop authority, and a Session that starts work after its listing page is read is not stopped.
 
 ### Interrupting one model operation
 

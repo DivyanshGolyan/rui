@@ -1017,6 +1017,14 @@ def main():
             [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}", "timeout_ms": None, "description": "Append unattempted marker"}))],
         )
     )
+    stop_all_marker = state / "stop-all-marker"
+    for name in ("stop-all-a", "stop-all-b", "stop-all-lost", "stop-all-lost-2"):
+        responses.append(
+            fixture.sse_tool_calls(
+                f"{name}-calls",
+                [("bash", f"{name}-call", json.dumps({"cmd": f"printf x >> {stop_all_marker}", "timeout_ms": None, "description": "Append stop-all marker"}))],
+            )
+        )
     prelaunch_stop_marker = state / "prelaunch-stop-marker"
     responses.append(
         fixture.sse_tool_calls(
@@ -1452,6 +1460,56 @@ def main():
         assert stopped["answer"]["status"] == "accepted", stopped
         assert resolution(store, session) == "cancelled"
         assert not unattempted_marker.exists()
+
+        # stop --all stops each Session whose work is under way, each under
+        # its own generated request, and leaves idle and settled ones alone.
+        waiting = []
+        for name in ("stop-all-a", "stop-all-b"):
+            waiter = configure(state, store, f"{name}-config")
+            fixture.message(state, store, f"{name}-message", waiter, "execute")
+            fixture.wait_for(lambda: action_for(store, waiter), f"{name} stoppable Action")
+            waiting.append(waiter)
+        idle = configure(state, store, "stop-all-idle-config")
+        # Generated captures go under this HOME, not the runner's.
+        stop_all_env = {**os.environ, "HOME": str(state / "stop-all-home")}
+        (state / "stop-all-home").mkdir()
+        stopped_all = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
+                                     env=stop_all_env, text=True, capture_output=True, timeout=15)
+        assert stopped_all.returncode == 0, stopped_all
+        replies = [json.loads(line) for line in stopped_all.stdout.splitlines()]
+        assert sorted(reply["context"]["session"] for reply in replies) == sorted(waiting), replies
+        assert all(reply["answer"]["status"] == "accepted" and reply["context"]["kind"] == "session_stop" for reply in replies), replies
+        for waiter in waiting:
+            assert resolution(store, waiter) == "cancelled"
+        assert not stop_all_marker.exists()
+        assert idle not in [reply["context"]["session"] for reply in replies]
+        nothing = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store)],
+                                 env=stop_all_env, text=True, capture_output=True, timeout=15)
+        assert (nothing.returncode, nothing.stdout) == (0, ""), nothing
+        assert nothing.stderr == "\nrui: no Session in this Store has work to stop.\n", nothing
+        # A lost reply leaves each stop saved. Every Session is named before
+        # its own request line, which is what recovers its answer.
+        lost = []
+        for name in ("stop-all-lost", "stop-all-lost-2"):
+            waiter = configure(state, store, f"{name}-config")
+            fixture.message(state, store, f"{name}-message", waiter, "execute")
+            fixture.wait_for(lambda: action_for(store, waiter), f"{name} stoppable Action")
+            lost.append(waiter)
+        dropped = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store), "--test-drop-reply", "after-commit"],
+                                 env=stop_all_env, text=True, capture_output=True, timeout=15)
+        # The second Session is still stopped after the first reply was lost.
+        assert dropped.returncode == 1 and dropped.stdout == "", dropped
+        unconfirmed = re.findall(r"^rui: stopping (\S+)\n+request: (\S+) ", dropped.stderr, re.M)
+        assert {waiter for waiter, _ in unconfirmed} == set(lost) and len(unconfirmed) == 2, dropped
+        assert {waiter for waiter in re.findall(r"^rui: stopping (\S+) failed \(\w+\)\.$", dropped.stderr, re.M)} == set(lost), dropped
+        assert "rui: 2 of 2 stops failed." in dropped.stderr, dropped
+        for (waiter, handle) in unconfirmed:
+            fixture.wait_for(lambda: resolution(store, waiter) == "cancelled", "saved stop of a lost reply")
+            recovered = subprocess.run([str(fixture.RUI), "request", "recover", handle],
+                                       env=stop_all_env, text=True, capture_output=True, timeout=15)
+            assert recovered.returncode == 0, recovered
+            assert json.loads(recovered.stdout)["context"]["session"] == waiter, recovered
+        assert not stop_all_marker.exists()
 
         session = configure(state, store, "prelaunch-stop-config")
         fixture.message(state, store, "prelaunch-stop-message", session, "execute")
@@ -2231,7 +2289,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 30 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 34 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:
