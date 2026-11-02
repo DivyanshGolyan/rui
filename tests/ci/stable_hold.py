@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import subprocess
 
 from auto_land import CLOSING_KEYWORD, STABLE_RED, git, gh
 from report_issue import signature_state
@@ -23,7 +24,12 @@ REFERENCE = re.compile(r"\brefs?:?\s+#([0-9]+)\b", re.IGNORECASE)
 def held(repository):
     """(number, title, paths) of each open stable-red issue."""
     # REST, not `gh issue list`: GraphQL fails through the cloud sessions' proxy.
-    rows = json.loads(gh("api", f"repos/{repository}/issues?labels={STABLE_RED}&state=open&per_page=100"))
+    # Pages by hand: `gh api --paginate` also fails through that proxy.
+    rows, page = [], 1
+    while batch := json.loads(gh("api", f"repos/{repository}/issues?labels={STABLE_RED}&state=open"
+                                        f"&per_page=100&page={page}")):
+        rows += batch
+        page += 1
     return [(row["number"], row["title"], (signature_state(row["body"]) or {}).get("paths", []))
             for row in rows if "pull_request" not in row]
 
@@ -67,10 +73,21 @@ def main():
     pr.add_argument("--base", required=True)
     pr.add_argument("--head", default="HEAD")
     args = parser.parse_args()
-    issues = held(args.repository)
     if args.command == "status":
-        release = json.loads(gh("api", f"repos/{args.repository}/releases/latest"))
-        print("\n".join(status(issues, release.get("published_at"), datetime.now(timezone.utc))))
+        issues = held(args.repository)
+        try:
+            released_at = json.loads(gh("api", f"repos/{args.repository}/releases/latest"))["published_at"]
+        except subprocess.CalledProcessError:
+            released_at = None
+            print("No release found.")
+        print("\n".join(status(issues, released_at, datetime.now(timezone.utc))))
+        return
+    try:
+        issues = held(args.repository)
+    except subprocess.CalledProcessError as error:
+        # The warning never gates the policy job, so an API outage must not either.
+        print(f"::warning::Could not list open stable-red issues, so uncited fixes were not checked: "
+              f"{(error.stderr or '').strip()}")
         return
     paths, base = changed_paths(args.base, args.head)
     text = os.environ.get("PR_BODY", "") + "\n" + git("log", "--format=%B", f"{base}..{args.head}")
