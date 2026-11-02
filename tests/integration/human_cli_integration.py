@@ -2251,8 +2251,10 @@ def persistent_opening_case():
             assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 1, "failed keyed result restarted work"
             proxy.close()
             proxy = None
+        saved_keys = []
         for i in range(1, 10):
             message = admit(home, "session", "send", "--to", session, input=f"saved user {i:02d}")
+            saved_keys.append(message["request"])
             fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
         # A queued local traversal is not eligible until opening establishes its
         # cursor. Both command and inspection cancellation must retain it.
@@ -2322,6 +2324,22 @@ def persistent_opening_case():
             os.write(master, b"\x1b[6~")
             details += read_terminal(master, "Browsing · Esc returns")
         assert "literal **user** é" not in above_line(details), details
+        return_to_live(master)
+        # /requests lists the saved Messages above the input, newest first,
+        # and Enter on the empty draft reads the highlighted one's answer: no
+        # key is typed. Down passes the late Message to the one before it.
+        os.write(master, b"/requests\n")
+        read_terminal(master, "/result " + message["request"])
+        rows = [row.strip() for row in current_screen(master).split("\n") if row.strip().startswith("/result ")]
+        assert len(rows) >= 2 and rows[0].startswith("/result " + message["request"]), rows
+        before_late = rows[1].split()[1]
+        assert before_late == saved_keys[-1], (rows, saved_keys)
+        os.write(master, b"\x1b[B")
+        os.write(master, b"\r")
+        read_terminal(master, "result: completed")
+        picked = current_screen(master)
+        assert picked.startswith("Browsing · Esc returns") and "saved answer 09" in picked, picked
+        assert "late beyond captured end" not in picked, picked
         return_to_live(master)
 
         history_held = threading.Event()

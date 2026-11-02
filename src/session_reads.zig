@@ -26,7 +26,11 @@ const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
-pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
+/// Writes /requests' recovery handles, and offers each saved Message among
+/// them to the page's list.
+pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
+/// The saved Messages a /requests page offers, under the Store's key bound.
+pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
 /// Takes what /status reports of the Session from one Current capture, whose
 /// attention rows are in the first file, into the Session given. True when
 /// it differs from the shown one (always without one): the second file then
@@ -311,6 +315,8 @@ pub const Job = struct {
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
         copied: Copied = .no_answer,
+        // What a /requests page offers to act on.
+        requests: SavedRequests = .{},
         // The sent Message a recall step found, its text staged in scratch.
         recalled: ?Input.Found = null,
         // The step passed over a sent Message the draft cannot hold.
@@ -1689,7 +1695,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
         try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: " ++ comptime protocol.Provider.codex.login() ++ " in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
-        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
+        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
         try writeSubmission(job.inspection_submission, &output.interface);
     }
     try output.flush();

@@ -22,6 +22,7 @@ const preferences = @import("preferences.zig");
 const status_page = @import("status_page.zig");
 const model_capability = @import("model_capability.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
+const session_view = @import("session_view.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
@@ -2314,7 +2315,7 @@ fn decodeInteractive(input: []u8, tokens: [][]const u8, split: bool) !usize {
     return count;
 }
 
-pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer) anyerror!void {
+pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer, picks: *session_reads.SavedRequests) anyerror!void {
     const canonical = try platform.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
@@ -2345,6 +2346,13 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
         try out.writeAll(" (");
         try writeSafeTextTo(out, @tagName(saved.kind));
         try out.writeAll(")\n");
+        // A Message's answer is the one saved result the page can read.
+        if (saved.kind != .message) continue;
+        // The record just read whole, so its file time failing fails the
+        // page as a failing directory read does.
+        const saved_at = (try dir.statFile(init.io, entry.name, .{})).mtime;
+        var clock: [5]u8 = undefined;
+        picks.offer(saved_at, session_view.clock(@intCast(@max(@divFloor(saved_at.nanoseconds, std.time.ns_per_s), 0)), &clock), handle);
     }
 }
 
@@ -2373,9 +2381,10 @@ test "local recovery enumeration observes cancellation before skipping invalid r
     const requester: client.Requests = .{ .io = io, .cancellation = &token };
     var buffer: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
-    try sessionRequests(init, requester, store, "original/session", &out);
+    var picks: session_reads.SavedRequests = .{};
+    try sessionRequests(init, requester, store, "original/session", &out, &picks);
     token.requestStop();
-    try std.testing.expectError(error.Cancelled, sessionRequests(init, requester, store, "original/session", &out));
+    try std.testing.expectError(error.Cancelled, sessionRequests(init, requester, store, "original/session", &out, &picks));
 }
 
 fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {

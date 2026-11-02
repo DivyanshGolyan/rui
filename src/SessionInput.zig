@@ -111,7 +111,8 @@ pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput
     if (outcome == .refused and outcome.refused.endsLine()) self.clear();
     if (outcome != .submit) return .{ .editor = outcome };
     const bytes = self.composition().bytes;
-    if (bytes.len == 0) return .{ .editor = .none };
+    // An empty draft's Enter stays the editor's, for a list the caller shows.
+    if (bytes.len == 0) return .{ .editor = outcome };
     // A slash command stays in the draft; the caller clears it once it runs.
     // While another waits, every draft command waits too, local ones included.
     if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return if (self.command_length != null) .busy else .command;

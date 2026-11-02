@@ -135,7 +135,22 @@ fn advanceWithLaunch(self: *Self, launch: *const fn (*Self) anyerror!void) !End 
 }
 
 fn canRetry(self: *const Self, requested: [36]u8) bool {
-    return self.intent != null and self.state != .rejected and std.mem.eql(u8, &requested, &self.key);
+    const key = self.retryable() orelse return false;
+    return std.mem.eql(u8, &requested, key);
+}
+
+/// The original's key while a retry of it may go: it is not rejected.
+fn retryable(self: *const Self) ?*const [36]u8 {
+    return if (self.intent != null and self.state != .rejected) &self.key else null;
+}
+
+/// The original a retry would send now and could only send as a Message:
+/// a plain Message whose Admission is unconfirmed, with nothing in flight.
+/// Never a decision, or a Message that carries one.
+pub fn unconfirmedMessage(self: *const Self) ?*const [36]u8 {
+    const key = self.retryable() orelse return null;
+    if (self.task.thread != null or self.state != .unconfirmed or self.intent.? != .message) return null;
+    return key;
 }
 
 fn launchRetry(self: *Self) !void {

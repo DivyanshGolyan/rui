@@ -4,6 +4,7 @@
 const std = @import("std");
 const cli_args = @import("cli_args.zig");
 const model_capability = @import("model_capability.zig");
+const TerminalText = @import("TerminalText.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
 
 /// What may follow the name, after one space.
@@ -135,7 +136,7 @@ pub const conversation = Commands(ConversationName, .{
     .model = .{ .description = "this Session's model and sign-in" },
     .recover = .{ .argument = .{ .required = "KEY" }, .description = "the original request", .listed = false },
     .rename = .{ .argument = .{ .required = "NAME" }, .description = "name this Session" },
-    .requests = .{ .description = "recovery handles", .listed = false },
+    .requests = .{ .description = "recovery handles; pick one to recover it or read its answer", .listed = false },
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
     .status = .{ .description = "settings and work" },
@@ -467,6 +468,8 @@ pub const Shown = struct {
     /// last when the list narrowed under it (the model changed, say).
     highlight: usize = 0,
     seen: enum { drawn, hidden, closed } = .hidden,
+    /// What the rows came from, when not the draft alone (see `nextOf`).
+    source: u64 = 0,
 
     /// The list, `list`, for the draft at `revision`, after `previous`:
     /// while the draft is the one `previous` was built for, it keeps its
@@ -474,11 +477,21 @@ pub const Shown = struct {
     /// at its first row. It counts as drawn while the latest frame drew a
     /// list, until a frame records its own. Null when nothing matches.
     pub fn next(previous: ?Shown, revision: u64, list: ?List) ?Shown {
+        return nextOf(previous, revision, 0, list);
+    }
+
+    /// As `next`, for a list whose rows come from elsewhere than the
+    /// draft, named by `source`: rows from another source are a new list, at its first row
+    /// and not drawn until a frame draws it, so no key acts on a row the
+    /// person did not see.
+    pub fn nextOf(previous: ?Shown, revision: u64, source: u64, list: ?List) ?Shown {
         const built = list orelse return null;
         if (built.count == 0) return null;
-        const kept = previous orelse return .{ .list = built, .revision = revision };
-        if (kept.revision != revision) return .{ .list = built, .revision = revision, .seen = if (kept.seen == .drawn) .drawn else .hidden };
-        return .{ .list = built, .revision = revision, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
+        const fresh: Shown = .{ .list = built, .revision = revision, .source = source };
+        const kept = previous orelse return fresh;
+        if (kept.source != source) return fresh;
+        if (kept.revision != revision) return .{ .list = built, .revision = revision, .source = source, .seen = if (kept.seen == .drawn) .drawn else .hidden };
+        return .{ .list = built, .revision = revision, .source = source, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
     }
 
     /// The list Enter, Esc and the arrows act on: `stored`, the latest
@@ -515,6 +528,175 @@ pub const Shown = struct {
         self.highlight = if (down) @min(self.highlight + 1, self.list.count - 1) else self.highlight -| 1;
     }
 };
+
+const recover_command = "/" ++ @tagName(ConversationName.recover);
+/// The /recover line's room: the conversation's own key is a UUID.
+pub const recover_line_bytes = recover_command.len + " ".len + 36;
+
+/// The row a conversation's /requests page shows for its own unconfirmed
+/// original: the `/recover KEY` line that retries it, as Ctrl-R does. The
+/// caller decides that the original can be retried now, and owns `buffer`.
+pub fn recoverEntry(buffer: *[recover_line_bytes]u8, key: *const [36]u8) Entry {
+    const line = std.fmt.bufPrint(buffer, recover_command ++ " {s}", .{key}) catch unreachable;
+    return .{ .word = line, .shown = line, .description = "retry this unconfirmed original, as Ctrl-R does" };
+}
+
+/// A conversation's /requests rows for its saved Messages, newest saved
+/// first: each the `/result KEY` line that reads its answer, so a pick does
+/// what typing it does. `max_key_bytes` is the Store's bound on a key.
+pub fn Requests(comptime max_key_bytes: usize) type {
+    return struct {
+        rows: [capacity]Row = undefined,
+        count: usize = 0,
+
+        const Self = @This();
+        /// The list's rows, less one for the original's /recover row.
+        pub const capacity = List.capacity - 1;
+        const result_command = "/" ++ @tagName(ConversationName.result);
+        const line_bytes = result_command.len + " ".len + max_key_bytes;
+        const description = "read this Message's saved answer";
+        const description_bytes = "00:00 · ".len + description.len;
+
+        const Row = struct {
+            line: [line_bytes]u8,
+            line_length: usize,
+            description: [description_bytes]u8,
+            description_length: usize,
+            /// When the request was saved; newer rows come first.
+            saved: std.Io.Timestamp,
+
+            fn key(self: *const Row) []const u8 {
+                return self.line[result_command.len + 1 .. self.line_length];
+            }
+        };
+
+        /// A saved Message, saved at `saved` and shown at `clock`, its local
+        /// `HH:MM`; the shell passes null when the C library cannot give
+        /// one, and the row then says no time. Only the newest fit.
+        pub fn offer(self: *Self, saved: std.Io.Timestamp, clock: ?[]const u8, key: []const u8) void {
+            if (key.len > max_key_bytes) return;
+            var row: Row = .{ .line = undefined, .line_length = 0, .description = undefined, .description_length = 0, .saved = saved };
+            row.line_length = (std.fmt.bufPrint(&row.line, result_command ++ " {s}", .{key}) catch unreachable).len;
+            if (!admits(row.line[0..row.line_length], key)) return;
+            const said = if (clock) |time| std.fmt.bufPrint(&row.description, "{s} · " ++ description, .{time}) else std.fmt.bufPrint(&row.description, description, .{});
+            row.description_length = (said catch unreachable).len;
+            var at = self.count;
+            while (at > 0 and newer(&row, &self.rows[at - 1])) at -= 1;
+            if (at == capacity) return;
+            const kept = @min(self.count, capacity - 1);
+            std.mem.copyBackwards(Row, self.rows[at + 1 .. kept + 1], self.rows[at..kept]);
+            self.rows[at] = row;
+            self.count = kept + 1;
+        }
+
+        /// A key the parser reads back from `line` as its one word, and
+        /// one the list can draw: no control or direction character.
+        fn admits(line: []const u8, key: []const u8) bool {
+            const parsed = conversation.parse(line);
+            if (parsed != .command or !std.mem.eql(u8, parsed.command.argument, key)) return false;
+            if (std.mem.indexOfScalar(u8, key, ' ') != null) return false;
+            var at: usize = 0;
+            while (at < key.len) {
+                const length = std.unicode.utf8ByteSequenceLength(key[at]) catch return false;
+                if (length > key.len - at) return false;
+                const scalar = std.unicode.utf8Decode(key[at..][0..length]) catch return false;
+                if (TerminalText.isControl(scalar)) return false;
+                at += length;
+            }
+            return true;
+        }
+
+        /// Newest first; the key orders saves of the same moment.
+        fn newer(row: *const Row, than: *const Row) bool {
+            if (row.saved.nanoseconds != than.saved.nanoseconds) return row.saved.nanoseconds > than.saved.nanoseconds;
+            return std.mem.order(u8, row.key(), than.key()) == .lt;
+        }
+
+        /// The rows as the list an empty draft shows, after `lead`, the
+        /// original's /recover row when it can be retried now; a saved
+        /// Message that is that original has only that row. Null when
+        /// there is no row.
+        pub fn list(self: *const Self, lead: ?Entry) ?List {
+            var shown: List = .{ .typed = "" };
+            const original = if (lead) |entry| entry.word[recover_command.len + 1 ..] else "";
+            if (lead) |entry| shown.add(entry);
+            for (self.rows[0..self.count]) |*row| {
+                if (std.mem.eql(u8, row.key(), original)) continue;
+                shown.add(.{ .word = row.line[0..row.line_length], .shown = row.line[0..row.line_length], .description = row.description[0..row.description_length] });
+            }
+            return if (shown.count == 0) null else shown;
+        }
+    };
+}
+
+test "a /requests list keeps the newest saved Messages, after the original's /recover row" {
+    const Saved = Requests(128);
+    const key = "01234567-89ab-4cde-8012-0123456789ab";
+    var requests: Saved = .{};
+    // More Messages than fit, offered out of order, and the original among them.
+    const total = Saved.capacity + 5;
+    comptime std.debug.assert(std.math.gcd(11, total) == 1);
+    var keys: [total][36]u8 = undefined;
+    for (0..total) |index| {
+        const order = (index * 11) % total;
+        _ = std.fmt.bufPrint(&keys[order], "{x:0>8}-89ab-4cde-8012-0123456789ab", .{order}) catch unreachable;
+        requests.offer(.{ .nanoseconds = @as(i96, @intCast(order)) * 60_000_000_000 }, "12:34", &keys[order]);
+    }
+    requests.offer(.{ .nanoseconds = 1 << 60 }, null, key);
+    try std.testing.expectEqual(Saved.capacity, requests.count);
+    var recover_line: [recover_line_bytes]u8 = undefined;
+    const shown = requests.list(recoverEntry(&recover_line, key)).?;
+    // The original, the newest saved, shows only as its /recover row.
+    try std.testing.expectEqual(Saved.capacity, shown.count);
+    try std.testing.expectEqualStrings("/recover " ++ key, shown.entries[0].word);
+    try std.testing.expectEqualStrings("retry this unconfirmed original, as Ctrl-R does", shown.entries[0].description);
+    try std.testing.expectEqualStrings(key, conversation.parse(shown.entries[0].word).command.argument);
+    for (shown.shown()[1..], 1..) |entry, index| {
+        const newest = &keys[total - index];
+        var expected: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/result {s}", .{newest}), entry.word);
+        try std.testing.expectEqualStrings(entry.word, entry.shown);
+        try std.testing.expectEqualStrings("12:34 · read this Message's saved answer", entry.description);
+        // Enter runs the whole line, which parses back to the key.
+        try std.testing.expectEqualStrings(entry.word, shown.enter(index).rest);
+        try std.testing.expect(shown.enter(index).runs);
+        try std.testing.expectEqualStrings(newest, conversation.parse(entry.word).command.argument);
+    }
+    // Without the /recover row, the original is a saved Message like any
+    // other, and the newest.
+    const without = requests.list(null).?;
+    try std.testing.expectEqual(Saved.capacity, without.count);
+    try std.testing.expectEqualStrings("/result " ++ key, without.entries[0].word);
+    try std.testing.expectEqualStrings("read this Message's saved answer", without.entries[0].description);
+}
+
+test "rows from elsewhere than the draft that change are a new list, which no key acts on until a frame draws it" {
+    var requests: Requests(8) = .{};
+    requests.offer(.{ .nanoseconds = 1 }, null, "older");
+    requests.offer(.{ .nanoseconds = 2 }, null, "newer");
+    var stored = Shown.nextOf(null, 1, 7, requests.list(null));
+    stored.?.drew(true);
+    Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 7, requests.list(null))).?.move(true);
+    try std.testing.expectEqualStrings("/result older", Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 7, requests.list(null))).?.completion());
+    // The same draft over other rows: nothing to act on, and the first row
+    // once a frame draws them.
+    try std.testing.expect(Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 8, requests.list(null))) == null);
+    try std.testing.expectEqual(@as(usize, 0), stored.?.highlight);
+    stored.?.drew(true);
+    try std.testing.expectEqualStrings("/result newer", Shown.drawnNow(&stored, Shown.nextOf(stored, 1, 8, requests.list(null))).?.completion());
+}
+
+test "a /requests list takes only keys the parser reads back as one word the list can draw" {
+    const Saved = Requests(8);
+    var requests: Saved = .{};
+    try std.testing.expect(requests.list(null) == null);
+    for ([_][]const u8{ "", " ab", "ab ", "a b", "a\x1bb", "a\u{202e}b", "a\xffb", "a\xc3", "123456789" }) |key| requests.offer(.zero, null, key);
+    try std.testing.expect(requests.list(null) == null);
+    for ([_][]const u8{ "café", "a\"b'c\\d", "12345678" }) |key| requests.offer(.zero, null, key);
+    const shown = requests.list(null).?;
+    try std.testing.expectEqual(@as(usize, 3), shown.count);
+    for (shown.shown()) |entry| try std.testing.expectEqualStrings(entry.word["/result ".len..], conversation.parse(entry.word).command.argument);
+}
 
 test "a command admits exactly the arguments its shape names" {
     const cases = .{
