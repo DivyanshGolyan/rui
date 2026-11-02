@@ -71,6 +71,9 @@ copy_shift: ?i64 = null,
 // The live offset the copy starts at: rows above it are older pages and
 // labels, not live rows.
 copy_front: u64 = 0,
+// For a transcript of newer pages, the first row no frame drew in the run
+// frames drew from its top, at an absolute offset; null otherwise.
+newer_drawn: ?Position = null,
 // Rows asked for above the transcript's top while an older page loads; the
 // page applies them, so holding PgUp or the wheel keeps moving.
 overscroll: usize = 0,
@@ -378,6 +381,7 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
     self.browsing.top = null;
     self.copy_shift = 0;
     self.copy_front = self.browsing.origin;
+    self.newer_drawn = null;
 }
 
 /// Starts an empty transcript at its top, which newer pages then fill.
@@ -390,6 +394,7 @@ pub fn beginNewer(self: *Self) void {
     self.enterTranscript(true);
     self.browsing.top = .{};
     self.copy_shift = null;
+    self.newer_drawn = .{};
 }
 
 fn enterTranscript(self: *Self, apart: bool) void {
@@ -403,15 +408,14 @@ fn enterTranscript(self: *Self, apart: bool) void {
 }
 
 /// Appends one newer page, rendered to `file`, below the transcript without
-/// moving the rows in view. Returns false when text no frame showed left
-/// the transcript's front to make room.
+/// moving the rows in view. Returns false when text no frame drew left the
+/// transcript's front to make room.
 pub fn appendFile(self: *Self, io: std.Io, file: std.Io.File) !bool {
     std.debug.assert(self.view == .transcript);
     const document = &self.browsing;
     try document.prepare();
     const first = document.first(self.textLayout(), self.height);
     const top = document.origin + first.offset;
-    const unshown = document.origin + document.length;
     const length = (try file.stat(io)).size;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
@@ -423,7 +427,28 @@ pub fn appendFile(self: *Self, io: std.Io, file: std.Io.File) !bool {
     }
     try document.prepare();
     document.top = if (top >= document.origin) .{ .offset = @intCast(top - document.origin), .row = first.row } else .{};
-    return document.origin <= unshown;
+    return document.origin <= self.newer_drawn.?.offset;
+}
+
+/// Joins the rows the latest frame drew to those frames drew from the top
+/// of a transcript of newer pages, and says whether they reach its end.
+/// Rows that moves between two frames passed over never join.
+pub fn drewNewer(self: *Self) !bool {
+    if (self.view != .transcript) return false;
+    const drawn = &(self.newer_drawn orelse return false);
+    const document = &self.browsing;
+    try document.prepare();
+    const layout = self.textLayout();
+    const first = document.first(layout, self.height);
+    if ((Position{ .offset = @intCast(document.origin + first.offset), .row = first.row }).order(drawn.*) == .gt) return false;
+    if (document.atBottom(layout, self.height)) {
+        drawn.* = .{ .offset = @intCast(document.origin + document.text().len) };
+        return true;
+    }
+    const next = document.down(layout, first, self.height);
+    const reached: Position = .{ .offset = @intCast(document.origin + next.offset), .row = next.row };
+    if (reached.order(drawn.*) == .gt) drawn.* = reached;
+    return false;
 }
 
 /// The transcript shows its last row.

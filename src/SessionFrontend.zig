@@ -154,8 +154,7 @@ transcript: struct {
     // a copy of live output: where its next page starts, null once it holds
     // the opening's end, and the position its rows show every row through.
     newer: ?reads.Newer = null,
-    // A newer page pushed out rows no frame showed: `newer.through` stays
-    // before them for the rest of this transcript.
+    // A newer page pushed out rows no frame drew, and the notice said so.
     newer_skipped: bool = false,
 } = .{},
 // What this visit has seen of the conversation, for "new since you looked".
@@ -804,10 +803,10 @@ fn driveActive(self: *Self) !void {
             if (self.reader.thread != null) {} else if (self.olderWanted()) {
                 self.notice = "Loading earlier messages…";
                 try self.launch(self.freeze(.history), reads.history);
-            } else if (self.newerWanted()) |cursor| {
+            } else if (self.newerWanted()) |newer| {
                 self.notice = "Loading newer messages…";
                 const job = self.freeze(.history);
-                job.target = .{ .newer = cursor };
+                job.target = .{ .newer = newer };
                 try self.launch(job, reads.history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 try self.launch(self.freeze(.activity), reads.scan);
@@ -912,7 +911,7 @@ fn drawFrame(self: *Self) !void {
     // What this frame showed of the conversation.
     if (screen.view == .live and !self.reading.opening and self.live.cursor.end == null)
         self.seen.live(if (self.seen.live_from) |at| screen.liveShows(at) else false, self.live.cursor.position, try screen.liveEnd());
-    if (self.transcript.newer) |newer| if (screen.transcriptAtBottom()) self.seen.transcript(newer.through);
+    if (self.transcript.newer) |newer| if (try screen.drewNewer()) self.seen.transcript(newer.through);
     // A copy of live output can show rows no live frame did: more than a
     // screen arrived between frames.
     if (try screen.transcriptLiveSpan()) |span| self.seen.drew(span.start, span.end);
@@ -1260,12 +1259,12 @@ fn olderWanted(self: *const Self) bool {
     return (self.transcript.plan.next() != null or self.transcript.older != null) and !self.transcript.load_failed and self.terminal.screen.transcriptAtTop() and !self.reading.opening;
 }
 
-/// Where the next page of rows after the read-through position starts, once
-/// the transcript of them shows its end.
-fn newerWanted(self: *const Self) ?protocol_reply.ActivityCursor {
+/// The next page of rows after the read-through position, once the
+/// transcript of them shows its end.
+fn newerWanted(self: *const Self) ?reads.Newer {
     const newer = self.transcript.newer orelse return null;
-    if (self.transcript.load_failed or self.reading.opening or !self.terminal.screen.transcriptAtBottom()) return null;
-    return newer.next;
+    if (newer.next == null or self.transcript.load_failed or self.reading.opening or !self.terminal.screen.transcriptAtBottom()) return null;
+    return newer;
 }
 
 /// Opens the conversation at the "new since you looked" rule, on a
@@ -1308,7 +1307,8 @@ fn showNewer(self: *Self) !void {
         self.dirty = true;
     }
     newer.next = result.newer.next;
-    if (!self.transcript.newer_skipped) newer.through = result.newer.through;
+    newer.taking = result.newer.taking;
+    newer.through = result.newer.through;
 }
 
 /// The position for leaving to record, once: how far this visit's frames
@@ -3133,4 +3133,46 @@ test "Ctrl-X twice stops the open Session through the overview; any other key on
     try sendKeys(&held.self, "\x18");
     try std.testing.expect(!overview.asking);
     try std.testing.expectEqualStrings("Ctrl-X stops the Session once it opens.", try Bottom.row(held, &storage));
+}
+
+test "a newer transcript counts as seen only once frames drew every row, whatever keys arrived between them" {
+    const page_down = "\x1b[6~";
+    for ([_]usize{ 1, 4 }) |presses| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try held.settle();
+        const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+        defer page.close(std.testing.io);
+        var line: [16]u8 = undefined;
+        for (0..200) |row| try page.writePositionalAll(std.testing.io, try std.fmt.bufPrint(&line, "row {d:0>3}\n", .{row}), row * 8);
+        // Rows after position 20 run through 60, every one unseen.
+        self.seen = .open(20, 60, .older, try held.screen.liveEnd());
+        held.screen.beginNewer();
+        try std.testing.expect(try held.screen.appendFile(std.testing.io, page));
+        self.transcript.newer = .{ .next = null, .through = 60 };
+        self.dirty = true;
+        try held.settle();
+        while (!held.screen.transcriptAtBottom()) {
+            // A press past the end would leave for live output.
+            for (0..presses) |_| if (!held.screen.transcriptAtBottom()) try sendKeys(self, page_down);
+            try held.settle();
+        }
+        if (presses == 1) {
+            try std.testing.expectEqual(@as(?u64, 60), self.takeSeen());
+            continue;
+        }
+        // Presses read before one frame passed over screens no frame drew.
+        try std.testing.expectEqual(@as(?u64, null), self.takeSeen());
+        // Paging back up draws them; the end then shows every row.
+        while (!held.screen.transcriptAtTop()) {
+            try sendKeys(self, "\x1b[5~");
+            try held.settle();
+        }
+        while (!held.screen.transcriptAtBottom()) {
+            try sendKeys(self, page_down);
+            try held.settle();
+        }
+        try std.testing.expectEqual(@as(?u64, 60), self.takeSeen());
+    }
 }

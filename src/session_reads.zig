@@ -181,15 +181,22 @@ pub const Target = union(enum) {
     listing: Listing,
     /// This collapsed block's Message, in full.
     message: View.Collapsed,
-    /// The conversation after this cursor, for the end of the transcript
+    /// The conversation after its `next`, for the end of the transcript
     /// that starts at the "new since you looked" rule.
-    newer: protocol_reply.ActivityCursor,
+    newer: Newer,
 };
 
 /// How far a transcript of the rows after the read-through position
 /// reaches: where its next page starts, null once it holds the opening's
 /// end, and the position its rows show every row through.
-pub const Newer = struct { next: ?protocol_reply.ActivityCursor, through: u64 };
+pub const Newer = struct {
+    next: ?protocol_reply.ActivityCursor,
+    through: u64,
+    /// What the next page takes from the pages before it, as each live
+    /// read does from the last: a stop there may exclude a Message admitted
+    /// on an earlier page. Null for the first page.
+    taking: ?View.Taking = null,
+};
 
 pub const Job = struct {
     init: std.process.Init = undefined,
@@ -497,8 +504,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
-    const from: ?u64 = if (job.queued.count != 0) job.queued.oldest_position - 1 else null;
-    job.drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = from });
+    job.drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) });
     // One shown at its Admission is delivered too.
     job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     if (output.rule_at) |offset| job.result.rule = .{ .at = offset };
@@ -550,7 +556,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     if (!latest) switch (job.target) {
         .older => {},
         .listing => |step| return list(job, task, step),
-        .newer => |cursor| return newer(job, task, cursor),
+        .newer => |state| return newer(job, task, state),
         .message => unreachable,
     };
     const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
@@ -567,8 +573,10 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
 /// output shows it, for the end of the transcript that starts at the "new
 /// since you looked" rule. The first page, which follows the read-through
 /// position itself, starts with the rule.
-fn newer(job: *Job, task: *Task, cursor: protocol_reply.ActivityCursor) !void {
+fn newer(job: *Job, task: *Task, state: Newer) !void {
     const requests = task.requests();
+    const cursor = state.next.?;
+    const taking = state.taking orelse View.Taking{ .drawn = .{}, .from = try waitingFrom(requests, job, cursor.position) };
     const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
         .page => |page| page,
         .failure => |failure| return requests.failRead(failure),
@@ -578,11 +586,27 @@ fn newer(job: *Job, task: *Task, cursor: protocol_reply.ActivityCursor) !void {
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .end = page.facts.end, .colour = job.colour };
     if (cursor.ordinal == null) try output.rule();
     var compact = false;
-    _ = try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact, .{ .drawn = .{}, .from = null });
+    const drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact, taking);
     _ = output.finish();
     const next = page.continuation();
     // Later rows of a page's last position may be on the next page.
-    job.result.newer = .{ .next = next, .through = if (next) |after| @max(after.position - 1, cursor.position) else page.facts.end };
+    job.result.newer = .{ .next = next, .through = if (next) |after| @max(after.position - 1, cursor.position) else page.facts.end, .taking = .{ .drawn = drawn, .from = searchFrom(page.facts.queued) } };
+}
+
+/// Where a stop's search for the Messages it excluded begins, for those
+/// waiting at `position`: the first newer page's Taking.from.
+fn waitingFrom(requests: client.Requests, job: *const Job, position: u64) !?u64 {
+    if (position == 0) return null;
+    const page = switch (try requests.activityPage(job.store, job.session, .{ .end = position, .position = position - 1 })) {
+        .page => |page| page,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    return searchFrom(page.facts.queued);
+}
+
+/// A position before the Admission of every Message in `queued`.
+fn searchFrom(queued: protocol.Queued) ?u64 {
+    return if (queued.count != 0) queued.oldest_position - 1 else null;
 }
 
 /// Renders one listed Message, bound to its item's length and digest, and
@@ -1871,7 +1895,7 @@ const FakeHost = struct {
         const boundary = if (direction == .forward and facts.more) facts.items[facts.count - 1].position else end;
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
-            const value = self.item(at, end).value;
+            const value = self.item(at, boundary).value;
             if (value != .admission or value.admission.state != .queued or value.admission.sender != null) continue;
             if (facts.queued.count == 0) facts.queued.oldest_position = at;
             facts.queued.count += 1;
@@ -1949,6 +1973,10 @@ const FakeHost = struct {
     /// Runs `job` as a read against this Host at a Store it serves; what it
     /// showed is then in `shown`.
     fn read(self: *FakeHost, job: *Job) !void {
+        return self.readWith(job, scan);
+    }
+
+    fn readWith(self: *FakeHost, job: *Job, work: fn (*anyopaque, *Task) anyerror!void) !void {
         const io = std.testing.io;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
@@ -1976,7 +2004,7 @@ const FakeHost = struct {
         job.store = root;
         job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection };
         var task: Task = .{ .io = io };
-        try scan(job, &task);
+        try work(job, &task);
         self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
     }
 };
@@ -2053,4 +2081,33 @@ test "a stop labels a Message that showed while it waited at the opening" {
     try host.read(&live);
     try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Stopped before it ran · send it again to run it") != null);
     try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Session stopped.") != null);
+}
+
+test "a stop on a newer page labels a Message admitted before that page, on an earlier one or before the rule" {
+    // Rows 1 to 35 are done; A, admitted at 36, waits until the stop at 37
+    // excludes it. The transcript after the read-through position shows A
+    // only where the stop labels it.
+    const tail = [_]FakeHost.Tail{
+        .{ .value = FakeHost.message(1), .excluded_at = 37 },
+        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } } },
+    };
+    const labelled = "! Stopped before it ran · send it again to run it";
+    // Read through 20: the first page ends at A, the next holds the stop.
+    var host: FakeHost = .{ .history = 35, .tail = &tail, .end = 37, .read_through = 20 };
+    var first: Job = .{ .session = "k7m2qx", .phase = .history, .target = .{ .newer = .{ .next = .{ .end = 37, .position = 20 }, .through = 20 } } };
+    try host.readWith(&first, history);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "please wait") == null);
+    try std.testing.expect(first.result.newer.next != null);
+    var second: Job = .{ .session = "k7m2qx", .phase = .history, .target = .{ .newer = first.result.newer } };
+    try host.readWith(&second, history);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, labelled) != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "please wait"));
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Session stopped.") != null);
+    // Read through A: the stop is on the first page.
+    var seen: FakeHost = .{ .history = 35, .tail = &tail, .end = 37, .read_through = 36 };
+    var opening: Job = .{ .session = "k7m2qx", .phase = .history, .target = .{ .newer = .{ .next = .{ .end = 37, .position = 36 }, .through = 36 } } };
+    try seen.readWith(&opening, history);
+    try std.testing.expect(std.mem.startsWith(u8, seen.shown, unseen.rule));
+    try std.testing.expect(std.mem.indexOf(u8, seen.shown, labelled) != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, seen.shown, "please wait"));
 }
