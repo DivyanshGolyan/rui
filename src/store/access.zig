@@ -48,6 +48,7 @@ pub const Failure = error{
     TooManyPositionClaims,
     RoundFull,
     StatementQueuedTwice,
+    ContentNotInserted,
 };
 
 /// A Session's positions claimed by one Access, from its head as a round
@@ -122,6 +123,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// None in a read Access, which claims no positions.
         claims: [if (mode == .read) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
+        /// The last `content_id` this Access took: the one row
+        /// `contentSink` opens.
+        content_id: u64 = 0,
 
         /// No transition takes positions in more Sessions than the change
         /// ring tracks; touching more only degrades the ring's record.
@@ -228,7 +232,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             comptime std.debug.assert(mode != .read);
             a.ensureOpen();
             if (a.failure) |err| return err;
-            return store_core.takeIdentity(a.store, column);
+            const id = try store_core.takeIdentity(a.store, column);
+            if (column == .content_id) a.content_id = id;
+            return id;
         }
 
         /// Queues writing `bytes` into the payload of the content row
@@ -245,8 +251,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Reads exactly `destination.len` bytes of the content row
         /// `content_id`'s payload at `offset`, as a round of its own,
         /// through the Store's one reused blob handle, which the Entry
-        /// closes.
+        /// closes. Nothing may be queued, in every build.
         pub fn readRaw(a: *Self, content_id: u64, offset: u64, destination: []u8) Error!void {
+            if (a.queued != 0) @panic("readRaw is a round of its own; run what is queued first");
             if (a.failure) |err| return err;
             if (destination.len == 0) return;
             if (offset > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
@@ -266,11 +273,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// A sink for the payload of the content row `content_id`, which
-        /// a write of this Access inserted and a round has run. It writes
-        /// into the open transaction, so the bytes commit with the row.
+        /// must be the last id this Access took (`identity(.content_id)`),
+        /// with nothing queued: so its row is the one this Access inserted
+        /// and a round has run, or none. Any other id is
+        /// `ContentNotInserted`. It writes into the open transaction, so
+        /// the bytes commit with the row.
         pub fn contentSink(a: *Self, content_id: u64) Error!ContentSink {
             comptime std.debug.assert(mode != .read);
             if (a.failure) |err| return err;
+            if (content_id == 0 or content_id != a.content_id or a.queued != 0) return error.ContentNotInserted;
             var blob: ?*c.sqlite3_blob = null;
             if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
             return .{ .blob = blob.? };

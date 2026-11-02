@@ -1201,6 +1201,33 @@ const TestingRound = struct {
     }
 };
 
+test "a content sink opens only the row its Access last took, once its insert ran" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "sink-config");
+    // A row a committed configure inserted, not this Access.
+    const existing: u64 = @intCast((try store_core.readSessionForTesting(&storage, session.slice())).?.instructions_id.?);
+
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{}) = .open(&entry);
+    defer a.deinit();
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
+    const id = try a.identity(.content_id);
+    const digest = protocol.contentDigest("sink");
+    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 4 });
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(id));
+    try a.run();
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
+    const sink = try a.contentSink(id);
+    try sink.write("sink", 0);
+    sink.close();
+    try a.abandon(.{});
+}
+
 test "the tables that carry Sessions are exactly the ones the touch oracle watches" {
     inline for (store_schema.tables) |table| {
         const watched = comptime for (sqlite.touch_oracle_owners) |owner| {
