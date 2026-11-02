@@ -2056,7 +2056,7 @@ const FakeHost = struct {
         const inspection = try tmp.dir.createFile(io, "inspection", .{ .read = true });
         defer inspection.close(io);
         job.store = root;
-        job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection };
+        job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
         var task: Task = .{ .io = io };
         try work(job, &task);
         self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
