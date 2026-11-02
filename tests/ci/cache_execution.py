@@ -2,6 +2,8 @@
 """A warm compile cache must never replace execution of selected Zig tests."""
 import subprocess
 
+from run_selected import TEST_TIMEOUT
+
 
 def main():
     # A fixed seed exposes cached acceptance; changing random seeds can conceal it.
@@ -10,7 +12,8 @@ def main():
     for target in ("test-logic", "test", "test-full"):
         for attempt in range(2):
             result = subprocess.run(
-                ["zig", "build", target, "-Dtest-filter=TerminalText", "--seed=0", "--summary", "all"],
+                ["zig", "build", target, "-Dtest-filter=TerminalText", "--seed=0", "--summary", "all",
+                 "--test-timeout", TEST_TIMEOUT],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
             print(result.stdout, end="", flush=True)

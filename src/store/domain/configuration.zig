@@ -261,15 +261,15 @@ pub fn configureLocked(
     if (command.require_model and !try servesProvider(self, &command.configuration, command.session.slice())) {
         return try saveConfigurationRejection(self, command, &digest, .model_capability_unavailable, faults);
     }
-    const applied = switch (try applyConfiguration(self, command.key.slice(), command.session.slice(), &command.configuration, faults)) {
+    const applied = switch (try applyConfiguration(self, command.session.slice(), &command.configuration, faults)) {
         .rejected => |code| return saveConfigurationRejection(self, command, &digest, code, faults),
         .accepted => |value| value,
     };
-    try command_domain.insertCommand(
+    try insertConfiguredCommand(
         self,
+        &applied,
         command.key.slice(),
         .configure,
-        applied.session.slice(),
         &digest,
         applied.instructions_id,
         applied.output_schema_id,
@@ -280,22 +280,27 @@ pub fn configureLocked(
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
 }
 
+/// Settings `applyConfiguration` wrote to a Session, whose revision row
+/// `insertConfiguredCommand` records with the command.
+pub const Applied = struct {
+    session: protocol.Bounded(protocol.max_session_bytes),
+    revision: u64,
+    instructions_id: ?i64,
+    output_schema_id: ?i64,
+    instructions_updated: bool,
+};
+
 /// Applies settings within the caller's transaction. Creation and its
 /// first Message can share this owner without an intermediate commit.
 /// An empty `session` creates one; the answer names the Session either way.
+/// The caller records an accepted answer with `insertConfiguredCommand`.
 pub fn applyConfiguration(
     self: *Store,
-    key: []const u8,
     session: []const u8,
     configuration: *const protocol.Configuration,
     faults: Faults,
 ) !union(enum) {
-    accepted: struct {
-        session: protocol.Bounded(protocol.max_session_bytes),
-        revision: u64,
-        instructions_id: ?i64,
-        output_schema_id: ?i64,
-    },
+    accepted: Applied,
     rejected: protocol.ConfigurationRejection,
 } {
     const creating = session.len == 0;
@@ -390,18 +395,12 @@ pub fn applyConfiguration(
         try target.set(session);
         try updateSession(self, target.slice(), &next);
     }
-    try insertRevision(
-        self,
-        target.slice(),
-        key,
-        &next,
-        created or configuration.instructions.state == .value,
-    );
     return .{ .accepted = .{
         .session = target,
         .revision = next.revision,
         .instructions_id = command_instructions_id,
         .output_schema_id = command_output_schema_id,
+        .instructions_updated = created or configuration.instructions.state == .value,
     } };
 }
 
@@ -504,11 +503,18 @@ pub fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*prot
 }
 
 pub fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-    const statement = try store_core.cached(self, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,unixepoch()) ON CONFLICT(session_ref) DO NOTHING");
+    // created_seq is max+1 inside the creating transaction; a Workspace's
+    // key is the created_seq of its first Session. A bare max() subquery
+    // seeks the key's last entry; an aggregate in FROM would scan it.
+    const statement = try store_core.cached(self, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key) " ++
+        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,unixepoch(),allocated.seq,coalesce((SELECT workspace_key FROM session WHERE workspace_digest=?16 AND workspace=?2 LIMIT 1),allocated.seq) " ++
+        "FROM (SELECT coalesce((SELECT max(created_seq) FROM session),0)+1 AS seq) allocated WHERE true ON CONFLICT(session_ref) DO NOTHING");
     defer sqlite.resetCached(statement);
     try bindSettings(statement, session_ref, current);
     try sqlite.bindU64(statement, 9, current.next_position);
     try sqlite.bindText(statement, 15, @tagName(current.provider.codec()));
+    var digest: [32]u8 = undefined;
+    try store_core.bindWorkspace(statement, 16, 2, current.workspace.slice(), &digest);
     try sqlite.expectDone(statement);
     if (c.sqlite3_changes(self.database) != 1) return false;
     try store_core.touch(self, session_ref);
@@ -517,38 +523,40 @@ pub fn insertSession(self: *Store, session_ref: []const u8, current: *const Curr
 
 fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
     try store_core.touch(self, session_ref);
-    const statement = try store_core.cached(self, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
+    const statement = try store_core.cached(self, "UPDATE session SET model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try bindSettings(statement, session_ref, current);
     try sqlite.expectDone(statement);
     if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
 }
 
-fn insertRevision(
+/// Inserts the command row that carries `applied`, then the Session's
+/// revision row, which references it: the one writer of session_revision.
+pub fn insertConfiguredCommand(
     self: *Store,
-    session_ref: []const u8,
-    command_key: []const u8,
-    current: *const CurrentConfiguration,
-    instructions_updated: bool,
+    applied: *const Applied,
+    key: []const u8,
+    kind: protocol.CommandKind,
+    digest: *const [32]u8,
+    primary_content_id: ?i64,
+    secondary_content_id: ?i64,
+    answer: StoredAnswer,
 ) !void {
-    const statement = try store_core.cached(self, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)");
+    try command_domain.insertCommand(self, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
+    try insertRevision(self, applied.session.slice(), key, applied.instructions_updated);
+}
+
+/// Records the Session's settings as written under `command_key`, which
+/// must already exist: the revision row copies the Session row.
+fn insertRevision(self: *Store, session_ref: []const u8, command_key: []const u8, instructions_updated: bool) !void {
+    const statement = try store_core.cached(self, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label FROM session WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindU64(statement, 2, current.revision);
-    try sqlite.bindText(statement, 3, command_key);
-    try sqlite.bindText(statement, 4, current.workspace.slice());
-    try sqlite.bindText(statement, 5, current.model.slice());
-    try sqlite.bindNullableI64(statement, 6, current.instructions_id);
-    try sqlite.bindI64(statement, 7, @as(i64, if (instructions_updated) 1 else 0));
-    try sqlite.bindI64(statement, 8, current.tools_mask);
-    try sqlite.bindI64(statement, 9, current.permission_mode);
-    try sqlite.bindNullableI64(statement, 10, current.output_schema_id);
-    try sqlite.bindText(statement, 11, @tagName(current.provider));
-    try sqlite.bindNullableU64(statement, 12, current.compaction_trigger);
-    try sqlite.bindNullableU64(statement, 13, current.output_reservation);
-    try sqlite.bindNullableEffort(statement, 14, current.reasoning_effort);
-    try sqlite.bindOptionalLabel(statement, 15, &current.label);
+    try sqlite.bindText(statement, 2, command_key);
+    try sqlite.bindI64(statement, 3, @as(i64, if (instructions_updated) 1 else 0));
     try sqlite.expectDone(statement);
+    if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
 }
 
 /// Whether `supplied` canonicalizes to `existing`. Its canonical path
@@ -573,11 +581,11 @@ fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *protocol.Bo
     destination.len = length;
 }
 
-/// Binds every session column except `next_position` (?9), which only
+/// Binds every session column a configuration sets except the Workspace
+/// (?2), which only creation writes, and `next_position` (?9), which only
 /// `claimSessionPositions` advances.
 fn bindSettings(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *const CurrentConfiguration) !void {
     try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindText(statement, 2, current.workspace.slice());
     try sqlite.bindText(statement, 3, current.model.slice());
     try sqlite.bindNullableI64(statement, 4, current.instructions_id);
     try sqlite.bindI64(statement, 5, current.tools_mask);

@@ -24,6 +24,8 @@ import sys
 import tempfile
 import time
 
+from run_selected import TEST_TIMEOUT
+
 
 @dataclasses.dataclass(frozen=True)
 class Check:
@@ -37,7 +39,7 @@ class Check:
                     "--cache", str(Path(environment["ZIG_LOCAL_CACHE_DIR"]) / "sequence-model"),
                     "--selector", self.name.removeprefix("TD1 sequence model ")]
         return ["zig", "build", self.target, "-j2", "-Dtest-filter=" + self.name,
-                "--summary", "all", "--verbose"]
+                "--summary", "all", "--verbose", "--test-timeout", TEST_TIMEOUT]
 
 
 @dataclasses.dataclass(frozen=True)
