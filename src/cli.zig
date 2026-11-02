@@ -1796,11 +1796,16 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
         else => |mode| @tagName(mode),
     });
     {
-        const origin = if (work.settings.compaction_trigger_override != null) "Session override" else "model default";
+        const origin = if (work.settings.compaction_trigger_override != null)
+            "Session override"
+        else if (model_capability.supportsModel(work.settings.model.slice()))
+            "model default"
+        else
+            "assumed for a model Rui does not list";
         var buffer: [160]u8 = undefined;
         const policy = policy: {
-            const tokens = work.settings.compaction_trigger orelse
-                break :policy try std.fmt.bufPrint(&buffer, "no automatic threshold ({s})", .{origin});
+            // Only a Host from before unlisted models had a window sends none.
+            const tokens = work.settings.compaction_trigger orelse break :policy "no automatic threshold";
             const estimate = (work.settings.context_estimate.value orelse null) orelse
                 break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s})", .{ tokens.value, origin });
             break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s}); now {d}", .{ tokens.value, origin, estimate.value });
