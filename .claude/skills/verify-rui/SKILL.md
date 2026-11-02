@@ -160,7 +160,7 @@ $V cleanup "$RUN"
 
 Cleanup runs `evidence` first, then:
 - kills the private tmux server only (`-S RUN/tmux.sock`);
-- runs `rui host stop --store`;
+- runs `rui host pause --store`;
 - stops each PID in `owned.jsonl`, but only if its start time still matches;
 - archives the Store to `evidence/store-after.tgz`;
 - removes the scratch tree.

@@ -3668,16 +3668,16 @@ Restart then uses committed uncertainty and owned-leftover cleanup; it preserves
 Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
-`rui host stop [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
+`rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.
 A lost reply prints an exact retry command retaining that instance.
 Matching in-flight retries may receive the same acknowledgement; a replacement returns `host_instance_changed` without action.
 
-Stop affects all work in the selected Store.
+Pause affects all work in the selected Store; it records no Session stop, so a later Host resumes that work from committed facts.
 Acknowledgement means a fence was requested, not that effects retired, connections drained or the lease released.
 A missing/disconnected listener or timeout leaves completion unconfirmed.
 After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
-Host stop adds no PID signal, force escalation, Session stop or separate shutdown authority.
+Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
 Peer collaboration has no Rui-owned group lifecycle.
 Operators compose ordinary Session stops over known addresses or stop the entire selected Host, including unrelated work there.

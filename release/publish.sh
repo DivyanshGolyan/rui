@@ -117,6 +117,12 @@ _rui_ready() {
     return 1
 }
 
+# _rui_pause BIN -> the Host shutdown command BIN knows: builds before the
+# rename call it host stop.
+_rui_pause() {
+    if "$1" host pause --help </dev/null >/dev/null 2>&1; then printf 'host pause'; else printf 'host stop'; fi
+}
+
 # _rui_physical FILE -> FILE with its directory's symlinks and dots resolved.
 _rui_physical() {
     ( CDPATH= cd -P "${1%/*}" >/dev/null 2>&1 && printf '%s/%s' "$(pwd -P)" "${1##*/}" )
@@ -242,13 +248,13 @@ _rui_render() {
         ready)
             # A reinstall's Host runs this version, or the update before it said so.
             case $_rui_kind in
-                first) printf '%s is already running another Rui build. When its work finishes, run: %s host stop\n' "$_rui_host_is" "$_rui_cmd" ;;
-                update) printf '%s is still running an earlier build. When its work finishes, run: %s host stop\n' "$_rui_host_is" "$_rui_cmd" ;;
+                first) printf '%s is already running another Rui build. When its work finishes, run: %s host pause\n' "$_rui_host_is" "$_rui_cmd" ;;
+                update) printf '%s is still running an earlier build. When its work finishes, run: %s host pause\n' "$_rui_host_is" "$_rui_cmd" ;;
             esac ;;
         old)
             if [ -n "$_rui_old" ]; then _rui_running="Rui $_rui_old"; else _rui_running='your previous build'; fi
-            printf '%s is still running %s, and this version cannot stop it. When its work finishes, run: %s host stop\n' \
-                "$_rui_host_is" "$_rui_running" "$(_rui_word "$_rui_old_bin")" ;;
+            printf '%s is still running %s, and this version cannot stop it. When its work finishes, run: %s %s\n' \
+                "$_rui_host_is" "$_rui_running" "$(_rui_word "$_rui_old_bin")" "$(_rui_pause "$_rui_old_bin")" ;;
         foreign)
             printf '%s is still running an older build, and this version cannot stop it. Stop it with the build that started it. Earlier builds stay in %s.\n' \
                 "$_rui_host_is" "$_rui_builds" ;;
