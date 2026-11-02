@@ -512,8 +512,8 @@ pub fn insertSession(self: *Store, session_ref: []const u8, current: *const Curr
     try bindSettings(statement, session_ref, current);
     try sqlite.bindU64(statement, 9, current.next_position);
     try sqlite.bindText(statement, 15, @tagName(current.provider.codec()));
-    const digest = store_core.workspaceDigest(current.workspace.slice());
-    try sqlite.bindBlob(statement, 16, &digest);
+    var digest: [32]u8 = undefined;
+    try store_core.bindWorkspace(statement, 16, 2, current.workspace.slice(), &digest);
     try sqlite.expectDone(statement);
     if (c.sqlite3_changes(self.database) != 1) return false;
     try store_core.touch(self, session_ref);
@@ -522,7 +522,7 @@ pub fn insertSession(self: *Store, session_ref: []const u8, current: *const Curr
 
 fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
     try store_core.touch(self, session_ref);
-    const statement = try store_core.cached(self, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
+    const statement = try store_core.cached(self, "UPDATE session SET model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
     defer sqlite.resetCached(statement);
     try bindSettings(statement, session_ref, current);
     try sqlite.expectDone(statement);
@@ -564,11 +564,11 @@ fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *protocol.Bo
     destination.len = length;
 }
 
-/// Binds every session column except `next_position` (?9), which only
+/// Binds every session column a configuration sets except the Workspace
+/// (?2), which only creation writes, and `next_position` (?9), which only
 /// `claimSessionPositions` advances.
 fn bindSettings(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *const CurrentConfiguration) !void {
     try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindText(statement, 2, current.workspace.slice());
     try sqlite.bindText(statement, 3, current.model.slice());
     try sqlite.bindNullableI64(statement, 4, current.instructions_id);
     try sqlite.bindI64(statement, 5, current.tools_mask);
