@@ -6,6 +6,7 @@ const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
 const draft_layout = @import("draft_layout.zig");
+const TerminalText = @import("TerminalText.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
@@ -148,14 +149,32 @@ const LineShape = struct {
 /// Collapsed blocks' summaries in a range of text: see `collapsed`.
 pub const Summaries = struct { count: usize = 0, last: ?usize = null };
 
+/// Text shown as an OSC 8 link, by absolute byte offsets. `end` is
+/// `open` until the link closes. Its address is `length` bytes at `uri`
+/// in the address ring.
+const Link = struct { start: u64, end: u64, uri: u64, length: u16 };
+const open = std.math.maxInt(u64);
+
 pub fn Sized(comptime limit: usize, comptime styled: bool) type {
     return struct {
         const Self = @This();
+        /// Links and their addresses, oldest first; the oldest leave when
+        /// either is full. Text that left the view keeps its link until then.
+        const link_slots = if (styled) @max(4, limit / 512) else 0;
+        const uri_limit = if (styled) @max(2 * TerminalText.max_link_bytes, limit / 8) else 0;
         bytes: [limit]u8 = undefined,
         styles: [if (styled) limit else 0]u8 = undefined,
         style: u8 = 0,
         control: [8]u8 = undefined,
         control_length: usize = 0,
+        links: [link_slots]Link = undefined,
+        link_first: usize = 0,
+        link_next: usize = 0,
+        link_open: bool = false,
+        uris: [uri_limit]u8 = undefined,
+        uri_end: u64 = 0,
+        /// An OSC 8 address being read, and whether its ST has begun.
+        uri: ?struct { at: u64, length: u16 = 0, ending: bool = false } = null,
         length: usize = 0,
         origin: u64 = 0,
         /// The first row in view; null follows the latest rows.
@@ -175,6 +194,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             // already been escaped; no cursor, OSC or terminal-emulator state exists.
             var start: usize = 0;
             for (input, 0..) |byte, index| {
+                if (self.uri != null) {
+                    self.uriByte(byte);
+                    start = index + 1;
+                    continue;
+                }
                 if (self.control_length != 0 or byte == 0x1b) {
                     try self.appendText(input[start..index]);
                     std.debug.assert(self.control_length < self.control.len);
@@ -187,11 +211,82 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                             self.style = (self.style & ~foreground_mask) | (colour_index << 3);
                         }
                         self.control_length = 0;
+                    } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_open)) {
+                        self.beginUri();
+                        self.control_length = 0;
                     }
                     start = index + 1;
                 }
             }
             try self.appendText(input[start..]);
+        }
+
+        /// Room for the longest address, contiguous in the ring, so a cell
+        /// can borrow it whole. Links whose addresses it covers leave.
+        fn beginUri(self: *Self) void {
+            var at = self.uri_end;
+            if (at % uri_limit + TerminalText.max_link_bytes > uri_limit) at = std.mem.alignForward(u64, at, uri_limit);
+            while (self.link_first != self.link_next and self.links[self.link_first % link_slots].uri + uri_limit < at + TerminalText.max_link_bytes) self.link_first += 1;
+            self.uri = .{ .at = at };
+        }
+
+        fn uriByte(self: *Self, byte: u8) void {
+            const uri = &self.uri.?;
+            if (uri.ending) {
+                std.debug.assert(byte == '\\');
+                self.endUri();
+            } else if (byte == 0x1b) {
+                uri.ending = true;
+            } else {
+                std.debug.assert(uri.length < TerminalText.max_link_bytes);
+                self.uris[(uri.at + uri.length) % uri_limit] = byte;
+                uri.length += 1;
+            }
+        }
+
+        /// An empty address closes the open link; any other opens one.
+        fn endUri(self: *Self) void {
+            const uri = self.uri.?;
+            self.uri = null;
+            const at = self.origin + self.length;
+            if (self.link_open) self.links[(self.link_next - 1) % link_slots].end = at;
+            self.link_open = uri.length != 0;
+            if (!self.link_open) return;
+            if (self.link_next - self.link_first == link_slots) self.link_first += 1;
+            self.links[self.link_next % link_slots] = .{ .start = at, .end = open, .uri = uri.at, .length = uri.length };
+            self.link_next += 1;
+            self.uri_end = uri.at + uri.length;
+        }
+
+        /// The first link that ends after absolute offset `at`.
+        fn linkFrom(self: *const Self, at: u64) usize {
+            var low = self.link_first;
+            var high = self.link_next;
+            while (low < high) {
+                const middle = low + (high - low) / 2;
+                if (self.links[middle % link_slots].end > at) high = middle else low = middle + 1;
+            }
+            return low;
+        }
+
+        fn address(self: *const Self, link: Link) []const u8 {
+            return self.uris[link.uri % uri_limit ..][0..link.length];
+        }
+
+        /// Moves link edges in old text `[old_start, old_end)` to the text
+        /// that replaced it, `[new_start, new_end)`. Cursors walk starts and
+        /// ends in order.
+        fn moveLinks(self: *Self, cursors: *[2]usize, old_start: u64, old_end: u64, new_start: u64, new_end: u64) void {
+            while (cursors[0] < self.link_next) : (cursors[0] += 1) {
+                const link = &self.links[cursors[0] % link_slots];
+                if (link.start >= old_end) break;
+                link.start = new_start;
+            }
+            while (cursors[1] < self.link_next) : (cursors[1] += 1) {
+                const link = &self.links[cursors[1] % link_slots];
+                if (link.end > old_end) break;
+                link.end = if (link.end <= old_start) new_start else new_end;
+            }
         }
 
         fn appendText(self: *Self, input: []const u8) !void {
@@ -230,6 +325,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.top = null;
             self.style = 0;
             self.control_length = 0;
+            self.link_first = 0;
+            self.link_next = 0;
+            self.link_open = false;
+            self.uri_end = 0;
+            self.uri = null;
             self.dirty = true;
         }
 
@@ -265,11 +365,15 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 const complete = self.text().len;
                 const saved_style = self.style;
                 defer self.style = saved_style;
+                const base = self.origin;
+                var cursors: [2]usize = @splat(self.link_first);
                 self.length = 0;
                 var clusters = unicode.graphemeIterator(bytes[0..complete]);
                 while (clusters.next()) |value| {
                     if (styled) self.style = styles[value.start];
                     const raw = value.bytes(bytes[0..complete]);
+                    const moved = self.origin + self.length;
+                    defer if (styled) self.moveLinks(&cursors, base + value.start, base + value.start + raw.len, moved, self.origin + self.length);
                     if (std.mem.eql(u8, raw, "\n") or std.mem.eql(u8, raw, "\t") or representable(raw, self.width_method)) {
                         try self.appendText(raw);
                     } else {
@@ -293,6 +397,17 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     }
                 }
                 if (styled and complete < length) self.style = styles[complete];
+                if (styled) {
+                    // The unfinished scalar and later edges keep their places
+                    // relative to the end of the escaped text.
+                    const old = base + complete;
+                    const new = self.origin + self.length;
+                    for (cursors[0]..self.link_next) |index| self.links[index % link_slots].start = self.links[index % link_slots].start - old + new;
+                    for (cursors[1]..self.link_next) |index| {
+                        const link = &self.links[index % link_slots];
+                        if (link.end != open) link.end = link.end - old + new;
+                    }
+                }
                 try self.appendText(bytes[complete..length]);
                 return;
             }
@@ -412,17 +527,29 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             var count: usize = 0;
             var result: vaxis.Window.PrintResult = .{ .row = 0, .col = 0, .overflow = false };
             var start = from;
+            var link: usize = if (styled) self.linkFrom(self.origin + from) else 0;
             while (start < end) {
                 var stop = end;
+                var shown: vaxis.Cell.Hyperlink = .{};
                 if (styled) {
                     stop = start + 1;
                     while (stop < end and self.styles[stop] == self.styles[start]) stop += 1;
+                    if (link < self.link_next) {
+                        const value = self.links[link % link_slots];
+                        if (self.origin + start >= value.start) {
+                            stop = @intCast(@min(stop, value.end - self.origin));
+                            shown.uri = self.address(value);
+                        } else stop = @intCast(@min(stop, value.start - self.origin));
+                    }
                 }
                 if (!styled or isSidenote(self.styles[start]) == notes) {
-                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain) };
+                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain), .link = shown };
                     count += 1;
                 }
                 start = stop;
+                if (styled) {
+                    while (link < self.link_next and self.links[link % link_slots].end <= self.origin + start) link += 1;
+                }
                 if (count != 0 and (count == segments.len or start == end)) {
                     result = window.print(segments[0..count], .{ .wrap = wrap, .row_offset = result.row, .col_offset = result.col, .commit = commit });
                     count = 0;
@@ -1018,4 +1145,73 @@ test "older text prepends above the rows in view and trims newer text at capacit
     full.discardFront(full.origin + 6);
     try std.testing.expect(std.mem.startsWith(u8, full.text(), "old 1\n"));
     try std.testing.expectEqual(@as(u64, 6), full.origin);
+}
+
+/// Each drawn cell's link address in one row, `-` for a cell with none.
+fn expectLinks(view: anytype, width: u16, expected: []const []const u8) !void {
+    var test_screen: TestScreen = undefined;
+    _ = view.draw(test_screen.window(width, 1), .{}, true, true, .{});
+    for (expected, 0..) |uri, column| {
+        const cell = test_screen.screen.readCell(@intCast(column), 0).?;
+        errdefer std.debug.print("column={d} uri={s}\n", .{ column, cell.link.uri });
+        try std.testing.expectEqualStrings(if (std.mem.eql(u8, uri, "-")) "" else uri, cell.link.uri);
+    }
+}
+
+test "a link's text carries its address to the cells, however its bytes arrive" {
+    const link = TerminalText.link_open ++ "https://g.dev/a" ++ TerminalText.link_end;
+    const input = "See " ++ link ++ "\x1b[4mg.dev\x1b[0m" ++ TerminalText.link_close ++ ". " ++ link ++ "x" ++ TerminalText.link_close;
+    const a = "https://g.dev/a";
+    for (0..input.len + 1) |split| {
+        var view: Sized(256, true) = .{};
+        try view.append(input[0..split]);
+        try view.append(input[split..]);
+        try view.prepare();
+        try std.testing.expectEqualStrings("See g.dev. x", view.text());
+        try std.testing.expect(cellStyle(view.styles[4], true).underline);
+        try expectLinks(&view, 16, &.{ "-", "-", "-", "-", a, a, a, a, a, "-", "-", a, "-" });
+    }
+}
+
+test "escaping text before and inside a link keeps the link on its own text" {
+    const a = "https://a.dev";
+    var view: Sized(256, true) = .{};
+    try view.append("\u{200b}" ++ TerminalText.link_open ++ a ++ TerminalText.link_end ++ "b\u{200b}c" ++ TerminalText.link_close ++ "d" ++ TerminalText.link_open ++ a ++ TerminalText.link_end ++ "e");
+    try view.prepare();
+    try std.testing.expectEqualStrings("\\u{200b}b\\u{200b}cde", view.text());
+    const before: []const []const u8 = &.{ "-", "-", "-", "-", "-", "-", "-", "-" };
+    const inside: []const []const u8 = &.{ a, a, a, a, a, a, a, a, a, a };
+    try expectLinks(&view, 24, before ++ inside ++ &[_][]const u8{ "-", a });
+    // The open link continues with text that arrives after escaping.
+    try view.append("f" ++ TerminalText.link_close ++ "g");
+    try view.prepare();
+    try expectLinks(&view, 24, before ++ inside ++ &[_][]const u8{ "-", a, a, "-" });
+}
+
+test "the oldest links leave when links or their addresses fill, newer ones stay" {
+    const view = try std.testing.allocator.create(Document);
+    defer std.testing.allocator.destroy(view);
+    view.* = .{};
+    var address: [TerminalText.max_link_bytes]u8 = undefined;
+    for (0..1000) |index| {
+        @memset(&address, 'a');
+        const uri = try std.fmt.bufPrint(&address, "https://{d}.dev/", .{index});
+        const long = address[0..if (index % 2 == 0) uri.len else address.len];
+        try view.append(TerminalText.link_open);
+        try view.append(long);
+        try view.append(TerminalText.link_end ++ "x" ++ TerminalText.link_close ++ "\n");
+    }
+    try view.prepare();
+    try std.testing.expect(view.link_next - view.link_first <= @TypeOf(view.*).link_slots);
+    // The newest line's link is intact; the first line's has left.
+    var last = view.text().len - 2;
+    var test_screen: TestScreen = undefined;
+    _ = view.draw(test_screen.window(4, 1), .{ .offset = last }, true, true, .{});
+    try std.testing.expect(std.mem.startsWith(u8, test_screen.screen.readCell(0, 0).?.link.uri, "https://999.dev/"));
+    try std.testing.expectEqual(TerminalText.max_link_bytes, test_screen.screen.readCell(0, 0).?.link.uri.len);
+    last = 0;
+    _ = view.draw(test_screen.window(4, 1), .{ .offset = last }, true, true, .{});
+    try std.testing.expectEqualStrings("", test_screen.screen.readCell(0, 0).?.link.uri);
+    view.clear();
+    try std.testing.expectEqual(view.link_first, view.link_next);
 }
