@@ -7262,6 +7262,22 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try std.testing.expectEqualStrings("absent", failed.target.session.slice());
     try std.testing.expectEqualStrings("unknown_session", failed.code.slice());
     try std.testing.expect(own.items[0].position < own.items[1].position);
+    {
+        // Each peer row names the peer by its label as it is now; a peer
+        // without one, or one the Store never held, has none.
+        try std.testing.expectEqual(@as(usize, 0), out.target.label.len);
+        try std.testing.expectEqual(@as(usize, 0), failed.target.label.len);
+        var update: [128]u8 = undefined;
+        try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='Review the WAL' WHERE session_ref='{s}'", .{allocated_session_1.slice()}, 0));
+        const renamed = try store_core.activityPageForTesting(&storage, .{ .session = session, .position = sender_end });
+        try std.testing.expectEqualStrings("Review the WAL", renamed.items[0].value.sent.target.label.slice());
+        try std.testing.expectEqual(@as(usize, 0), renamed.items[1].value.send_failed.target.label.len);
+        try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='Lead' WHERE session_ref='{s}'", .{sender}, 0));
+        var receiver: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try receiver.set(allocated_session_1.slice());
+        const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
+        try std.testing.expectEqualStrings("Lead", named.items[0].value.admission.sender.?.label.slice());
+    }
     try storage.revokeActionSender(action);
     try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
     var stale = sent;

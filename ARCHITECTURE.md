@@ -2860,7 +2860,10 @@ Only after trying those alternatives may genuine row pressure shorten the bounde
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 
-Peer Messages show as one upright, dim line each, never with `›`: `← k7m2qx · first line` for a Message from a peer, `→ k7m2qx · first line` for one this Session sent, and `! → k7m2qx — Failed` for a send its target refused.
+Peer Messages show as one upright, dim line each, never with `›`: `← Received message from NAME · first line` for a Message from a peer, `→ Messaged NAME · first line` for one this Session sent, and `! Messaged NAME — Failed` for a send its target refused.
+NAME is the peer's label as the Store holds it when the page is read, so a rename shows on every row; a peer without one shows its ID (`k7m2qx`).
+The Store looks the label up once per peer row; it is not copied into the Message.
+Peer rows group with tool rows: one after a tool row or another peer row follows it with no blank line, and a failed send stands apart as a failed tool row does.
 The line keeps one row and ends in `…` when it does not fit.
 A Message with more than its line shows (a later non-blank line, or a first line past 200 bytes) ends in `…` too, and Ctrl-O opens it like a collapsed user block.
 Its admission time goes in the right margin as on a user block; below 60 columns it does not show.
@@ -2932,6 +2935,10 @@ Content cannot select a style, and all escaping, exact permission text and termi
 Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.
 Successful outcome aggregates do not repeat assistant rows.
 Assistant opening, live, history and human keyed-result text use `AnswerRenderer`; User, Tool Result and inspection fields use terminal escaping without Markdown interpretation.
+`AnswerRenderer` shows a Markdown link to an `http` or `https` address as its underlined text and a bare address as itself, each an OSC 8 hyperlink, so the terminal opens it on click and the address is not laid out (Divyansh asked for this on 2026-11-02).
+Other link targets, links inside code or emphasis, Markdown link titles and addresses longer than 2,048 bytes stay literal, and `/copy` still sends the Markdown with every address.
+The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
+A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
 Normal tool presentation shows the canonical outcome header, omitting routine zero exit codes and stdout/stderr tails.
 It retains failure, indeterminate outcomes and capture or cleanup warnings even after a successful exit.
 The public result's tail delimiters control display only, never execution, permission or outcome classification.
@@ -3296,7 +3303,7 @@ The position only advances: one at or before the stored one changes nothing, so 
 A missing Session, or a position the Session has not reached, answers `mark_read_refused` with `SessionNotFound` or `PositionNotReached` and changes nothing; a canonical Store failure answers as for any request, and the client returns it as one.
 The write starts no work and changes no settings revision.
 Unlike other Session writes it touches nothing in the change ring: no Session list row shows the position, so a list watching the Session has nothing to read again.
-Wire version 5 added the pages' `hosted_call` items, after version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
+Wire version 6 added the `label` on the Session a Message row names as sender or target, after version 5 added the pages' `hosted_call` items, version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 
 Opening reads the latest Activity page as before, and the page's `read_through` places the dim rule `── new since you looked ──` on a line of its own above the first shown item after it.
 The conversation opens at the latest view when the Session was never read, when no item after the position shows, or when the latest view shows the rule.
