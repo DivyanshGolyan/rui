@@ -81,6 +81,12 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/h2/policy.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["stack-frames", "test-h2", "test-logic"])
 
+    def test_postgres_wire_client_selects_its_own_tests_and_h2_trust_reaches_them(self):
+        result = select(["src/store/wire/pg.zig"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["stack-frames", "test-pg"])
+        result = select(["src/h2/tls.zig"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["stack-frames", "test-h2", "test-pg"])
+
     def test_portable_roots_keep_their_native_owner_checks(self):
         for path in ("src/SessionInput.zig", "src/tools.zig"):
             result = select([path], "review", AVAILABLE)

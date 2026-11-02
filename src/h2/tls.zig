@@ -104,7 +104,7 @@ pub const Context = struct {
     }
 };
 
-fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
+pub fn loadTrust(ctx: *c.SSL_CTX, trust: h2.Trust) h2.EndpointError!void {
     defer c.ERR_clear_error();
     switch (trust) {
         .ca_file => |path| {

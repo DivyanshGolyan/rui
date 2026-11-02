@@ -42,6 +42,11 @@ const c = @import("h2_c");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
+const tls = @import("tls.zig");
+
+/// The OpenSSL bindings this module links, for the Store's Postgres TLS,
+/// which shares one copy of the library and its trust loading.
+pub const openssl = c;
 
 /// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
@@ -74,8 +79,8 @@ pub const read_allowance_bytes = 64 * 1024;
 pub fn checkLibraries() error{UnexpectedLibraryVersion}!void {
     const nghttp2: *const c.nghttp2_info = c.nghttp2_version(0) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(nghttp2.version_str), nghttp2_version)) return error.UnexpectedLibraryVersion;
-    const openssl = c.OpenSSL_version(c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
-    if (!std.mem.eql(u8, std.mem.span(openssl), openssl_version)) return error.UnexpectedLibraryVersion;
+    const linked = c.OpenSSL_version(c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
+    if (!std.mem.eql(u8, std.mem.span(linked), openssl_version)) return error.UnexpectedLibraryVersion;
 }
 
 // ---------------------------------------------------------------- endpoints
@@ -180,6 +185,11 @@ pub const Trust = union(enum) {
     /// Only the certificates in this PEM file (`--provider-ca-file`).
     ca_file: []const u8,
 };
+
+/// Loads `trust` into a context the caller built: the CA file, or the
+/// system's trust as OpenSSL reads it (never SecTrust, which verifies only
+/// h2's own sessions).
+pub const loadTrust = tls.loadTrust;
 
 pub const Options = struct {
     /// Most streams alive at once. Sizes the connection table: one

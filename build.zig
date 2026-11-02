@@ -95,11 +95,16 @@ pub fn build(b: *std.Build) void {
     logic_test_step.dependOn(&run_logic_tests.step);
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
+    const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
     if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| {
         const h2_tests = b.addTest(.{ .root_module = h2, .filters = if (test_filter) |filter| &.{filter} else &.{} });
         const run_h2_tests = ci.run(h2_tests);
         run_h2_tests.has_side_effects = true;
         h2_test_step.dependOn(&run_h2_tests.step);
+        const pg_tests = b.addTest(.{ .root_module = addPg(b, target, .ReleaseSafe, h2), .filters = if (test_filter) |filter| &.{filter} else &.{} });
+        const run_pg_tests = ci.run(pg_tests);
+        run_pg_tests.has_side_effects = true;
+        pg_test_step.dependOn(&run_pg_tests.step);
     }
 
     const codec_runtime_test_step = b.step("test-codec-runtime", "Run the codec sandbox's own tests against tiny modules");
@@ -530,6 +535,7 @@ pub fn build(b: *std.Build) void {
         "--ast-check",
     });
     check_step.dependOn(h2_test_step);
+    check_step.dependOn(pg_test_step);
     check_step.dependOn(codec_runtime_test_step);
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
@@ -1019,6 +1025,18 @@ fn addH2(
         module.linkSystemLibrary("pthread", .{});
         module.linkSystemLibrary("dl", .{});
     }
+    return module;
+}
+
+/// The Store's Postgres wire client, on h2's OpenSSL.
+fn addPg(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h2: *std.Build.Module) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/store/wire/pg.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("h2", h2);
     return module;
 }
 
