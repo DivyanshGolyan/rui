@@ -118,11 +118,19 @@ pub const ConfigurationContentAction = enum(u2) {
     clear,
 };
 
+/// A created Session has no output schema by default, so the schema's
+/// plan never imports empty content.
+pub const OutputSchemaAction = enum(u2) {
+    preserve,
+    import_requested,
+    clear,
+};
+
 pub const ConfigurationUpdatePlan = union(enum) {
     rejected: protocol.ConfigurationRejection,
     update: struct {
         instructions: ConfigurationContentAction,
-        output_schema: ConfigurationContentAction,
+        output_schema: OutputSchemaAction,
     },
 };
 
@@ -241,13 +249,13 @@ pub fn planConfigurationUpdate(
 }
 
 /// Round 1 reads the command's saved answer, the Session's saved
-/// configuration and the content lookup its instructions need. A creation
-/// reads its Workspace's key and whether its drawn reference is taken in
-/// a round of its own, after the replay check.
-/// An output schema's lookup is a round of its own, as the lookup
-/// statement is already in round 1. The decision is `applyConfiguration`;
-/// the write round saves the Session, the command and its revision, then
-/// commits.
+/// configuration and the content lookups its instructions and output
+/// schema need. A creation then reads its Workspace's key and whether its
+/// drawn reference is taken, which depends on the replay check: a replay
+/// draws no reference and canonicalizes no Workspace. Each new sealed
+/// import runs its insert before streaming into it (`importSealed`). The
+/// decision is `applyConfiguration`; the write round saves the Session,
+/// the command and its revision, then commits.
 pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
@@ -318,6 +326,8 @@ pub const ConfigurationReads = struct {
     instructions: content_domain.Import = undefined,
     output_schema: content_domain.Import = undefined,
     empty: content_domain.Import = content_domain.empty_content,
+    /// The rows `lookupPair` found, when round 1 needed two lookups.
+    pair: ?content_domain.Pair = null,
 };
 
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
@@ -441,14 +451,23 @@ fn newReference(io: std.Io, reference: *[protocol.session_id_bytes]u8) !void {
 }
 
 /// Queues what applying `configuration` to `session` reads (an empty
-/// `session` creates one) into `reads`.
+/// `session` creates one) into `reads`: one content lookup, or one pair of
+/// them when both the instructions and an output schema need one.
 pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *const protocol.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
-    if (configuration.instructions.state == .value) {
+    const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
         reads.instructions = content_domain.sealedIdentity(&configuration.instructions);
-        content_domain.lookup(a, &reads.instructions);
-    } else if (creating) content_domain.lookup(a, &reads.empty);
+        break :requested &reads.instructions;
+    } else if (creating) &reads.empty else null;
+    const output_schema: ?*content_domain.Import = if (configuration.output_schema.state == .value) requested: {
+        reads.output_schema = content_domain.sealedIdentity(&configuration.output_schema);
+        break :requested &reads.output_schema;
+    } else null;
+    if (instructions != null and output_schema != null) {
+        reads.pair = .{ .first = null, .second = null };
+        content_domain.lookupPair(a, instructions.?, output_schema.?, &reads.pair.?);
+    } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
 }
 
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
@@ -487,6 +506,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_output_schema };
     }
 
+    if (reads.pair) |*rows| content_domain.foundPair(rows, if (configuration.instructions.state == .value) &reads.instructions else &reads.empty, &reads.output_schema);
     const next = &reads.next;
     if (!creating and !reads.found) {
         return .{ .rejected = .unknown_session };
@@ -535,14 +555,9 @@ pub fn applyConfiguration(
     switch (content_actions.output_schema) {
         .preserve => {},
         .import_requested => {
-            reads.output_schema = content_domain.sealedIdentity(&configuration.output_schema);
-            content_domain.lookup(a, &reads.output_schema);
-            try a.run();
             command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
             next.output_schema_id = @intCast(command_output_schema_id.?);
         },
-        // A created Session's output schema defaults to none.
-        .default_empty => unreachable,
         .clear => next.output_schema_id = null,
     }
     var target: protocol.Bounded(protocol.max_session_bytes) = .{};

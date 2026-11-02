@@ -6077,7 +6077,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
     const SchemaRequest = enum { omitted, value, clear };
     const Actions = struct {
         instructions: ConfigurationContentAction,
-        output_schema: ConfigurationContentAction,
+        output_schema: configuration_domain.OutputSchemaAction,
     };
     const Case = struct {
         name: []const u8,
