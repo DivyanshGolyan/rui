@@ -401,7 +401,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         // Seed a real retained boundary. History is launched only from the
         // transcript, including A -> launch -> new B -> delayed completion.
         front.job.result.boundaries.add(.{ .output = 0, .cursor = first_cursor, .admitted = first_cursor.before_position });
-        try ops.showStaged(front);
+        _ = try ops.showStaged(front);
         if (seed % 2 == 1) {
             try ops.beginTranscript(front);
             generation = 1;
@@ -582,7 +582,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     _ = ops.freeze(front, .activity);
     var task: Task = .{ .io = std.testing.io };
     try ops.scan(&front.job, &task);
-    try ops.showStaged(front);
+    _ = try ops.showStaged(front);
     try ops.applyReader(front, .complete);
     try historyReachability(front, ops, 0);
     try std.testing.expect(std.c.write(ready_file.handle, "x", 1) == 1);
@@ -592,7 +592,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     for (0..16) |prefix| {
         _ = ops.freeze(front, .activity);
         try ops.scan(&front.job, &task);
-        try ops.showStaged(front);
+        _ = try ops.showStaged(front);
         try ops.applyReader(front, .complete);
         try std.testing.expect(fixture.screen.live.length <= Viewport.capacity);
         try historyReachability(front, ops, prefix + 1);

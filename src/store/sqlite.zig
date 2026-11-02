@@ -219,6 +219,18 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
             try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ owner[0], event, event, owner[0], body }));
         }
     }
+    // How far a person read is no Session list row's fact, so recording it
+    // needs no touch: the Session's update trigger watches every other
+    // column, read from the schema so a new column is watched too.
+    try exec(database, "DROP TRIGGER temp.touched_session_UPDATE");
+    const columns = "SELECT group_concat(name,',') FROM pragma_table_info('session') WHERE name<>'read_through'";
+    var statement: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(database, columns, -1, &statement, null) != c.SQLITE_OK) return error.SqliteExecFailed;
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SqliteExecFailed;
+    const names = c.sqlite3_column_text(statement, 0) orelse return error.SqliteExecFailed;
+    var sql: [2048]u8 = undefined;
+    try exec(database, try std.fmt.bufPrintSentinel(&sql, "CREATE TEMP TRIGGER touched_session_UPDATE AFTER UPDATE OF {s} ON main.session BEGIN INSERT INTO touched_oracle VALUES(NEW.session_ref);INSERT INTO touched_oracle VALUES(OLD.session_ref); END", .{std.mem.span(names)}, 0));
 }
 
 pub fn setLimit(database: *c.sqlite3, category: c_int, value: c_int) !void {

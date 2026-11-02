@@ -105,6 +105,9 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,6 +116,13 @@ jobs:
       - name: Install the pinned fixture packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
       - run: python3 -B -m unittest discover -s tests/ci -v
+      - name: Warn when a change touches a held fixture without citing its stable-red issue
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 -B tests/ci/stable_hold.py pr --base "$BASE"
       - name: Reject undefined fixture names before native builds
         run: |
           python3 -m pip install --disable-pip-version-check ruff==0.17.0
@@ -302,6 +312,19 @@ jobs:
             echo "RUI_TEST_PG_PASSWORD=$password"
             echo "RUI_TEST_PG_CA_FILE=$certs/server.crt"
           } >> "$GITHUB_ENV"
+      - name: Give tests macOS's temporary directory shape
+        # macOS's TMPDIR is /var/folders/XX/<30>/T/ through a symlink to
+        # /private/var. Linux's short real /tmp hid that class three times
+        # (#579, #724, #755); here it fails on Linux first.
+        run: |
+          set -euo pipefail
+          real=/private/var/folders/rq/rui0linux0shaped0like0darwin00/T
+          sudo mkdir -p "$real"
+          sudo chown -R "$(id -u):$(id -g)" /private/var/folders
+          sudo ln -sfn /private/var/folders /var/folders
+          tmp=/var/folders/rq/rui0linux0shaped0like0darwin00/T/
+          test "$(realpath "$tmp")" = "$real"
+          echo "TMPDIR=$tmp" >> "$GITHUB_ENV"
       - name: Run selected targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}

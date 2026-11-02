@@ -16,14 +16,15 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 47;
+pub const schema_version: u32 = 48;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes needs a new row, and so a new schema_version.
 /// Review rule: a row, once merged, is never edited.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
-    .{ .schema_version = 46, .digest = 0x43171cdad9e02591 },
-    .{ .schema_version = 47, .digest = 0x2555db13f8f07650 },
+    .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
+    .{ .schema_version = 47, .digest = 0x5b8fb32e14ed0c17 },
+    .{ .schema_version = 48, .digest = 0x7b1445d3efa8f4c4 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -193,6 +194,9 @@ pub const tables = [_]Table{
             label_column,
             .{ .name = "created_at", .type = .int, .check = "created_at>0" },
             .{ .name = "next_position", .type = .int, .check = "next_position>0" },
+            // The position a person has seen the conversation through; null
+            // until one has.
+            .{ .name = "read_through", .type = .int, .nullable = true, .check = "read_through IS NULL OR (read_through>0 AND read_through<next_position)" },
         },
         .primary_key = &.{"session_ref"},
         .foreign_keys = &.{
@@ -486,6 +490,7 @@ pub const tables = [_]Table{
         .name = "model_tool_call",
         .columns = &.{
             .{ .name = "operation_id", .type = .int },
+            .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "call_ordinal", .type = .int, .check = "call_ordinal>=0" },
             .{ .name = "item_ordinal", .type = .int, .check = "item_ordinal>=0" },
             .{ .name = "name_content_id", .type = .int },
@@ -502,6 +507,7 @@ pub const tables = [_]Table{
         .uniques = &.{ &.{ "operation_id", "item_ordinal" }, &.{ "operation_id", "call_id_content_id" }, &.{ "operation_id", "call_ordinal", "action_kind" } },
         .foreign_keys = &.{
             references("operation_id", "model_operation", &.{"operation_id"}),
+            .{ .columns = &.{ "operation_id", "session_ref" }, .references = "model_operation", .referenced = &.{ "operation_id", "session_ref" } },
             references("name_content_id", "content", content_reference),
             references("call_id_content_id", "content", content_reference),
             references("arguments_content_id", "content", content_reference),
@@ -584,8 +590,10 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_session_pending", .table = "message_admission", .columns = &.{ "session_ref", "admission_id" }, .where = "turn_id IS NULL" },
     .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
+    .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "session_stop_exclusion", .table = "session_stop", .columns = &.{ "session_ref", "admission_cutoff", "position" } },
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
+    .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
@@ -593,6 +601,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     .{ .name = "model_tool_call_rejections", .table = "model_tool_call", .columns = &.{ "operation_id", "call_ordinal" }, .where = "rejection_code IS NOT NULL" },
+    .{ .name = "model_tool_call_acceptance", .table = "model_tool_call", .columns = &.{ "session_ref", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
     .{ .name = "model_operation_retry_due", .table = "model_operation", .columns = &.{ "retry_due_at_ms", "operation_id" }, .where = "resolution_code IS NULL AND " ++ retry_allowance_open_sql },
     .{ .name = "model_operation_retry_exhausted", .table = "model_operation", .columns = &.{"operation_id"}, .where = retry_exhausted_sql },
     .{ .name = "model_operation_session_history", .table = "model_operation", .columns = &.{ "session_ref", "operation_id" } },
@@ -601,15 +610,17 @@ pub const indexes = [_]Index{
     .{ .name = "model_operation_compaction_bases", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = "purpose=1 AND " ++ resolutionIs("resolution_code", .compacted) },
     .{ .name = "conversation_entry_history", .table = "conversation_entry", .columns = &.{ "session_ref", "session_position" } },
     .{ .name = "model_output_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" } },
+    .{ .name = "model_output_call_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" }, .where = "item_kind=3" },
     .{ .name = "model_output_compaction_anchor", .table = "model_output_item", .columns = &.{ "operation_id", "item_ordinal" }, .where = "item_kind=4" },
     .{ .name = "turn_session_latest", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" } },
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },
+    .{ .name = "turn_outcome_position", .table = "turn", .columns = &.{ "session_ref", "outcome_position" } },
 };
 
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
-        // Today's 46 tables and indexes take about 68,000 branches (measured).
+        // Format 45's 46 tables and indexes took about 68,000 branches (measured).
         @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
         var text: []const u8 = "";
         for (tables) |table| text = text ++ createTable(dialect, table) ++ ";\n";

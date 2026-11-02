@@ -10174,6 +10174,93 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
 }
 
+test "read-through only advances, within the Session's committed positions, touches no list, and pages carry it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "read-through-config");
+    try submitTestMessage(&storage, &tmp, "read-through-a", "a", session.slice(), "first");
+    try submitTestMessage(&storage, &tmp, "read-through-b", "b", session.slice(), "second");
+    var page: protocol.ActivityPage = .{};
+    try page.session.set(session.slice());
+    const unread = try store_core.activityPageForTesting(&storage, page);
+    try std.testing.expectEqual(@as(?u64, null), unread.read_through);
+    const first = unread.items[0].position;
+    var read: protocol.MarkRead = .{ .position = first };
+    try read.session.set(session.slice());
+    const unmarked = storage.commit_generation.load(.acquire);
+    try storage.markRead(&read);
+    try std.testing.expectEqual(@as(?u64, first), (try store_core.activityPageForTesting(&storage, page)).read_through);
+    // No Session list row shows it, so a list watching the Session has
+    // nothing to read again.
+    var changed: [1]change_ring.Id = undefined;
+    try std.testing.expectEqual(@as(usize, 0), storage.changes.changed(unmarked, storage.commit_generation.load(.acquire), null, null, &changed).len);
+    // A client that saw more moves it on; one that saw less, or the same
+    // write again, leaves it.
+    read.position = unread.end;
+    try storage.markRead(&read);
+    try storage.markRead(&read);
+    read.position = first;
+    try storage.markRead(&read);
+    try std.testing.expectEqual(@as(?u64, unread.end), (try store_core.activityPageForTesting(&storage, page)).read_through);
+    // A position the Session has not reached, or an unknown Session, fails
+    // without fencing the Store.
+    read.position = unread.end + 1;
+    try std.testing.expectError(error.PositionNotReached, storage.markRead(&read));
+    try read.session.set("zzzzzz");
+    read.position = 1;
+    try std.testing.expectError(error.SessionNotFound, storage.markRead(&read));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(?u64, unread.end), (try store_core.activityPageForTesting(&storage, page)).read_through);
+}
+
+test "a latest page says whether unseen rows reach past its oldest row" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "beyond-unseen-config");
+    var key: [32]u8 = undefined;
+    for (0..20) |index| {
+        const name = try std.fmt.bufPrint(&key, "beyond-unseen-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "row");
+    }
+    var page: protocol.ActivityPage = .{ .direction = .backward };
+    try page.session.set(session.slice());
+    const latest = try store_core.activityPageForTesting(&storage, page);
+    try std.testing.expect(latest.more and latest.count == latest.items.len);
+    // The rows before the page, newest first.
+    var older = page;
+    older.end = latest.end;
+    older.position = latest.items[latest.count - 1].position;
+    older.ordinal = latest.items[latest.count - 1].ordinal;
+    const before = try store_core.activityPageForTesting(&storage, older);
+    const just_before = before.items[0].position;
+    try std.testing.expect(just_before < older.position);
+    var further: u64 = 0;
+    for (before.items[0..before.count]) |item| if (item.position < just_before) {
+        further = item.position;
+        break;
+    };
+    try std.testing.expect(further != 0);
+    var read: protocol.MarkRead = .{ .position = further };
+    try read.session.set(session.slice());
+    // The row just before the page is unseen too.
+    try storage.markRead(&read);
+    try std.testing.expectEqual(true, (try store_core.activityPageForTesting(&storage, page)).beyond_unseen);
+    // Read through it: every unseen row is on the page, so the opening
+    // places the rule there without reading an older page.
+    read.position = just_before;
+    try storage.markRead(&read);
+    const placed = try store_core.activityPageForTesting(&storage, page);
+    try std.testing.expectEqual(true, placed.more);
+    try std.testing.expectEqual(false, placed.beyond_unseen);
+    try std.testing.expectEqual(just_before, placed.read_through.?);
+}
+
 test "an activity page reports the queued Messages at its end, until applied or stopped" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -10532,6 +10619,82 @@ test "completed tool labels trust admission while model replay authenticates pay
     var buffer: [4096]u8 = undefined;
     try std.testing.expectError(error.CorruptStore, reader.read(0, buffer[0..@intCast(name.length)]));
     try std.testing.expect(storage.isFenced());
+}
+
+test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
+    // Each Store holds `history` earlier units, a Message, its call item, the
+    // call's rejection and its Turn's outcome, then the same Session tail: a
+    // Message, twenty rejected calls and a stop. The opening's page and a
+    // forward page from the tail's first row read only the tail.
+    var steps: [2][2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "cost-config");
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+4*(value-1) AS position,instructions_content_id AS content FROM sequence,session; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                "SELECT value,'{1s}',printf('history-%d',value),content,position,value,1 FROM history; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1 FROM history; " ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT value,0,'{1s}',position+1,3,1,zeroblob(32),0,content,0 FROM history; " ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                "SELECT value,'{1s}',0,0,content,content,content,zeroblob(120),'unknown_tool',content,position+2 FROM history; " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT value,'{1s}',value,value,value,'completed',position+3,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+4*{0}; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        const tail = (try turn_domain.sessionNextPosition(&storage, session.slice())).?;
+        try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var identities: [20][24]u8 = undefined;
+        var calls: [20]TestingCall = undefined;
+        for (&calls, &identities, 0..) |*call, *identity, index| {
+            const id = try std.fmt.bufPrint(identity, "cost-{d}", .{index});
+            call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" };
+        }
+        try settleCallsForTesting(&storage, &tmp, binding, "cost-calls", &calls);
+        var stop = try completeSessionStop("cost-stop", session.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+
+        var opening: protocol.ActivityPage = .{ .direction = .backward };
+        try opening.session.set(session.slice());
+        cost[0] = try activityPageSteps(&storage, opening);
+        const page = try store_core.activityPageForTesting(&storage, opening);
+        try std.testing.expect(page.more);
+        var forward: protocol.ActivityPage = .{ .end = page.end, .position = tail - 1 };
+        try forward.session.set(session.slice());
+        cost[1] = try activityPageSteps(&storage, forward);
+        const later = try store_core.activityPageForTesting(&storage, forward);
+        try std.testing.expect(later.more);
+        try std.testing.expectEqual(tail, later.items[0].position);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+/// The VM steps every statement of the Store's connection takes to read one
+/// Activity page.
+fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {
+    var statement = c.sqlite3_next_stmt(storage.database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.database, each))
+        _ = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+    _ = try store_core.activityPageForTesting(storage, request);
+    var total: i64 = 0;
+    statement = c.sqlite3_next_stmt(storage.database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.database, each))
+        total += c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    return total;
 }
 
 test "live tool activity survives completed Turns and split result pages" {
