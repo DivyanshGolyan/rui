@@ -170,15 +170,16 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         pub fn read(a: *Self, comptime S: type, args: S.Args, destination: *S.Result) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality != .each);
             // An `.optional` result is a copy of the decoded Row.
-            if (S.cardinality == .optional and @sizeOf(S.Row) > 1024)
-                @compileError("rsql: a Row over 1 KiB is never copied; read it with readInto: " ++ S.sql);
+            if (comptime S.cardinality == .optional and (@sizeOf(S.Row) > 1024 or rsql.fillsInPlace(S.Row)))
+                @compileError("rsql: a Row over 1 KiB, or one that points into the caller's memory, is read with readInto: " ++ S.sql);
             a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, null);
         }
 
         /// Queues an `.optional` read that decodes into `row` in place, so
-        /// a Row over 1 KiB is never copied; `found` says whether there was
-        /// one. A missing row leaves `row` as it was. Both are defined once
-        /// the round runs.
+        /// a Row over 1 KiB is never copied, and a Row's pointer fields
+        /// (`rsql.fillsInPlace`) fill what they point to; `found` says
+        /// whether there was one. A missing row leaves `row` as it was.
+        /// Both are defined once the round runs.
         pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *bool) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
             a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, null);

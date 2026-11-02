@@ -430,7 +430,8 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
 }
 
 /// Fills `row` from the current row, field by field in place, so a Row
-/// over 1 KiB is never copied. Every value that breaks its type is
+/// over 1 KiB is never copied. A pointer field fills what it points to
+/// (`rsql.fillsInPlace`). Every value that breaks its type is
 /// `CorruptStore`, here and nowhere else.
 pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt, row: *Row) error{CorruptStore}!void {
     comptime var column: c_int = 0;
@@ -466,6 +467,10 @@ fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out:
     // Text goes straight into the Row's own bytes.
     if (comptime isBounded(T)) return out.set(try columnText(statement, column));
     switch (@typeInfo(T)) {
+        .pointer => |pointer| {
+            comptime std.debug.assert(pointer.size == .one);
+            try decodeValue(pointer.child, statement, column, out.*);
+        },
         .optional => |optional| {
             if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) {
                 out.* = null;

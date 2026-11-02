@@ -295,6 +295,8 @@ pub fn Read(comptime spec: ReadSpec) type {
         // into the round's frame. `Access.read` refuses a big `.optional`.
         if (spec.cardinality == .each and @sizeOf(spec.Row) > 1024)
             @compileError("rsql: a Row over 1 KiB is never copied; read it .one or .at_most(1): " ++ spec.sql);
+        if (fillsInPlace(spec.Row) and spec.cardinality != .optional)
+            @compileError("rsql: a Row that points into its caller's memory is read .optional, with Access.readInto: " ++ spec.sql);
     }
     return struct {
         pub const kind: StatementKind = .read;
@@ -330,6 +332,17 @@ pub fn Write(comptime spec: WriteSpec) type {
 }
 
 pub const StatementKind = enum { read, write };
+
+/// Whether a Row has a pointer field, which decodes into the caller's
+/// memory it points to, so the caller's struct fills in place without a
+/// copy. Its pointers must be set before the round runs: only
+/// `Access.readInto` reads such a Row, from the caller's own Row.
+pub fn fillsInPlace(comptime Row: type) bool {
+    comptime {
+        for (@typeInfo(Row).@"struct".field_types) |Field| if (@typeInfo(Field) == .pointer) return true;
+        return false;
+    }
+}
 
 /// Why a typed statement's text is refused, or null.
 pub fn statementError(comptime kind: StatementKind, comptime sql: []const u8, comptime Args: type, comptime Row: type) ?[]const u8 {
@@ -544,7 +557,7 @@ const Refused = error{Refused};
 ///   core      := SELECT [DISTINCT|ALL] expr [AS name], ... [FROM source
 ///                {[LEFT [OUTER] | INNER | CROSS] JOIN source}]
 ///                [WHERE expr] [GROUP BY expr, ... [HAVING expr]]
-///   source    := table [@index(name)] [[AS] alias] [ON expr]
+///   source    := table [[AS] alias] [@index(name)] [ON expr]
 ///   insert    := INSERT INTO table (names) (VALUES (expr, ...) | select)
 ///   update    := UPDATE table SET name=expr, ... WHERE expr
 ///   delete    := DELETE FROM table WHERE expr
@@ -768,14 +781,15 @@ const Parser = struct {
         return .{ .results = results, .sources = sources, .where = where };
     }
 
-    /// A table or WITH name. The only marker that may follow it is
-    /// `@index(name)`, naming an index of that same table.
+    /// A table or WITH name and its alias. The only marker that may
+    /// follow them is `@index(name)`, naming an index of that same table.
     fn source(p: *Parser, outer: bool) Refused!Source {
         const written = try p.name();
         const defined = for (p.defined) |each| {
             if (std.mem.eql(u8, each, written)) break true;
         } else false;
         if (!defined and !isTable(written)) return p.refuseWith("rsql: no table named " ++ written);
+        const alias = if (p.accept("AS")) try p.name() else if (p.peek().kind == .word and !isGrammarWord(p.peek().text)) p.next().text else written;
         if (p.peek().kind == .marker) {
             if (!std.mem.eql(u8, p.next().text, "@index")) return p.refuseWith("rsql: only @index(name) follows a table");
             try p.expectSymbol("(");
@@ -783,7 +797,6 @@ const Parser = struct {
             try p.expectSymbol(")");
             if (defined or !isIndexOf(written, index)) return p.refuseWith("rsql: @index names an index of its own table, and " ++ written ++ " has no index " ++ index);
         }
-        const alias = if (p.accept("AS")) try p.name() else if (p.peek().kind == .word and !isGrammarWord(p.peek().text)) p.next().text else written;
         const on: ?Expr = if (p.accept("ON")) try p.expr() else null;
         return .{ .table = written, .alias = alias, .defined = defined, .outer = outer, .on = on };
     }

@@ -6530,14 +6530,10 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
             .decoded = descriptor,
         }});
         var input: BashExecutionInput = .{
-            .current = true,
-            .turn_id = 1,
-            .position = 1,
             .session = request.session,
             .sender_handle = .{},
             .workspace = .{},
-            .arguments_length = descriptor.len,
-            .arguments_digest = undefined,
+            .arguments = .{ .length = descriptor.len, .digest = undefined },
             .timeout_ms = 1000,
         };
         try input.workspace.set(storage.selector.slice());
@@ -7171,6 +7167,45 @@ test "message rejections replay before current Session checks without retained i
     const observed = try storage.observeCommand("rejected-message");
     try std.testing.expect(observed.status == .rejected);
     try std.testing.expect(observed.message == null);
+}
+
+test "a Bash binding that is unknown, unattempted or without its revision is stale, and fences nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "stale-bash-config");
+    var tools: protocol.ConfigureCommand = .{};
+    try tools.key.set("stale-bash-tools");
+    try tools.session.set(session.slice());
+    tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
+    tools.configuration.permission_mode.state = .value;
+    try tools.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "stale-bash-seed", "stale-bash-seed", session.slice(), "run two");
+    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stale-bash-calls");
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    var input: BashExecutionInput = undefined;
+    try storage.readBashExecutionInput(action, &input);
+    try std.testing.expectEqualStrings(session.slice(), input.session.slice());
+    try std.testing.expectEqual(@as(u64, 300_000), input.timeout_ms);
+
+    var unknown = action;
+    unknown.action_id += 1000;
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unknown, &input));
+    // The other Action of the call pair, never attempted: its timeout is NULL.
+    var unattempted = action;
+    unattempted.action_id = try querySessionU64(storage.database, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND attempt_ordinal=0", session.slice());
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unattempted, &input));
+    var rebound = action;
+    rebound.turn_id += 1000;
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(rebound, &input));
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try execSessionSql(storage.database, "UPDATE action_operation SET permission_revision=999 WHERE session_ref=?1 AND attempt_ordinal=1", session.slice());
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(action, &input));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "a peer sender is resolved from its Action handle and exact replays survive revocation" {
