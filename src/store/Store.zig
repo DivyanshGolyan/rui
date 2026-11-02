@@ -79,6 +79,11 @@ pub const Store = struct {
     /// names generations this one never counted.
     instance: [16]u8 = undefined,
     statements: StatementCache = .{},
+    /// What a configure reads, over 4.6 KB: one address the Store owns, so no
+    /// Host stack frame holds it. A configure or a creating Message uses
+    /// it under the mutex, and no entry point runs both. Owned:
+    /// `openWithOptions` allocates it and `close` frees it.
+    configuration_reads: *configuration_domain.ConfigurationReads,
     /// The Host hands out every id and sequence value, and each
     /// transaction's second; see `HostValues`.
     ids: HostValues,
@@ -246,7 +251,9 @@ pub const Store = struct {
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
-        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = .{ .next = undefined } };
+        const configuration_reads = try std.heap.page_allocator.create(configuration_domain.ConfigurationReads);
+        errdefer std.heap.page_allocator.destroy(configuration_reads);
+        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .configuration_reads = configuration_reads, .ids = .{ .next = undefined } };
         self.served = options.served;
         // The Store is in final storage, so the function may keep its address.
         if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
@@ -317,6 +324,7 @@ pub const Store = struct {
         self.mutex.unlock(self.io);
         // Freed even when SQLite keeps the handle: nothing retries a close.
         destroyRing(self.changes);
+        std.heap.page_allocator.destroy(self.configuration_reads);
         if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
         _ = c.sqlite3_hard_heap_limit64(0);
         self.* = undefined;

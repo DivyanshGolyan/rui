@@ -264,8 +264,9 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     const digest = request.semanticDigest();
     var saved: command_domain.saved_command.Result = undefined;
     command_domain.lookupCommand(a, command.key.slice(), &saved);
-    var reads: ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-    prepareConfiguration(a, command.session.slice(), &command.configuration, &reads);
+    const reads = a.store.configuration_reads;
+    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    prepareConfiguration(a, command.session.slice(), &command.configuration, reads);
     try a.run();
 
     if (saved != null) try a.abandon(.{});
@@ -284,7 +285,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, &digest, .model_capability_unavailable, faults);
     }
-    const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, faults, &reads)) {
+    const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, faults, reads)) {
         .rejected => |code| return saveConfigurationRejection(a, command, &digest, code, faults),
         .accepted => |value| value,
     };
@@ -663,10 +664,11 @@ pub fn applyConfigurationLocked(
 ) !Application {
     var a = Access(.nested, error{SessionUpdateFailed}).within(self);
     defer a.deinit();
-    var reads: ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-    prepareConfiguration(&a, session, configuration, &reads);
+    const reads = self.configuration_reads;
+    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    prepareConfiguration(&a, session, configuration, reads);
     try a.run();
-    const application = try applyConfiguration(&a, self.io, session, configuration, faults, &reads);
+    const application = try applyConfiguration(&a, self.io, session, configuration, faults, reads);
     try a.apply();
     return application;
 }
