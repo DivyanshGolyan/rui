@@ -7,6 +7,8 @@ const SessionEnvironments = @import("SessionEnvironments.zig");
 const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
+const model_list = @import("model_list.zig");
+const signal_stack = @import("signal_stack.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const product_defaults = @import("product_defaults.zig");
@@ -261,6 +263,8 @@ pub const Host = struct {
     limits: Limits = .{},
     /// What this Host serves, owned by its caller for the Host's life.
     providers: *const providers_module.Providers = &providers_module.none,
+    /// The OpenAI API key's model list, fetched once at start.
+    model_lists: ModelLists = .{},
     auth_worker: ?*AuthWorker = null,
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
@@ -336,6 +340,71 @@ pub const Host = struct {
         defer self.launch_mutex.unlock(self.io);
         if (!self.launchAllowed()) return error.HostDispatchSuppressed;
         try launch(context);
+    }
+};
+
+/// The OpenAI API key's model list: the execution owner fetches it once as
+/// the Host starts and publishes it here, where it stays until the Host
+/// stops. The key is read once at start, so the list never needs fetching
+/// again. ChatGPT has no public list; its list is always the table.
+pub const ModelLists = struct {
+    io: std.Io = undefined,
+    allocator: std.mem.Allocator = undefined,
+    providers: *const providers_module.Providers = &providers_module.none,
+    mutex: std.Io.Mutex = .init,
+    /// A live list's IDs are exact length, from `allocator`.
+    openai: model_list.List = .table,
+
+    pub fn deinit(self: *ModelLists) void {
+        switch (self.openai) {
+            .live => |ids| self.allocator.free(ids.bytes),
+            .table, .pending, .table_fallback => {},
+        }
+        self.* = .{};
+    }
+
+    /// Under the lock: intake renders while execution sets.
+    pub fn set(self: *ModelLists, list: model_list.List) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.debug.assert(self.openai == .pending);
+        self.openai = list;
+    }
+
+    /// Publishes a fetched answer: its IDs, kept, or why there are none.
+    pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
+        const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
+            stderr.print("rui: OpenAI model list unavailable ({s}); the picker shows Rui's models\n", .{@errorName(err)});
+            break :failed .table_fallback;
+        };
+        self.set(list);
+    }
+
+    /// The IDs of `body`, exact length from `allocator`. Its scratch is
+    /// mapped for the call, off the caller's stack.
+    noinline fn keep(allocator: std.mem.Allocator, body: anyerror![]const u8) ![]const u8 {
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        const ids = try arena.allocator().create(model_list.IdBuffer);
+        const parsed = try model_list.parseOpenAi(arena.allocator(), try body, ids);
+        return allocator.dupe(u8, parsed.bytes);
+    }
+
+    /// Each served provider's list, borrowed under the lock for `write`.
+    pub fn render(self: *ModelLists, out: *std.Io.Writer) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var entries: [std.enums.values(protocol.Provider).len]model_list.Entry = undefined;
+        var count: usize = 0;
+        for (std.enums.values(protocol.Provider)) |name| {
+            if (!self.providers.serves(name)) continue;
+            entries[count] = .{ .provider = name, .list = switch (name) {
+                .codex => .table,
+                .openai => self.openai,
+            } };
+            count += 1;
+        }
+        try model_list.writeProviders(out, entries[0..count]);
     }
 };
 

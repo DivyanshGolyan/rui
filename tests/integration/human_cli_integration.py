@@ -206,7 +206,7 @@ def help_case():
                 output = run(home, *command.split(), flag)
                 assert output.startswith(f"rui {command} ["), output
                 if command == "session configure":
-                    for phrase in ("Omission preserves", "default resets", "Unknown models",
+                    for phrase in ("Omission preserves", "default resets", "A model Rui does not list",
                                    "rui session inspect", "extra compaction headroom",
                                    "Changes apply to new model requests.",
                                    "Requests already accepted keep their original settings, even when retried."):
@@ -403,7 +403,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert "Reasoning effort: medium (catalog default)" in status, status
         assert "Extra compaction headroom: 0 tokens (model default); not a guaranteed output budget" in status, status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
-        assert "Unknown models have no automatic threshold" in usage, usage
+        assert "A model Rui does not list is assumed to have a 128000-token context." in usage, usage
         assert "Changes apply to new model requests." in usage, usage
         assert "Requests already accepted keep their original settings, even when retried." in usage, usage
         for flags, trigger, headroom, effort in (
@@ -459,7 +459,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
     report = json.loads(run(home, "session", "inspect", "--store", store, "--session", session))
     assert report["session"]["model"] == "gpt-6-luna", report
     # CLI creation accepts only release-supported models; the Host preserves
-    # exact bindings outside that list without inferring a context window.
+    # exact bindings outside that list and gives them the unlisted window.
     body = {"version": "4", "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
@@ -474,10 +474,10 @@ def compaction_settings_case(home, store, workspace, socket_path):
         "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
         status = flat(terminal_step(master, "/status", "Work: ", composer=True))
-        assert "no automatic threshold (model default)" in status, status
+        # 90% of the 128000-token window assumed for an unlisted model.
+        assert "estimated context pressure threshold: 115200 tokens (assumed for a model Rui does not list)" in status, status
         assert "Reasoning effort: unknown (no catalog value; reasoning omitted)" in status, status
-        assert "Use /configure --compaction-trigger TOKENS to enable a threshold." in status, status
-        assert "Provider context-overflow recovery still applies." in status, status
+        assert "enable a threshold" not in status, status
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
 

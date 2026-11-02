@@ -523,20 +523,25 @@ pub fn submit(self: *Connection, record: *Record, origin: *const Engine.Origin, 
     // the endpoint's, the fields are the record's block, kept while a
     // resend is possible.
     const borrowed: u8 = c.NGHTTP2_NV_FLAG_NO_COPY_NAME | c.NGHTTP2_NV_FLAG_NO_COPY_VALUE;
-    nva[0] = nv(":method", "POST", borrowed);
+    nva[0] = nv(":method", if (record.flags.get) "GET" else "POST", borrowed);
     nva[1] = nv(":scheme", switch (origin.scheme) {
         .http => "http",
         .https => "https",
     }, borrowed);
     nva[2] = nv(":authority", origin.authority, borrowed);
     nva[3] = nv(":path", path, borrowed);
+    var count: usize = 4;
     var length_text: [20]u8 = undefined;
-    // nghttp2 copies this value at submit.
-    nva[4] = nv("content-length", std.fmt.bufPrint(&length_text, "{d}", .{record.body_length}) catch unreachable, c.NGHTTP2_NV_FLAG_NO_COPY_NAME);
+    // A GET has no content, so it sends no length (RFC 9110 8.6). nghttp2
+    // copies this value at submit.
+    if (!record.flags.get) {
+        nva[count] = nv("content-length", std.fmt.bufPrint(&length_text, "{d}", .{record.body_length}) catch unreachable, c.NGHTTP2_NV_FLAG_NO_COPY_NAME);
+        count += 1;
+    }
     // No content coding is decoded here, so none is accepted (RFC 9110
     // 12.5.3: a request without accept-encoding accepts any).
-    nva[5] = nv("accept-encoding", "identity", borrowed);
-    var count: usize = 6;
+    nva[count] = nv("accept-encoding", "identity", borrowed);
+    count += 1;
     var entries = record.fieldEntries();
     while (entries.next()) |entry| : (count += 1) {
         nva[count] = nv(entry.name, entry.value, borrowed | if (entry.sensitive) @as(u8, c.NGHTTP2_NV_FLAG_NO_INDEX) else 0);

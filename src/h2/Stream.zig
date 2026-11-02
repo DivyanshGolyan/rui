@@ -70,7 +70,9 @@ pub const Flags = packed struct(u16) {
     body_retired: bool = false,
     opened_connection: bool = false,
     replays: u3 = 0,
-    _: u4 = 0,
+    /// The request is a GET: no body and no content-length.
+    get: bool = false,
+    _: u3 = 0,
 };
 
 comptime {

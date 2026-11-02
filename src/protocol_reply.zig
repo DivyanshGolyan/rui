@@ -3,6 +3,8 @@
 //! client.zig owns transport and request capture.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const model_capability = @import("model_capability.zig");
+const model_list = @import("model_list.zig");
 const transport_policy = @import("transport_policy.zig");
 
 pub const ConversationCursor = struct {
@@ -436,6 +438,57 @@ pub fn validHostUnavailable(body: []const u8) bool {
         std.mem.eql(u8, reply.code, "classification_capacity_exhausted") or
         std.mem.eql(u8, reply.code, "ordinary_capacity_exhausted") or
         std.mem.eql(u8, reply.code, "discovery_capacity_exhausted");
+}
+
+/// A `model_list` reply: each served provider's models.
+pub const ModelList = struct {
+    providers: []const struct {
+        provider: protocol.Provider,
+        source: model_list.Source,
+        models: []const struct {
+            id: []const u8,
+            /// Whether Rui's table knows the model; otherwise it runs with
+            /// default limits.
+            known: bool,
+        },
+    },
+};
+
+/// Parsed into `arena`, which owns the result.
+pub fn parseModelList(arena: std.mem.Allocator, body: []const u8) !ModelList {
+    if (body.len > protocol.model_list_reply.max_bytes) return error.InvalidModelList;
+    const reply = std.json.parseFromSliceLeaky(struct {
+        version: []const u8,
+        type: []const u8,
+        providers: @FieldType(ModelList, "providers"),
+    }, arena, body, .{}) catch return error.InvalidModelList;
+    if (!std.mem.eql(u8, reply.version, protocol.wire_version) or !std.mem.eql(u8, reply.type, "model_list")) return error.InvalidModelList;
+    for (reply.providers) |entry| for (entry.models) |model| {
+        if (!model_capability.validModelSyntax(model.id)) return error.InvalidModelList;
+    };
+    return .{ .providers = reply.providers };
+}
+
+test "a model list reply parses what the Host writes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var bytes: [protocol.model_list_reply.max_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try out.writeAll(protocol.model_list_reply.head);
+    try model_list.writeProviders(&out, &.{
+        .{ .provider = .codex, .list = .table },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nwhisper-1\n" } } },
+    });
+    try out.writeAll(protocol.model_list_reply.tail);
+    const list = try parseModelList(arena.allocator(), out.buffered());
+    try std.testing.expectEqual(@as(usize, 2), list.providers.len);
+    try std.testing.expectEqual(protocol.Provider.codex, list.providers[0].provider);
+    try std.testing.expectEqual(model_capability.models.len, list.providers[0].models.len);
+    try std.testing.expectEqual(model_list.Source.live, list.providers[1].source);
+    try std.testing.expectEqualStrings("whisper-1", list.providers[1].models[1].id);
+    try std.testing.expect(list.providers[1].models[0].known and !list.providers[1].models[1].known);
+    try std.testing.expectError(error.InvalidModelList, parseModelList(arena.allocator(), "{\"version\":\"4\",\"type\":\"model_list\",\"providers\":[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]}"));
+    try std.testing.expectError(error.InvalidModelList, parseModelList(arena.allocator(), "{\"version\":\"4\",\"type\":\"host_info\",\"providers\":[]}"));
 }
 
 pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {

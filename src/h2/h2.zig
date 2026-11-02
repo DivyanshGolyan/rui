@@ -294,8 +294,12 @@ pub const Sink = union(enum) {
     buffer: []u8,
 };
 
+/// GET sends no body, so `prepare` refuses one with a body.
+pub const Method = enum { post, get };
+
 pub const Request = struct {
     endpoint: Endpoint,
+    method: Method = .post,
     /// Copied by `prepare` into one owned block of exact length, so the
     /// caller may wipe its own copies (credentials) once it returns; a
     /// borrowed field leaves only its two addresses there. The block is

@@ -42,6 +42,8 @@ RULES = (
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig", "src/provider_name.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
+    (("src/model_list.zig",), ("test-logic", "test", "codex-h2-integration"),
+     ("test-logic", "test", "codex-h2-integration"), "Provider model lists; the Host's fetch and the wire reply follow"),
     (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
       "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
       "src/session_reads.zig", "src/unseen.zig", "src/ClientTask.zig", "src/Overview.zig", "src/keymap.zig", "src/slash_commands.zig"),

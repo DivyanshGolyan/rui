@@ -802,6 +802,11 @@ fn setNonblocking(fd: std.posix.fd_t) !void {
         std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SocketFlagsFailed;
 }
 
+fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.Transport {
+    if (!served.any()) return .none;
+    return if (served.modelListKey() != null) .requests_and_model_list else .requests;
+}
+
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
 pub fn serve(
@@ -830,7 +835,7 @@ pub fn serve(
         active_capacity,
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
-        served.any(),
+        descriptorTransport(served),
         served.chatgpt() != null,
         os.tag,
     );
@@ -868,7 +873,7 @@ pub fn serve(
         active_capacity,
         intake_capacity,
         3,
-        served.any(),
+        descriptorTransport(served),
         served.chatgpt() != null,
         os.tag,
     );
@@ -1001,6 +1006,10 @@ pub fn serve(
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
     host.started_at = @intCast(started_at);
+    // Freed after intake and execution are joined: they read and fill it.
+    // Pending from the start: execution launches the fetch, or settles it.
+    host.model_lists = .{ .io = io, .allocator = allocator, .providers = served, .openai = if (served.modelListKey() != null) .pending else .table };
+    defer host.model_lists.deinit();
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
@@ -1232,6 +1241,7 @@ const Route = enum {
     activity_content,
     mark_read,
     person_message,
+    model_list,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -1560,7 +1570,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, protocol.max_person_message_response_bytes, renderPersonMessage, .{&found});
         },
+        // Host memory only: never SQLite or the network.
+        // Sized as written: the bound is tens of KiB, a reply mostly far less.
+        .model_list => try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host}),
     }
+}
+
+fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
+    out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
+    host.model_lists.render(out.writer) catch return error.BufferTooLarge;
+    out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
 /// One `T` on the heap whose bytes stay unwritten until its initializer or
@@ -1683,6 +1702,8 @@ const HeaderReader = struct {
             .mark_read
         else if (std.mem.eql(u8, path, "/v1/person-message"))
             .person_message
+        else if (std.mem.eql(u8, path, "/v1/model-list"))
+            .model_list
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
@@ -2175,8 +2196,18 @@ const Reply = struct {
     /// retires unanswered: it cannot revoke an already saved semantic answer.
     /// Only the renderer's own failure, or outgrowing `max_bytes`, returns.
     fn json(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+        const body = std.Io.Writer.Allocating.initCapacity(self.allocator, max_bytes) catch return;
+        return self.jsonInto(body, status, max_bytes, render, args);
+    }
+
+    /// As `json`, growing from empty: for a bound far above most replies.
+    fn jsonGrowing(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+        return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
+    }
+
+    fn jsonInto(self: *Reply, initial: std.Io.Writer.Allocating, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
         std.debug.assert(self.body == .none);
-        var body = std.Io.Writer.Allocating.initCapacity(self.allocator, max_bytes) catch return;
+        var body = initial;
         defer body.deinit();
         try @call(.auto, render, .{protocol.JsonOut{ .writer = &body.writer }} ++ args);
         if (body.written().len > max_bytes) return error.BufferTooLarge;

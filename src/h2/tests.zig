@@ -168,11 +168,34 @@ test "a request and its response round trip" {
     try std.testing.expect(harness.receiver.content_type_seen);
     try std.testing.expectEqual(@as(u32, 1), harness.receiver.retired);
     const seen = harness.peer.streams.items[0];
+    try std.testing.expectEqualStrings("POST", seen.method.items);
     try std.testing.expectEqualStrings("/v1/responses", seen.path.items);
+    try std.testing.expectEqualStrings("11", seen.content_length.items);
     try std.testing.expectEqualStrings("Bearer secret", seen.authorization.items);
     try std.testing.expectEqualStrings("{\"input\":1}", seen.body.items);
     try std.testing.expectEqual(@as(?*h2.Stream, null), harness.client.nextFinished());
     stream.deinit();
+}
+
+test "a GET sends no body and no length, and a GET with a body is refused" {
+    const harness = try Harness.create(.{});
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [8]u8 = undefined;
+    var refused = bytesRequest(harness.endpoint, "x", &sink);
+    refused.method = .get;
+    try std.testing.expectError(error.InvalidRequest, harness.client.prepare(&stream, refused));
+    var request = bytesRequest(harness.endpoint, "", &sink);
+    request.method = .get;
+    try harness.launch(&stream, request);
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(h2.End{ .cause = .complete, .request_sent = true }, try harness.collect(&stream));
+    try std.testing.expectEqualStrings("ok", sink[0..@intCast(stream.responseLength())]);
+    stream.deinit();
+    const seen = harness.peer.streams.items[0];
+    try std.testing.expectEqualStrings("GET", seen.method.items);
+    try std.testing.expectEqualStrings("", seen.content_length.items);
+    try std.testing.expectEqualStrings("", seen.body.items);
 }
 
 test "requests accept only identity, and the peer is told the header limit" {
