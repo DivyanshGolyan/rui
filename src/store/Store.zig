@@ -532,11 +532,20 @@ pub const Store = struct {
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
-        return action_domain.actionContent(self, session_ref, action_id, "arguments_content_id");
+        return self.actionContent(session_ref, action_id, .arguments);
     }
 
     pub fn actionCallId(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
-        return action_domain.actionContent(self, session_ref, action_id, "call_id_content_id");
+        return self.actionContent(session_ref, action_id, .call_id);
+    }
+
+    fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action, action_domain.actionContent(&access, session_ref, action_id, field));
     }
 
     pub fn admitNextModelAttempt(self: *Store, faults: Faults) !?AttemptAdmission {
@@ -570,7 +579,9 @@ pub const Store = struct {
     pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.action_attempt, action_domain.readBashExecutionInputLocked(self, binding, out));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_attempt, action_domain.readBashExecutionInput(&access, binding, out));
     }
 
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {

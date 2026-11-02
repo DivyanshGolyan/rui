@@ -13,7 +13,6 @@ const turn_domain = @import("turn.zig");
 const c = sqlite.c;
 const ContentReference = content_domain.ContentReference;
 const Faults = store_core.Faults;
-const Ordinary = store_core.Ordinary;
 
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
@@ -70,12 +69,25 @@ pub const ActionSettlement = enum { effect, session_stop };
 
 pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
+/// What a Bash execution reads from its Attempt, decoded in place from the
+/// one row `bash_input` returns: first the facts that check the binding,
+/// then what the execution uses.
 pub const BashExecutionInput = struct {
+    /// Whether the Action is still the unresolved Attempt the binding names.
+    current: bool,
+    turn_id: u64,
+    /// The Session position of the Action's call.
+    position: u64,
+    workspace: protocol.Bounded(protocol.max_workspace_bytes),
     session: protocol.Bounded(protocol.max_session_bytes),
     sender_handle: protocol.Bounded(32),
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
-    arguments: ContentReference,
     timeout_ms: u64,
+    arguments_length: u64,
+    arguments_digest: [32]u8,
+
+    pub fn arguments(input: *const BashExecutionInput) ContentReference {
+        return .{ .length = input.arguments_length, .digest = input.arguments_digest };
+    }
 };
 
 pub const ActiveOperationFilter = struct {
@@ -102,35 +114,30 @@ fn containsNoActiveOperation(_: *const anyopaque, _: u64) bool {
     return false;
 }
 
-pub fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
-    const entry = try store_core.enter(self, .none);
-    defer entry.release();
-    if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
-    return entry.finish(Ordinary.action, actionContentLocked(self, session_ref, action_id, column));
-}
+/// The Session position of the call the Action `action_id` of `session`
+/// carries out.
+const action_call_position = rsql.Read(.{
+    .sql = "SELECT item.session_position AS position FROM action_operation action JOIN model_tool_call tool_call " ++
+        "ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+        "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
+        "WHERE action.action_id=?1 AND action.session_ref=?2",
+    .Args = struct { action_id: u64, session: []const u8 },
+    .Row = struct { position: rsql.Positive },
+    .cardinality = .optional,
+});
 
-fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
-    const statement = try store_core.cached(
-        self,
-        "SELECT tool_call." ++ column ++ ",item.session_position FROM action_operation action JOIN model_tool_call tool_call " ++
-            "ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
-            "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
-            "WHERE action.action_id=?1 AND action.session_ref=?2",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, action_id);
-    try sqlite.bindText(statement, 2, session_ref);
-    switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => return error.ActionNotFound,
-        c.SQLITE_ROW => {},
-        else => return error.ActionReadFailed,
-    }
-    const content_id = c.sqlite3_column_int64(statement, 0);
-    if (content_id <= 0) return error.CorruptStore;
-    const position = try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-    _ = try reads_domain.proposalLocked(self, session_ref, @intCast(position));
-    const metadata = try content_domain.readPublicContentMetadata(self, content_id);
-    return .{ .length = metadata.length, .digest = metadata.digest };
+/// A field of the Proposal the Action carries out, checked as every
+/// Proposal read checks it. Round 2 depends on round 1's position.
+pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    var found: action_call_position.Result = undefined;
+    a.read(action_call_position, .{ .action_id = action_id, .session = session_ref }, &found);
+    try a.run();
+    const position = (found orelse return error.ActionNotFound).position.get();
+    var proposal: reads_domain.proposal_row.Result = undefined;
+    reads_domain.readProposal(a, session_ref, position, &proposal);
+    try a.run();
+    const reference = (try reads_domain.proposalIdentity(proposal, position)).metadata.fields[@backingInt(field)];
+    return .{ .length = reference.length, .digest = reference.digest };
 }
 
 /// The read Access `candidate` finds the next Action outside any
@@ -166,31 +173,35 @@ pub fn admitNextActionAttempt(
     } } };
 }
 
-pub fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT revision.workspace,tool_call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref,action.sender_handle " ++
-            "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-            "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
-            "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
-            "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " " ++
-            "AND action.resolution_code IS NULL",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.action_id);
-    try sqlite.bindU64(statement, 2, binding.parent_operation_id);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
-    if (step != c.SQLITE_ROW) return error.ActionReadFailed;
-    if (c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
-    try sqlite.readText(statement, 0, &out.workspace);
-    const content_id = c.sqlite3_column_int64(statement, 1);
-    const timeout_ms = c.sqlite3_column_int64(statement, 2);
-    if (content_id <= 0 or timeout_ms <= 0) return error.CorruptStore;
-    try sqlite.readText(statement, 4, &out.session);
-    try sqlite.readText(statement, 5, &out.sender_handle);
-    out.arguments = try actionContentLocked(self, out.session.slice(), binding.action_id, "arguments_content_id");
-    out.timeout_ms = @intCast(timeout_ms);
+/// The Action `binding` names, by its key, so it decodes into the caller's
+/// input in place; whether it is still that Attempt is a column.
+const bash_input = rsql.Read(.{
+    .sql = "SELECT (action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL) AS current," ++
+        "operation.turn_id,item.session_position AS position,revision.workspace,action.session_ref AS session,action.sender_handle," ++
+        "action.bash_timeout_ms AS timeout_ms,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest " ++
+        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "LEFT JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
+        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+        "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
+        "LEFT JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id WHERE action.action_id=?1",
+    .Args = struct { action_id: u64, parent_operation_id: u64 },
+    .Row = BashExecutionInput,
+    .cardinality = .one,
+});
+
+/// Round 1 reads the Attempt into `out`; round 2, which needs its Session
+/// and position, checks the Proposal its arguments come from. `out` is
+/// valid only when this returns without error.
+pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
+    a.read(bash_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, out);
+    try a.run();
+    if (!out.current or out.turn_id != binding.turn_id) return error.StaleActionAttemptBinding;
+    // An attempted Action has its timeout and its revision's Workspace.
+    if (out.timeout_ms == 0 or out.workspace.len == 0) return error.CorruptStore;
+    var proposal: reads_domain.proposal_row.Result = undefined;
+    reads_domain.readProposal(a, out.session.slice(), out.position, &proposal);
+    try a.run();
+    _ = try reads_domain.proposalIdentity(proposal, out.position);
 }
 
 /// The Session of the Attempt `binding` names, while it is attempted.

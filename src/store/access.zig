@@ -88,7 +88,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         failure: ?Error = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
-        claims: [max_claims]Positions = undefined,
+        /// None in a read Access, which claims no positions.
+        claims: [if (mode == .read) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
 
         /// No transition takes positions in more Sessions than the change
@@ -116,10 +117,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             return .{ .store = entry.store };
         }
 
-        /// An Access inside the transaction its caller opened.
+        /// How unconverted code, under an Entry it already holds, runs a
+        /// rule that has an Access form. A `.nested` Access writes inside
+        /// the transaction its caller opened, which is asserted; a `.read`
+        /// one checks nothing.
         pub fn within(store: *Store) Self {
-            comptime std.debug.assert(mode == .nested);
-            std.debug.assert(c.sqlite3_get_autocommit(store.database) == 0);
+            comptime std.debug.assert(mode != .write);
+            if (mode == .nested) std.debug.assert(c.sqlite3_get_autocommit(store.database) == 0);
             return .{ .store = store };
         }
 

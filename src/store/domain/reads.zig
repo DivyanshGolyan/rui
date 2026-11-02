@@ -11,6 +11,8 @@ const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
+const rsql = @import("../rsql.zig");
+const Access = @import("../access.zig").Access;
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
@@ -937,61 +939,103 @@ pub fn proposalPageLocked(self: *Store, request: *const protocol.ProposalPage, p
     }
 }
 
-const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [3]i64 };
+pub const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [3]i64 };
+
+/// The content columns of a Proposal's three fields, in ProposalField order.
+const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", "arguments_content_id" };
 
 // The page, continuation cursor and byte route share one provenance check.
 // LEFT JOIN keeps missing/contradictory owners visible as corruption.
-pub fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
-    const statement = try store_core.cached(self, "SELECT item.operation_id,op.turn_id,tool_call.call_ordinal,action.action_id,tool_call.rejection_code," ++
+/// The Proposal at a Session position, with each field's content row.
+pub const proposal_row = rsql.Read(.{
+    .sql = "SELECT item.operation_id,op.turn_id,tool_call.call_ordinal,action.action_id,tool_call.rejection_code," ++
         "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id," ++
         "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
         store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND op.attempt_ordinal=item.attempt_ordinal AND " ++
         "((tool_call.rejection_code IS NOT NULL AND action.action_id IS NULL AND tool_call.acceptance_position IS NOT NULL AND " ++
         "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
         "(tool_call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
-        "THEN 1 ELSE 0 END,tool_call.field_metadata FROM model_output_item item " ++
+        "THEN 1 ELSE 0 END AS consistent,tool_call.field_metadata," ++
+        "field0.byte_length AS length0,field0.digest AS digest0,field0.private AS private0," ++
+        "field1.byte_length AS length1,field1.digest AS digest1,field1.private AS private1," ++
+        "field2.byte_length AS length2,field2.digest AS digest2,field2.private AS private2 FROM model_output_item item " ++
         "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
         "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
         "LEFT JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=3");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session);
-    try sqlite.bindU64(statement, 2, position);
-    switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {},
-        c.SQLITE_DONE => return error.ContentNotFound,
-        else => return error.ProposalReadFailed,
-    }
-    if (c.sqlite3_column_int(statement, 8) != 1) return error.CorruptStore;
-    const ordinal = c.sqlite3_column_int64(statement, 2);
-    if (ordinal < 0 or c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return error.CorruptStore;
+        "LEFT JOIN content field0 ON field0.content_id=tool_call." ++ proposal_fields[0] ++ " " ++
+        "LEFT JOIN content field1 ON field1.content_id=tool_call." ++ proposal_fields[1] ++ " " ++
+        "LEFT JOIN content field2 ON field2.content_id=tool_call." ++ proposal_fields[2] ++ " " ++
+        "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=3",
+    .Args = struct { session: []const u8, position: u64 },
+    .Row = struct {
+        operation_id: rsql.Positive,
+        turn_id: rsql.Positive,
+        call_ordinal: u64,
+        action_id: ?rsql.Positive,
+        rejection_code: ?protocol.ProposalRejection,
+        name_content_id: rsql.Positive,
+        call_id_content_id: rsql.Positive,
+        arguments_content_id: rsql.Positive,
+        consistent: bool,
+        /// Three admission-certified (little-endian length, SHA-256) pairs.
+        field_metadata: [120]u8,
+        length0: u64,
+        digest0: [32]u8,
+        private0: bool,
+        length1: u64,
+        digest1: [32]u8,
+        private1: bool,
+        length2: u64,
+        digest2: [32]u8,
+        private2: bool,
+    },
+    .cardinality = .optional,
+});
+
+/// Queues reading the Proposal at `position`; `proposalIdentity` follows
+/// its round.
+pub fn readProposal(a: anytype, session: []const u8, position: u64, destination: *proposal_row.Result) void {
+    a.read(proposal_row, .{ .session = session, .position = position }, destination);
+}
+
+/// The identity of the Proposal a `readProposal` round found at `position`.
+/// Each field's content must be public and match the metadata admission
+/// certified, so reference substitution is detectable without reopening
+/// payloads.
+pub fn proposalIdentity(found: proposal_row.Result, position: u64) error{ ContentNotFound, CorruptStore }!ProposalIdentity {
+    const row = found orelse return error.ContentNotFound;
+    if (!row.consistent) return error.CorruptStore;
     var result: ProposalIdentity = .{ .metadata = .{
         .position = position,
-        .operation = @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
-        .turn = @intCast(try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore),
-        .call_ordinal = @intCast(ordinal),
-        .action = if (try sqlite.readNullablePositiveI64(statement, 3)) |action| @intCast(action) else null,
-        .rejection = null,
+        .operation = row.operation_id.get(),
+        .turn = row.turn_id.get(),
+        .call_ordinal = row.call_ordinal,
+        .action = if (row.action_id) |action| action.get() else null,
+        .rejection = row.rejection_code,
         .fields = undefined,
     }, .content_ids = undefined };
-    if (c.sqlite3_column_type(statement, 4) != c.SQLITE_NULL) {
-        var code: protocol.Bounded(32) = .{};
-        try sqlite.readText(statement, 4, &code);
-        result.metadata.rejection = std.meta.stringToEnum(protocol.ProposalRejection, code.slice()) orelse return error.CorruptStore;
-    }
-    // Three admission-certified (little-endian length, SHA-256) pairs.
-    // Reference substitution is detectable without reopening payloads.
-    if (c.sqlite3_column_bytes(statement, 9) != 120) return error.CorruptStore;
-    const certified: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, 9) orelse return error.CorruptStore);
-    for (&result.content_ids, &result.metadata.fields, 0..) |*id, *field, index| {
-        id.* = try sqlite.readNullablePositiveI64(statement, @intCast(5 + index)) orelse return error.CorruptStore;
-        const metadata = try content_domain.readPublicContentMetadata(self, id.*);
-        if (metadata.length != std.mem.readInt(u64, certified[index * 40 ..][0..8], .little) or
-            !std.mem.eql(u8, &metadata.digest, certified[index * 40 + 8 ..][0..32])) return error.CorruptStore;
-        field.* = .{ .length = metadata.length, .digest = metadata.digest };
+    inline for (proposal_fields, 0..) |column, index| {
+        const suffix = std.fmt.comptimePrint("{d}", .{index});
+        const length: u64 = @field(row, "length" ++ suffix);
+        const digest: [32]u8 = @field(row, "digest" ++ suffix);
+        const certified = row.field_metadata[index * 40 ..][0..40];
+        if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
+            !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
+        result.content_ids[index] = @intCast(@field(row, column).get());
+        result.metadata.fields[index] = .{ .length = length, .digest = digest };
     }
     return result;
+}
+
+/// `readProposal` and `proposalIdentity` for unconverted code.
+pub fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
+    var a = Access(.read, error{}).within(self);
+    defer a.deinit();
+    var found: proposal_row.Result = undefined;
+    readProposal(&a, session, position, &found);
+    try a.run();
+    return proposalIdentity(found, position);
 }
 
 pub fn openProposalFieldLocked(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {

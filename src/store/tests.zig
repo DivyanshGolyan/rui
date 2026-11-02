@@ -6489,10 +6489,14 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
             .decoded = descriptor,
         }});
         var input: BashExecutionInput = .{
+            .current = true,
+            .turn_id = 1,
+            .position = 1,
             .session = request.session,
             .sender_handle = .{},
             .workspace = .{},
-            .arguments = .{ .length = descriptor.len, .digest = undefined },
+            .arguments_length = descriptor.len,
+            .arguments_digest = undefined,
             .timeout_ms = 1000,
         };
         try input.workspace.set(storage.selector.slice());
