@@ -437,7 +437,7 @@ def main():
                 endpoint.bind(str(stale))
                 endpoint.listen(1)
                 def incompatible_peer():
-                    for _ in range(2):
+                    for _ in range(3):
                         connection, _ = endpoint.accept()
                         with connection:
                             read_request(connection)
@@ -450,6 +450,11 @@ def main():
                 peer.start()
                 assert status(store) == "incompatible"
                 assert cli_status(home, "--store", store)["status"] == "incompatible"
+                # A client of another wire version names the mismatch and the
+                # way out instead of failing on its first read.
+                started = subprocess.run([RUI, "host", "start", "--store", str(store)],
+                    env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
+                assert started.returncode != 0 and "does not speak this rui's protocol" in started.stderr, started
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
@@ -490,7 +495,7 @@ def main():
                 (f"HTTP/1.1 0200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
                  "X-Rui-Wire-Version: 4\r\n\r\n").encode() + valid_body,
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
-                 "X-Rui-Wire-Version : 3\r\n\r\n").encode() + valid_body,
+                 "X-Rui-Wire-Version : 4\r\n\r\n").encode() + valid_body,
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
                  "X-Rui-Wire-Version: 4\r\nTransfer-Encoding: chunked\r\n\r\n").encode() + valid_body,
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 4\r\n\r\n{}",

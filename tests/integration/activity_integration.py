@@ -184,6 +184,14 @@ def main():
             stop_row = next(r for r in stopped if kind(r) == "stop")
             assert history(store, stop_row["position"])[1][-1]["value"]["stop"]["completion"] == "pending"
             assert history(store, empty_end)[1] == [] and history(store, complete_end)[1] == complete
+            # Read-through is null until marked, only advances, and never passes the Session's end.
+            assert page(store)["page"]["read_through"] is None
+            caller(store, "mark-read", complete_end)
+            caller(store, "mark-read", pending_end)
+            assert page(store)["page"]["read_through"] == complete_end
+            caller(store, "mark-read", int(stopped_end) + 1, ok=False)
+            caller(store, "mark-read", 1, session="zzzzzz", ok=False)
+            assert page(store)["page"]["read_through"] == complete_end
             for args in ((stopped_end, 2**63, "null"), (str(int(stopped_end)+1), 0, "null"), (stopped_end, calls[0]["position"], 1)):
                 caller(store, "page", *args, "forward", ok=False)
             before_reads = host_resources(process.pid)
@@ -221,7 +229,7 @@ def main():
             valid = {"version": "4", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
-                "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"},
+                "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"}, "read_through": None, "beyond_unseen": False,
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
