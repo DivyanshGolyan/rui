@@ -1467,9 +1467,24 @@ const Capture = struct {
     fn writeTools(self: *Capture, tools: ?[]const u8) !void {
         const value = tools orelse return self.write("{\"state\":\"omitted\"}");
         try self.write("{\"state\":\"value\",\"value\":[");
+        // A comma list such as `bash,web_search`, each name once, written in
+        // catalog order; `none` is the empty catalog.
         if (!std.mem.eql(u8, value, "none")) {
-            if (!std.mem.eql(u8, value, "bash")) return error.UnknownTool;
-            try self.writeJsonString(value);
+            const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
+            var chosen = std.EnumSet(Tool).empty;
+            var names = std.mem.splitScalar(u8, value, ',');
+            while (names.next()) |name| {
+                const tool = std.meta.stringToEnum(Tool, name) orelse return error.UnknownTool;
+                if (chosen.contains(tool)) return error.UnknownTool;
+                chosen.insert(tool);
+            }
+            var first = true;
+            var tools_in_order = chosen.iterator();
+            while (tools_in_order.next()) |tool| {
+                if (!first) try self.write(",");
+                first = false;
+                try self.writeJsonString(@tagName(tool));
+            }
         }
         try self.write("]}");
     }

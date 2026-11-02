@@ -998,15 +998,16 @@ fn ReportNumber(comptime allow_zero: bool) type {
 
 const ReportTools = struct {
     bash: bool = false,
+    web_search: bool = false,
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ReportTools {
         if (try source.next() != .array_begin) return error.UnexpectedToken;
         var result: ReportTools = .{};
         while (try source.peekNextTokenType() != .array_end) {
-            const tool = try std.json.innerParse(JsonEnum(enum { bash }), allocator, source, options);
+            const tool = try std.json.innerParse(JsonEnum(enum { bash, web_search }), allocator, source, options);
             switch (tool.value) {
-                .bash => {
-                    if (result.bash) return error.DuplicateField;
-                    result.bash = true;
+                inline else => |name| {
+                    if (@field(result, @tagName(name))) return error.DuplicateField;
+                    @field(result, @tagName(name)) = true;
                 },
             }
         }
@@ -1017,6 +1018,7 @@ const ReportTools = struct {
     pub fn jsonStringify(self: ReportTools, jw: anytype) !void {
         try jw.beginArray();
         if (self.bash) try jw.write("bash");
+        if (self.web_search) try jw.write("web_search");
         try jw.endArray();
     }
 };
@@ -1186,6 +1188,7 @@ pub const SessionListPage = struct {
                 .provider = wire.provider.value,
                 .model = wire.model.value,
                 .bash = wire.tools.bash,
+                .web_search = wire.tools.web_search,
                 .permission_mode = wire.permission_mode.value,
                 .label = if (wire.label) |label| label.value else null,
                 .created_at = try ActivityPage.id(wire.created_at, false),

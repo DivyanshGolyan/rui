@@ -1340,11 +1340,15 @@ pub const Preparation = struct {
                     const tool = all[self.state.next_tool];
                     self.state.next_tool += 1;
                     if (self.settings.tools_mask & tools.toolBit(tool) == 0) continue;
-                    const definition = tools.definition(tool);
-                    self.handles[0] = .{ .text = definition.name };
-                    self.handles[1] = .{ .text = definition.description };
-                    self.handles[2] = .{ .text = definition.parameters_json };
-                    return self.loadItemHeader(.tool, 0b111);
+                    switch (tools.offer(tool)) {
+                        .function => |definition| {
+                            self.handles[0] = .{ .text = definition.name };
+                            self.handles[1] = .{ .text = definition.description };
+                            self.handles[2] = .{ .text = definition.parameters_json };
+                            return self.loadItemHeader(.tool, 0b111);
+                        },
+                        .web_search => return self.loadItemHeader(.web_search, 0),
+                    }
                 }
                 self.state.stage = .text_format;
             },
@@ -2053,7 +2057,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     var configuration: protocol.ConfigureCommand = .{};
     try configuration.key.set("peer-tools");
     configuration.session = peer;
-    configuration.configuration.tools = .{ .state = .value, .count = 1, .values = .{.bash} };
+    configuration.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("bypass");
     try std.testing.expect(setup.storage.configure(&configuration, .{}) == .accepted);
@@ -2170,6 +2174,8 @@ const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 // Share the tool's prose and schema, not the request's tool envelope.
 const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_definition.description ++
     "\",\"strict\":true,\"parameters\":" ++ tools.bash_definition.parameters_json ++ "}";
+// A Session created with the product's default tools.
+const default_tools_json = bash_tool_json ++ ",{\"type\":\"web_search\",\"external_web_access\":true}";
 
 // Share prose, not request construction: independently JSON-encode fixture inputs.
 fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8) ![]u8 {
@@ -2611,7 +2617,7 @@ test "request preparation retains the allocated ID across reopen and replacement
     try setup.submit("prep-replacement-input", "prep-replacement-message", session.slice(), "same input");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const original = try admitted.permit.consume();
-    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}],\"tools\":[" ++ bash_tool_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
+    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}],\"tools\":[" ++ default_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
     defer std.testing.allocator.free(expected);
     var binding = original;
     for (0..2) |index| {
@@ -3572,7 +3578,7 @@ test "request preparation replays reasoning continuation without its private rea
             "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"original\"}]},",
             case.replayed,
-            ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ bash_tool_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
+            ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ default_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
         });
         defer std.testing.allocator.free(body);
         const expected = try requestGolden(setup.workspace, session.slice(), body);
