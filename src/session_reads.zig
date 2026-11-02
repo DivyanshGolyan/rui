@@ -1836,10 +1836,12 @@ test "plain text keeps whole code points within its bound, escapes controls and 
 
 /// A Host for tests of what a Session read asks: it answers Activity pages
 /// and Message content from a history of `history` completed Turns'
-/// outcomes followed by `tail`, and counts the pages it served.
+/// outcomes followed by `tail`, and counts the pages it served. The history
+/// position `results.at`, if any, also holds `results.count` tool results.
 const FakeHost = struct {
     history: u64,
     tail: []const Tail,
+    results: struct { at: u64 = 0, count: u64 = 0 } = .{},
     /// The Store's end, which a page asked for at no end reads.
     end: u64,
     held: bool = false,
@@ -1867,7 +1869,27 @@ const FakeHost = struct {
         return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = content(), .admitted_at = 1 } };
     }
 
-    fn item(self: *const FakeHost, position: u64, end: u64) protocol.ActivityItem {
+    const Row = struct { position: u64, ordinal: u64 = 0 };
+
+    fn rows(self: *const FakeHost, position: u64) u64 {
+        return if (position != 0 and position == self.results.at) self.results.count + 1 else 1;
+    }
+
+    fn step(self: *const FakeHost, row: Row, end: u64, direction: @FieldType(protocol.ActivityFacts, "direction")) ?Row {
+        const following: Row = switch (direction) {
+            .forward => if (row.ordinal + 1 < self.rows(row.position)) .{ .position = row.position, .ordinal = row.ordinal + 1 } else .{ .position = row.position + 1 },
+            .backward => if (row.ordinal > 0) .{ .position = row.position, .ordinal = row.ordinal - 1 } else if (row.position <= 1) return null else .{ .position = row.position - 1, .ordinal = self.rows(row.position - 1) - 1 },
+        };
+        return if (following.position <= end) following else null;
+    }
+
+    fn item(self: *const FakeHost, row: Row, end: u64) protocol.ActivityItem {
+        const position = row.position;
+        if (row.ordinal != 0) {
+            var presentation: protocol.ToolPresentation = .{ .description = .{}, .code = .succeeded, .publication_position = position };
+            presentation.description.?.set("ls") catch unreachable;
+            return .{ .position = position, .ordinal = row.ordinal, .at = 1, .value = .{ .tool_result = .{ .content = content(), .presentation = presentation } } };
+        }
         if (position <= self.history) {
             var code: Bounded(protocol.max_code_bytes) = .{};
             code.set("completed") catch unreachable;
@@ -1881,21 +1903,27 @@ const FakeHost = struct {
         return .{ .position = position, .at = 1, .value = value };
     }
 
-    fn page(self: *const FakeHost, end: u64, position: u64, direction: @FieldType(protocol.ActivityFacts, "direction")) protocol.ActivityFacts {
+    fn page(self: *const FakeHost, end: u64, position: u64, ordinal: ?u64, direction: @FieldType(protocol.ActivityFacts, "direction")) protocol.ActivityFacts {
         var facts: protocol.ActivityFacts = .{ .end = end, .direction = direction };
-        var next = if (direction == .forward) position + 1 else if (position == 0) end else position - 1;
-        while (facts.count < facts.items.len and next >= 1 and next <= end) {
-            facts.items[facts.count] = self.item(next, end);
+        var next: ?Row = if (ordinal) |at|
+            self.step(.{ .position = position, .ordinal = at }, end, direction)
+        else switch (direction) {
+            .forward => self.step(.{ .position = position, .ordinal = self.rows(position) - 1 }, end, direction),
+            .backward => if (position != 0) self.step(.{ .position = position }, end, direction) else if (end >= 1) .{ .position = end, .ordinal = self.rows(end) - 1 } else null,
+        };
+        while (facts.count < facts.items.len) {
+            const row = next orelse break;
+            facts.items[facts.count] = self.item(row, end);
             facts.count += 1;
-            next = if (direction == .forward) next + 1 else next - 1;
+            next = self.step(row, end, direction);
         }
-        facts.more = facts.count == facts.items.len and next >= 1 and next <= end;
+        facts.more = facts.count == facts.items.len and next != null;
         facts.read_through = self.read_through;
-        facts.beyond_unseen = direction == .backward and facts.more and if (self.read_through) |through| next > through else true;
+        facts.beyond_unseen = direction == .backward and facts.more and if (self.read_through) |through| next.?.position > through else true;
         const boundary = if (direction == .forward and facts.more) facts.items[facts.count - 1].position else end;
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
-            const value = self.item(at, boundary).value;
+            const value = self.item(.{ .position = at }, boundary).value;
             if (value != .admission or value.admission.state != .queued or value.admission.sender != null) continue;
             if (facts.queued.count == 0) facts.queued.oldest_position = at;
             facts.queued.count += 1;
@@ -1937,13 +1965,14 @@ const FakeHost = struct {
         const body = request[body_start .. body_start + length];
         var storage: [4096]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        const Cursor = struct { end: ?[]const u8 = null, position: []const u8, direction: []const u8 = "forward" };
+        const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward" };
         const cursor = try std.json.parseFromSliceLeaky(Cursor, fixed.allocator(), body, .{ .ignore_unknown_fields = true });
         const position = try std.fmt.parseInt(u64, cursor.position, 10);
         if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
             self.pages += 1;
             const end = if (cursor.end) |value| try std.fmt.parseInt(u64, value, 10) else self.end;
-            const facts = self.page(end, position, if (std.mem.eql(u8, cursor.direction, "backward")) .backward else .forward);
+            const ordinal = if (cursor.ordinal) |value| try std.fmt.parseInt(u64, value, 10) else null;
+            const facts = self.page(end, position, ordinal, if (std.mem.eql(u8, cursor.direction, "backward")) .backward else .forward);
             var out = std.Io.Writer.Allocating.init(std.testing.allocator);
             defer out.deinit();
             try facts.writeJson(&out.writer);
@@ -2110,4 +2139,18 @@ test "a stop on a newer page labels a Message admitted before that page, on an e
     try std.testing.expect(std.mem.startsWith(u8, seen.shown, unseen.rule));
     try std.testing.expect(std.mem.indexOf(u8, seen.shown, labelled) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, seen.shown, "please wait"));
+}
+
+test "newer pages count a position read only once its last row is on one" {
+    // Read through 20; position 22 holds 33 rows, which the first three
+    // pages split: 21 and 22's first 15, 22's next 16, then its last 2.
+    var host: FakeHost = .{ .history = 40, .tail = &.{}, .end = 40, .read_through = 20, .results = .{ .at = 22, .count = 32 } };
+    var transcript: Newer = .{ .next = .{ .end = 40, .position = 20 }, .through = 20 };
+    for ([_]u64{ 21, 21, 35, 40 }) |through| {
+        var job: Job = .{ .session = "k7m2qx", .phase = .history, .target = .{ .newer = transcript } };
+        try host.readWith(&job, history);
+        transcript = job.result.newer;
+        try std.testing.expectEqual(through, transcript.through);
+    }
+    try std.testing.expectEqual(@as(?protocol_reply.ActivityCursor, null), transcript.next);
 }
