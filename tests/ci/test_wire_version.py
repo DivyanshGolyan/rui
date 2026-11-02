@@ -14,14 +14,14 @@ ROOT = Path(__file__).resolve().parents[2]
 OWNER = re.compile(r'^pub const wire_version = "(\d+)";$', re.MULTILINE)
 GO_OWNER = re.compile(r'^const WireVersion = "(\d+)"$', re.MULTILINE)
 GO_OWNER_FILE = "tests/qualification/measurement/measurement.go"
-HEADER = r"Wire-Version\s*:\s*\d"
+HEADER = r'Wire-Version\\?"?\s*:\s*\\?"?\d'
 # Literal version digits, per language, in the forms the wire takes in source.
 LITERALS = (
-    ("src", (".zig",), re.compile(r'\\"(?:version|vers\\\\u0069on)\\":(?:\\")?\d|' + HEADER, re.I)),
+    ("src", (".zig",), re.compile(r'\\"(?:version|vers\\\\u0069on)\\":\s*(?:\\")?\d|\.version\s*=\s*"\d|' + HEADER, re.I)),
     ("tests/integration", (".py", ".sh"), re.compile(
         r"""\\?["']version\\?["']\s*:\s*\\?["']?\d|\bversion\s*=\s*["']\d|\[["']version["']\]\s*==?\s*["']\d|"""
         + HEADER, re.I)),
-    ("tests/qualification", (".go",), re.compile(r'\bVersion:\s*"\d|\\?"version\\?":\\?"?\d|' + HEADER, re.I)),
+    ("tests/qualification", (".go",), re.compile(r'\bVersion:\s*"\d|\\?"version\\?":\s*\\?"?\d|' + HEADER, re.I)),
 )
 
 
@@ -50,6 +50,8 @@ def bump_error(candidate, base, released):
     A PR may raise the version to one past the last release. Once main holds
     an unreleased number, every PR shares it: nothing may go above main's.
     """
+    if candidate < base:
+        return f"wire_version {candidate} goes back below main's {base}"
     allowed = base if base > released else released + 1
     if candidate <= allowed:
         return None
@@ -80,10 +82,12 @@ class WireVersionTest(unittest.TestCase):
     def test_the_literal_check_sees_each_form(self):
         cases = {
             ".zig": ['"{\\"version\\":\\"4\\",\\"type\\":\\"busy\\"}"', '"{\\"version\\":4}"',
-                     '"{\\"vers\\\\u0069on\\":\\"4\\"}"', '"X-Rui-Wire-Version: 4\\r\\n"'],
+                     '"{\\"vers\\\\u0069on\\":\\"4\\"}"', '"X-Rui-Wire-Version: 4\\r\\n"',
+                     '"{\\"version\\": \\"4\\"}"', '.{ .version = "4" }'],
             ".py": ['{"version": "4"}', "{'version': '4'}", 'b\'{"version":"4"}\'', 'dict(version="4")',
-                    'page["version"] = "2"', 'value["version"] == "4"', 'b"X-Rui-Wire-Version : 3\\r\\n"'],
-            ".go": ['Request{Version: "4"}', '`{"version":"4"}`', '"X-Rui-Wire-Version: 4\\r\\n"'],
+                    'page["version"] = "2"', 'value["version"] == "4"', 'b"X-Rui-Wire-Version : 3\\r\\n"',
+                    '{"X-Rui-Wire-Version": "4"}'],
+            ".go": ['Request{Version: "4"}', '`{"version":"4"}`', '"X-Rui-Wire-Version: 4\\r\\n"', '`{"version": "4"}`'],
         }
         clean = {".zig": ['"{\\"version\\":\\"" ++ protocol.wire_version ++ "\\"}"'],
                  ".py": ['{"version": host_process.WIRE_VERSION}', 'b"version=1\\nstore=\\n"', "version=0 if x else 1"],
@@ -116,11 +120,15 @@ class WireVersionTest(unittest.TestCase):
         self.assertIsNotNone(bump_error(6, 4, 4), "a skipped number")
         self.assertIsNone(bump_error(4, 4, 2), "main already past the release is not the PR's bump")
         self.assertIsNotNone(bump_error(5, 4, 2))
+        self.assertIsNotNone(bump_error(3, 4, 2), "a downgrade below main")
 
     def test_wire_version_moves_once_per_release(self):
         tag = released_tag(ROOT)
         if tag is None:
             self.skipTest("no v* release tags in this checkout; the policy job checks out with fetch-depth 0")
+        if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "-q", "origin/main"],
+                          capture_output=True).returncode:
+            self.skipTest("no origin/main in this checkout to take the merge base from")
         released = wire_version(git(ROOT, "show", f"{tag}:src/protocol.zig"))
         base_commit = git(ROOT, "merge-base", "HEAD", "origin/main").strip()
         base = wire_version(git(ROOT, "show", f"{base_commit}:src/protocol.zig"))
