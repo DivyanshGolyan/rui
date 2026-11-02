@@ -152,22 +152,40 @@ pub const Status = enum {
 
     /// The record a Session has once a listing reads it `now`, from the
     /// record it `held` and what the listing before read (`was`, null when
-    /// none listed it). A record follows each change; `fresh` news, a later
-    /// finish, failure or wait in the same status, is one. The listing the
-    /// overview opens on changes nothing: it gives a record only to work
-    /// under way or waiting. A Session at rest gets none until it does
-    /// something.
-    pub fn next(held: ?Status, was: ?Status, now: Status, opening: bool, fresh: bool) ?Status {
-        const changed = if (was) |before| before != now or fresh else !opening;
-        if (!changed) return if (was == null and (now == .working or now == .blocked)) now else held;
-        if (held == null and now == .idle) return null;
-        return now;
+    /// none listed it). A record follows each change between listings; a
+    /// later finish, failure or wait in the same status is one, whichever
+    /// screen read it first. The listing the overview opens on changes
+    /// nothing: it gives a record only to work under way or waiting. A
+    /// Session at rest gets none until it does something.
+    pub fn next(held: ?Status, was: ?Reading, now: Reading, opening: bool) ?Status {
+        const changed = if (was) |before| before.status != now.status or now.after(before) else !opening;
+        if (!changed) return if (was == null and (now.status == .working or now.status == .blocked)) now.status else held;
+        if (held == null and now.status == .idle) return null;
+        return now.status;
     }
 
     /// The record once the person opens the Session: an outcome is seen.
     pub fn opened(held: ?Status) ?Status {
         const status = held orelse return null;
         return if (status == .done or status == .failed) .idle else status;
+    }
+};
+
+/// What one listing read of a Session's work: its status, and the state
+/// that wanted the person, which tells a later finish, failure or wait in
+/// the same status from the one read before.
+pub const Reading = struct {
+    status: Status,
+    attention: ?Attention,
+
+    pub fn of(work: session_work.Work) Reading {
+        return .{ .status = .of(work), .attention = .of(work) };
+    }
+
+    fn after(self: Reading, before: Reading) bool {
+        const now = self.attention orelse return false;
+        const held = before.attention orelse return true;
+        return now.after(held);
     }
 };
 
@@ -352,33 +370,38 @@ test "a notification is one sequence a hostile name cannot end or extend" {
 }
 
 test "a Session's program status follows its work, and a record begins only with news" {
-    const working: Work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 };
-    const finished: Work = .{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 };
-    const failed: Work = .{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 };
-    const waiting: Work = .{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 };
-    const beside: Work = .{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 };
-    const stopped: Work = .{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 };
-    const idle: Work = .{ .state = .{ .idle = .{ .since = 1 } } };
+    const working: Reading = .of(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 });
+    const finished: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 });
+    const failed: Reading = .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 });
+    const waiting: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 });
+    const beside: Reading = .of(.{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 });
+    const stopped: Reading = .of(.{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 });
+    const idle: Reading = .of(.{ .state = .{ .idle = .{ .since = 1 } } });
+    const next_turn: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 });
+    const next_wait: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 5 });
     // What the overview opens on: work under way or waiting has a record,
     // an outcome or rest has none.
-    try std.testing.expectEqual(Status.working, Status.next(null, null, Status.of(working), true, false).?);
-    try std.testing.expectEqual(Status.blocked, Status.next(null, null, Status.of(waiting), true, true).?);
-    try std.testing.expectEqual(Status.blocked, Status.next(null, null, Status.of(beside), true, true).?);
-    for ([_]Work{ finished, failed, stopped, idle }) |work| try std.testing.expectEqual(@as(?Status, null), Status.next(null, null, Status.of(work), true, Status.of(work) != .idle));
+    try std.testing.expectEqual(Status.working, Status.next(null, null, working, true).?);
+    try std.testing.expectEqual(Status.blocked, Status.next(null, null, waiting, true).?);
+    try std.testing.expectEqual(Status.blocked, Status.next(null, null, beside, true).?);
+    for ([_]Reading{ finished, failed, stopped, idle }) |reading| try std.testing.expectEqual(@as(?Status, null), Status.next(null, null, reading, true));
     // An outcome read again by a later listing is still no record.
-    try std.testing.expectEqual(@as(?Status, null), Status.next(null, .done, .done, false, false));
+    try std.testing.expectEqual(@as(?Status, null), Status.next(null, finished, finished, false));
     // A Session first listed later is news, unless it rests.
-    try std.testing.expectEqual(Status.done, Status.next(null, null, Status.of(finished), false, true).?);
-    try std.testing.expectEqual(Status.failed, Status.next(null, null, Status.of(failed), false, true).?);
-    try std.testing.expectEqual(@as(?Status, null), Status.next(null, null, Status.of(idle), false, false));
+    try std.testing.expectEqual(Status.done, Status.next(null, null, finished, false).?);
+    try std.testing.expectEqual(Status.failed, Status.next(null, null, failed, false).?);
+    try std.testing.expectEqual(@as(?Status, null), Status.next(null, null, idle, false));
     // A record follows every change, back to rest after a stop, and a later
-    // Turn's finish in the same status.
-    try std.testing.expectEqual(Status.done, Status.next(.working, .working, .done, false, true).?);
-    try std.testing.expectEqual(Status.idle, Status.next(.working, .working, Status.of(stopped), false, false).?);
-    try std.testing.expectEqual(Status.working, Status.next(null, .done, .working, false, false).?);
-    try std.testing.expectEqual(@as(?Status, null), Status.next(null, .done, .idle, false, false));
-    try std.testing.expectEqual(Status.idle, Status.next(.idle, .done, .done, false, false).?);
-    try std.testing.expectEqual(Status.done, Status.next(.idle, .done, .done, false, true).?);
+    // Turn's finish or a later wait in the same status, even one opened or
+    // never recorded.
+    try std.testing.expectEqual(Status.done, Status.next(.working, working, finished, false).?);
+    try std.testing.expectEqual(Status.idle, Status.next(.working, working, stopped, false).?);
+    try std.testing.expectEqual(Status.working, Status.next(null, finished, working, false).?);
+    try std.testing.expectEqual(@as(?Status, null), Status.next(null, finished, idle, false));
+    try std.testing.expectEqual(Status.idle, Status.next(.idle, finished, finished, false).?);
+    try std.testing.expectEqual(Status.done, Status.next(.idle, finished, next_turn, false).?);
+    try std.testing.expectEqual(Status.done, Status.next(null, finished, next_turn, false).?);
+    try std.testing.expectEqual(Status.blocked, Status.next(.blocked, waiting, next_wait, false).?);
     // Opening the Session sees its outcome; work under way stays.
     try std.testing.expectEqual(Status.idle, Status.opened(.done).?);
     try std.testing.expectEqual(Status.idle, Status.opened(.failed).?);

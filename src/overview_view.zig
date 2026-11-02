@@ -745,16 +745,14 @@ pub const State = struct {
     /// in `arrivals` until `settleArrivals`, so a listing inserts all at
     /// once.
     fn readListed(self: *State, ref: Reference, work: session_work.Work, opening: bool) error{OutOfMemory}!?attention.Kind {
-        const now = attention.Status.of(work);
+        const now: attention.Reading = .of(work);
         if (self.entryOf(ref)) |entry| {
-            const kind = attention.observe(&entry.attention, work);
-            self.track(entry, attention.Status.next(entry.status, entry.listed, now, opening, kind != null));
+            self.track(entry, attention.Status.next(entry.status, entry.listed, now, opening));
             entry.listed = now;
-            return kind;
+            return attention.observe(&entry.attention, work);
         }
-        var arrival: Seen = .{ .key = referenceKey(ref), .listed = now };
+        var arrival: Seen = .{ .key = referenceKey(ref), .listed = now, .status = attention.Status.next(null, null, now, opening) };
         const kind = attention.observe(&arrival.attention, work);
-        arrival.status = attention.Status.next(null, null, now, opening, kind != null);
         arrival.unsent = arrival.status != null;
         try self.arrivals.append(self.gpa, arrival);
         return kind;
@@ -922,14 +920,14 @@ pub const Summary = struct {
 
 const Run = struct { start: usize = 0, len: usize = 0 };
 const Keyed = struct { key: u64, index: u32 };
-/// One Session's record: the latest news any read gave; what the last
-/// listing read; and the program status the terminal should show, from
-/// listings alone, which read in order. A Session no longer listed has no
-/// program status.
+/// One Session's record: the latest news any read gave, which decides
+/// notifications; what the last listing read; and the program status the
+/// terminal should show, from listings alone, which read in order. A
+/// Session no longer listed has no program status.
 const Seen = struct {
     key: u64,
     attention: ?attention.Attention = null,
-    listed: ?attention.Status = null,
+    listed: ?attention.Reading = null,
     status: ?attention.Status = null,
     unsent: bool = false,
 };
