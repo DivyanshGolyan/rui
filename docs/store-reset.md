@@ -1,8 +1,11 @@
 # Start fresh after a Store format change
 
-A Rui build opens only Stores in its own format. If they differ, Host startup fails and the error names the Store, its format and the format the build supports. Rui never migrates or resets a Store.
+A Rui build opens only Stores in its own format.
+If they differ, Host startup fails and the error names the Store, its format and the format the build supports.
+Rui never migrates or resets a Store.
 
-Release versions show the format. `0.35.x` releases all open the same Stores, and a `0.36.0` release needs a new Store.
+Release versions show the format.
+`0.35.x` releases all open the same Stores, and a `0.36.0` release needs a new Store.
 
 You have two choices:
 
@@ -11,13 +14,17 @@ You have two choices:
 
 ## Use a compatible build
 
-Earlier builds stay under `~/.local/lib/rui/install.*/bin/rui`. To identify one, run it with `--version`. Older source builds lack `--version`, so read the `revision` file in their `install.*` directory instead.
+Earlier builds stay under `~/.local/lib/rui/install.*/bin/rui`.
+To identify one, run it with `--version`.
+Older source builds lack `--version`, so read the `revision` file in their `install.*` directory instead.
 
 Set `RUI` to the full `bin/rui` path of a compatible build, and use `"$RUI"` in place of `rui`.
 
 ## Back up the old Store and start a new one
 
-1. Close other clients. Until the copy finishes, run no Rui command against the Store except `host status`. Bare `rui` and `rui session resume` can start a Host.
+1. Close other clients.
+   Until the copy finishes, run no Rui command against the Store except `host status`.
+   Bare `rui` and `rui session resume` can start a Host.
 
 2. Set `STORE` to the exact path printed in the error, and check its Host:
 
@@ -27,16 +34,20 @@ Set `RUI` to the full `bin/rui` path of a compatible build, and use `"$RUI"` in 
 	"$RUI" host status --store "$STORE"
 	```
 
-3. If a Host is running, let its work finish. Then stop it, because `host stop` interrupts all remaining work:
+3. If a Host is running, let its work finish.
+   Then stop it, because `host stop` interrupts all remaining work:
 
 	```sh
 	"$RUI" host stop --store "$STORE"
 	"$RUI" host status --store "$STORE"
 	```
 
-	If the installer said that this version cannot stop the Host, use the `host stop` command it printed instead, which runs your previous build. Wait until status reports `"status":"unavailable"`. The stop acknowledgment alone is not enough.
+	If the installer said that this version cannot stop the Host, use the `host stop` command it printed instead, which runs your previous build.
+	Wait until status reports `"status":"unavailable"`.
+	The stop acknowledgment alone is not enough.
 
-4. Copy the whole stopped Store into a new private directory. Never copy `rui.sqlite3` alone, because committed work can still be only in `rui.sqlite3-wal` after a crash.
+4. Copy the whole stopped Store into a new private directory.
+   Never copy `rui.sqlite3` alone, because committed work can still be only in `rui.sqlite3-wal` after a crash.
 
 	```sh
 	BACKUP=$(mktemp -d "$HOME/rui-store-backup.XXXXXX")
@@ -54,12 +65,17 @@ Set `RUI` to the full `bin/rui` path of a compatible build, and use `"$RUI"` in 
 	"$RUI" defaults configure --store "$FRESH_STORE"
 	```
 
-The old Store stays at its original path. Rui does not import its Sessions into the new Store.
+The old Store stays at its original path.
+Rui does not import its Sessions into the new Store.
 
 ## Restore a backup
 
-A Store is bound to its original path. Neither a renamed Store nor a backup opens unchanged at a different path.
+A Store is bound to its original path.
+Neither a renamed Store nor a backup opens unchanged at a different path.
 
-To restore a backup, stop every Host that uses the original path. Move aside any Store now at that path, then copy the complete backup there. Read it with a compatible build. To make it your default again, run `"$RUI" defaults configure --store "$STORE"` with that build.
+To restore a backup, stop every Host that uses the original path.
+Move aside any Store now at that path, then copy the complete backup there.
+Read it with a compatible build.
+To make it your default again, run `"$RUI" defaults configure --store "$STORE"` with that build.
 
 The [Store format policy](../ARCHITECTURE.md#store-format-and-upgrades) describes the plans for migrations.
