@@ -102,19 +102,6 @@ pub const ContentReader = struct {
     }
 };
 
-/// One read handle reused only within a locked Store entry point.
-/// Its overflow-page index costs SQLite heap of about length/1024 bytes.
-pub const ContentBlob = struct {
-    handle: ?*c.sqlite3_blob = null,
-    content_id: i64 = 0,
-
-    pub fn close(self: *ContentBlob) void {
-        // Close reports only an earlier read failure, already returned.
-        if (self.handle) |handle| _ = c.sqlite3_blob_close(handle);
-        self.* = .{};
-    }
-};
-
 const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
     .Args = struct { digest: *const [32]u8, length: u64, private: bool },
@@ -229,32 +216,38 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     if (wanted != 0) reader.prepareRead();
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    try entry.finish(Ordinary.none, readOwnedContentLocked(self, reader, start, destination[0..wanted]));
+    var a: Access(.read, error{}) = .open(&entry);
+    defer a.deinit();
+    try entry.finish(Ordinary.none, readWindow(&a, reader, start, destination[0..wanted]));
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
 }
 
-/// Fills all of `destination` or fails, so no reader sees a short window.
+/// `readWindow` for unconverted code, under the Entry it holds.
 pub fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
-    return readReaderBlob(self, reader, reader.content_id, start, reader.reference.length, destination);
+    var a = Access(.read, error{}).within(self);
+    defer a.deinit();
+    return readWindow(&a, reader, start, destination);
 }
 
-// Each reader owns its copied source window. Neither interleaved readers
-// nor another row at the same offset can borrow those bytes. Entry still
-// owns and closes the SQLite handle before callbacks or yields.
-fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: u64, end: u64, destination: []u8) !void {
+/// Fills all of `destination` from `reader`'s content at `start`, or
+/// fails, so no reader sees a short window. Each reader owns its copied
+/// source window: neither interleaved readers nor another row at the same
+/// offset can borrow those bytes.
+fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8) !void {
     if (destination.len == 0) return;
-    const window = reader.prefetch orelse return readBlob(self, content_id, start, destination);
+    const content_id: u64 = @intCast(reader.content_id);
+    const window = reader.prefetch orelse return a.readRaw(content_id, start, destination);
     var filled: usize = 0;
     while (filled < destination.len) {
         const position = start + filled;
-        if (reader.prefetch_source != content_id or position < reader.prefetch_start or
+        if (reader.prefetch_source != reader.content_id or position < reader.prefetch_start or
             position >= reader.prefetch_start + reader.prefetch_length)
         {
             reader.prefetch_length = 0;
-            const wanted: usize = @intCast(@min(window.len, end - position));
-            try readBlob(self, content_id, position, window[0..wanted]);
-            reader.prefetch_source = content_id;
+            const wanted: usize = @intCast(@min(window.len, reader.reference.length - position));
+            try a.readRaw(content_id, position, window[0..wanted]);
+            reader.prefetch_source = reader.content_id;
             reader.prefetch_start = position;
             reader.prefetch_length = wanted;
         }
@@ -263,25 +256,6 @@ fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: 
         @memcpy(destination[filled..][0..count], window[offset..][0..count]);
         filled += count;
     }
-}
-
-// Called only inside one Entry. Reuse avoids repeated overflow-page walks
-// within synchronous work, never across callbacks or preparation yields.
-fn readBlob(self: *Store, content_id: i64, start: u64, destination: []u8) !void {
-    if (destination.len == 0) return;
-    if (start > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
-    const blob = &self.read_blob;
-    if (blob.handle == null) {
-        // A failed open leaves the handle null.
-        if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob.handle) != c.SQLITE_OK) return error.ContentReadFailed;
-        blob.content_id = content_id;
-    } else if (blob.content_id != content_id) {
-        // A failed reopen aborts the handle; close remains its release.
-        if (c.sqlite3_blob_reopen(blob.handle, content_id) != c.SQLITE_OK) return error.ContentReadFailed;
-        blob.content_id = content_id;
-    }
-    if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(start)) != c.SQLITE_OK) return error.ContentReadFailed;
-    if (@import("builtin").is_test) _ = self.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
 }
 
 pub fn importEmptyContent(self: *Store) !i64 {

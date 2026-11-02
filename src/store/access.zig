@@ -37,6 +37,8 @@ pub const Failure = error{
     CanonicalRollbackFailed,
     CorruptStore,
     ContentWriteFailed,
+    ContentReadFailed,
+    RangeOutOfBounds,
     SqliteExecFailed,
     ClockReadFailed,
     SessionPositionExhausted,
@@ -71,6 +73,20 @@ const advance = rsql.Write(.{
     // The head was read in this transaction under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
+
+/// The read handle on a content payload, reused within one Entry: reading
+/// on through one row reuses SQLite's overflow-page index, about
+/// length/1024 bytes of its heap. `Entry.release` closes it.
+pub const ContentBlob = struct {
+    handle: ?*c.sqlite3_blob = null,
+    content_id: i64 = 0,
+
+    pub fn close(self: *ContentBlob) void {
+        // Close reports only an earlier read failure, already returned.
+        if (self.handle) |handle| _ = c.sqlite3_blob_close(handle);
+        self.* = .{};
+    }
+};
 
 pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     return struct {
@@ -195,6 +211,29 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
                 a.queued += 1;
             }
+        }
+
+        /// Reads exactly `destination.len` bytes of the content row
+        /// `content_id`'s payload at `offset`, as a round of its own,
+        /// through the Store's one reused blob handle, which the Entry
+        /// closes.
+        pub fn readRaw(a: *Self, content_id: u64, offset: u64, destination: []u8) Error!void {
+            if (a.failure) |err| return err;
+            if (destination.len == 0) return;
+            if (offset > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
+            const id: i64 = @intCast(content_id);
+            const blob = &a.store.read_blob;
+            if (blob.handle == null) {
+                // A failed open leaves the handle null.
+                if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", id, 0, &blob.handle) != c.SQLITE_OK) return error.ContentReadFailed;
+                blob.content_id = id;
+            } else if (blob.content_id != id) {
+                // A failed reopen aborts the handle; close remains its release.
+                if (c.sqlite3_blob_reopen(blob.handle, id) != c.SQLITE_OK) return error.ContentReadFailed;
+                blob.content_id = id;
+            }
+            if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(offset)) != c.SQLITE_OK) return error.ContentReadFailed;
+            if (@import("builtin").is_test) _ = a.store.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
         }
 
         /// Runs the queued writes and one compare-and-set per Session that
