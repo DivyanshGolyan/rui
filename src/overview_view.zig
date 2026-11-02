@@ -13,7 +13,6 @@
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
-const SessionInput = @import("SessionInput.zig");
 const attention = @import("attention.zig");
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
@@ -172,6 +171,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 /// `anchor` is the byte that started the composer's first shown line last
 /// frame. `edits` counts changes to its bytes and never repeats for a new
 /// draft. `listed` is the previous frame's `Screen.listed`.
+/// The most bytes a draft holds, as the shell's line editor caps it.
+pub const draft_capacity = 65_536;
+
 pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0, edits: u32 = 0, listed: bool = false };
 
 /// Where the next input goes, which the shell's route and `render` both
@@ -1858,8 +1860,8 @@ fn compose(state: *State, value: Composed, effects: *Effects) void {
         // another follows. A screen too short for the list shows none.
         .submit => if (picker != null) pick(state, effects) else if (if (value.draft.listed) commandList(state, value.draft) else null) |shown| {
             const taken = shown.enter(state.list_row);
-            if (taken.runs and value.draft.bytes.len + taken.rest.len <= SessionInput.capacity) {
-                var line: [SessionInput.capacity]u8 = undefined;
+            if (taken.runs and value.draft.bytes.len + taken.rest.len <= draft_capacity) {
+                var line: [draft_capacity]u8 = undefined;
                 @memcpy(line[0..value.draft.bytes.len], value.draft.bytes);
                 @memcpy(line[value.draft.bytes.len..][0..taken.rest.len], taken.rest);
                 enter(state, line[0 .. value.draft.bytes.len + taken.rest.len], effects);

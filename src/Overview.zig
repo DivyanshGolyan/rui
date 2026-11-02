@@ -31,6 +31,11 @@ const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const preferences = @import("preferences.zig");
+
+comptime {
+    // The draft holds what a conversation's does.
+    std.debug.assert(view.draft_capacity == SessionInput.capacity);
+}
 const Self = @This();
 
 pub const Options = struct {
@@ -308,7 +313,7 @@ interrupted: *client.Cancellation,
 input: TerminalInput = .{},
 /// The composer's line editor, the conversation's, which owns the draft.
 composer: TerminalEditor = undefined,
-draft: [SessionInput.capacity]u8 = undefined,
+draft: [view.draft_capacity]u8 = undefined,
 /// The byte the latest frame's first composer line starts at, kept first by
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
