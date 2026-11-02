@@ -19,6 +19,7 @@ const api_key = @import("api_key.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
+const status_page = @import("status_page.zig");
 const model_capability = @import("model_capability.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
 const session_view = @import("session_view.zig");
@@ -302,6 +303,10 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     });
     // Preferences are local hints, not Session settings or Host facts.
     try std.Io.File.stdout().writeStreamingAll(init.io, if (!changed) "Defaults (read only):\n" else if (reader == .conversation) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Saved defaults for future Sessions.\n");
+    // A conversation's /status page shows the defaults: after a change
+    // there, the report follows only when the next Session cannot start as
+    // saved.
+    if (reader == .conversation and changed and available_store != null and nextSessionReady(&values, &readiness)) return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
     try writeSafeText(init.io, prospective_store orelse "unavailable");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
@@ -356,6 +361,15 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .access_failure => "Host: access failure; inspect Store permissions.\n",
     } else "Host: unavailable; selected Store unavailable.\n";
     try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
+}
+
+/// The saved defaults select a provider and model whose sign-in is usable.
+fn nextSessionReady(values: *const preferences.Values, readiness: *const preferences.Readinesses) bool {
+    const selectable = model_capability.capabilities(readiness);
+    // A saved provider or model Rui cannot select is not ready either: the
+    // full report that follows says which.
+    const selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch return false;
+    return selection == .selected and selection.selected.readiness.usable();
 }
 
 const DefaultsFacts = struct {
@@ -1205,7 +1219,7 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = writeSessionStatus, .captured = captureGate });
+    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate });
 }
 
 fn captureGate(io: std.Io) !void {
@@ -1821,73 +1835,134 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
     try writer.flush();
 }
 
-/// Everything /status reports, from one Current capture; `file` holds the
-/// capture's attention rows.
-pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
-    try writeSafeFieldTo(out, "Session: ", session_ref);
-    try writeSafeFieldTo(out, "Label: ", if (work.settings.label) |label| label.slice() else "not set");
-    try writeSafeFieldTo(out, "Store: ", store);
-    try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
-    try writeSafeFieldTo(out, "Provider: ", @tagName(work.settings.provider.value));
-    try writeSafeFieldTo(out, "Model: ", work.settings.model.slice());
-    {
-        var buffer: [80]u8 = undefined;
-        const effort = if (work.settings.reasoning_effort) |value|
-            try std.fmt.bufPrint(&buffer, "{s} ({s})", .{ @tagName(value.value), if (work.settings.reasoning_effort_override != null) "Session override" else "catalog default" })
-        else
-            "unknown (no catalog value; reasoning omitted)";
-        try writeSafeFieldTo(out, "Reasoning effort: ", effort);
-    }
-    // The bypass default is stated where it is inspected, without alert weight.
-    try writeSafeFieldTo(out, "Permission: ", switch (work.settings.permission_mode.value) {
-        .bypass => "bypass (Bash runs without asking)",
-        else => |mode| @tagName(mode),
-    });
-    {
-        const origin = if (work.settings.compaction_trigger_override != null)
-            "Session override"
-        else if (model_capability.supportsModel(work.settings.model.slice()))
-            "model default"
-        else
-            "assumed for a model Rui does not list";
-        var buffer: [160]u8 = undefined;
-        const policy = policy: {
-            // Only a Host from before unlisted models had a window sends none.
-            const tokens = work.settings.compaction_trigger orelse break :policy "no automatic threshold";
-            const estimate = (work.settings.context_estimate.value orelse null) orelse
-                break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s})", .{ tokens.value, origin });
-            break :policy try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {d} tokens ({s}); now {d}", .{ tokens.value, origin, estimate.value });
-        };
-        try writeSafeFieldTo(out, "Automatic compaction: ", policy);
-        if (work.settings.compaction_trigger == null)
-            try out.writeAll("Use /configure --compaction-trigger TOKENS to enable a threshold. Provider context-overflow recovery still applies.\n");
-    }
-    {
-        const origin = if (work.settings.output_reservation_override != null) "Session override" else "model default";
-        var buffer: [160]u8 = undefined;
-        try writeSafeFieldTo(out, "Extra compaction headroom: ", try std.fmt.bufPrint(&buffer, "{d} tokens ({s}); not a guaranteed output budget", .{ work.settings.output_reservation.value, origin }));
-    }
-    try writeSafeFieldTo(out, "Work: ", @tagName(work.work.state.value));
-    if (work.selected_message) |selected|
-        try writeSafeFieldTo(out, "Current message: ", selected.slice());
-    if (work.actionable_count != 0) try renderActionable(io, work, file, out);
-    if (work.first_indeterminate) |action| {
-        var buffer: [20]u8 = undefined;
-        try writeSafeFieldTo(out, "Indeterminate Action: ", try std.fmt.bufPrint(&buffer, "{d}", .{action}));
-        if (work.indeterminate_count > 1) {
-            var line: [160]u8 = undefined;
-            try out.writeAll(try std.fmt.bufPrint(&line, "Rui: {d} indeterminate Actions in this Turn; session inspect --profile current lists all IDs.\n", .{work.indeterminate_count}));
+/// What /status reports of the Session, from one Current capture whose
+/// attention rows are in `rows`, taken into `taken`. True when it differs
+/// from `shown` (always without one): `actions` then lists its Actions
+/// awaiting approval, in Current's order.
+pub fn sessionStatus(io: std.Io, current: *const protocol_reply.Current, rows: std.Io.File, taken: *status_page.Session, shown: ?*const status_page.Session, actions: std.Io.File) anyerror!bool {
+    try takeStatus(taken, current);
+    const Digest = struct {
+        hash: std.hash.Wyhash = .init(0),
+        count: u64 = 0,
+        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
+            if (row != .actionable) return;
+            self.hash.update(std.mem.asBytes(&row.actionable.action.value));
+            self.count += 1;
         }
-        try out.writeAll("Rui: The command may have run; Rui did not replay it. Check its effects before deciding what to do next.\n");
-    }
-    if (work.recent_count != 0) {
-        try out.writeAll("Recent messages (use /result KEY for an answer):\n");
-        for (work.recent[0..work.recent_count]) |recent| {
-            try out.writeAll("  ");
-            try writeSafeTextTo(out, recent.message.slice());
-            try out.writeAll(": ");
-            try writeSafeFieldTo(out, "", recent.outcome.slice());
+    };
+    var digest: Digest = .{};
+    try current.traverse(io, rows, &digest);
+    if (digest.count != current.actionable_count) return error.InvalidObservation;
+    taken.work.actions = digest.hash.final();
+    if (shown) |page| if (taken.eql(page)) return false;
+    try actions.setLength(io, 0);
+    var buffer: [1024]u8 = undefined;
+    var output = actions.writer(io, &buffer);
+    const List = struct {
+        out: *std.Io.Writer,
+        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
+            if (row == .actionable) try status_page.writeAction(row.actionable.action.value, self.out);
         }
+    };
+    var list: List = .{ .out = &output.interface };
+    try current.traverse(io, rows, &list);
+    try output.interface.flush();
+    return true;
+}
+
+comptime {
+    std.debug.assert(status_page.max_session_bytes == protocol.max_session_bytes);
+    std.debug.assert(status_page.max_label_bytes == protocol.max_label_bytes);
+    std.debug.assert(status_page.max_path_bytes >= protocol.max_workspace_bytes and status_page.max_path_bytes >= std.Io.Dir.max_path_bytes);
+    std.debug.assert(status_page.max_model_bytes == protocol.max_model_bytes);
+    std.debug.assert(status_page.max_key_bytes == protocol.max_key_bytes);
+    std.debug.assert(status_page.max_outcome_bytes == protocol.max_code_bytes);
+    std.debug.assert(status_page.max_recent == @typeInfo(@FieldType(protocol_reply.Current, "recent")).array.len);
+}
+
+test "/status takes the Session's facts from Current, lists every Action awaiting approval, and says when they change" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
+    defer listed.close(io);
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    try file.writePositionalAll(io, report, 0);
+    const reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
+    const taken = try std.testing.allocator.create([2]status_page.Session);
+    defer std.testing.allocator.destroy(taken);
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
+    var defaults: status_page.Defaults = error.AccessDenied;
+    var bytes: [4096]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try status_page.render(.{ .home = "/home/d", .store = "/home/d/s", .session = &taken[0], .defaults = &defaults }, .effort, &out);
+    try status_page.writeWorkEnd(&taken[0].work, &out);
+    const page = out.buffered();
+    for ([_][]const u8{
+        " Status · lane four · k7m2qx\n",
+        "Folder          ~/w\n",
+        "Tools           bash\n",
+        "Permissions     ask · Bash asks first\n",
+        "Effort          high  \x1b[90mSession override",
+        "Compact at      1,000 tokens · now 310",
+        "Model           gpt-6.1-sol · API key  \x1b[90mfixed",
+        "Store           ~/s  \x1b[90mfixed",
+        "Instructions    none\n",
+        " Work\n   Finished\n   Current message: m1\n   Recent messages (use /result KEY for an answer):\n     m1: completed\n",
+    }) |expected| {
+        errdefer std.debug.print("missing {s} in\n{s}\n", .{ expected, page });
+        try std.testing.expect(std.mem.indexOf(u8, page, expected) != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
+    // The same capture again is no change, and leaves the list as it was.
+    try listed.writePositionalAll(io, "kept", 0);
+    try std.testing.expect(!try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    try std.testing.expectEqual(@as(u64, 4), try listed.length(io));
+    taken[0].work.recent_count = 0;
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
+}
+
+/// The Session's settings and work as the page shows them, its Actions'
+/// digest aside.
+fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Current) !void {
+    const settings = &current.settings;
+    try taken.session.set(settings.reference.slice());
+    taken.label.len = 0;
+    if (settings.label) |label| try taken.label.set(label.slice());
+    try taken.workspace.set(settings.workspace.slice());
+    taken.provider = settings.provider.value;
+    try taken.model.set(settings.model.slice());
+    taken.effort = if (settings.reasoning_effort) |effort| effort.value else null;
+    taken.effort_override = settings.reasoning_effort_override != null;
+    taken.permission = switch (settings.permission_mode.value) {
+        .ask => .ask,
+        .bypass => .bypass,
+    };
+    taken.bash = settings.tools.bash;
+    taken.web_search = settings.tools.web_search;
+    taken.instructions = settings.instructions.bytes.value != 0;
+    taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
+    taken.compaction_override = settings.compaction_trigger_override != null;
+    taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
+    taken.output_reservation = settings.output_reservation.value;
+    taken.reservation_override = settings.output_reservation_override != null;
+    const work = &taken.work;
+    work.state = std.meta.activeTag(current.work.state.value);
+    work.approvals = current.actionable_count;
+    work.current_message = null;
+    if (current.selected_message) |selected| {
+        work.current_message = .{ .len = 0 };
+        try work.current_message.?.set(selected.slice());
+    }
+    work.indeterminate = current.first_indeterminate;
+    work.indeterminate_count = current.indeterminate_count;
+    work.recent_count = current.recent_count;
+    for (current.recent[0..current.recent_count], work.recent[0..current.recent_count]) |*from, *to| {
+        try to.message.set(from.message.slice());
+        try to.outcome.set(from.outcome.slice());
     }
 }
 
@@ -3174,20 +3249,6 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
             return failure.err();
         },
     }
-}
-
-fn renderActionable(io: std.Io, current: *const protocol_reply.Current, file: std.Io.File, out: *std.Io.Writer) !void {
-    const Sink = struct {
-        out: *std.Io.Writer,
-        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
-            if (row == .actionable) {
-                var buffer: [20]u8 = undefined;
-                try writeSafeFieldTo(self.out, "Action requiring attention: ", try std.fmt.bufPrint(&buffer, "{d}", .{row.actionable.action.value}));
-            }
-        }
-    };
-    var sink: Sink = .{ .out = out };
-    try current.traverse(io, file, &sink);
 }
 
 fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]const u8, reference: []const u8, target: u64, interactive: bool) !void {

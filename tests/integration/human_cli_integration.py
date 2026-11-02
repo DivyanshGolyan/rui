@@ -118,13 +118,33 @@ def json_strings(value):
 
 
 # The bypass default is explained only where /status reports it.
-BYPASS_STATUS = "Permission: bypass (Bash runs without asking)"
+BYPASS_STATUS = "bypass · Bash runs without asking"
 
 
 def permission_row(frame, mode):
     """The exact /status row, unwrapped from a narrow page."""
-    value = BYPASS_STATUS if mode == "bypass" else f"Permission: {mode}"
-    return f"{value} Automatic compaction:" in " ".join(frame.split())
+    value = BYPASS_STATUS if mode == "bypass" else f"{mode} · Bash asks first"
+    return f" Permissions {value} Tools " in " ".join(frame.split())
+
+
+def home_path(home, path):
+    """`path` as /status shows it: from `~` under HOME."""
+    text, home = str(path), str(home)
+    if len(home) > 1 and (text == home or text.startswith(home + "/")):
+        text = "~" + text[len(home):]
+    return text
+
+
+def folder_row(home, path):
+    """The /status Folder row for `path`."""
+    return "Folder          " + home_path(home, path)
+
+
+def status_row(page, label, following):
+    """A /status row's value and note, words single-spaced: the text from
+    `label`'s row up to the next row, `following`."""
+    flat = " ".join(page.split())
+    return flat.split(f" {label} ", 1)[1].split(f" {following} ", 1)[0]
 
 
 CAPTURE_NOTICE = re.compile(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n")
@@ -398,26 +418,28 @@ def compaction_settings_case(home, store, workspace, socket_path):
     with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
         "--", session], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
-        status = flat(status_frame(master, session))
-        assert "244800 tokens (model default)" in status, status
-        assert "Reasoning effort: medium (catalog default)" in status, status
-        assert "Extra compaction headroom: 0 tokens (model default); not a guaranteed output budget" in status, status
+        status = status_frame(master, session)
+        compact = status_row(status, "Compact at", "Headroom")
+        assert compact.startswith("244,800 tokens") and compact.endswith(" model default"), status
+        assert status_row(status, "Headroom", "Model") == "0 tokens model default", status
+        assert status_row(status, "Effort", "Permissions") == "medium model default", status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
         assert "A model Rui does not list is assumed to have a 128000-token context." in usage, usage
         assert "Changes apply to new model requests." in usage, usage
         assert "Requests already accepted keep their original settings, even when retried." in usage, usage
-        for flags, trigger, headroom, effort in (
-            ("--compaction-trigger 12345 --output-reservation 234 --reasoning-effort high", "12345 tokens (Session override)", "234 tokens (Session override)", "high (Session override)"),
-            ("--permission-mode ask", "12345 tokens (Session override)", "234 tokens (Session override)", "high (Session override)"),
-            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244800 tokens (model default)", "0 tokens (model default)", "medium (catalog default)"),
+        for flags, trigger, origin, headroom, effort in (
+            ("--compaction-trigger 12345 --output-reservation 234 --reasoning-effort high", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
+            ("--permission-mode ask", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
+            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244,800 tokens", "model default", "0 tokens model default", "medium model default"),
         ):
             configured = configured_frame(master, "/configure " + flags)
             assert "revision:" not in configured and "request:" not in configured, configured
-            status = flat(status_frame(master, session))
-            assert trigger in status and "Extra compaction headroom: " + headroom in status, status
-            assert "Reasoning effort: " + effort in status, status
-            assert "Output reservation:" not in status and "source unknown" not in status, status
-            assert "not a guaranteed output budget" in status, status
+            status = status_frame(master, session)
+            compact = status_row(status, "Compact at", "Headroom")
+            assert compact.startswith(trigger) and compact.endswith(" " + origin), status
+            assert status_row(status, "Headroom", "Model") == headroom, status
+            assert status_row(status, "Effort", "Permissions") == effort, status
+            assert "source unknown" not in status, status
         # /effort and /rename are /configure's flags, with its checks and messages.
         # "/effort " lists the model's levels, the one in force marked.
         efforts = command_frame(master, "/effort ", lambda frame: "current" in frame, end="")
@@ -427,12 +449,12 @@ def compaction_settings_case(home, store, workspace, socket_path):
         command_frame(master, "\x15", lambda frame: "current" not in frame, end="")
         configured_frame(master, "/effort high")
         configured_frame(master, "/rename lane five")
-        status = flat(status_frame(master, session))
-        assert "Reasoning effort: high (Session override)" in status and "Label: lane five" in status, status
+        status = status_frame(master, session)
+        assert status_row(status, "Effort", "Permissions") == "high Session override" and status_row(status, "Name", "Folder") == "lane five", status
         configured_frame(master, "/effort default")
-        assert "Reasoning effort: medium (catalog default)" in flat(status_frame(master, session))
+        assert status_row(status_frame(master, session), "Effort", "Permissions") == "medium model default"
         configured_frame(master, '/rename "lane four"')
-        assert "Label: lane four" in flat(status_frame(master, session))
+        assert status_row(status_frame(master, session), "Name", "Folder") == "lane four"
         terminal_step(master, '/effort "high', "Usage: /effort LEVEL", composer=True)
         told = lambda command, marker: [line for line in terminal_step(master, command, marker, composer=True).split("\n") if marker in line]
         for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "unsupported_reasoning_effort"),
@@ -477,11 +499,12 @@ def compaction_settings_case(home, store, workspace, socket_path):
     with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
         "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
-        status = flat(terminal_step(master, "/status", "Work: ", composer=True))
+        status = terminal_step(master, "/status", " Work", composer=True)
         # 90% of the 128000-token window assumed for an unlisted model.
-        assert "estimated context pressure threshold: 115200 tokens (assumed for a model Rui does not list)" in status, status
-        assert "Reasoning effort: unknown (no catalog value; reasoning omitted)" in status, status
-        assert "enable a threshold" not in status, status
+        compact = status_row(status, "Compact at", "Headroom")
+        assert compact.startswith("115,200 tokens") and compact.endswith(" assumed for an unlisted model"), status
+        assert status_row(status, "Effort", "Permissions") == "unknown no catalog value; reasoning omitted", status
+        assert "overflow recovery" not in status, status
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
 
@@ -638,15 +661,22 @@ def command_frame(master, command, accept, timeout=15, *, end="\n"):
 def status_frame(master, session, command="/status", timeout=15):
     """The /status page for exactly `session` (escaped as /status shows it)."""
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
-    line = "\nSession: " + escaped + "\n"
-    return command_frame(master, command, lambda frame: frame.startswith("Browsing · Esc returns\n")
-        and line in frame and "\nWork: " in frame, timeout)
+    def page(frame):
+        rows = frame.split("\n")
+        return (len(rows) > 1 and rows[0] == "Browsing · Esc returns" and rows[1].startswith(" Status · ")
+            and (rows[1] == " Status · " + escaped or rows[1].endswith(" · " + escaped)) and "\n Work\n" in frame)
+    return command_frame(master, command, page, timeout)
 
 
 def configured_frame(master, command):
-    """The live frame whose status row reports this Configure's success."""
-    return command_frame(master, command, lambda frame: "Configured." in frame.split("\n")
-        and not frame.startswith("Browsing"))
+    """The frame whose status row reports this Configure's success. Run over
+    the /status page, the change leaves the page shown with its reply as a
+    notice; Esc then returns to the conversation, so a later /status page is
+    the one that request reads, not the page already shown."""
+    frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
+    if frame.startswith("Browsing"):
+        command_frame(master, "\x1b", lambda frame: not frame.startswith("Browsing"), end="")
+    return frame
 
 
 def composer_ready(screen, x, y):
@@ -944,7 +974,7 @@ def terminal_wait_oracles():
             raise AssertionError("an earlier frame satisfied a later wait")
         forget_terminal(reader.fileno())
     # The command writer: a queued composer cannot acknowledge a command.
-    for command, marker in (("/configure --model gpt-6-sol", "Configured."), ("/status", "Session: example")):
+    for command, marker in (("/configure --model gpt-6-sol", "Configured."), ("/status", "Status · example")):
         stale = terminal_frame(["› /con"], (1, 7))
         for suffix in (b"", terminal_frame([marker], (1, 1)), terminal_frame([marker, "›"], (2, 3))):
             reader, peer = socket.socketpair()
@@ -965,8 +995,8 @@ def terminal_wait_oracles():
     # Command results: identity, readiness and absence describe one fresh
     # committed frame, not readiness or a Session borrowed from earlier ones.
     session = 's/é"\n'
-    page = ["Browsing · Esc returns", 'Session: s/é\\"\\n', "Permission: bypass (Bash runs without asking)", "Work: finished", "", "›"]
-    def frame_after(command, chunks, read):
+    page = ["Browsing · Esc returns", ' Status · s/é\\"\\n', "   Permissions     bypass · Bash runs without asking", " Work", "   Finished", "", "›"]
+    def frame_after(command, chunks, read, typed=None):
         reader, peer = socket.socketpair()
         with reader, peer:
             forget_terminal(reader.fileno())
@@ -979,19 +1009,38 @@ def terminal_wait_oracles():
                 assert failure.args[0][0] == "terminal closed before command result", failure
                 return None
             finally:
-                assert peer.recv(4096) == (command + "\n").encode()
+                assert peer.recv(4096) == (typed or command + "\n").encode()
                 forget_terminal(reader.fileno())
     status = lambda fd: status_frame(fd, session)
     configured = lambda fd: configured_frame(fd, "/configure --model m")
     unavailable = terminal_frame(["Browsing · Esc returns", "rui: status: StatusUnavailable", "", "›"], (4, 3))
     assert frame_after("/status", [terminal_frame(page[:2], (2, 1)), unavailable], status) is None
-    assert frame_after("/status", [terminal_frame([page[0], "Session: other"] + page[2:], (6, 3))], status) is None
+    assert frame_after("/status", [terminal_frame([page[0], " Status · other"] + page[2:], (7, 3))], status) is None
     assert frame_after("/status", [terminal_frame(page, (1, 1))], status) is None  # Not at the composer.
-    shown = frame_after("/status", [terminal_frame(["✓ Inspect café", "", "›"], (3, 3)), terminal_frame(page, (6, 3))], status)
+    shown = frame_after("/status", [terminal_frame(["✓ Inspect café", "", "›"], (3, 3)), terminal_frame(page, (7, 3))], status)
     assert shown is not None and "Inspect café" not in shown, shown  # A transient live outcome is legitimate.
     live = ["answer", "Configured.", "›"]
     assert frame_after("/configure --model m", [terminal_frame(live, (2, 1))], configured) is None
-    assert frame_after("/configure --model m", [terminal_frame(["Browsing · Esc returns"] + live, (4, 3))], configured) is None
+    over_page = terminal_frame(["Browsing · Esc returns"] + live, (4, 3))
+    # Over the page, the reply is the result only once Esc returns to the conversation.
+    assert frame_after("/configure --model m", [over_page], configured, "/configure --model m\n\x1b") is None
+    reader, peer = socket.socketpair()
+    with reader, peer:
+        forget_terminal(reader.fileno())
+        peer.settimeout(1)
+        keys = []
+        def answer():
+            for frame in (over_page, terminal_frame(live, (3, 3))):
+                keys.append(peer.recv(4096))
+                peer.sendall(frame)
+        answering = threading.Thread(target=answer)
+        answering.start()
+        try:
+            shown = configured(reader.fileno())
+        finally:
+            answering.join()
+            forget_terminal(reader.fileno())
+        assert keys == [b"/configure --model m\n", b"\x1b"] and shown.startswith("Browsing · Esc returns\n"), (keys, shown)
     assert frame_after("/configure --model m", [terminal_frame(live, (3, 3))], configured) is not None
     # Every command step with a composer check binds marker and readiness to
     # one frame: a marker frame that is not ready, then a ready frame without
@@ -1004,8 +1053,8 @@ def terminal_wait_oracles():
     reader, peer = socket.socketpair()
     with reader, peer:  # A page committed before the command is not its result.
         forget_terminal(reader.fileno())
-        peer.sendall(terminal_frame(page, (6, 3)))
-        read_terminal(reader.fileno(), "Work: ", composer=True)
+        peer.sendall(terminal_frame(page, (7, 3)))
+        read_terminal(reader.fileno(), " Work", composer=True)
         try:
             status_frame(reader.fileno(), session, "/status", timeout=0.3)
         except AssertionError:
@@ -1308,7 +1357,7 @@ def overview_cases():
         started = fixture.observe(store, record.stem)["target"]
         status = status_frame(master, started)
         # The Session line under the input names the label, model and ask mode.
-        assert "Label: lane four\n" in status and "lane four · gpt-6-luna" in status and "asks before Bash" in status and permission_row(status, "ask"), status
+        assert status_row(status, "Name", "Folder") == "lane four" and "lane four · gpt-6-luna" in status and "asks before Bash" in status and permission_row(status, "ask"), status
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
@@ -1655,8 +1704,8 @@ def command_entry_cases():
             prompt_cell = drawn_style(master, "› ")
             coloured = prompt_cell is not None and prompt_cell.fg in USER_COLOUR
             assert prompt_cell is not None and coloured == (no_colour == ""), (prompt_cell, opening)
-            status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {initial_session}\nLabel: not set\n" in status, status
+            status = terminal_step(master, "/status", " Status · ", composer=True)
+            assert f" Status · {initial_session}\n" in status and status_row(status, "Name", "Folder") == "not set", status
             terminal_step(master, "/exit", "Resume: ")
             _, errors = terminal_exit(caller, master)
             assert caller.returncode == 0 and not errors, errors
@@ -1774,8 +1823,8 @@ def command_entry_cases():
             env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
-        status = terminal_step(master, "/status", "Session: ", composer=True)
-        assert f"Session: {allocated_entry}\n" in status, status
+        status = terminal_step(master, "/status", " Status · ", composer=True)
+        assert f" Status · {allocated_entry}\n" in status, status
         terminal_step(master, "/exit", "Resume: ")
         _, resumed_errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not resumed_errors, resumed_errors
@@ -1834,8 +1883,10 @@ def command_entry_cases():
             env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
-        status = terminal_step(master, "/status", "Session: ", composer=True)
-        assert f"Session: {newer}\n" in status and shown(f"Store: {store}\n", status), status
+        status = terminal_step(master, "/status", " Status · ", composer=True)
+        assert f" Status · {newer}\n" in status, status
+        # The path wraps at the screen edge, so compare it without layout spaces.
+        assert "".join(status_row(status, "Store", "Instructions").split()) == "".join((home_path(home, store) + "fixed for this Session").split()), status
         assert "gpt-5.6-luna" not in status, status
         terminal_step(master, "/exit", "Resume: ")
         _, errors = terminal_exit(caller, master)
@@ -2583,7 +2634,7 @@ def persistent_input_cases():
         # composer under the same response budget before typing the next draft.
         diagnostic_deadline = time.monotonic() + 15
         os.write(master, b"/status\n")
-        read_terminal(master, "Session: ", timeout=diagnostic_deadline - time.monotonic(), composer=True)
+        read_terminal(master, " Status · ", timeout=diagnostic_deadline - time.monotonic(), composer=True)
         # The page is taller than the screen, and the diagnostic ends it.
         os.write(master, b"\x1b[6~")
         diagnostic = read_terminal(master, "Ctrl-R retries this exact original.",
@@ -2682,7 +2733,7 @@ def persistent_empty_answer_case():
                 assert result["result"]["status"] == "completed", result
                 assert fixture.read_result(store, key) == expected
                 status = status_frame(master, session)
-                assert "Work: finished" in status, status
+                assert " Work\n   Finished" in status, status
                 return_to_live(master)
                 shown = current_screen(master)
                 assert f"Complete request {index}" in shown and "Work ended" not in shown, shown
@@ -3923,7 +3974,7 @@ def opaque_session_commands_case():
         entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), reference],
             cwd=state, env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         read_terminal(master, "› ")
-        assert f"Session: {reference}" in terminal_step(master, "/status", "Session: ", composer=True)
+        assert f" Status · {reference}" in terminal_step(master, "/status", " Status · ", composer=True)
         farewell = terminal_step(master, "/exit", "Resume: ")
         assert entered.wait(timeout=5) == 0
         command = farewell.split("Resume: ", 1)[1].split("\n", 1)[0]
@@ -3935,8 +3986,8 @@ def opaque_session_commands_case():
             env={**os.environ, "HOME": str(home), "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
                  "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         read_terminal(master, "› ")
-        actual = terminal_step(master, "/status", "Session: ", composer=True)
-        assert f"Session: {reference}" in actual, (command, actual)
+        actual = terminal_step(master, "/status", " Status · ", composer=True)
+        assert f" Status · {reference}" in actual, (command, actual)
         os.write(master, b"propose two distinct Actions\n")
         proposal = action_ready(ready_read, master)
         for label, decision in (("Deny: ", "deny"), ("Allow once: ", "allow_once")):
@@ -4053,8 +4104,8 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert "Permission:" not in greeting, greeting
         assert "Bash runs without" not in greeting, ("bypass is quiet", greeting)
         assert "Bash commands can run without asking you" not in greeting, greeting
-        binding = terminal_step(master, "/status", "Session: ", composer=True)
-        assert permission_row(binding, "bypass") and "Provider: codex" in binding and " · gpt-6-sol" in binding and "asks before Bash" not in binding, binding
+        binding = terminal_step(master, "/status", " Status · ", composer=True)
+        assert permission_row(binding, "bypass") and "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash" not in binding, binding
         return_to_live(master)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
@@ -4431,7 +4482,7 @@ def renderer_cases():
 
     def joined(tty):
         # A final answer frame is not proof that its reader has joined.
-        tty.send("/status\n", "Session: ")
+        tty.send("/status\n", " Status · ")
         tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
 
     try:
@@ -4732,12 +4783,12 @@ def renderer_cases():
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
                 requests = len(endpoint.requests)
-                shown = tty.send("status\r", predicate=lambda: "Session: " in tty.capture.completed or "› status" in tty.capture.completed)
-                assert "Session: " in shown and "› status" not in shown, (decision, shown)
+                shown = tty.send("status\r", predicate=lambda: " Status · " in tty.capture.completed or "› status" in tty.capture.completed)
+                assert " Status · " in shown and "› status" not in shown, (decision, shown)
                 assert len(endpoint.requests) == requests, endpoint.requests
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 # Paging and a /status round trip cannot bring the choice back.
-                tty.send("\x1b[6~/status\n", "Session: ")
+                tty.send("\x1b[6~/status\n", " Status · ")
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 assert "Allow once" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
@@ -4818,10 +4869,12 @@ def renderer_cases():
                 # Long enough for the /status read to join; the page waits.
                 time.sleep(0.5)
                 os.write(tty.master, b"\xa9")
-                tty.wait("Session: ")
+                tty.wait(" Status · ")
+                # The page is taller than the screen; Work ends it.
+                tty.send("\x1b[6~", predicate=lambda: "\n Work\n" in tty.capture.completed)
                 generation = tty.capture.generation
                 run(home, "action", "deny", "--store", store, "--session", session, "--action", action)
-                tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, after=generation, timeout=20)
+                tty.wait(predicate=lambda: " Work\n   Finished" in tty.capture.completed, after=generation, timeout=20)
                 requests = len(endpoint.requests)
                 tty.send("\x07", marker)
                 assert tty.capture.draft("é", 3), tty.capture.completed
@@ -4902,10 +4955,13 @@ def renderer_cases():
         marker = answer("status follows")
         with terminal(session) as tty:
             tty.send("wait briefly\n", "• Wait briefly")
-            shown = tty.send("/status\n", "Session: ")
-            assert any(f"Work: {kind}" in shown for kind in ("working", "pending", "bash")), shown
-            shown = tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, timeout=20)
-            assert "Session: " in shown and "Permission: bypass" in shown, shown
+            shown = tty.send("/status\n", " Status · ")
+            assert BYPASS_STATUS in shown, shown
+            # The page is taller than the screen; Work ends it.
+            shown = tty.send("\x1b[6~", predicate=lambda: "\n Work\n" in tty.capture.completed)
+            assert any(f" Work\n   {kind.capitalize()}" in shown for kind in ("working", "pending", "bash")), shown
+            shown = tty.wait(predicate=lambda: " Work\n   Finished" in tty.capture.completed, timeout=20)
+            assert shown.startswith("Browsing · Esc returns\n"), shown
             tty.send("\x07", marker)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
@@ -5027,12 +5083,12 @@ def renderer_cases():
             tty.send("propose three Actions\n", CHOICE)
             actions = [row["action"] for row in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
             assert len(actions) == 3, actions
-            tty.send("/status\n", "Session: ")
+            tty.send("/status\n", " Status · ")
             # The update replaces the page in place: what the user scrolled
             # to and was told stays, and nothing returns to the top.
             # Thirteen rows: the rule above the input takes one of them.
             tty.resize(80, 13)
-            tty.wait(predicate=lambda: f"Action requiring attention: {actions[0]}" not in tty.capture.completed or "Session: " not in tty.capture.completed)
+            tty.wait(predicate=lambda: f"Action requiring attention: {actions[0]}" not in tty.capture.completed or " Status · " not in tty.capture.completed)
             # Line by line, so the last Action lands on the bottom row however
             # many rows the Store path wraps to.
             for _ in range(40):
@@ -5040,7 +5096,7 @@ def renderer_cases():
                     break
                 tty.send("\x1b[1;2B", predicate=lambda: True)
             scrolled = tty.capture.completed
-            assert "Session: " not in scrolled, scrolled
+            assert " Status · " not in scrolled, scrolled
             for action in actions:
                 assert f"Action requiring attention: {action}" in scrolled, scrolled
             tty.send("/foo\n", "! Unknown command /foo · /help")
@@ -5052,7 +5108,7 @@ def renderer_cases():
                         f"Action requiring attention: {actions[0]}" in screen and f"Action requiring attention: {actions[2]}" in screen)
             tty.wait(predicate=updated, timeout=10)
             for frame in frames:
-                assert "Session: " not in frame and "! Unknown command /foo · /help" in frame, frame
+                assert " Status · " not in frame and "! Unknown command /foo · /help" in frame, frame
             # Running a command returns to the Action. The /status line was
             # typed beside it, so the draft keeps the input row until Esc
             # returns to the choice, which the command holds: a command typed
@@ -5159,9 +5215,11 @@ def renderer_cases():
             os.write(tty.master, b"/status\n")
             time.sleep(1)
             release.set()
-            tty.wait(predicate=lambda: "Work: finished" in tty.capture.completed, timeout=20)
+            tty.wait(" Status · ", timeout=20)
+            # The page is taller than the screen; Work ends it.
+            tty.send("\x1b[6~", predicate=lambda: " Work\n   Finished" in tty.capture.completed)
             for frame in frames:
-                assert not ("Session: " in frame and LIVE_LINE.search(frame)), frame
+                assert not (frame.startswith("Browsing · Esc returns\n") and LIVE_LINE.search(frame)), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -5202,7 +5260,7 @@ def renderer_cases():
             time.sleep(1.5)
             assert "Recent conversation — tool details" in tty.capture.completed, tty.capture.completed
             for frame in frames:
-                assert "Session: " not in frame, frame
+                assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -5429,7 +5487,7 @@ def renderer_cases():
                 release.set()
                 tty.wait(marker, timeout=20)
                 shown = tty.capture.completed
-                assert marker in shown and "Browsing · Esc returns" not in shown and "Session: " not in shown, (command, route, shown)
+                assert marker in shown and "Browsing · Esc returns" not in shown and " Status · " not in shown, (command, route, shown)
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
             proxy.close()
@@ -6450,7 +6508,7 @@ def main(selected="all"):
             "--", session], env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
-            assert f"Session: {session}" in terminal_step(master, "/status", "Session: ", composer=True)
+            assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         saved.unlink()
@@ -6460,7 +6518,7 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
-            assert f"Session: {session}" in terminal_step(master, "/status", "Session: ", composer=True)
+            assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         fallback.unlink()
@@ -6840,9 +6898,9 @@ def main(selected="all"):
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
             assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
-            binding = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {session}" in binding and shown(f"Workspace (Bash cwd): {workspace.resolve()}", binding), binding
-            assert "Provider: codex" in binding and " · gpt-6-sol" in binding and "asks before Bash" in binding and "Permission: ask" in binding, binding
+            binding = terminal_step(master, "/status", " Status · ", composer=True)
+            assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
+            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash" in binding and permission_row(binding, "ask"), binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
                 assert command in help_text, help_text
@@ -6859,7 +6917,7 @@ def main(selected="all"):
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
-            terminal_step(master, "/status", "Permission: ask", composer=True)
+            terminal_step(master, "/status", "ask · Bash asks first", composer=True)
             assert not credential.exists(), "unsupported in-session login created credentials"
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             terminal_step(master, "/setup --model gpt-5.5", "Saved defaults for future Sessions", composer=True)
@@ -6875,7 +6933,7 @@ def main(selected="all"):
                     assert "Supported model IDs:" in rejected and "See rui session configure --help." in rejected, rejected
                     assert "active Session unchanged" not in rejected, rejected
                 assert interactive_saved.read_bytes() == cleared_preferences
-            terminal_step(master, "/status", "Permission: ask", composer=True)
+            terminal_step(master, "/status", "ask · Bash asks first", composer=True)
             active = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert active["model"] == "gpt-6-sol" and active["permission_mode"] == "ask", active
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
@@ -6891,18 +6949,18 @@ def main(selected="all"):
             terminal_step(master, '/setup --store "unfinished', "Usage: /setup", composer=True)
             assert defaults(preferences_home)["store"] == str(quoted_store.resolve())
             terminal_step(master, f'/setup --store "{store}"', "Saved defaults for future Sessions", composer=True)
-            terminal_step(master, "/status", "Permission: ask", composer=True)
+            terminal_step(master, "/status", "ask · Bash asks first", composer=True)
             assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "gpt-6-sol"
             terminal_step(master, "/configure --session human/other", "Usage: /configure", composer=True)
             terminal_step(master, "/configure --instructions -", "Set instructions separately", composer=True)
             terminal_step(master, "/configure --output-schema -", "Set instructions separately", composer=True)
-            terminal_step(master, "/status", f"Session: {session}", composer=True)
+            terminal_step(master, "/status", f" Status · {session}", composer=True)
             configured = configured_frame(master, '/configure --model "gpt-6-sol"')
             assert "Configured." in configured and "request:" not in configured, configured
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
                 assert receipt not in configured, configured
-            terminal_step(master, "/status", f"Session: {session}", composer=True)
+            terminal_step(master, "/status", f" Status · {session}", composer=True)
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
@@ -7293,7 +7351,7 @@ def main(selected="all"):
             # Clear any unsent draft before diagnostics.
             result = terminal_step(master, "\x15/result " + interactive_key, "result: completed", composer=True)
             assert "result: completed\ninteractive complete" in result, result
-            terminal_step(master, "/status", "Recent messages", composer=True)
+            terminal_step(master, "/status", " Status · ", composer=True)
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON, "terminal mode not restored"
@@ -7321,8 +7379,8 @@ def main(selected="all"):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting, greeting
             assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
-            status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {control_session}" in status and shown(f"Workspace (Bash cwd): {escaped_workspace}\n", status), status
+            status = terminal_step(master, "/status", " Status · ", composer=True)
+            assert f" Status · {control_session}" in status and shown(folder_row(home, escaped_workspace) + "\n", status), status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
             farewell = terminal_step(master, "/exit", "Resume: ")
             assert entered.wait(timeout=5) == 0
@@ -7341,9 +7399,8 @@ def main(selected="all"):
                  "PATH": str(resume_bin) + os.pathsep + os.environ["PATH"]},
         ) as (entered, master):
             read_terminal(master, "› ")
-            resumed = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {control_session}" in resumed and shown(f"Workspace (Bash cwd): {escaped_workspace}\n", resumed), resumed
-            assert shown(f"Store: {store}\n", resumed), resumed
+            resumed = terminal_step(master, "/status", " Status · ", composer=True)
+            assert f" Status · {control_session}" in resumed and shown(folder_row(home, escaped_workspace) + "\n", resumed), resumed
             terminal_step(master, "/exit", "Resume: ")
             assert entered.wait(timeout=5) == 0
             defaults(home, "--store", store)
@@ -7367,8 +7424,7 @@ def main(selected="all"):
                 "--", unsafe_session], env={**os.environ, "HOME": str(home)},
             ) as (entered, master):
                 read_terminal(master, "› ")
-                status = terminal_step(master, "/status", "Session: ", composer=True)
-                assert "Current message: message\\n\\x1b[2J\\u202e" in status, status
+                status = terminal_step(master, "/status", " Status · ", composer=True)
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert entered.wait(timeout=5) == 0
@@ -7382,9 +7438,8 @@ def main(selected="all"):
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting and "\nsafe result" in greeting, greeting
-            status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {unsafe_session}" in status, status
-            assert "message\\n\\x1b[2J\\u202e: completed" in status, status
+            status = terminal_step(master, "/status", " Status · ", composer=True)
+            assert f" Status · {unsafe_session}" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0

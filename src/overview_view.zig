@@ -16,6 +16,8 @@ const session_line = @import("session_line.zig");
 const attention = @import("attention.zig");
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
+const command_value = @import("command_value.zig");
+const shortPath = @import("home_path.zig").shortPath;
 const codex_credential_policy = @import("codex_credential_policy.zig");
 const draft_layout = @import("draft_layout.zig");
 const failure_class = @import("failure_class.zig");
@@ -3094,15 +3096,6 @@ fn decode(bytes: []const u8) struct { codepoint: u21, len: usize } {
     return .{ .codepoint = codepoint, .len = len };
 }
 
-/// A home-relative Workspace: `~` for the home directory itself.
-fn shortPath(home: []const u8, path: []const u8) struct { prefix: []const u8, rest: []const u8 } {
-    if (home.len > 1 and std.mem.startsWith(u8, path, home)) {
-        const rest = path[home.len..];
-        if (rest.len == 0 or rest[0] == '/') return .{ .prefix = "~", .rest = rest };
-    }
-    return .{ .prefix = "", .rest = path };
-}
-
 fn header(painter: *Painter, state: *const State) error{OutOfMemory}![]const Span {
     painter.begin(false);
     const bar: Style = .{ .colour = .strong, .background = .bar, .bold = true };
@@ -3387,17 +3380,7 @@ pub fn writeSettings(settings: *const StartSettings, writer: *std.Io.Writer) std
     for (start_options, 0..) |name, option| {
         const value = settings.get(option) orelse continue;
         try writer.print(" --{s} ", .{name});
-        const plain = value.len != 0 and std.mem.indexOfAny(u8, value, " \"\\") == null;
-        if (plain) {
-            try writer.writeAll(value);
-            continue;
-        }
-        try writer.writeByte('"');
-        for (value) |byte| {
-            if (byte == '"' or byte == '\\') try writer.writeByte('\\');
-            try writer.writeByte(byte);
-        }
-        try writer.writeByte('"');
+        try command_value.write(writer, value);
     }
 }
 

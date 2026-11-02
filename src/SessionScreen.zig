@@ -517,6 +517,27 @@ pub fn browse(self: *Self, down: bool, page: bool) bool {
     return (end and self.ends_apart) or (!self.ends_apart and document.atBottom(self.textLayout(), self.height));
 }
 
+/// Scrolls the inspection page so line `line` begins in view, as little as
+/// it takes.
+pub fn revealLine(self: *Self, line: usize) void {
+    std.debug.assert(self.view == .inspection);
+    const document = &self.browsing;
+    const start = lineStart(document, line) orelse return;
+    const layout = self.textLayout();
+    const first = document.first(layout, self.height);
+    if (start < first.offset or (start == first.offset and first.row != 0)) {
+        document.top = .{ .offset = start };
+    } else if (document.measure(layout, first, self.height).next.order(.{ .offset = start }) != .gt) {
+        document.top = document.up(layout, .{ .offset = start }, self.height -| 1);
+    }
+}
+
+fn lineStart(document: *const Document, line: usize) ?usize {
+    var offset: usize = 0;
+    for (0..line) |_| offset = document.nextLine(offset) orelse return null;
+    return offset;
+}
+
 /// The transcript shows its first retained row, so older text is wanted.
 pub fn transcriptAtTop(self: *const Self) bool {
     return self.view == .transcript and self.browsing.atTop(self.textLayout(), self.height);
