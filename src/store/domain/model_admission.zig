@@ -100,12 +100,11 @@ pub const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL A
 /// fit in one read, and a larger Host pages on operation_id.
 pub const retry_admission_page_rows = product_defaults.active_capacity + 1;
 const retry_admission_select_text = std.fmt.comptimePrint(
-    "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms,session_ref," ++
-        "(SELECT workspace_key FROM session WHERE session_ref=model_operation.session_ref) AS workspace_key," ++
-        "(SELECT next_position FROM session WHERE session_ref=model_operation.session_ref) AS next_position " ++
-        "FROM model_operation @index(model_operation_retry_due) WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
-        "AND retry_due_at_ms<=?1 AND operation_id>?2 AND " ++ configuration_domain.servedProviderSql("(SELECT provider FROM session WHERE session_ref=model_operation.session_ref)") ++
-        " ORDER BY operation_id LIMIT {d}",
+    "SELECT o.turn_id,o.operation_id,o.attempt_ordinal,o.retry_due_at_ms," ++ rsql.session_head_columns ++ " " ++
+        "FROM model_operation o @index(model_operation_retry_due) JOIN session s ON s.session_ref=o.session_ref " ++
+        "WHERE o.resolution_code IS NULL AND o." ++ retry_allowance_open_sql ++ " " ++
+        "AND o.retry_due_at_ms<=?1 AND o.operation_id>?2 AND " ++ configuration_domain.servedProviderSql("s.provider") ++
+        " ORDER BY o.operation_id LIMIT {d}",
     .{retry_admission_page_rows},
 );
 pub const DispatchPermit = attempt.DispatchPermit;
@@ -474,8 +473,9 @@ const retry_attempt = rsql.Write(.{
         "WHERE operation_id=?1 AND session_ref=@session(?6) AND turn_id=?3 AND resolution_code IS NULL " ++
         "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
     .Args = struct { operation_id: u64, replacement: u64, turn_id: u64, attempt_ordinal: u64, now_ms: u64, session: rsql.SessionHead },
-    // Its candidate round read every condition, under the single writer.
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    // Main answered null when it changed no row; `tryAdmitNextModelRetry`
+    // still does.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.RetryNoLongerDue } },
 });
 
 /// Scans one page of `due_retries` for the first retry no execution slot
@@ -515,7 +515,7 @@ pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active
     while (choice.chosen == null and choice.scanned < limit) {
         choice.page_rows = 0;
         candidate.readEach(due_retries, .{ .now_ms = now_ms, .after = choice.after }, limit - choice.scanned, &choice);
-        try candidate.run();
+        candidate.run() catch |err| return if (err == error.StatementFailed) error.RetrySelectionFailed else err;
         if (choice.corrupt) return error.CorruptStore;
         if (choice.page_rows < retry_admission_page_rows) break;
     }
@@ -530,7 +530,11 @@ pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active
         .session = chosen.session,
     });
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try a.commit();
+    a.commit() catch |err| {
+        if (err != error.RetryNoLongerDue) return err;
+        try a.abandon(faults);
+        return null;
+    };
     return .{ .permit = .{ .binding = .{
         .turn_id = chosen.turn_id.get(),
         .operation_id = chosen.operation_id.get(),

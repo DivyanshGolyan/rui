@@ -165,11 +165,30 @@ pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !change_rin
     try sqlite.readText(statement, 4, &session);
     try store_core.touch(self, session.slice());
     if (session.len != change_ring.id_bytes) return error.CorruptStore;
-    if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
-        c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
-        return error.StaleAttemptBinding;
-    if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return session.slice()[0..change_ring.id_bytes].*;
-    if (c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL) return error.SupersededByControl;
+    try attemptStanding(.{
+        .turn_id = c.sqlite3_column_int64(statement, 0),
+        .attempt_ordinal = c.sqlite3_column_int64(statement, 1),
+        .resolved = c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL,
+        .interrupted = c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL,
+    }, binding);
+    return session.slice()[0..change_ring.id_bytes].*;
+}
+
+/// The stored facts that decide whether a binding is still current.
+const AttemptFacts = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool };
+
+/// Whether `binding` names the Attempt whose Turn and ordinal these are.
+fn namesAttempt(turn_id: i64, attempt_ordinal: i64, binding: AttemptBinding) bool {
+    return turn_id == binding.turn_id and attempt_ordinal == binding.attempt_ordinal;
+}
+
+/// The one rule for a binding: current while it names its Operation's
+/// unresolved Attempt; otherwise `SupersededByControl` when a control
+/// interrupted that Attempt, else `StaleAttemptBinding`.
+fn attemptStanding(facts: AttemptFacts, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!void {
+    if (!namesAttempt(facts.turn_id, facts.attempt_ordinal, binding)) return error.StaleAttemptBinding;
+    if (!facts.resolved) return;
+    if (facts.interrupted) return error.SupersededByControl;
     return error.StaleAttemptBinding;
 }
 
@@ -181,14 +200,14 @@ const attempt_facts = rsql.Read(.{
     .sql = "SELECT o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved," ++
         "o.interrupted_by_command_key IS NOT NULL AS interrupted,o.purpose AS compaction,o.admission_position," ++
         "coalesce(o.retry_due_at_ms,0)<>0 AS retry_waiting,o.auth_refresh_claimed AS refresh_claimed," ++
-        "s.session_ref,s.workspace_key,s.next_position," ++
+        rsql.session_head_columns ++ "," ++
         "CASE WHEN ?2 THEN EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
         "AND t.operation_id=o.operation_id) ELSE 0 END AS turn_open " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64, closes: bool },
     .Row = struct {
-        turn_id: rsql.Positive,
-        attempt_ordinal: rsql.Positive,
+        turn_id: i64,
+        attempt_ordinal: i64,
         resolved: bool,
         interrupted: bool,
         compaction: bool,
@@ -201,22 +220,18 @@ const attempt_facts = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// After an `attempt_facts` round: its row while `binding` names the
-/// Operation's unresolved Attempt; otherwise `SupersededByControl` when a
-/// control interrupted it, else `StaleAttemptBinding`, as
-/// `validateCurrentAttempt` decides.
+/// After an `attempt_facts` round: its row while `attemptStanding` finds
+/// `binding` current; a missing Operation is `StaleAttemptBinding`.
 fn currentAttempt(facts: *const attempt_facts.Result, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!*const attempt_facts.Row {
     const row = &(facts.* orelse return error.StaleAttemptBinding);
-    if (row.turn_id.get() != binding.turn_id or row.attempt_ordinal.get() != binding.attempt_ordinal) return error.StaleAttemptBinding;
-    if (!row.resolved) return row;
-    if (row.interrupted) return error.SupersededByControl;
-    return error.StaleAttemptBinding;
+    try attemptStanding(.{ .turn_id = row.turn_id, .attempt_ordinal = row.attempt_ordinal, .resolved = row.resolved, .interrupted = row.interrupted }, binding);
+    return row;
 }
 
 const superseding_control = rsql.Read(.{
     .sql = "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { turn_id: rsql.Positive, attempt_ordinal: rsql.Positive, interrupted_by_command_key: ?protocol.Bounded(protocol.max_key_bytes) },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?protocol.Bounded(protocol.max_key_bytes) },
     .cardinality = .optional,
 });
 
@@ -224,9 +239,9 @@ const superseding_control = rsql.Read(.{
 pub fn operationSupersededByControl(a: anytype, binding: AttemptBinding) !?SupersedingControl {
     var found: superseding_control.Result = undefined;
     a.read(superseding_control, .{ .operation_id = binding.operation_id }, &found);
-    try a.run();
+    try runOperationRead(a);
     const row = found orelse return null;
-    if (row.turn_id.get() != binding.turn_id or row.attempt_ordinal.get() != binding.attempt_ordinal) return null;
+    if (!namesAttempt(row.turn_id, row.attempt_ordinal, binding)) return null;
     return .{ .command_key = row.interrupted_by_command_key orelse return null };
 }
 
@@ -234,24 +249,35 @@ const claim_auth_refresh = rsql.Write(.{
     .sql = "UPDATE model_operation SET auth_refresh_claimed=1 WHERE operation_id=?1 AND session_ref=@session(?3) " ++
         "AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2 AND auth_refresh_claimed=0 AND " ++ retry_allowance_open_sql,
     .Args = struct { operation_id: u64, attempt_ordinal: u64, session: rsql.SessionHead },
-    // Its round read every condition, under the single writer.
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    // Main answered false when it changed no row; `claimModelAuthRefresh`
+    // still does.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.AuthRefreshUnclaimed } },
 });
 
+/// The error a failed step of an Operation read reports, as on main.
+fn runOperationRead(a: anytype) !void {
+    a.run() catch |err| return if (err == error.StatementFailed) error.OperationReadFailed else err;
+}
+
 /// Round 1 reads the Attempt; the claim is written only when the round
-/// found it running, unclaimed and within the allowance. Otherwise the
-/// Access is abandoned and the answer is false, as on main.
+/// found it running, unclaimed and within the allowance. Otherwise, or
+/// when the claim's UPDATE changes no row, the Access is abandoned and
+/// the answer is false, as on main.
 pub fn claimModelAuthRefresh(a: anytype, binding: AttemptBinding) !bool {
     var facts: attempt_facts.Result = undefined;
     a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &facts);
-    try a.run();
+    try runOperationRead(a);
     const row = try currentAttempt(&facts, binding);
     if (row.retry_waiting or row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) {
         try a.abandon(.{});
         return false;
     }
     a.write(claim_auth_refresh, .{ .operation_id = binding.operation_id, .attempt_ordinal = binding.attempt_ordinal, .session = row.session });
-    try a.commit();
+    a.commit() catch |err| {
+        if (err != error.AuthRefreshUnclaimed) return err;
+        try a.abandon(.{});
+        return false;
+    };
     return true;
 }
 
@@ -310,16 +336,15 @@ const FailureContent = struct {
         return try content_domain.importBytes(a, value, failure.diagnostic().?);
     }
 
-    /// The report's row; one equal to the diagnostic is the diagnostic's.
-    /// A round queues `insert_content` once, so when the diagnostic's row
-    /// is new and the report's is too, the queued round runs first: one
-    /// more round trip, only then.
+    /// The report's row. One equal to the diagnostic is the diagnostic's
+    /// (`content.importSlot`). A round queues `insert_content` once, so
+    /// when the diagnostic's row is new and the report's is a different
+    /// new row, the queued round runs first: one more round trip, only
+    /// then.
     fn importReport(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
         const value = if (content.report) |*value| value else return null;
-        if (content.diagnostic) |*diagnostic| if (content_domain.sameIdentity(diagnostic, value)) {
-            if (diagnostic.found) |row| return row.content_id.get();
-        };
-        if (value.found == null and content.diagnostic_inserted) try a.run();
+        if (value.found == null and content.diagnostic_inserted and
+            a.insertedContent(&value.digest, value.length, value.private) == null) try a.run();
         return try content_domain.importBytes(a, value, failure.report());
     }
 };
@@ -352,7 +377,7 @@ pub fn settleModelAttemptFailure(
     var content: FailureContent = if (resolves) .of(&failure) else .{ .diagnostic = null, .report = null };
     a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = resolves }, &facts);
     content.lookup(a);
-    try a.run();
+    try runOperationRead(a);
     content.found();
     const row = try currentAttempt(&facts, binding);
     const session = row.session;
@@ -443,12 +468,11 @@ fn optionalId(id: ?u64) ?i64 {
 /// Unresolved last Attempts with no retry due, in id order, with their
 /// Session and whether their Turn is open on them.
 const exhausted_attempts = rsql.Read(.{
-    .sql = "SELECT turn_id,operation_id,session_ref," ++
-        "(SELECT workspace_key FROM session WHERE session_ref=model_operation.session_ref) AS workspace_key," ++
-        "(SELECT next_position FROM session WHERE session_ref=model_operation.session_ref) AS next_position," ++
-        "EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=model_operation.turn_id AND t.outcome_code IS NULL " ++
-        "AND t.operation_id=model_operation.operation_id) AS turn_open " ++
-        "FROM model_operation @index(model_operation_retry_exhausted) WHERE " ++ retry_exhausted_sql ++ " ORDER BY operation_id",
+    .sql = "SELECT o.turn_id,o.operation_id," ++ rsql.session_head_columns ++ "," ++
+        "EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
+        "AND t.operation_id=o.operation_id) AS turn_open " ++
+        "FROM model_operation o @index(model_operation_retry_exhausted) JOIN session s ON s.session_ref=o.session_ref " ++
+        "WHERE o." ++ retry_exhausted_sql ++ " ORDER BY o.operation_id",
     .Args = struct {},
     .Row = struct { turn_id: rsql.Positive, operation_id: rsql.Positive, session: rsql.SessionHead, turn_open: bool },
     .cardinality = .each,
@@ -482,10 +506,10 @@ const ExhaustedChoice = struct {
 pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: ActiveOperationFilter) !bool {
     var choice: ExhaustedChoice = .{ .active = active };
     candidate.readEach(exhausted_attempts, .{}, try std.math.add(u64, active.maximum_exclusions, 1), &choice);
-    try candidate.run();
+    candidate.run() catch |err| return if (err == error.StatementFailed) error.RetryRecoveryFailed else err;
     const chosen = choice.chosen orelse return false;
-    a.write(resolve_exhausted, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
     if (!chosen.turn_open) return error.SelectionChanged;
+    a.write(resolve_exhausted, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
     try turn_domain.queueCloseOr(a, try a.positions(chosen.session), chosen.turn_id.get(), .{ .retry_exhausted = null }, error.SelectionChanged);
     try a.commit();
     return true;

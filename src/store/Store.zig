@@ -674,7 +674,7 @@ pub const Store = struct {
         defer entry.release();
         var candidate: Access(.read, error{}) = .open(&entry);
         defer candidate.deinit();
-        var access: Access(.write, error{}) = .open(&entry);
+        var access: Access(.write, error{RetryNoLongerDue}) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, model_admission_domain.tryAdmitNextModelRetry(&candidate, &access, self.io, active, faults)));
     }
@@ -731,7 +731,7 @@ pub const Store = struct {
     pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.write, Ordinary.attempt_binding) = .open(&entry);
+        var access: Access(.write, Ordinary.attempt_binding || error{AuthRefreshUnclaimed}) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.attempt_binding, .{}, access.end(.{}, model_settlement_domain.claimModelAuthRefresh(&access, binding)));
     }

@@ -81,6 +81,9 @@ const advance = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
+/// A content row an Access queued, by its identity.
+pub const InsertedContent = struct { digest: [32]u8, length: u64, private: bool, content_id: u64 };
+
 /// The read handle on a content payload, reused within one Entry: reading
 /// on through one row reuses SQLite's overflow-page index, about
 /// length/1024 bytes of its heap. `Entry.release` closes it.
@@ -132,6 +135,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The last `content_id` this Access took: the one row
         /// `contentSink` opens.
         content_id: u64 = 0,
+        /// The content rows this Access queued, by identity, so a second
+        /// import of an equal value reuses the row (`content.importSlot`).
+        inserted: [if (mode == .read or mode == .single) 0 else max_inserted]InsertedContent = undefined,
+        inserted_count: u8 = 0,
+
+        /// The most content rows one Access inserts: a creating Message's
+        /// instructions, output schema, empty default and text.
+        const max_inserted = 4;
 
         /// No transition takes positions in more Sessions than the change
         /// ring tracks; touching more only degrades the ring's record.
@@ -244,6 +255,23 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 ref.* = head.ref;
             }
             a.queueStatement(S, &args, runWrite(S), .{ .none = {} }, &refs);
+        }
+
+        /// The id of the content row this Access queued for (`digest`,
+        /// `length`, `private`), or null.
+        pub fn insertedContent(a: *const Self, digest: *const [32]u8, length: u64, private: bool) ?u64 {
+            for (a.inserted[0..a.inserted_count]) |row| {
+                if (row.length == length and row.private == private and std.mem.eql(u8, &row.digest, digest)) return row.content_id;
+            }
+            return null;
+        }
+
+        /// Records a content row this Access queued. More than
+        /// `max_inserted` panics, in every build.
+        pub fn recordInserted(a: *Self, digest: *const [32]u8, length: u64, private: bool, content_id: u64) void {
+            if (a.inserted_count == a.inserted.len) @panic("an Access inserts at most max_inserted content rows");
+            a.inserted[a.inserted_count] = .{ .digest = digest.*, .length = length, .private = private, .content_id = content_id };
+            a.inserted_count += 1;
         }
 
         /// The next value of `column`, inside this transaction.

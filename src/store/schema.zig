@@ -752,8 +752,10 @@ pub fn keys(comptime table: []const u8) []const []const []const u8 {
 /// Whether the schema has an index named `name`.
 pub fn hasIndex(comptime name: []const u8) bool {
     comptime {
-        // Whichever statement asks first renders every object, as `ddl` does.
-        @setEvalBranchQuota(20_000 * (tables.len + indexes.len));
+        // Whichever statement asks first renders every object. The test
+        // build needed between 5_000 and 6_250 per object (measured); this
+        // is twice the passing bound.
+        @setEvalBranchQuota(12_500 * (tables.len + indexes.len));
         for (objects(.sqlite)) |object| if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
         return false;
     }

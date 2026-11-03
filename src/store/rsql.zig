@@ -238,6 +238,9 @@ pub const Positive = enum(u64) {
 /// next_position`. A write names each Session it writes with one, through
 /// the marker `@session(?k)`, which binds its reference; the Access that
 /// queues the write records the touch from each without a read.
+/// A SessionHead's columns, in order, from a read that joins `session s`.
+pub const session_head_columns = "s.session_ref,s.workspace_key,s.next_position";
+
 pub const SessionHead = struct {
     ref: change_ring.Id,
     workspace_key: Positive,
