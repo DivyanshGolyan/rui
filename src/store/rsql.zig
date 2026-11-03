@@ -271,11 +271,6 @@ pub const SessionHead = struct {
     next_position: Positive,
 };
 
-/// A Session by its reference alone. Only a write that touches no Session
-/// (`Write.touches` false) binds `@session(?k)` to one, since a touch
-/// needs the head's Workspace key; every other write binds a SessionHead.
-pub const SessionRef = struct { ref: change_ring.Id };
-
 /// How many rows a read returns. Nothing is unbounded. A row past the
 /// first is looked for only when the text does not already rule it out
 /// (`returnsOneRow`).
@@ -364,13 +359,8 @@ pub fn Write(comptime spec: WriteSpec) type {
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
         pub const uses_now = parsed.uses_now;
         /// The Args fields the write's `@session` markers bind, in Args'
-        /// order: none, or one per Session it names. Each is a SessionHead
-        /// when `touches` is true (`sessionError`).
+        /// order: none, or one per Session it names.
         pub const session_fields: []const []const u8 = sessionFields(Args);
-        /// Whether the Access that queues it touches those Sessions: false
-        /// only for an UPDATE whose every assigned column no list row
-        /// shows (`schema.Column.listed`).
-        pub const touches = touchesLists(parsed.statement);
     };
 }
 
@@ -1151,24 +1141,12 @@ fn fieldCount(comptime T: type) usize {
     return @typeInfo(T).@"struct".field_names.len;
 }
 
-/// See `Write.touches`.
-fn touchesLists(comptime statement: Statement) bool {
-    comptime {
-        const update = switch (statement) {
-            .update => |update| update,
-            else => return true,
-        };
-        for (update.assigned) |name| if (schema.isListed(update.table, name)) return true;
-        return false;
-    }
-}
-
-/// The SessionHead and SessionRef fields of Args, in order.
+/// The SessionHead fields of Args, in order.
 fn sessionFields(comptime Args: type) []const []const u8 {
     comptime {
         var fields: []const []const u8 = &.{};
         const info = @typeInfo(Args).@"struct";
-        for (info.field_names, info.field_types) |name, Field| if (Field == SessionHead or Field == SessionRef) {
+        for (info.field_names, info.field_types) |name, Field| if (Field == SessionHead) {
             fields = fields ++ .{name};
         };
         return fields;
@@ -1243,9 +1221,7 @@ fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
 /// (`schema.carriesSessions`) binds no SessionHead and writes no marker,
 /// and nothing more is checked of it. A write to one that does:
 /// - binds the k of each `@session(?k)` to a SessionHead field of Args,
-///   or to a SessionRef field only when `Write.touches` is false, uses ?k
-///   only in such markers, and binds every SessionHead and SessionRef
-///   field so;
+///   uses ?k only in such markers, and binds every SessionHead field so;
 ///   its markers name at least one k, and at most one per column of
 ///   `schema.sessionColumns` (exactly one where it has one column);
 /// - as an INSERT ... VALUES (`insertSessionError`), gives each Session
@@ -1271,8 +1247,7 @@ fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
 /// (`compoundError`). So every row a write reads or inserts in a table
 /// that carries Sessions belongs to a Session its heads name, an UPDATE or
 /// DELETE changes only such rows, and an UPDATE changes only columns those
-/// Sessions read; the Access that queues it touches each, unless
-/// `Write.touches` is false. `expectError`
+/// Sessions read; the Access that queues it touches each. `expectError`
 /// holds a copy's Expect to its row count.
 fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
     comptime {
@@ -1293,11 +1268,8 @@ fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
             "rsql: a write to " ++ table ++ " names its Session exactly once, as @session(?k)"
         else
             "rsql: a write to " ++ table ++ " names each of its Sessions at most once, and one at least, as @session(?k)";
-        const touches = touchesLists(parsed.statement);
         for (named) |k| {
-            if (k <= fields.len and fields[k - 1] == SessionRef and touches)
-                return "rsql: a write that touches its Sessions binds @session(?k) to a SessionHead; only one that assigns only unlisted columns binds a SessionRef";
-            if (k > fields.len or (fields[k - 1] != SessionHead and fields[k - 1] != SessionRef) or (columns.len == 1 and heads != 1))
+            if (k > fields.len or fields[k - 1] != SessionHead or (columns.len == 1 and heads != 1))
                 return if (columns.len == 1) "rsql: @session(?k) binds the one SessionHead field of Args" else "rsql: @session(?k) binds a SessionHead field of Args";
             if (parsed.uses[k - 1] != occurrences(parsed.sessions, k)) return "rsql: the SessionHead ?k binds is used only in @session(?k)";
         }
@@ -1996,27 +1968,6 @@ test "a write names its Session with @session on its table's own session_ref" {
     try std.testing.expectEqualStrings(comptime untiedMessage("session", "session"), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1) OR revision=1", Copy, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT gives one value per column", comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision FROM session WHERE session_ref=@session(?1) AND ?2 IS NOT NULL", Copy, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT writes one VALUES row", comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now),(?1,'other',?3,0,@now)", Stop, void).?);
-}
-
-test "a write touches its Sessions unless it assigns only columns no list row shows" {
-    const Mark = struct { session: SessionHead, position: u64 };
-    const Stop = struct { key: []const u8, session: SessionHead, turn_id: u64 };
-    try std.testing.expect(!Write(.{ .sql = "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1)", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
-    try std.testing.expect(Write(.{ .sql = "UPDATE session SET read_through=?2,label=NULL WHERE session_ref=@session(?1)", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
-    try std.testing.expect(Write(.{ .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?2 AND session_ref=@session(?1)", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
-    try std.testing.expect(Write(.{ .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now)", .Args = Stop, .expect = .{ .at_most = 1 } }).touches);
-    try std.testing.expect(Write(.{ .sql = "DELETE FROM turn WHERE session_ref=@session(?1) AND turn_id=?2", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
-}
-
-test "only a write that touches no Session binds @session to a SessionRef" {
-    const Marked = struct { session: SessionRef, position: u64 };
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1) AND ?2<next_position", Marked, void));
-    const refused = "rsql: a write that touches its Sessions binds @session(?k) to a SessionHead; only one that assigns only unlisted columns binds a SessionRef";
-    try std.testing.expectEqualStrings(refused, comptime statementError(.write, "UPDATE session SET read_through=?2,label=NULL WHERE session_ref=@session(?1)", Marked, void).?);
-    try std.testing.expectEqualStrings(refused, comptime statementError(.write, "UPDATE turn SET outcome_at=?2 WHERE session_ref=@session(?1)", Marked, void).?);
-    try std.testing.expectEqualStrings(refused, comptime statementError(.write, "DELETE FROM turn WHERE session_ref=@session(?1) AND turn_id=?2", Marked, void).?);
-    try std.testing.expectEqualStrings(refused, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?2,@session(?1),NULL,0,1)", struct { session: SessionRef, key: []const u8 }, void).?);
-    try std.testing.expectEqualStrings("rsql: a read binds no SessionHead; it names a Session by its reference text", comptime statementError(.read, "SELECT read_through FROM session WHERE session_ref=?1", struct { session: SessionRef }, struct { read_through: ?u64 }).?);
 }
 
 test "a Message's write names its two Sessions, each on its own column" {

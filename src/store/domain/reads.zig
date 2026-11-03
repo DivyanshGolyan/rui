@@ -119,7 +119,6 @@ const read_failures = .{
     .{ public_page, error.ConversationReadFailed },
     .{ activity_forward, error.ActivityReadFailed },
     .{ activity_backward, error.ActivityReadFailed },
-    .{ proposal_positions, error.ProposalReadFailed },
     .{ public_entry, error.ConversationReadFailed },
     .{ public_tool_result, error.PublicContentReadFailed },
     .{ hosted_call, error.ActivityReadFailed },
@@ -277,13 +276,6 @@ pub const PublicConversationPage = struct {
     pub const capacity = protocol.public_conversation_page_items;
     end: u64,
     items: [capacity]PublicConversationItem = undefined,
-    count: usize = 0,
-    more: bool = false,
-};
-
-pub const ProposalPage = struct {
-    end: u64,
-    items: [protocol.proposal_page_items]protocol.ProposalMetadata = undefined,
     count: usize = 0,
     more: bool = false,
 };
@@ -1017,9 +1009,9 @@ const HostedRead = struct {
 
 /// The Session columns an Activity page reads, its workspace into the
 /// page itself. They are the columns main's Session facts read, so a
-/// damaged one still fails the page, and how far a person read.
+/// damaged one still fails the page.
 const page_session = rsql.Read(.{
-    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace,read_through " ++
+    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -1033,7 +1025,6 @@ const page_session = rsql.Read(.{
         created_at: rsql.Positive,
         provider: protocol.Provider,
         workspace: *protocol.Bounded(protocol.max_workspace_bytes),
-        read_through: ?rsql.Positive,
     },
     .cardinality = .optional,
 });
@@ -1068,7 +1059,6 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     if (end >= next or request.position > end) return error.InvalidCursor;
     if (guard != null) return error.CorruptStore;
     page.end = end;
-    page.read_through = if (session.read_through) |position| position.get() else null;
     // The cursor as a bound on (position, ordinal): a whole position is
     // passed or kept by the largest ordinal, and a backward page with
     // no cursor starts after the end's last row.
@@ -1090,12 +1080,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     } else try runRows(a);
     try work.advance();
     page.count = @min(rows.len, page.items.len);
-    if (rows.len > page.items.len) {
-        page.more = true;
-        // The row after a backward page's oldest says whether the
-        // unseen rows reach past it.
-        page.beyond_unseen = !forward and if (page.read_through) |read| rows.items[page.items.len].position.get() > read else true;
-    }
+    page.more = rows.len > page.items.len;
     var at: [page.items.len]ItemAt = undefined;
     for (rows.slice()[0..page.count], at[0..page.count]) |row, *item| item.* = .{ .position = row.position.get(), .ordinal = row.ordinal };
     const boundary: ?ItemAt = if (page.more) at[page.count - 1] else null;
@@ -1125,44 +1110,6 @@ const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };
 
 /// An Activity item's place: its position and ordinal.
 const ItemAt = struct { position: u64, ordinal: u64 };
-
-/// Main's one guarded UPDATE: how far a person read moves only forward,
-/// and stays below the Session's next position. No Session list row shows
-/// `read_through` (`schema` marks it unlisted), so the write touches no
-/// Session and names it by its reference alone.
-const advance_read_through = rsql.Write(.{
-    .sql = "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1) AND ?2<next_position AND (read_through IS NULL OR read_through<?2)",
-    .Args = struct { session: rsql.SessionRef, position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ReadThroughKept } },
-});
-
-/// Round 1 is the guarded write, which commits itself. Only when it
-/// changes no row does a read round ask why, as main did: an unknown
-/// Session, a position not reached, or one already read, which is no
-/// error. A failed read is `SessionReadFailed`, main's name for it.
-pub fn markRead(entry: *const store_core.Entry, request: *const protocol.MarkRead) !void {
-    // Main's bind refused a position past maxInt(i64), which fences.
-    if (request.position > std.math.maxInt(i64)) return error.IntegerOutOfRange;
-    const session = request.session.slice();
-    const Ref = @FieldType(rsql.SessionRef, "ref");
-    // The schema's check holds every session_ref to this length, so a
-    // text of any other names no Session.
-    if (session.len != @sizeOf(Ref)) return error.SessionNotFound;
-    kept: {
-        var a: store_access.Access(.single, error{ReadThroughKept}) = .open(entry);
-        defer a.deinit();
-        a.write(advance_read_through, .{ .session = .{ .ref = session[0..@sizeOf(Ref)].* }, .position = request.position });
-        a.commit() catch |err| switch (err) {
-            error.ReadThroughKept => break :kept,
-            else => |failed| return failed,
-        };
-        return;
-    }
-    var a: ReadAccess = .open(entry);
-    defer a.deinit();
-    const next = try readNextPosition(&a, session) orelse return error.SessionNotFound;
-    if (request.position >= next) return error.PositionNotReached;
-}
 
 const PersonMessageArgs = struct { session: []const u8, after: u64, before: u64 };
 const PersonMessageRow = struct { admission_position: rsql.Positive, content_id: rsql.Positive };
@@ -1922,51 +1869,6 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
 }
 
-/// The positions of a Session's proposed calls after ?2 through ?3: the
-/// immutable accepted item owns discovery, including rejected calls. Do
-/// not filter on live Actions, permissions or Turn state.
-const proposal_positions = rsql.Read(.{
-    .sql = "SELECT session_position FROM model_output_item " ++
-        "WHERE session_ref=?1 AND session_position>?2 AND session_position<=?3 AND item_kind=3 " ++
-        "ORDER BY session_position LIMIT 17",
-    .Args = struct { session: []const u8, after: u64, end: u64 },
-    .Row = struct { session_position: rsql.Positive },
-    .cardinality = .each,
-});
-
-/// Round 1 reads the Session's next position; round 2 the page's positions
-/// into this frame, with the cursor's Proposal; round 3 every row's
-/// Proposal. A failed step of the positions read is `ProposalReadFailed`,
-/// main's name.
-pub fn proposalPage(a: *ReadAccess, request: *const protocol.ProposalPage, page: *ProposalPage) !void {
-    const session = request.session.slice();
-    const next = try readNextPosition(a, session) orelse return error.SessionNotFound;
-    const end = request.end orelse next - 1;
-    if (end >= next) return error.InvalidCursor;
-    page.* = .{ .end = end };
-    var rows: Collected(proposal_positions.Row, protocol.proposal_page_items + 1) = .{};
-    var cursor: ProposalRead = .{ .position = request.after };
-    if (request.after != 0) readProposal(a, session, &cursor);
-    a.readEach(proposal_positions, .{ .session = session, .after = request.after, .end = end }, rows.items.len, &rows);
-    try runRows(a);
-    if (request.after != 0) cursor.found() catch |err| switch (err) {
-        error.ContentNotFound => return error.InvalidCursor,
-        else => return err,
-    };
-    page.more = rows.len > page.items.len;
-    page.count = @min(rows.len, page.items.len);
-    if (page.count == 0) return;
-    var reads: [protocol.proposal_page_items]ProposalRead = undefined;
-    for (rows.slice()[0..page.count], page.items[0..page.count], reads[0..page.count]) |row, *item, *read| {
-        read.* = .{ .position = row.session_position.get(), .metadata = item };
-        readProposal(a, session, read);
-    }
-    try runRows(a);
-    for (reads[0..page.count]) |*read| try read.found();
-}
-
-pub const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [3]i64 };
-
 /// The content columns of a Proposal's three fields, in ProposalField order.
 const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", "arguments_content_id" };
 
@@ -1997,7 +1899,7 @@ const proposal_joins = "LEFT JOIN model_operation op ON op.operation_id=item.ope
     "LEFT JOIN content field1 ON field1.content_id=tool_call." ++ proposal_fields[1] ++ " " ++
     "LEFT JOIN content field2 ON field2.content_id=tool_call." ++ proposal_fields[2] ++ " ";
 
-// The page, continuation cursor and byte route share one provenance check.
+// Every caller (Activity pages, Action reads, call outcomes, the report) shares one provenance check.
 /// The Proposal at a Session position, with each field's content row.
 pub const proposal_row = rsql.Read(.{
     .sql = "SELECT " ++ proposal_columns ++ " FROM model_output_item item " ++ proposal_joins ++
@@ -2029,14 +1931,12 @@ pub const proposal_row = rsql.Read(.{
 });
 
 /// The Proposal at `position`, read in a round it may share with other
-/// rows (`readProposal`), into `metadata` and `content_ids` when the
-/// caller keeps them. Each field's content must be public and match the
+/// rows (`readProposal`), into `metadata` when the caller keeps it. Each field's content must be public and match the
 /// metadata admission certified, so reference substitution is detectable
 /// without reopening payloads.
 pub const ProposalRead = struct {
     position: u64,
     metadata: ?*protocol.ProposalMetadata = null,
-    content_ids: ?*[3]i64 = null,
     count: RowCount = .{},
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
@@ -2045,9 +1945,6 @@ pub const ProposalRead = struct {
 
     fn keep(read: *ProposalRead, row: *const proposal_row.Row) error{CorruptStore}!void {
         const fields = try certifiedFields(row);
-        if (read.content_ids) |ids| inline for (proposal_fields, 0..) |column, index| {
-            ids[index] = @intCast(@field(row, column).get());
-        };
         if (read.metadata) |metadata| metadata.* = .{
             .position = read.position,
             .operation = row.operation_id.get(),
@@ -2255,21 +2152,11 @@ pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
 }
 
 /// `readProposal` in a round of its own.
-pub fn proposal(a: anytype, session: []const u8, position: u64) !ProposalIdentity {
-    var identity: ProposalIdentity = undefined;
-    var read: ProposalRead = .{ .position = position, .metadata = &identity.metadata, .content_ids = &identity.content_ids };
+pub fn proposal(a: anytype, session: []const u8, position: u64) !protocol.ProposalMetadata {
+    var metadata: protocol.ProposalMetadata = undefined;
+    var read: ProposalRead = .{ .position = position, .metadata = &metadata };
     readProposal(a, session, &read);
     try a.run();
     try read.found();
-    return identity;
-}
-
-pub fn openProposalField(a: *ReadAccess, request: *const protocol.ReadProposalField) !ContentLocation {
-    const identity = proposal(a, request.session.slice(), request.position) catch |err| switch (err) {
-        error.ContentNotFound => return err,
-        else => return store_core.fence(a.store, err),
-    };
-    const index = @backingInt(request.field);
-    const field = identity.metadata.fields[index];
-    return .{ .store = a.store, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest } };
+    return metadata;
 }

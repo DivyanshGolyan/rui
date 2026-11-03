@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Seven-kind Session activity through real writers and the typed native Client."""
 import copy
+import hashlib
 import http.server
 import json
 import os
@@ -19,7 +20,6 @@ from conversation_page_integration import host_resources, idle_resources, provid
 from model_fixture import sse_tool_calls
 import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
-from proposal_integration import digest
 from one_reply import one_reply
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
@@ -55,6 +55,11 @@ def history(store, end="null", position=0, direction="forward"):
         if reply["next"] is None: return captured, rows
         c = reply["next"]
         reply = page(store, c["end"], c["position"], c["ordinal"], c["direction"])
+
+
+def digest(data):
+    domain = b"rui/content/v1"
+    return hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).digest()
 
 
 def kind(row):
@@ -133,7 +138,6 @@ def main():
                 for field, reference, expected in zip(("name", "call_id", "arguments"), row["value"]["call"]["fields"], CALLS[i]):
                     data = expected.encode()
                     assert reference == {"bytes": str(len(data)), "sha256": digest(data).hex()}
-                    assert caller(store, "field", row["position"], field) == data
             caller(store, "content", calls[0]["position"], 0, ok=False)
             caller(store, "content", pending[0]["position"], 0, session=foreign, ok=False)
             for row in pending[:2]: assert caller(store, "content", row["position"], 0) == TEXT.encode()
@@ -184,14 +188,6 @@ def main():
             stop_row = next(r for r in stopped if kind(r) == "stop")
             assert history(store, stop_row["position"])[1][-1]["value"]["stop"]["completion"] == "pending"
             assert history(store, empty_end)[1] == [] and history(store, complete_end)[1] == complete
-            # Read-through is null until marked, only advances, and never passes the Session's end.
-            assert page(store)["page"]["read_through"] is None
-            caller(store, "mark-read", complete_end)
-            caller(store, "mark-read", pending_end)
-            assert page(store)["page"]["read_through"] == complete_end
-            caller(store, "mark-read", int(stopped_end) + 1, ok=False)
-            caller(store, "mark-read", 1, session="zzzzzz", ok=False)
-            assert page(store)["page"]["read_through"] == complete_end
             for args in ((stopped_end, 2**63, "null"), (str(int(stopped_end)+1), 0, "null"), (stopped_end, calls[0]["position"], 1)):
                 caller(store, "page", *args, "forward", ok=False)
             before_reads = host_resources(process.pid)
@@ -229,7 +225,7 @@ def main():
             valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
-                "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"}, "read_through": None, "beyond_unseen": False,
+                "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)

@@ -45,7 +45,6 @@ const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const PrefixSeal = historical_domain.PrefixSeal;
-const ProposalPage = reads_domain.ProposalPage;
 const PublicConversationPage = reads_domain.PublicConversationPage;
 const SessionListOptions = report_domain.SessionListOptions;
 const SessionObservation = reads_domain.SessionObservation;
@@ -496,17 +495,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
     }
 
-    /// Records that a person has seen the Session's conversation through
-    /// `request.position`. It only advances, so a client that saw less, or a
-    /// repeated write, changes nothing. No Session list row shows it, so
-    /// it touches nothing in the change ring: a list watching the Session
-    /// does not read it again.
-    pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        return entry.finish(Ordinary.read_through, reads_domain.markRead(&entry, request));
-    }
-
     /// The Message with no Session sender next to `position` at `end`: one
     /// seek in the index of those Messages, then its content's metadata.
     pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
@@ -525,24 +513,6 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
-    }
-
-    pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
-        try request.validate();
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.proposalPage(&access, request, out));
-    }
-
-    pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
-        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.content, reads_domain.openProposalField(&access, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -966,7 +936,6 @@ fn destroyRing(ring: *change_ring.Ring) void {
 pub const Ordinary = struct {
     pub const none = error{};
     const page = error{ SessionNotFound, InvalidCursor };
-    const read_through = error{ SessionNotFound, PositionNotReached };
     const content = error{ContentNotFound};
     const public_content = error{ ContentNotFound, RangeOutOfBounds };
     pub const action = error{ActionNotFound};
@@ -1255,12 +1224,6 @@ pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !pro
 pub fn publicConversationPageForTesting(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
     try self.publicConversationPage(&request, &page);
-    return page;
-}
-
-pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !ProposalPage {
-    var page: ProposalPage = undefined;
-    try self.proposalPage(&request, &page);
     return page;
 }
 

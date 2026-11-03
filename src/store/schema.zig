@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 49;
+pub const schema_version: u32 = 50;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -28,6 +28,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 47, .digest = 0x51267b57c44099bc },
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
+    .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -104,22 +105,13 @@ pub const Column = struct {
     /// two (`sessionColumns`). Every other table's one Session reads all
     /// of its columns, and leaves this `.recipient`.
     read_by: ReadBy = .recipient,
-    /// Whether a Session list row shows this column. Only
-    /// `rsql.Write.touches` reads it: an UPDATE that assigns only columns
-    /// no list shows makes the Access that queues it touch no Session. The
-    /// test touch oracle keeps its own list of the columns it does not
-    /// watch (`sqlite.touch_oracle_unwatched`), and a Store test holds the
-    /// two equal.
-    listed: bool = true,
 };
 
 /// The Sessions whose pages read a column of a table that names two
 /// Sessions: `.recipient`, only its `session_ref`'s; `.both`, its
 /// `sender_session_ref`'s too. A change to a `.both` column changes the
 /// sender's facts, so its writer names the sender (`rsql.sessionError`)
-/// and touches it unless `rsql.Write.touches` is false, and the touch
-/// oracle records the sender unless the column is one it does not watch
-/// (`sqlite.touch_oracle_unwatched`).
+/// and touches it, and the touch oracle records the sender.
 pub const ReadBy = enum { recipient, both };
 
 /// Checked when its row is written, on every engine: writers insert a
@@ -214,10 +206,6 @@ pub const tables = [_]Table{
             label_column,
             .{ .name = "created_at", .type = .int, .check = "created_at>0" },
             .{ .name = "next_position", .type = .int, .check = "next_position>0" },
-            // The position a person has seen the conversation through; null
-            // until one has.
-            // How far a person read: no list row shows it.
-            .{ .name = "read_through", .type = .int, .nullable = true, .check = "read_through IS NULL OR (read_through>0 AND read_through<next_position)", .listed = false },
             // Creation order: list cursors and the Workspace key, allocated
             // by the Host in the creating transaction.
             .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
@@ -675,19 +663,6 @@ pub fn carriesSessions(comptime table: []const u8) bool {
     return hasColumn(table, "session_ref") or hasColumn(table, "sender_session_ref");
 }
 
-/// The names of `table`'s columns.
-pub fn columnsOf(comptime table: []const u8) []const []const u8 {
-    comptime {
-        for (tables) |candidate| {
-            if (!std.mem.eql(u8, candidate.name, table)) continue;
-            var names: []const []const u8 = &.{};
-            for (candidate.columns) |column| names = names ++ .{column.name};
-            return names;
-        }
-        @compileError("schema: no table named " ++ table);
-    }
-}
-
 /// Whether `table` has a column named `column`.
 pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
     comptime {
@@ -695,18 +670,6 @@ pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
             if (!std.mem.eql(u8, candidate.name, table)) continue;
             for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return true;
             return false;
-        }
-        @compileError("schema: no table named " ++ table);
-    }
-}
-
-/// Whether a Session list row shows `table`'s column `column` (`Column.listed`).
-pub fn isListed(comptime table: []const u8, comptime column: []const u8) bool {
-    comptime {
-        for (tables) |candidate| {
-            if (!std.mem.eql(u8, candidate.name, table)) continue;
-            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return each.listed;
-            @compileError("schema: no column " ++ column ++ " in " ++ table);
         }
         @compileError("schema: no table named " ++ table);
     }

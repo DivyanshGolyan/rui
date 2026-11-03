@@ -112,84 +112,6 @@ pub const ConversationPage = struct {
     }
 };
 
-pub const ProposalCursor = struct { end: ?u64 = null, after: u64 = 0 };
-pub const ProposalPageReply = union(enum) { page: ProposalPage, failure: ReadFailure };
-pub const ProposalPage = struct {
-    end: u64,
-    items: [protocol.proposal_page_items]protocol.ProposalMetadata = undefined,
-    count: usize = 0,
-    more: bool,
-
-    pub fn continuation(self: *const ProposalPage) ?ProposalCursor {
-        return if (self.more) .{ .end = self.end, .after = self.items[self.count - 1].position } else null;
-    }
-
-    pub fn parse(bytes: []const u8, cursor: ProposalCursor) !ProposalPage {
-        if (bytes.len > protocol.max_proposal_page_response_bytes) return error.InvalidProposalPage;
-        try (protocol.ProposalPage{ .end = cursor.end, .after = cursor.after }).validate();
-        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
-        const Item = struct {
-            position: JsonString(20),
-            operation: JsonString(20),
-            turn: JsonString(20),
-            call_ordinal: JsonString(20),
-            action: ?JsonString(20),
-            rejection: ?JsonEnum(protocol.ProposalRejection),
-            fields: struct { name: Ref, call_id: Ref, arguments: Ref },
-        };
-        const Items = struct {
-            values: [protocol.proposal_page_items]Item = undefined,
-            count: usize = 0,
-            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-                if (try source.next() != .array_begin) return error.UnexpectedToken;
-                var result: @This() = .{};
-                while (try source.peekNextTokenType() != .array_end) {
-                    if (result.count == result.values.len) return error.LengthMismatch;
-                    result.values[result.count] = try std.json.innerParse(Item, a, source, options);
-                    result.count += 1;
-                }
-                _ = try source.next();
-                return result;
-            }
-        };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), items: Items, more: bool };
-        // Fixed scanner storage; no payload tokens or history-sized allocation.
-        var storage: [2 * protocol.max_proposal_page_response_bytes]u8 = undefined;
-        var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidProposalPage;
-        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("proposal_page")) return error.InvalidProposalPage;
-        var page: ProposalPage = .{ .end = try mutationId(wire.end, true), .count = wire.items.count, .more = wire.more };
-        if (page.end > std.math.maxInt(i64) or (cursor.end != null and cursor.end.? != page.end) or
-            page.end < cursor.after or (page.more and page.count != page.items.len)) return error.InvalidProposalPage;
-        var previous = cursor.after;
-        for (wire.items.values[0..wire.items.count], page.items[0..page.count]) |item, *result| {
-            result.* = .{
-                .position = try mutationId(item.position, false),
-                .operation = try mutationId(item.operation, false),
-                .turn = try mutationId(item.turn, false),
-                .call_ordinal = try mutationId(item.call_ordinal, true),
-                .action = if (item.action) |action| try mutationId(action, false) else null,
-                .rejection = if (item.rejection) |code| code.value else null,
-                .fields = undefined,
-            };
-            if (result.position <= previous or result.position > page.end or result.operation > std.math.maxInt(i64) or
-                result.turn > std.math.maxInt(i64) or result.call_ordinal > std.math.maxInt(i64) or
-                (result.action != null) == (result.rejection != null) or
-                (result.action != null and result.action.? > std.math.maxInt(i64))) return error.InvalidProposalPage;
-            inline for (comptime std.meta.tags(protocol.ProposalField), 0..) |field, index| {
-                const reference = @field(item.fields, @tagName(field));
-                if (reference.sha256.slice().len != 64) return error.InvalidProposalPage;
-                result.fields[index].length = try mutationId(reference.bytes, true);
-                if (result.fields[index].length > std.math.maxInt(i64)) return error.InvalidProposalPage;
-                _ = std.fmt.hexToBytes(&result.fields[index].digest, reference.sha256.slice()) catch return error.InvalidProposalPage;
-            }
-            previous = result.position;
-        }
-        if (page.more and previous >= page.end) return error.InvalidProposalPage;
-        return page;
-    }
-};
-
 pub const ActivityCursor = struct {
     end: ?u64 = null,
     position: u64 = 0,
@@ -257,14 +179,14 @@ pub const ActivityPage = struct {
         };
         const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work, read_through: ?JsonString(20), beyond_unseen: bool };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
         var page: ActivityPage = .{ .facts = .{ .end = try id(wire.end, true), .direction = wire.direction.value, .more = wire.more, .count = wire.items.count } };
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("activity_page") or page.facts.direction != cursor.direction or
             (cursor.end != null and cursor.end.? != page.facts.end) or cursor.position > page.facts.end or
-            (wire.more and wire.items.count != 16) or (wire.beyond_unseen and !wire.more)) return error.InvalidActivityPage;
+            (wire.more and wire.items.count != 16)) return error.InvalidActivityPage;
         var position = cursor.position;
         var ordinal = cursor.ordinal;
         for (wire.items.values[0..wire.items.count], page.facts.items[0..wire.items.count]) |item, *fact| {
@@ -358,8 +280,6 @@ pub const ActivityPage = struct {
         // The permission prompt shows this Workspace, so it keeps Current's rule.
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
         facts.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
-        page.facts.read_through = if (wire.read_through) |text| try id(text, false) else null;
-        page.facts.beyond_unseen = wire.beyond_unseen;
         return page;
     }
 
