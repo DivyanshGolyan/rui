@@ -33,6 +33,7 @@ const BashExecutionInput = action_domain.BashExecutionInput;
 const CommandObservation = command_domain.CommandObservation;
 const ConfigureReply = configuration_domain.ConfigureReply;
 const ContentBlob = @import("access.zig").ContentBlob;
+const Found = @import("access.zig").Found;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
@@ -1206,14 +1207,13 @@ pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
     return err;
 }
 
-/// The saved Session, as `configuration.readSaved` reads it, through the
-/// unconverted path tests take, as `configuration.readSession` did until
-/// its last caller converted.
+/// The saved Session, as `configuration.readSaved` reads it, in a read
+/// Access of its own, then checked by `configuration.checkSaved`.
 pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
     var a = ReadAccess.within(self);
     defer a.deinit();
     var current: CurrentConfiguration = .{};
-    var found: @import("access.zig").Found = undefined;
+    var found: Found = undefined;
     configuration_domain.readSaved(&a, session_ref, &current, &found);
     try a.run();
     if (!found.get()) return null;

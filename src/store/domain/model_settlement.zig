@@ -772,10 +772,10 @@ const lookup_width = batch_items;
 /// `content_batch` statements: a call imports at most four (its name,
 /// call_id, arguments and rejection text), so 64 calls always fit.
 const batch_identities = 4 * lookup_width;
-/// The identities left above which a lookup takes a wide statement: three
-/// narrow statements step less than one wide statement padded to 64
-/// values, four more (measured: 33 identities took 316 steps in three
-/// narrow statements and 342 in one wide).
+/// The identities left above which a lookup takes a wide statement:
+/// measured on digests the Store lacks, 48 took 369 steps in three narrow
+/// statements and 395 in one wide one padded to 64 values, and 49 took
+/// 432 in four narrow and 399 in one wide.
 const wide_lookup_above = 3 * narrow_width;
 /// The `content_batch` statements `n` identities take.
 fn lookupCount(n: usize) usize {
