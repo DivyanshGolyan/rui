@@ -1857,7 +1857,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
     try request.session.set(session.slice());
     try std.testing.expectEqual(@as(?u64, null), try personStep(&storage, request));
     for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
-    // Another Session sent the middle one: it is a received row, not the
+    // Another Session sent the newest one: it is a received row, not the
     // person's, and every step passes over it.
     try submitTestMessage(&storage, &tmp, "from-peer", "from-peer", session.slice(), "peer");
     {
@@ -1876,7 +1876,6 @@ test "a person's Message next to a position is a one-row page of admission rows,
     try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.digest);
     try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.length);
     request.end = page.end;
-    request.ordinal = 0;
     // Older from each one, then newer back: each step names its neighbour.
     for ([_]?u64{ positions[1], positions[0], null }, [_]u64{ positions[2], positions[1], positions[0] }) |expected, from| {
         request.position = from;
@@ -1898,10 +1897,24 @@ test "a person's Message next to a position is a one-row page of admission rows,
     const peers = try store_core.activityPageForTesting(&storage, received);
     try std.testing.expect(peers.count == 1 and peers.items[0].value == .received);
     try std.testing.expectEqualStrings(peer.slice(), peers.items[0].value.received.sender.?.session.slice());
+    // Both kinds read the one admission source, each row once, by its sender.
+    received.kinds = .initMany(&.{ .admission, .received });
+    const both = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(both.count == 5 and !both.more);
+    var counts: [2]usize = .{ 0, 0 };
+    for (both.items[0..both.count]) |item| counts[@intFromBool(item.value == .received)] += 1;
+    try std.testing.expectEqual([2]usize{ 4, 1 }, counts);
+    // A cursor may name the received row; an admission page steps past it.
+    received.kinds = .initOne(.admission);
+    received.end = both.end;
+    received.position = peers.items[0].position;
+    received.ordinal = peers.items[0].ordinal;
+    const before = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(before.count > 0 and before.items[0].position < peers.items[0].position);
     try std.testing.expect(!storage.isFenced());
 }
 
-test "a page lists only the kinds it asks for, and a smaller one steps fewer rows" {
+test "a page lists only the kinds it asks for, up to its limit" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;

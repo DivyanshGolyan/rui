@@ -310,12 +310,13 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
     const requests = task.requests();
     const step = job.recall.?;
     std.debug.assert(step.older or step.from != null);
-    // A person's Messages are the activity page's `admission` rows; a
-    // cursor at a shown one names its row, ordinal zero.
+    // A person's Messages are the activity page's `admission` rows. A
+    // Message's position holds no other row, so the step from a shown one
+    // starts at its position's boundary and needs no row identity.
     var cursor: protocol_reply.ActivityCursor = .{
         .end = if (step.from) |from| from.end else null,
         .position = if (step.from) |from| from.position else 0,
-        .ordinal = if (step.from != null) 0 else null,
+        .ordinal = null,
         .direction = if (step.older) .backward else .forward,
         .kinds = .initOne(.admission),
         .limit = 1,
@@ -336,7 +337,6 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
         job.result.recall_passed = true;
         cursor.end = page.facts.end;
         cursor.position = row.position;
-        cursor.ordinal = 0;
     }
 }
 

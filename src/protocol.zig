@@ -3061,6 +3061,33 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     }
 }
 
+test "an activity page names its kinds once each, in order, and a limit from 1 to 16" {
+    const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
+        .{ .body = "[\"admission\"],\"limit\":\"1\"" },
+        .{ .body = "[\"admission\",\"received\"],\"limit\":\"16\"" },
+        .{ .body = "[\"received\",\"admission\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
+        .{ .body = "[\"user\",\"user\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
+        .{ .body = "[\"unknown\"],\"limit\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "[],\"limit\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"17\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"256\"", .failure = error.InvalidCursor },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":\"s\",\"session\":\"x\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":{s}}}", .{case.body});
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const request = try parseForTest(&parser);
+            try std.testing.expect(request == .activity_page);
+        }
+    }
+}
+
 test "a Label is one non-blank line of at most 100 bytes" {
     const longest: [max_label_bytes]u8 = @splat('x');
     const overlong: [max_label_bytes + 1]u8 = @splat('x');
