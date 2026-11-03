@@ -470,8 +470,9 @@ fn checkAssistantEntries(a: *ReadAccess, session: []const u8, lower: u64, upper:
     if (missing != null) return error.CorruptStore;
 }
 
-/// `checkAssistantEntries` for unconverted code (`report.zig`).
-pub fn validateAssistantEntries(self: *Store, session: []const u8, lower: u64, upper: u64) !void {
+/// `checkAssistantEntries` for unconverted code (`report.zig`). Not inlined, so its
+/// Access takes no slot in the report's frame.
+pub noinline fn validateAssistantEntries(self: *Store, session: []const u8, lower: u64, upper: u64) !void {
     var a = ReadAccess.within(self);
     defer a.deinit();
     return checkAssistantEntries(&a, session, lower, upper);
@@ -575,8 +576,9 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     return content;
 }
 
-/// `publicConversationContent` for unconverted code (`report.zig`).
-pub fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !PublicContent {
+/// `publicConversationContent` for unconverted code (`report.zig`). Not inlined, so its
+/// Access takes no slot in the report's frame.
+pub noinline fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !PublicContent {
     var a = ReadAccess.within(self);
     defer a.deinit();
     return publicConversationContent(&a, session, position, ordinal);
@@ -737,8 +739,9 @@ fn hostedCall(a: *ReadAccess, session: []const u8, position: u64) !struct { pres
     };
 }
 
-/// `toolPresentation` for unconverted code (`report.zig`).
-pub fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
+/// `toolPresentation` for unconverted code (`report.zig`). Not inlined, so its
+/// Access takes no slot in the report's frame.
+pub noinline fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
     var a = ReadAccess.within(self);
     defer a.deinit();
     const presentation = try toolPresentation(&a, operation, ordinal, publication_position);
@@ -1266,70 +1269,87 @@ fn activityItem(a: *ReadAccess, session: []const u8, end: u64, position: u64, or
             result.item.value = .{ .hosted_call = call.presentation };
             result.item.at = call.at;
         },
-        8 => {
-            const admission = row.id orelse return error.CorruptStore;
-            var sent: sent_message.Row = undefined;
-            a.read(sent_message, .{ .admission = admission.get(), .session = session, .position = position }, &sent);
-            a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
-            if (!sent.consistent) return error.CorruptStore;
-            var metadata: content_metadata.Row = undefined;
-            var label: peer_label.Result = undefined;
-            a.read(content_metadata, .{ .content_id = sent.content_id.get() }, &metadata);
-            a.read(peer_label, .{ .session = sent.session_ref }, &label);
-            a.run() catch |err| return if (err == error.StatementFailed) (if (a.failedOn(peer_label)) error.SessionReadFailed else error.CorruptStore) else err;
-            const content = try content_domain.publicMetadata(&metadata);
-            result.item.value = .{ .sent = .{
-                .admission = admission.get(),
-                .target = try namedPeer(sent.session_ref, label),
-                .content = .{ .length = content.length, .digest = content.digest },
-                .admitted_at = sent.admitted_at.get(),
-            } };
-            result.item.at = sent.admitted_at.get();
-            result.content = .{ .id = @intCast(sent.content_id.get()), .metadata = content };
-        },
-        9 => {
-            var failure: send_failure.Row = undefined;
-            a.read(send_failure, .{ .session = session, .position = position }, &failure);
-            a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
-            if (!failure.consistent) return error.CorruptStore;
-            result.item.value = .{ .send_failed = .{ .key = failure.command_key, .target = try peerNamed(a, failure.target), .code = failure.code } };
-            result.item.at = failure.rejected_at.get();
-        },
-        6 => {
-            var first: First(turn_outcome.Row) = .{};
-            a.readEach(turn_outcome, .{ .session = session, .position = position }, 1, &first);
-            a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
-            const turn = first.row orelse return error.CorruptStore;
-            if (!turn.consistent) return error.CorruptStore;
-            var outcome: protocol.ActivityItem.Outcome = .{ .turn = turn.turn_id.get(), .operation = turn.operation_id.get(), .code = turn.outcome_code, .content = null };
-            const content_id: ?i64 = if (turn.outcome_content_id) |id| @intCast(id.get()) else null;
-            switch (try TurnOutcome.decode(outcome.code.slice(), content_id)) {
-                // A completed Turn answers with its causing Operation's Resolution.
-                .completed => |answer| if (turn.resolution_content_id == null or turn.resolution_content_id.?.get() != answer) return error.CorruptStore,
-                .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
-            }
-            if (turn.outcome_content_id) |id| {
-                const content = try readPublicMetadata(a, id.get());
-                outcome.content = .{ .length = content.length, .digest = content.digest };
-                result.content = .{ .id = @intCast(id.get()), .metadata = content };
-            }
-            result.item.value = .{ .outcome = outcome };
-            result.item.at = turn.outcome_at.get();
-        },
-        7 => {
-            var first: First(session_stop.Row) = .{};
-            a.readEach(session_stop, .{ .session = session, .position = position }, 1, &first);
-            a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
-            const stop_row = first.row orelse return error.CorruptStore;
-            if (!stop_row.consistent) return error.CorruptStore;
-            const turn: ?u64 = if (stop_row.selected_turn_id) |id| id.get() else null;
-            const outcome_position: ?u64 = if (stop_row.outcome_position) |at| at.get() else null;
-            result.item.value = .{ .stop = .{ .key = stop_row.command_key, .turn = turn, .cutoff = stop_row.admission_cutoff, .completion = if (turn == null or (outcome_position != null and outcome_position.? <= end)) .completed else .pending } };
-            result.item.at = stop_row.stopped_at.get();
-        },
+        8 => try sentItem(a, session, position, &row, &result),
+        9 => try sendFailureItem(a, session, position, &result),
+        6 => try outcomeItem(a, session, position, &result),
+        7 => try stopItem(a, session, end, position, &result),
         else => return error.CorruptStore,
     }
     return result;
+}
+
+/// A Message this Session sent (kind 8): its admission, then its content
+/// and its target's label.
+/// Its own function, so its rows take no slot in `activityItem`'s frame.
+noinline fn sentItem(a: *ReadAccess, session: []const u8, position: u64, row: *const activity_item.Row, result: *ActivityIdentity) !void {
+    const admission = row.id orelse return error.CorruptStore;
+    var sent: sent_message.Row = undefined;
+    a.read(sent_message, .{ .admission = admission.get(), .session = session, .position = position }, &sent);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    if (!sent.consistent) return error.CorruptStore;
+    var metadata: content_metadata.Row = undefined;
+    var label: peer_label.Result = undefined;
+    a.read(content_metadata, .{ .content_id = sent.content_id.get() }, &metadata);
+    a.read(peer_label, .{ .session = sent.session_ref }, &label);
+    a.run() catch |err| return if (err == error.StatementFailed) (if (a.failedOn(peer_label)) error.SessionReadFailed else error.CorruptStore) else err;
+    const content = try content_domain.publicMetadata(&metadata);
+    result.item.value = .{ .sent = .{
+        .admission = admission.get(),
+        .target = try namedPeer(sent.session_ref, label),
+        .content = .{ .length = content.length, .digest = content.digest },
+        .admitted_at = sent.admitted_at.get(),
+    } };
+    result.item.at = sent.admitted_at.get();
+    result.content = .{ .id = @intCast(sent.content_id.get()), .metadata = content };
+}
+
+/// A send this Session's target refused (kind 9).
+/// Its own function, so its rows take no slot in `activityItem`'s frame.
+noinline fn sendFailureItem(a: *ReadAccess, session: []const u8, position: u64, result: *ActivityIdentity) !void {
+    var failure: send_failure.Row = undefined;
+    a.read(send_failure, .{ .session = session, .position = position }, &failure);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    if (!failure.consistent) return error.CorruptStore;
+    result.item.value = .{ .send_failed = .{ .key = failure.command_key, .target = try peerNamed(a, failure.target), .code = failure.code } };
+    result.item.at = failure.rejected_at.get();
+}
+
+/// A Turn's outcome (kind 6), with its Resolution's answer.
+/// Its own function, so its rows take no slot in `activityItem`'s frame.
+noinline fn outcomeItem(a: *ReadAccess, session: []const u8, position: u64, result: *ActivityIdentity) !void {
+    var first: First(turn_outcome.Row) = .{};
+    a.readEach(turn_outcome, .{ .session = session, .position = position }, 1, &first);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    const turn = first.row orelse return error.CorruptStore;
+    if (!turn.consistent) return error.CorruptStore;
+    var outcome: protocol.ActivityItem.Outcome = .{ .turn = turn.turn_id.get(), .operation = turn.operation_id.get(), .code = turn.outcome_code, .content = null };
+    const content_id: ?i64 = if (turn.outcome_content_id) |id| @intCast(id.get()) else null;
+    switch (try TurnOutcome.decode(outcome.code.slice(), content_id)) {
+        // A completed Turn answers with its causing Operation's Resolution.
+        .completed => |answer| if (turn.resolution_content_id == null or turn.resolution_content_id.?.get() != answer) return error.CorruptStore,
+        .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
+    }
+    if (turn.outcome_content_id) |id| {
+        const content = try readPublicMetadata(a, id.get());
+        outcome.content = .{ .length = content.length, .digest = content.digest };
+        result.content = .{ .id = @intCast(id.get()), .metadata = content };
+    }
+    result.item.value = .{ .outcome = outcome };
+    result.item.at = turn.outcome_at.get();
+}
+
+/// A Session stop (kind 7) and whether its Turn has finished by `end`.
+/// Its own function, so its rows take no slot in `activityItem`'s frame.
+noinline fn stopItem(a: *ReadAccess, session: []const u8, end: u64, position: u64, result: *ActivityIdentity) !void {
+    var first: First(session_stop.Row) = .{};
+    a.readEach(session_stop, .{ .session = session, .position = position }, 1, &first);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    const stop_row = first.row orelse return error.CorruptStore;
+    if (!stop_row.consistent) return error.CorruptStore;
+    const turn: ?u64 = if (stop_row.selected_turn_id) |id| id.get() else null;
+    const outcome_position: ?u64 = if (stop_row.outcome_position) |at| at.get() else null;
+    result.item.value = .{ .stop = .{ .key = stop_row.command_key, .turn = turn, .cutoff = stop_row.admission_cutoff, .completion = if (turn == null or (outcome_position != null and outcome_position.? <= end)) .completed else .pending } };
+    result.item.at = stop_row.stopped_at.get();
 }
 
 /// Round 1 reads the sequence guard; the item's own reads follow
@@ -1493,8 +1513,9 @@ pub fn proposal(a: anytype, session: []const u8, position: u64) !ProposalIdentit
     return proposalIdentity(found, position);
 }
 
-/// `proposal` for unconverted code (`report.zig`).
-pub fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
+/// `proposal` for unconverted code (`report.zig`). Not inlined, so its
+/// Access takes no slot in the report's frame.
+pub noinline fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
     var a = ReadAccess.within(self);
     defer a.deinit();
     return proposal(&a, session, position);
