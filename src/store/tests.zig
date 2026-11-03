@@ -12288,6 +12288,149 @@ test "live tool activity counts calls past the sixteenth Operation" {
     try std.testing.expect(page.call_activity.entries[0].operation > first);
 }
 
+test "activity judges every candidate Operation's tool outcomes, not only its kept calls" {
+    // The page keeps three calls' presentations; the rule must still reach
+    // the fourth call, by one read per Operation while there are at most
+    // `max_operations` and by one read over them all past that.
+    for ([_]enum { one_operation, many_operations }{ .one_operation, .many_operations }) |shape| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "outcome-config");
+        try submitTestMessage(&storage, &tmp, "outcome-input", "input", session.slice(), "propose");
+        switch (shape) {
+            .one_operation => {
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var calls: [4]TestingCall = undefined;
+                var ids: [4][16]u8 = undefined;
+                for (&calls, &ids, 0..) |*call, *id_buffer, index| {
+                    const id = try std.fmt.bufPrint(id_buffer, "outcome-{d}", .{index});
+                    call.* = .{
+                        .item_id = id,
+                        .name = "bash",
+                        .encoded_call_id = id,
+                        .decoded_call_id = id,
+                        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+                        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
+                    };
+                }
+                try settleCallsForTesting(&storage, &tmp, binding, "outcome-calls", &calls);
+            },
+            .many_operations => for (0..32) |index| {
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var identity: [24]u8 = undefined;
+                const id = try std.fmt.bufPrint(&identity, "ops-{d}", .{index});
+                var prefix: [24]u8 = undefined;
+                const calls = [_]TestingCall{.{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" }};
+                try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "ops-calls-{d}", .{index}), &calls);
+            },
+        }
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
+        try std.testing.expect(page.call_activity.total >= 4);
+        // The last candidate call's item stops being a call item; no kept
+        // presentation reads that call.
+        try sqlite.exec(storage.database, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
+            "(SELECT operation_id,item_ordinal FROM model_tool_call ORDER BY operation_id DESC,call_ordinal DESC LIMIT 1)");
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "the tool outcome rule counts an Operation's calls against its call items" {
+    // One call's item stops being a call item: every call left is valid
+    // and as many as the call items, so only the count of calls differs.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "count-config");
+    try submitTestMessage(&storage, &tmp, "count-input", "input", session.slice(), "propose");
+    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "count-calls");
+    try sqlite.exec(storage.database, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3 AND item_ordinal=" ++
+        "(SELECT item_ordinal FROM model_tool_call WHERE call_ordinal=1)");
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "the Current report's resolved and rejected calls carry their group's publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "publication-config");
+    try submitTestMessage(&storage, &tmp, "publication-input", "input", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{
+            .item_id = "publication-item-0",
+            .name = "bash",
+            .encoded_call_id = "publication-call-0",
+            .decoded_call_id = "publication-call-0",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
+        },
+        .{ .item_id = "publication-item-1", .name = "other", .encoded_call_id = "publication-call-1", .decoded_call_id = "publication-call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "publication-calls", &calls);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation"), .decision = .allow_once };
+    try allow.key.set("publication-allow");
+    try allow.session.set(session.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+    const group = try queryU64(storage.database, "SELECT max(acceptance_position) FROM action_operation");
+    try std.testing.expect(group > try queryU64(storage.database, "SELECT acceptance_position FROM model_tool_call WHERE rejection_code IS NOT NULL"));
+
+    const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer report.deinit();
+    const resolved = report.value.object.get("actions").?.object.get("resolved").?.array.items;
+    const rejected = report.value.object.get("rejected_calls").?.object.get("items").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), resolved.len);
+    try std.testing.expectEqual(@as(usize, 1), rejected.len);
+    var expected: [20]u8 = undefined;
+    const position = try std.fmt.bufPrint(&expected, "{d}", .{group});
+    for ([_]std.json.Value{ resolved[0], rejected[0] }) |row| {
+        const published = row.object.get("presentation").?.object.get("publication_position").?;
+        try std.testing.expectEqualStrings(position, switch (published) {
+            .string => |text| text,
+            else => return error.TestUnexpectedResult,
+        });
+    }
+}
+
+test "the Current report fences an unauthorized Action proposed under bypass" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "unauthorized-config");
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("unauthorized-mode");
+    try update.session.set(session.slice());
+    update.configuration.permission_mode.state = .value;
+    try update.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "unauthorized-input", "input", session.slice(), "propose");
+    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "unauthorized-calls");
+    // The CHECK pairs a grant with its decision, so the damage clears both.
+    try sqlite.exec(storage.database, "UPDATE action_operation SET authorized=0,decided_at=NULL WHERE call_ordinal=1");
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    try std.testing.expect(storage.isFenced());
+}
+
 test "compaction overflow admits a new Operation without losing applied input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
