@@ -218,22 +218,6 @@ pub fn build(b: *std.Build) void {
     });
     configurePosix(b, read_client);
     session_list_client.root_module.addImport("rui_client", read_client);
-    const proposal_client = b.addExecutable(.{
-        .name = "rui-proposal-client-test",
-        .use_llvm = test_actor_llvm,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/proposal_client.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
-    });
-    proposal_client.root_module.link_libc = true;
-    proposal_client.root_module.addImport("rui_client", read_client);
-    const proposal_integration = b.addSystemCommand(&.{"python3"});
-    proposal_integration.addFileArg(b.path("tests/integration/proposal_integration.py"));
-    proposal_integration.addFileArg(ci.path(release_safe));
-    proposal_integration.addFileArg(ci.path(proposal_client));
-    b.step("proposal-integration", "Run historical proposal discovery and complete typed Client reads").dependOn(&proposal_integration.step);
     const activity_client = b.addExecutable(.{
         .name = "rui-activity-client-test",
         .use_llvm = test_actor_llvm,
@@ -536,7 +520,6 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(tests));
     fast_integrations.addFileArg(ci.path(host_status_actor));
     fast_integrations.addFileArg(ci.path(session_list_client));
-    fast_integrations.addFileArg(ci.path(proposal_client));
     fast_integrations.addFileArg(ci.path(activity_client));
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
@@ -570,7 +553,6 @@ pub fn build(b: *std.Build) void {
     process_integrations.addFileArg(ci.path(debug));
     process_integrations.addFileArg(ci.path(host_status_actor));
     process_integrations.addFileArg(ci.path(session_list_client));
-    process_integrations.addFileArg(ci.path(proposal_client));
     process_integrations.addFileArg(ci.path(activity_client));
     process_integrations.addFileArg(ci.path(preference_policy_actor));
     process_integrations.addArg(@tagName(check_part));

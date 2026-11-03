@@ -177,8 +177,6 @@ pub const Kind = enum {
     list_sessions,
     conversation_page,
     conversation_content,
-    proposal_page,
-    proposal_field,
     activity_page,
     activity_content,
     person_message,
@@ -521,7 +519,6 @@ pub const ProposalField = enum { name, call_id, arguments };
 /// One certified call field: its decoded length and content digest.
 pub const ProposalFieldReference = struct { length: u64, digest: [32]u8 };
 pub const ProposalRejection = enum { unknown_tool, invalid_arguments };
-pub const proposal_page_items = 16;
 pub const ProposalMetadata = struct {
     position: u64,
     operation: u64,
@@ -530,25 +527,6 @@ pub const ProposalMetadata = struct {
     action: ?u64,
     rejection: ?ProposalRejection,
     fields: [3]ProposalFieldReference, // ProposalField order.
-};
-pub const ProposalPage = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    end: ?u64 = null, // Null captures; zero freezes an empty traversal.
-    after: u64 = 0,
-
-    pub fn validate(self: ProposalPage) !void {
-        if (self.after > std.math.maxInt(i64)) return error.InvalidCursor;
-        if (self.end) |end| {
-            if (end > std.math.maxInt(i64) or self.after > end) return error.InvalidCursor;
-        } else if (self.after != 0) return error.InvalidCursor;
-    }
-};
-pub const ReadProposalField = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    position: u64 = 0,
-    field: ProposalField = .name,
 };
 
 pub const ActivityPage = struct {
@@ -1073,8 +1051,6 @@ pub const Request = union(Kind) {
     list_sessions: ListSessions,
     conversation_page: ConversationPage,
     conversation_content: ConversationContent,
-    proposal_page: ProposalPage,
-    proposal_field: ReadProposalField,
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
     person_message: ReadPersonMessage,
@@ -1084,7 +1060,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .person_message, .model_list => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .person_message, .model_list => {},
         }
     }
 
@@ -1411,10 +1387,6 @@ const Parser = struct {
             .conversation_page
         else if (kind_text.eql("conversation_content"))
             .conversation_content
-        else if (kind_text.eql("proposal_page"))
-            .proposal_page
-        else if (kind_text.eql("proposal_field"))
-            .proposal_field
         else if (kind_text.eql("activity_page"))
             .activity_page
         else if (kind_text.eql("activity_content"))
@@ -1491,14 +1463,6 @@ const Parser = struct {
             .conversation_content => {
                 out.* = .{ .conversation_content = .{ .store = store } };
                 try self.parseConversationContent(&out.conversation_content);
-            },
-            .proposal_page => {
-                out.* = .{ .proposal_page = .{ .store = store } };
-                try self.parseProposalPage(&out.proposal_page);
-            },
-            .proposal_field => {
-                out.* = .{ .proposal_field = .{ .store = store } };
-                try self.parseProposalField(&out.proposal_field);
             },
             .activity_page => {
                 out.* = .{ .activity_page = .{ .store = store } };
@@ -1825,21 +1789,6 @@ const Parser = struct {
             out.ordinal > std.math.maxInt(i64) or (out.stream and out.start != 0)) return error.InvalidCursor;
     }
 
-    fn parseProposalPage(self: *Parser, out: *ProposalPage) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("end");
-        if (try self.consumeIf('n')) {
-            for ("ull") |byte| try self.expectByte(byte);
-        } else out.end = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("after");
-        out.after = try self.readCanonicalU64();
-        try out.validate();
-    }
-
     fn parseActivityPage(self: *Parser, out: *ActivityPage) !void {
         try self.expectByte(',');
         try self.expectKey("session");
@@ -1896,21 +1845,6 @@ const Parser = struct {
         try self.expectKey("ordinal");
         out.ordinal = try self.readCanonicalU64();
         if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
-    }
-
-    fn parseProposalField(self: *Parser, out: *ReadProposalField) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        if (out.position == 0 or out.position > std.math.maxInt(i64)) return error.InvalidCursor;
-        try self.expectByte(',');
-        try self.expectKey("field");
-        var field: Bounded(16) = .{};
-        try self.readSmallString(&field);
-        out.field = std.meta.stringToEnum(ProposalField, field.slice()) orelse return error.InvalidField;
     }
 
     fn parseReadResult(self: *Parser, out: *ReadResult) !void {
@@ -2467,10 +2401,6 @@ pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ 
 pub const conversation_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\",\"stream\":true}" };
 /// Holes: Store, Session, end, before position, before ordinal.
 pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, end, after.
-pub const proposal_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"proposal_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"after\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, position, field.
-pub const proposal_field_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"proposal_field\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = ProposalField }, "\"}" };
 /// Holes: Store, Session, end, position, ordinal, direction.
 pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Holes: Store, Session, position, ordinal.
@@ -2514,8 +2444,6 @@ pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_argum
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request);
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
-pub const max_proposal_page_request_bytes = shapeBytes(proposal_page_request);
-pub const max_proposal_field_request_bytes = shapeBytes(proposal_field_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
 pub const max_person_message_request_bytes = shapeBytes(person_message_request);
@@ -2525,8 +2453,8 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     observe_command_request,     host_info_request,             host_stop_request,
     read_result_request,         list_sessions_changed_request, read_action_arguments_request,
     read_action_call_id_request, conversation_content_request,  conversation_page_request,
-    proposal_page_request,       proposal_field_request,        activity_page_request,
-    activity_content_request,    person_message_request,        model_list_request,
+    activity_page_request,       activity_content_request,      person_message_request,
+    model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2536,28 +2464,6 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 
 /// A Message or answer's content reference in an observation. Holes: length, digest.
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-
-pub const proposal_page_reply = struct {
-    /// Hole: the page end.
-    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"proposal_page\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
-    /// Holes: position, operation, turn, call ordinal, Action and rejection.
-    pub const item_head = .{ "{\"position\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":{" };
-    /// One field's reference, in `ProposalField` order. Holes: length, digest.
-    pub fn field(comptime name: ProposalField) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
-        const separator = if (name == std.meta.tags(ProposalField)[0]) "" else ",";
-        return .{ separator ++ "\"" ++ @tagName(name) ++ "\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\"}" };
-    }
-    pub const item_end = .{"}}"};
-    /// Hole: whether more items follow.
-    pub const tail = .{ "],\"more\":", Hole.boolean, "}" };
-};
-
-pub const max_proposal_page_response_bytes = blk: {
-    const page = proposal_page_reply;
-    var item = shapeBytes(page.item_head) + shapeBytes(page.item_end);
-    for (std.meta.tags(ProposalField)) |name| item += shapeBytes(page.field(name));
-    break :blk shapeBytes(page.head) + jsonListBytes(proposal_page_items, item) + shapeBytes(page.tail);
-};
 
 pub const max_activity_page_response_bytes = ActivityFacts.max_json_bytes;
 pub const max_person_message_response_bytes = PersonMessage.max_json_bytes;
@@ -2684,7 +2590,7 @@ pub const command_observation_reply = struct {
 
 /// Holes: error type and code.
 /// The `type` of an error reply: what kind of failure its code names.
-pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, proposal_unavailable, failed_response_unavailable };
+pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable };
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
