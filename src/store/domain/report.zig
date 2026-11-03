@@ -1406,7 +1406,7 @@ fn appendRejectedCalls(
     }
 }
 
-fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+inline fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
     const statement = try store_core.cached(
         self,
         "WITH occurrence(revision,field_order,content_id) AS MATERIALIZED (" ++
