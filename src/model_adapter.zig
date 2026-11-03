@@ -328,7 +328,7 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
-        error.UnsupportedOutputSchema => "unsupported_output_schema",
+        error.UnsupportedOutputSchemaRoute => "unsupported_output_schema_route",
         error.CodecDeclined => "provider_codec_failed",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
@@ -826,7 +826,7 @@ pub const Preparation = struct {
             .settings => {
                 try self.view.settings(&self.settings);
                 if (self.settings.output_schema != null and !providers.acceptsOutputSchema(protocol.routeOf(self.state.routes, self.settings.provider)))
-                    return error.UnsupportedOutputSchema;
+                    return error.UnsupportedOutputSchemaRoute;
                 const codec = self.settings.provider.codec();
                 self.carry = codecs.initialCarry(codec);
                 self.encoder = codecs.resumeFrom(self.carry);

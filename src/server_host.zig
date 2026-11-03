@@ -354,6 +354,7 @@ pub const ModelLists = struct {
     providers: *const providers_module.Providers = &providers_module.none,
     mutex: std.Io.Mutex = .init,
     /// A live list's IDs are exact length, from `allocator`.
+    /// `Provider.onlyLiveList()`'s, the one provider with a live list.
     live: model_list.List = .table,
 
     pub fn deinit(self: *ModelLists) void {
@@ -375,7 +376,7 @@ pub const ModelLists = struct {
     /// Publishes a fetched answer: its IDs, kept, or why there are none.
     pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
         const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
-            stderr.print("rui: OpenAI model list unavailable ({s}); the picker shows Rui's models\n", .{@errorName(err)});
+            stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ comptime protocol.Provider.onlyLiveList().shown(), @errorName(err) });
             break :failed .table_fallback;
         };
         self.set(list);

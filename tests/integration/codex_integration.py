@@ -327,7 +327,7 @@ def run():
             lambda: (value := fixture.observe(stop_store, "schema")).get("result", {}).get("code") and value,
             "schema rejected before managed dispatch",
         )
-        assert rejected["result"]["code"] == "unsupported_output_schema", rejected
+        assert rejected["result"]["code"] == "unsupported_output_schema_route", rejected
         assert len(endpoint.requests) == 4
         fixture.stop_host(host)
         host = start(stop_store, url)

@@ -401,7 +401,7 @@ const ModelListWork = struct {
 
 /// The codec whose headers the Reactor observes: every provider's, so far.
 const observed_codec = blk: {
-    const codec = protocol.Provider.codex.codec();
+    const codec = std.enums.values(protocol.Provider)[0].codec();
     for (std.enums.values(protocol.Provider)) |served| {
         if (served.codec() != codec) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a second codec");
     }

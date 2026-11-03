@@ -43,14 +43,22 @@ pub const Provider = enum {
     /// compile error: a view that names it must then learn which provider
     /// a failure belongs to.
     pub fn onlyWith(comptime kind: Facts.Credential) Provider {
-        comptime {
-            var found: ?Provider = null;
-            for (std.enums.values(Provider)) |provider| if (provider.facts().credential == kind) {
-                if (found != null) @compileError("more than one provider has a " ++ @tagName(kind) ++ " credential");
-                found = provider;
-            };
-            return found orelse @compileError("no provider has a " ++ @tagName(kind) ++ " credential");
-        }
+        return comptime only("credential", kind);
+    }
+
+    /// The one provider whose model list is fetched live: the Host keeps
+    /// one live list, so a second one is a compile error.
+    pub fn onlyLiveList() Provider {
+        return comptime only("model_list", Facts.ModelList.live);
+    }
+
+    fn only(comptime field: []const u8, comptime value: anytype) Provider {
+        var found: ?Provider = null;
+        for (std.enums.values(Provider)) |provider| if (@field(provider.facts(), field) == value) {
+            if (found != null) @compileError("more than one provider has " ++ field ++ " " ++ @tagName(value));
+            found = provider;
+        };
+        return found orelse @compileError("no provider has " ++ field ++ " " ++ @tagName(value));
     }
 };
 
@@ -77,4 +85,5 @@ pub const Codec = enum { @"openai-responses/1" };
 test "each credential kind names its one provider" {
     try std.testing.expectEqual(Provider.codex, comptime Provider.onlyWith(.sign_in));
     try std.testing.expectEqual(Provider.openai, comptime Provider.onlyWith(.api_key));
+    try std.testing.expectEqual(Provider.openai, comptime Provider.onlyLiveList());
 }

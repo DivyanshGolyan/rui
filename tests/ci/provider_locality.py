@@ -43,30 +43,37 @@ RULES = (
         r"misalignment_policy_violation|invalid_prompt|model_not_found|refresh_token_expired|"
         r"refresh_token_reused|refresh_token_invalidated)\b")),
     ("names a ChatGPT endpoint", re.compile(r"chatgpt\.com")),
+    ("switches on a provider", re.compile(r"\bProvider\.(?:codex|openai)\b|\.(?:codex|openai)\s*=>")),
 )
 
-# Core lines that must name a provider fact, each with why.
+# Core files that must name a provider fact, each with why.
 ALLOWED = {
     # The Host's own request fields, which h2 and every codec must never
     # write: the transport sits below providers.zig, so it lists them itself.
     ("provider.zig", "names a ChatGPT or Codex header"),
 }
 
-TEST_BLOCK = re.compile(r'^test "', re.MULTILINE)
+TEST_BLOCK = re.compile(r'^([ \t]*)test\b[^{\n]*\{', re.MULTILINE)
+# A `//` comment starts the line or follows whitespace; `https://` in a
+# string does not.
+COMMENT = re.compile(r"(^|[ \t])//.*", re.MULTILINE)
 
 
 def production(text):
-    """The text outside test blocks, with `//` comments blanked."""
+    """The text with test blocks, named or not and at any indent, and `//`
+    comments blanked, lines kept in place. A block ends at the first `}`
+    line at its own indent."""
     kept = []
     rest = text
     while (match := TEST_BLOCK.search(rest)) is not None:
         kept.append(rest[:match.start()])
-        end = rest.find("\n}\n", match.start())
-        if end == -1:
-            raise ValueError("unterminated test block")
-        rest = rest[end + 3:]
+        end = rest.find("\n" + match.group(1) + "}", match.end())
+        stop = len(rest) if end == -1 else end + len(match.group(1)) + 2
+        # Blank lines keep every later line at its own number.
+        kept.append("\n" * rest.count("\n", match.start(), stop))
+        rest = rest[stop:]
     kept.append(rest)
-    return re.sub(r"//.*", "", "".join(kept))
+    return COMMENT.sub(r"\1", "".join(kept))
 
 
 def owned(relative):

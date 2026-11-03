@@ -580,7 +580,13 @@ fn slashCommand(self: *Self, text: []const u8) void {
             };
         } else self.unknownCommand(text),
         .wait => self.notice = "Work continues while you compose.",
-        .login => self.notice = "Login uses " ++ comptime protocol.Provider.codex.login() ++ " in your shell.",
+        .login => {
+            // The Session's own provider, else the one that signs in.
+            const provider = self.line.provider orelse comptime protocol.Provider.onlyWith(.sign_in);
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            writer.print("Login uses {s} in your shell.", .{provider.login()}) catch unreachable;
+            self.notice = writer.buffered();
+        },
         .model => self.notice = self.modelFacts(),
         .misused => |name| {
             var writer = std.Io.Writer.fixed(&self.notice_buffer);

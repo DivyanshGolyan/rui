@@ -1260,6 +1260,14 @@ test "tool summary hides only complete routine metadata and retains warnings" {
 /// A reason of null shows the saved code itself.
 const Ending = struct { reason: ?[]const u8, next: []const u8 };
 
+comptime {
+    // `ending`'s buffers hold its longest words for every provider.
+    for (std.enums.values(protocol.Provider)) |provider| {
+        std.debug.assert("the  plan does not include this Session's model".len + provider.shown().len <= 128);
+        std.debug.assert("Save a new one with , run rui host pause, then send a message to continue on a new Host.".len + provider.login().len <= 192);
+    }
+}
+
 /// `provider` is the Session's, null until its settings are read; its
 /// buffers hold the provider's name and login when the words need them.
 fn ending(provider: ?protocol.Provider, code: []const u8, reason: *[128]u8, next: *[192]u8) Ending {
