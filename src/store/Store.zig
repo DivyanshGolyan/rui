@@ -125,7 +125,7 @@ pub const Store = struct {
 
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        const statement = try cached(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
+        const statement = try fixtureStatement(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
         defer sqlite.resetCached(statement);
         try sqlite.bindU64(statement, 1, binding.operation_id);
         const bytes = seal.encode();
@@ -139,7 +139,7 @@ pub const Store = struct {
         var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
         try bounded.set(model);
         if (bounded.len == 0) return error.InvalidModel;
-        const statement = try cached(self, "UPDATE session_revision SET model=?2 " ++
+        const statement = try fixtureStatement(self, "UPDATE session_revision SET model=?2 " ++
             "WHERE (session_ref,revision)=(SELECT o.session_ref,o.settings_revision FROM model_operation o " ++
             "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.settings_revision<s.revision)");
         defer sqlite.resetCached(statement);
@@ -154,7 +154,7 @@ pub const Store = struct {
     /// damage would.
     pub fn damageOutputBagForTesting(self: *Store, binding: AttemptBinding) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        const statement = try cached(self, "UPDATE content SET payload=CAST(CASE WHEN substr(CAST(payload AS TEXT),1,1)='X' THEN 'Y' ELSE 'X' END || substr(CAST(payload AS TEXT),2) AS BLOB) " ++
+        const statement = try fixtureStatement(self, "UPDATE content SET payload=CAST(CASE WHEN substr(CAST(payload AS TEXT),1,1)='X' THEN 'Y' ELSE 'X' END || substr(CAST(payload AS TEXT),2) AS BLOB) " ++
             "WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE operation_id=?1 AND item_ordinal=0)");
         defer sqlite.resetCached(statement);
         try sqlite.bindU64(statement, 1, binding.operation_id);
@@ -245,8 +245,10 @@ pub const Store = struct {
         // Checkpoints truncate a grown WAL back to the auto-checkpoint size.
         try sqlite.exec(database.?, "PRAGMA journal_size_limit=4194304");
         if (!existing) try store_schema.bootstrap(database.?, selector);
-        // A new Host never inherits a lost Action's sender authority.
-        try sqlite.exec(database.?, "UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL");
+        // A new Host never inherits a lost Action's sender authority. It
+        // clears every Session's rows, so it cannot tie to one as a typed
+        // Write must; its text is held to rsql's portability rules only.
+        try sqlite.exec(database.?, comptime portable("UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL"));
 
         if (@import("builtin").is_test) try sqlite.createTouchOracleForTesting(database.?);
 
@@ -265,7 +267,7 @@ pub const Store = struct {
         io.random(&self.instance);
         errdefer self.statements.deinit();
         // Error paths then roll back without preparing or allocating.
-        _ = try cached(self, "ROLLBACK");
+        _ = try controlStatement(self, .rollback);
         try loadIdentities(self, .full);
     }
 
@@ -1135,12 +1137,12 @@ fn lockAdmin(self: *Store) void {
 /// its own, before any entry point can run.
 pub fn begin(self: *Store) !void {
     std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
-    try execute(self, "BEGIN IMMEDIATE");
+    try control(self, .begin);
 }
 
 /// Commits the open transaction; the identities it took stay taken.
 pub fn commit(self: *Store) !void {
-    try execute(self, "COMMIT");
+    try control(self, .commit);
     self.ids.taken = .empty;
     self.ids.second = 0;
 }
@@ -1174,7 +1176,7 @@ pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
     if (self.touched.everything) return null;
     // Cached, so a test that counts prepared or uncached statements sees
     // none. A test that makes SQLite fail gets no verdict.
-    const statement = cached(self, "SELECT DISTINCT session_ref FROM temp.touched_oracle WHERE session_ref IS NOT NULL") catch return null;
+    const statement = fixtureStatement(self, "SELECT DISTINCT session_ref FROM temp.touched_oracle WHERE session_ref IS NOT NULL") catch return null;
     defer sqlite.resetCached(statement);
     while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
         const changed = c.sqlite3_column_text(statement, 0)[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
@@ -1189,7 +1191,7 @@ pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
 
 fn clearTouchOracleForTesting(self: *Store) void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
-    const statement = cached(self, "DELETE FROM temp.touched_oracle") catch return;
+    const statement = fixtureStatement(self, "DELETE FROM temp.touched_oracle") catch return;
     defer sqlite.resetCached(statement);
     _ = c.sqlite3_step(statement);
 }
@@ -1234,23 +1236,62 @@ pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !Pro
     return page;
 }
 
-/// Prepares `sql`, a statement of this file's own (transaction control,
-/// identity reads, and test-only fixtures and oracles), once for the
-/// Store's lifetime; the caller resets it with `resetCached` before
-/// releasing the Store mutex. Comptime only pins the SQL to static storage,
-/// so one body serves every statement.
-inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
-    return cachedStatic(self, sql);
+/// `text`, once it passes `rsql.portabilityError`: for the one data
+/// statement opening runs outside the cache and outside a typed statement.
+fn portable(comptime text: [:0]const u8) [:0]const u8 {
+    if (rsql.portabilityError(text, rsql.reserved_names_checked)) |message| @compileError(message ++ ": " ++ text);
+    return text;
 }
 
-/// A typed statement's prepared form, cached like `cached`'s. Its text was
-/// checked when the statement type was made.
+/// The statements this file prepares that are not typed: transaction
+/// control, which rsql refuses (`forbidden_words`) because only `begin`,
+/// `commit` and `rollbackAfterError` may run it. A closed set: no other
+/// text reaches `cachedStatic` outside test builds.
+const Control = enum {
+    begin,
+    commit,
+    rollback,
+
+    fn sql(comptime which: Control) [:0]const u8 {
+        return switch (which) {
+            .begin => "BEGIN IMMEDIATE",
+            .commit => "COMMIT",
+            .rollback => "ROLLBACK",
+        };
+    }
+};
+
+/// `which`'s prepared form, cached for the Store's lifetime; the caller
+/// resets it before releasing the Store mutex.
+fn controlStatement(self: *Store, comptime which: Control) !*c.sqlite3_stmt {
+    return cachedStatic(self, comptime which.sql());
+}
+
+/// Runs `which`, which returns no rows.
+fn control(self: *Store, comptime which: Control) !void {
+    const statement = try controlStatement(self, which);
+    defer sqlite.resetCached(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.SqliteExecFailed;
+}
+
+/// A typed statement's prepared form, cached like `controlStatement`'s.
+/// Only a type `rsql.Read` or `rsql.Write` made passes, so its text passed
+/// rsql's checks when that type was made (`rsql.isStatement`).
 pub fn cachedTyped(self: *Store, comptime S: type) !*c.sqlite3_stmt {
+    comptime if (!rsql.isStatement(S)) @compileError("cachedTyped runs only a type rsql.Read or rsql.Write made: " ++ @typeName(S));
     return cachedStatic(self, S.sql);
 }
 
-/// Reached only through `cached` and `cachedTyped`: a reused buffer would
-/// alias its key.
+/// A test fixture's or oracle's own text, prepared like `cachedTyped`'s.
+/// Unchecked by rsql, and refused outside test builds.
+fn fixtureStatement(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
+    if (!@import("builtin").is_test) @compileError("test-only Store statement");
+    return cachedStatic(self, sql);
+}
+
+/// Prepares `sql` once for the Store's lifetime. Reached only through
+/// `controlStatement`, `cachedTyped` and `fixtureStatement`, each of which
+/// passes static text, so the cache's key never aliases a reused buffer.
 fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
     if (self.statements.find(sql.ptr)) |statement| {
         std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);
@@ -1266,17 +1307,6 @@ fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
         return err;
     };
     return statement;
-}
-
-/// Runs one of this file's own statements (`cached`) that returns no rows.
-inline fn execute(self: *Store, comptime sql: [:0]const u8) !void {
-    return executeStatic(self, sql);
-}
-
-fn executeStatic(self: *Store, sql: [:0]const u8) !void {
-    const statement = try cachedStatic(self, sql);
-    defer sqlite.resetCached(statement);
-    if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.SqliteExecFailed;
 }
 
 /// A column whose values the Host hands out: a row's id, or its place in
@@ -1333,10 +1363,18 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
             .command_seq => "core_command",
             .admission_id => "message_admission",
         };
-        const statement = try cached(self, "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) FROM " ++ table);
+        const Ceiling = rsql.Read(.{
+            .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,
+            .Args = struct {},
+            .Row = struct { ceiling: u64 },
+            .cardinality = .one,
+        });
+        const statement = try cachedTyped(self, Ceiling);
         defer sqlite.resetCached(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.IdentityReadFailed;
-        self.ids.next.set(column, try sqlite.readCount(statement, 0) + 1);
+        var row: Ceiling.Row = undefined;
+        try sqlite.decodeRow(Ceiling.Row, statement, &row);
+        self.ids.next.set(column, row.ceiling + 1);
     };
     self.ids.taken = .empty;
 }
@@ -1346,7 +1384,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     self.touched.everything = true;
     if (c.sqlite3_get_autocommit(self.database) == 0) {
         if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-        execute(self, "ROLLBACK") catch return error.CanonicalRollbackFailed;
+        control(self, .rollback) catch return error.CanonicalRollbackFailed;
         if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
     }
     self.ids.second = 0;

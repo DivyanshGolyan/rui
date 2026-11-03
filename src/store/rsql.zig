@@ -1,7 +1,12 @@
 //! Rui SQL: Store SQL text written once for every engine. Source text is SQLite
 //! SQL restricted to a portable subset, plus markers that each engine renders
 //! in its own spelling. The schema's checks and index predicates and every
-//! typed statement (`Read`, `Write`) pass its checks.
+//! typed statement (`Read`, `Write`) pass its checks. `Store.cachedTyped`,
+//! the one way a typed statement reaches SQLite, takes only a type `Read` or
+//! `Write` made (`isStatement`). The Store prepares other text in three
+//! places only: its transaction control (`Store.Control`), its test-only
+//! fixtures, and, at open, PRAGMAs, schema bootstrap and one sweep held to
+//! `portabilityError` alone.
 
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
@@ -312,6 +317,8 @@ pub fn Read(comptime spec: ReadSpec) type {
     }
     return struct {
         pub const kind: StatementKind = .read;
+        /// What `isStatement` checks this type was made from.
+        pub const made_from = spec;
         pub const Args = spec.Args;
         pub const Row = spec.Row;
         pub const cardinality = spec.cardinality;
@@ -335,6 +342,8 @@ pub fn Write(comptime spec: WriteSpec) type {
     comptime if (expectError(parsed.statement, spec.expect)) |message| @compileError(message ++ ": " ++ spec.sql);
     return struct {
         pub const kind: StatementKind = .write;
+        /// What `isStatement` checks this type was made from.
+        pub const made_from = spec;
         pub const Args = spec.Args;
         pub const expect = spec.expect;
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
@@ -351,6 +360,20 @@ pub fn Write(comptime spec: WriteSpec) type {
 }
 
 pub const StatementKind = enum { read, write };
+
+/// Whether `S` is the type `Read` or `Write` made, so its text passed every
+/// check. A struct that copies a statement's declarations, `made_from`
+/// included, is not: `S` must be the very type its spec makes.
+pub fn isStatement(comptime S: type) bool {
+    comptime {
+        if (@typeInfo(S) != .@"struct" or !@hasDecl(S, "kind") or !@hasDecl(S, "made_from")) return false;
+        if (@TypeOf(S.kind) != StatementKind) return false;
+        return switch (S.kind) {
+            .read => @TypeOf(S.made_from) == ReadSpec and S == Read(S.made_from),
+            .write => @TypeOf(S.made_from) == WriteSpec and S == Write(S.made_from),
+        };
+    }
+}
 
 /// Whether a Row has a pointer field, which decodes into the caller's
 /// memory it points to, so the caller's struct fills in place without a
@@ -1852,6 +1875,27 @@ test "statements are held to reserved names, rowid and comments" {
     try std.testing.expectEqualStrings("rsql: 'groups' is reserved on some engine; rename it", comptime portabilityError("WITH groups AS (SELECT 1) SELECT * FROM groups", reserved_names_checked).?);
     try std.testing.expectEqualStrings("rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column", comptime portabilityError("SELECT max(rowid) FROM session", reserved_names_checked).?);
     try std.testing.expectEqualStrings("rsql: '--' comments hide text from this check; write the note as a Zig comment", comptime portabilityError("SELECT 1 -- call", reserved_names_checked).?);
+}
+
+test "only a type Read or Write made counts as a typed statement" {
+    const Real = Read(.{ .sql = "SELECT content_id FROM content WHERE content_id=?1", .Args = struct { content_id: u64 }, .Row = struct { content_id: Positive }, .cardinality = .optional });
+    const Written = Write(.{ .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2)", .Args = struct { turn_id: u64, session: SessionHead }, .expect = .{ .at_most = 1 } });
+    try std.testing.expect(comptime isStatement(Real));
+    try std.testing.expect(comptime isStatement(Written));
+    // Open text in a struct shaped like a statement.
+    try std.testing.expect(!comptime isStatement(struct {
+        pub const kind: StatementKind = .write;
+        pub const sql: [:0]const u8 = "ROLLBACK";
+    }));
+    // A copy of a real statement's declarations around other text.
+    try std.testing.expect(!comptime isStatement(struct {
+        pub const kind = Real.kind;
+        pub const made_from = Real.made_from;
+        pub const Args = Real.Args;
+        pub const Row = Real.Row;
+        pub const sql: [:0]const u8 = "DELETE FROM session";
+    }));
+    try std.testing.expect(!comptime isStatement(struct {}));
 }
 
 test "a reserved word is a keyword only in its own place, and a name anywhere else" {

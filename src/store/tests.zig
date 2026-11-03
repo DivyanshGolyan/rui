@@ -3092,6 +3092,37 @@ test "canonical report and Action read failures fence later commands" {
     }
 }
 
+test "the Store prepares only typed statements, its transaction control and test fixtures" {
+    // Open text cannot reach SQLite beside `rsql`: the one prepare is
+    // `cachedStatic`, called only by these three, and `cachedTyped` takes
+    // only a type `rsql.Read` or `rsql.Write` made (`rsql.isStatement`).
+    const source = @embedFile("Store.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "sqlite3_" ++ "prepare"));
+    const callers = [_][]const u8{ "controlStatement", "cachedTyped", "fixtureStatement" };
+    var calls = std.mem.splitSequence(u8, source, "cachedStatic" ++ "(self, ");
+    var before = calls.first();
+    var found: usize = 0;
+    while (calls.next()) |rest| : (found += 1) {
+        const name_start = std.mem.lastIndexOf(u8, before, "fn ").? + 3;
+        const name = before[name_start .. name_start + std.mem.indexOfScalar(u8, before[name_start..], '(').?];
+        var allowed = false;
+        for (callers) |caller| allowed = allowed or std.mem.eql(u8, name, caller);
+        if (!allowed) std.debug.print("cachedStatic called from {s}\n", .{name});
+        try std.testing.expect(allowed);
+        before = rest;
+    }
+    try std.testing.expectEqual(callers.len, found);
+    // Opening's own text: engine settings, and one sweep held to
+    // `rsql.portabilityError`.
+    var execs = std.mem.splitSequence(u8, source, "sqlite.exec" ++ "(database.?, ");
+    _ = execs.first();
+    while (execs.next()) |rest| {
+        const allowed = std.mem.startsWith(u8, rest, "\"PRAGMA ") or std.mem.startsWith(u8, rest, "cache_size") or
+            std.mem.startsWith(u8, rest, "if (options.cache_spill) \"PRAGMA ") or std.mem.startsWith(u8, rest, "comptime portable(");
+        try std.testing.expect(allowed);
+    }
+}
+
 test "Store entry points lock and fence only through canonical access" {
     // Every entry point classifies its errors through `Entry`; a new path
     // cannot take the mutex, read or set the fence beside it, or enter
