@@ -56,7 +56,7 @@ fn Collected(comptime Row: type, comptime max: usize) type {
 
 /// The first row of an `.each` read, which it steps once, as main did for
 /// a text that does not rule out a second row (`rsql.Read.single_row`).
-fn First(comptime Row: type) type {
+pub fn First(comptime Row: type) type {
     return struct {
         row: ?Row = null,
 

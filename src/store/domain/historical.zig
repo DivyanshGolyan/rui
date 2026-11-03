@@ -12,6 +12,10 @@ const historical_domain = @This();
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
+const rsql = @import("../rsql.zig");
+const store_access = @import("../access.zig");
+pub const ReadAccess = reads_domain.ReadAccess;
+const content_metadata = content_domain.content_metadata;
 const store_schema = @import("../schema.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
@@ -24,8 +28,8 @@ const accepted_resolutions = store_schema.accepted_resolutions;
 
 pub const PrefixSeal = prefix_seal.PrefixSeal;
 
-/// The content row columns a view handle needs, decoded by
-/// `readHistoricalContent` in this order.
+/// The content row columns a view handle needs, named as
+/// `content_metadata.Row` names them so typed rows decode them.
 const historical_content_columns_sql = "content.byte_length,content.digest,content.private";
 
 /// Borrowed from one pointer-stable preparation view. Invalid after it closes.
@@ -422,78 +426,124 @@ pub const OutputItemKind = output_format.OutputItemKind;
 fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, readHistoricalSettingsLocked(self, view, out));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, readHistoricalSettingsLocked(&access, view, out));
 }
 
-fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort,s.codec,s.codec_options IS NULL " ++
-            "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
-            "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, view.binding.operation_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    try sqlite.readText(statement, 0, &out.model);
-    const instructions_id = try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-    const output_schema_id = try sqlite.readNullablePositiveI64(statement, 2);
-    const tools = c.sqlite3_column_int(statement, 3);
-    if (tools < 0 or tools > tool_catalog.all_tools_mask) return error.CorruptStore;
-    out.tools_mask = @intCast(tools);
-    out.baseline_instructions = try historicalContent(self, view, instructions_id);
-    out.output_schema = if (output_schema_id) |content_id| try historicalContent(self, view, content_id) else null;
-    try sqlite.readText(statement, 5, &out.session);
-    try sqlite.readText(statement, 6, &out.workspace);
-    out.store = self.selector;
+/// The settings an Operation's request froze, with its Session's binding.
+/// The texts decode straight into the caller's settings.
+const historical_settings = rsql.Read(.{
+    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+        "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose " ++
+        "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
+        "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
+    .Args = struct { operation: u64 },
+    .Row = struct {
+        model: *protocol.Bounded(protocol.max_model_bytes),
+        instructions_content_id: rsql.Positive,
+        output_schema_content_id: ?rsql.Positive,
+        tools_mask: u8,
+        provider: protocol.Provider,
+        session_ref: *protocol.Bounded(protocol.max_session_bytes),
+        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
+        compaction_trigger: ?u64,
+        output_reservation: ?u64,
+        reasoning_effort: ?protocol.ReasoningEffort,
+        codec: protocol.Bounded(40),
+        plain_codec: bool,
+        purpose: u8,
+    },
+    .cardinality = .optional,
+});
+
+/// Round 1 reads the settings, the Operation's purpose with them; round 2
+/// the instructions' and output schema's metadata. A failed step is
+/// `CorruptStore`, main's answer for both.
+fn readHistoricalSettingsLocked(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !void {
+    var row: historical_settings.Row = undefined;
+    row.model = &out.model;
+    row.session_ref = &out.session;
+    row.workspace = &out.workspace;
+    var found: store_access.Found = undefined;
+    a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, &row, &found);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    if (!found.get()) return error.CorruptStore;
+    if (row.tools_mask > tool_catalog.all_tools_mask) return error.CorruptStore;
+    out.tools_mask = row.tools_mask;
+    var instructions: content_metadata.Row = undefined;
+    var output_schema: content_metadata.Row = undefined;
+    a.read(content_metadata, .{ .content_id = row.instructions_content_id.get() }, &instructions);
+    if (row.output_schema_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &output_schema);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    out.baseline_instructions = try viewContent(view, row.instructions_content_id.get(), &instructions, false);
+    out.output_schema = if (row.output_schema_content_id) |id| try viewContent(view, id.get(), &output_schema, false) else null;
+    out.store = a.store.selector;
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update("rui/session-affinity/v1");
     var length: [8]u8 = undefined;
-    std.mem.writeInt(u64, &length, self.selector.len, .big);
+    std.mem.writeInt(u64, &length, a.store.selector.len, .big);
     hash.update(&length);
-    hash.update(self.selector.slice());
+    hash.update(a.store.selector.slice());
     std.mem.writeInt(u64, &length, out.session.len, .big);
     hash.update(&length);
     hash.update(out.session.slice());
-    out.operation = try model_settlement_domain.readModelOperationKind(self, view.binding.operation_id);
-    out.compaction_trigger = try sqlite.readNullableTokens(statement, 7, false);
-    out.output_reservation = try sqlite.readNullableTokens(statement, 8, true) orelse return error.CorruptStore;
-    out.reasoning_effort = try sqlite.readNullableEffort(statement, 9);
-    out.provider = try sqlite.readProvider(statement, 4);
+    out.operation = switch (row.purpose) {
+        0 => .assistant_response,
+        1 => .compaction,
+        else => return error.CorruptStore,
+    };
+    if (row.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
+    out.compaction_trigger = row.compaction_trigger;
+    out.output_reservation = row.output_reservation orelse return error.CorruptStore;
+    out.reasoning_effort = row.reasoning_effort;
+    out.provider = row.provider;
     // Requests are built by the provider's one codec, which takes no
     // options; a Session pinned to anything else cannot be served.
-    var codec: protocol.Bounded(40) = .{};
-    try sqlite.readText(statement, 10, &codec);
-    if (!codec.eql(@tagName(out.provider.codec())) or c.sqlite3_column_int(statement, 11) != 1) return error.CorruptStore;
+    if (!row.codec.eql(@tagName(out.provider.codec())) or !row.plain_codec) return error.CorruptStore;
     out.session_affinity = hash.finalResult()[0..16].*;
 }
 
 fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return .{ .ready = try entry.finish(Ordinary.historical_entry, readHistoricalEntryLocked(self, view, after_position)) };
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return .{ .ready = try entry.finish(Ordinary.historical_entry, readHistoricalEntryLocked(&access, view, after_position)) };
 }
 
 fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, validateHistoricalOutputsStepLocked(self, view));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, validateHistoricalOutputsStepLocked(&access, view));
 }
 
 fn readPrefixSeal(self: *Store, binding: AttemptBinding) !?PrefixSeal {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, readPrefixSealLocked(self, binding));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, prefixSealOf(&access, binding));
 }
 
-pub fn readPrefixSealLocked(self: *Store, binding: AttemptBinding) !?PrefixSeal {
-    const statement = try store_core.cached(self, "SELECT s.prefix_seal FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
-    if (c.sqlite3_column_type(statement, 0) != c.SQLITE_BLOB) return error.CorruptStore;
-    return try PrefixSeal.decode(sqlite.columnBytes(statement, 0));
+/// The prefix seal of an Operation's Session.
+const session_prefix_seal = rsql.Read(.{
+    .sql = "SELECT s.prefix_seal FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
+    .Args = struct { operation: u64 },
+    .Row = struct { prefix_seal: ?[prefix_seal.encoded_bytes]u8 },
+    .cardinality = .one,
+});
+
+/// The Session's recorded seal, in a round of its own. A failed step is
+/// `CorruptStore`, main's answer for it.
+pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
+    var row: session_prefix_seal.Row = undefined;
+    a.read(session_prefix_seal, .{ .operation = binding.operation_id }, &row);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    const bytes = row.prefix_seal orelse return null;
+    return try PrefixSeal.decode(&bytes);
 }
 
 fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
@@ -518,82 +568,109 @@ fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const Pr
 fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, readCompactionAnchorLocked(self, base_id));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, readCompactionAnchorLocked(&access, base_id));
 }
 
-/// The position of the base's one compaction item.
-fn readCompactionAnchorLocked(self: *Store, base_id: u64) !u64 {
-    // A compaction item is its provider bag: the opaque continuation.
-    const anchor = try store_core.cached(self, "SELECT session_position,extras_content_id FROM model_output_item INDEXED BY model_output_compaction_anchor WHERE operation_id=?1 AND item_kind=4 ORDER BY item_ordinal");
-    defer sqlite.resetCached(anchor);
-    try sqlite.bindU64(anchor, 1, base_id);
-    if (c.sqlite3_step(anchor) != c.SQLITE_ROW) return error.CorruptStore;
-    const position = c.sqlite3_column_int64(anchor, 0);
-    const content_id = sqlite.optionalColumnId(anchor, 1) orelse return error.CorruptStore;
-    if (position <= 0 or content_id <= 0) return error.CorruptStore;
-    _ = try content_domain.readContentMetadata(self, content_id);
-    if (c.sqlite3_step(anchor) != c.SQLITE_DONE) return error.CorruptStore;
-    return @intCast(position);
+/// A compaction base's compaction item: its provider bag is the opaque
+/// continuation. A base has exactly one.
+const compaction_anchor = rsql.Read(.{
+    .sql = "SELECT session_position,extras_content_id FROM model_output_item @index(model_output_compaction_anchor) WHERE operation_id=?1 AND item_kind=4 ORDER BY item_ordinal",
+    .Args = struct { base: u64 },
+    .Row = struct { session_position: rsql.Positive, extras_content_id: rsql.Positive },
+    .cardinality = .one,
+});
+
+/// The position of the base's one compaction item. Round 1 reads the
+/// item, round 2 that its bag's row exists. A failed step is
+/// `CorruptStore`, main's answer for both.
+fn readCompactionAnchorLocked(a: *ReadAccess, base_id: u64) !u64 {
+    var anchor: compaction_anchor.Row = undefined;
+    a.read(compaction_anchor, .{ .base = base_id }, &anchor);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    var bag: content_metadata.Row = undefined;
+    a.read(content_metadata, .{ .content_id = anchor.extras_content_id.get() }, &bag);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    return anchor.session_position.get();
 }
 
-// Each step checks one producing Operation and its items in one
-// statement. Its own item count detects even a completely missing output.
-// No statement or lock survives this one step.
-fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
-    if (view.outputs_validated) return true;
-    if (view.output_frontier == null) {
-        const boundary = try store_core.cached(self, "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) " ++
-            "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
-            "FROM model_operation selected INDEXED BY model_operation_compaction_bases WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
-            "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1) " ++
-            "WHERE current.operation_id=?1");
-        defer sqlite.resetCached(boundary);
-        try sqlite.bindU64(boundary, 1, view.binding.operation_id);
-        if (c.sqlite3_step(boundary) != c.SQLITE_ROW) return error.CorruptStore;
-        view.output_boundary = try sqlite.readNullableTokens(boundary, 0, false) orelse return error.CorruptStore;
-        view.selected_base = try sqlite.readNullableTokens(boundary, 1, false) orelse 0;
-        view.output_frontier = try sqlite.readNullableTokens(boundary, 2, true) orelse return error.CorruptStore;
-        return false;
-    }
-    // The primary key makes ordinals unique, so the count, the first and
-    // last ordinal and one position offset prove ordinals 0..count-1 at
-    // consecutive positions, all after admission and below the boundary.
-    const source = try store_core.cached(self, "SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose," ++
+/// The Operation's admission position and its selected Compaction Base:
+/// the latest compacted Operation admitted before it.
+const output_boundary = rsql.Read(.{
+    .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier " ++
+        "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
+        "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
+        "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1) " ++
+        "WHERE current.operation_id=?1",
+    .Args = struct { operation: u64 },
+    .Row = struct { admission_position: rsql.Positive, operation_id: ?rsql.Positive, frontier: u64 },
+    .cardinality = .each,
+});
+
+// The primary key makes ordinals unique, so the count, the first and last
+// ordinal and one position offset prove ordinals 0..count-1 at consecutive
+// positions, all after admission and below the boundary.
+/// The next accepted producing Operation after cursor (?3, ?5), from the
+/// frontier ?2 to the boundary ?4, with whether its items are complete.
+const output_source = rsql.Read(.{
+    .sql = "SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose," ++
         "(SELECT count(*)=source.output_item_count AND coalesce(min(item.item_ordinal)=0 AND max(item.item_ordinal)=count(*)-1 " ++
         "AND min(item.session_position-item.item_ordinal)=max(item.session_position-item.item_ordinal) " ++
         "AND min(item.session_position)>source.admission_position AND max(item.session_position)<?4 " ++
         "AND min(item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal),1) " ++
-        "FROM model_output_item item WHERE item.operation_id=source.operation_id) " ++
-        "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
-        "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position,source.operation_id)>(?3,?5) " ++
+        "FROM model_output_item item WHERE item.operation_id=source.operation_id) AS complete " ++
+        "FROM model_operation current JOIN model_operation source @index(model_operation_context_history) ON source.session_ref=current.session_ref " ++
+        "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position>?3 OR (source.admission_position=?3 AND source.operation_id>?5)) " ++
         "AND source.admission_position<?4 AND " ++ store_schema.oneOf("source.resolution_code", &accepted_resolutions) ++ " " ++
-        "ORDER BY source.admission_position,source.operation_id LIMIT 1");
-    defer sqlite.resetCached(source);
-    try sqlite.bindU64(source, 1, view.binding.operation_id);
-    // SQLite seeks the index only on this bound, never on the row value,
-    // so it carries the cursor; each step then starts at the next
-    // Operation instead of rescanning from the frontier.
-    try sqlite.bindU64(source, 2, @max(view.output_frontier.?, view.output_cursor));
-    try sqlite.bindU64(source, 3, view.output_cursor);
-    try sqlite.bindU64(source, 4, view.output_boundary);
-    try sqlite.bindU64(source, 5, view.output_cursor_id);
-    const result = c.sqlite3_step(source);
-    if (result == c.SQLITE_DONE) {
+        "ORDER BY source.admission_position,source.operation_id LIMIT 1",
+    .Args = struct { operation: u64, from: u64, after_position: u64, boundary: u64, after_operation: u64 },
+    .Row = struct { operation_id: rsql.Positive, admission_position: rsql.Positive, output_item_count: u64, purpose: u8, complete: bool },
+    .cardinality = .optional,
+});
+
+// Each step checks one producing Operation and its items in one
+// statement. Its own item count detects even a completely missing output.
+// No statement or lock survives this one step. A failed step is
+// `CorruptStore`, main's answer for it.
+fn validateHistoricalOutputsStepLocked(a: *ReadAccess, view: *HistoricalView) !bool {
+    if (view.outputs_validated) return true;
+    if (view.output_frontier == null) {
+        var first: reads_domain.First(output_boundary.Row) = .{};
+        a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &first);
+        a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+        const row = first.row orelse return error.CorruptStore;
+        view.output_boundary = row.admission_position.get();
+        view.selected_base = if (row.operation_id) |id| id.get() else 0;
+        view.output_frontier = row.frontier;
+        return false;
+    }
+    var found: output_source.Result = undefined;
+    a.read(output_source, .{
+        .operation = view.binding.operation_id,
+        // SQLite seeks the index only on this bound, never on the
+        // cursor's OR, so it carries the cursor; each step then starts at
+        // the next Operation instead of rescanning from the frontier.
+        .from = @max(view.output_frontier.?, view.output_cursor),
+        .after_position = view.output_cursor,
+        .boundary = view.output_boundary,
+        .after_operation = view.output_cursor_id,
+    }, &found);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    const source = found orelse {
         view.outputs_validated = true;
         return true;
-    }
-    if (result != c.SQLITE_ROW) return error.CorruptStore;
-    view.output_cursor_id = try sqlite.readNullableTokens(source, 0, false) orelse return error.CorruptStore;
-    view.output_cursor = try sqlite.readNullableTokens(source, 1, false) orelse return error.CorruptStore;
-    const expected = try sqlite.readNullableTokens(source, 2, true) orelse return error.CorruptStore;
-    if (c.sqlite3_column_int(source, 3) == 1 and expected == 0) return error.CorruptStore;
-    if (c.sqlite3_column_int(source, 4) != 1) return error.CorruptStore;
+    };
+    view.output_cursor_id = source.operation_id.get();
+    view.output_cursor = source.admission_position.get();
+    if (source.purpose == 1 and source.output_item_count == 0) return error.CorruptStore;
+    if (!source.complete) return error.CorruptStore;
     return false;
 }
 
 /// The served entry lives in the view: in its read-ahead, its next tool
 /// group or its output check.
-fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
+fn readHistoricalEntryLocked(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
     std.debug.assert(view.outputs_validated);
     var scan_tool_groups = !view.tool_group_initialized;
     if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
@@ -611,7 +688,7 @@ fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position
     }
     if (scan_tool_groups) {
         view.tool_group_initialized = false;
-        if (try readNextHistoricalToolGroup(self, view)) |group| {
+        if (try readNextHistoricalToolGroup(a, view)) |group| {
             view.tool_group_source_cursor = group.source_operation_id;
             if (group.position > after_position) {
                 view.next_tool_group = .{ .position = group.position, .kind = .tool_results };
@@ -621,64 +698,92 @@ fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position
         view.tool_group_initialized = true;
     }
     view.tool_group_scan_after = after_position;
-    const ordinary = try nextOrdinaryHistoricalEntry(self, view, after_position) orelse return activateHistoricalToolGroup(self, view);
+    const ordinary = try nextOrdinaryHistoricalEntry(a, view, after_position) orelse return activateHistoricalToolGroup(view);
     if (view.next_tool_group) |*group| {
-        if (group.position < ordinary.position) return activateHistoricalToolGroup(self, view);
+        if (group.position < ordinary.position) return activateHistoricalToolGroup(view);
     }
     return ordinary;
 }
 
+/// The host inputs and output items after ?2 below the Operation's
+/// admission, the first `HistoricalView.entry_batch` of them in position
+/// order.
+const historical_entries = rsql.Read(.{
+    .sql = "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS consistent," ++
+        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender " ++
+        "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
+        "LEFT JOIN content ON content.content_id=e.content_id " ++
+        "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
+        "AND e.entry_kind IN (1,2) UNION ALL " ++
+        "SELECT item.session_position,3,NULL,NULL,NULL,NULL,r.model,r.provider,item.item_kind,item.item_id_digest," ++
+        store_schema.oneOf("owner.resolution_code", &accepted_resolutions) ++ " AND owner.session_ref=item.session_ref " ++
+        "AND owner_turn.session_ref=item.session_ref " ++
+        "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
+        "AND owner.admission_position<current.admission_position AND " ++
+        "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
+        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL " ++
+        "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
+        "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
+        "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
+        "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
+        "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
+        std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{HistoricalView.entry_batch}),
+    .Args = struct { operation: u64, after: u64 },
+    .Row = struct {
+        session_position: rsql.Positive,
+        entry_kind: u8,
+        content_id: ?rsql.Positive,
+        byte_length: ?u64,
+        digest: ?[32]u8,
+        private: ?bool,
+        model: ?protocol.Bounded(protocol.max_model_bytes),
+        provider: ?protocol.Provider,
+        item_kind: ?u8,
+        item_id_digest: ?[32]u8,
+        consistent: ?bool,
+        sender: ?protocol.Bounded(protocol.max_session_bytes),
+    },
+    .cardinality = .each,
+    .compound = true,
+});
+
+/// Fills the view's read-ahead with each row a `historical_entries` read
+/// steps, as its entry. The first row that is not one stops the read, and
+/// its failure is the round's answer.
+const EntryBatch = struct {
+    view: *HistoricalView,
+    failure: ?error{CorruptStore} = null,
+
+    pub fn visit(batch: *EntryBatch, row: *const historical_entries.Row) bool {
+        const view = batch.view;
+        view.entries[view.entries_end] = historicalEntry(view, row) catch |err| {
+            batch.failure = err;
+            return false;
+        };
+        view.entries_end += 1;
+        return true;
+    }
+};
+
 /// The next host input or output item after `after_position`, served from
-/// the view's read-ahead and refilled by one ranged query.
-fn nextOrdinaryHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
+/// the view's read-ahead and refilled by one ranged read in a round of its
+/// own. A failed step is `HistoricalEntryReadFailed`, main's name.
+fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
     while (view.entries_next < view.entries_end) : (view.entries_next += 1) {
         if (view.entries[view.entries_next].position > after_position) return &view.entries[view.entries_next];
     }
     view.entries_next = 0;
     view.entries_end = 0;
     errdefer view.entries_end = 0;
-    const statement = try store_core.cached(
-        self,
-        "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL,NULL,NULL,NULL,NULL," ++
-            "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id),NULL " ++
-            "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
-            "LEFT JOIN content ON content.content_id=e.content_id " ++
-            "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
-            "AND e.entry_kind IN (1,2) UNION ALL " ++
-            "SELECT item.session_position,3,NULL,NULL,NULL,NULL,r.model,r.provider,item.item_kind,item.item_id_digest," ++
-            store_schema.oneOf("owner.resolution_code", &accepted_resolutions) ++ " AND owner.session_ref=item.session_ref " ++
-            "AND owner_turn.session_ref=item.session_ref " ++
-            "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
-            "AND owner.admission_position<current.admission_position AND " ++
-            "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-            "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL," ++
-            "item.replay_omits_reasoning_text " ++
-            "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
-            "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
-            "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
-            "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
-            "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
-            std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{HistoricalView.entry_batch}),
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, view.binding.operation_id);
-    try sqlite.bindU64(statement, 2, after_position);
-    while (true) switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {
-            view.entries[view.entries_end] = try readHistoricalEntryRow(view, statement);
-            view.entries_end += 1;
-        },
-        c.SQLITE_DONE => break,
-        else => return error.HistoricalEntryReadFailed,
-    };
+    var batch: EntryBatch = .{ .view = view };
+    a.readEach(historical_entries, .{ .operation = view.binding.operation_id, .after = after_position }, HistoricalView.entry_batch, &batch);
+    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    if (batch.failure) |err| return err;
     return if (view.entries_end == 0) null else &view.entries[0];
 }
 
-fn readHistoricalEntryRow(view: *HistoricalView, statement: *c.sqlite3_stmt) !HistoricalEntry {
-    const position = c.sqlite3_column_int64(statement, 0);
-    const kind_value = c.sqlite3_column_int(statement, 1);
-    if (position <= 0) return error.CorruptStore;
-    const kind: HistoricalEntryKind = switch (kind_value) {
+fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) error{CorruptStore}!HistoricalEntry {
+    const kind: HistoricalEntryKind = switch (row.entry_kind) {
         1 => .user,
         2 => .instruction,
         3 => .provider_output,
@@ -691,35 +796,32 @@ fn readHistoricalEntryRow(view: *HistoricalView, statement: *c.sqlite3_stmt) !Hi
         // output away. Accepted-population validation cannot see failed
         // owners; every selected item must independently certify one.
         // The item itself is read in Rui's form through `openOutput`.
-        if (c.sqlite3_column_int(statement, 10) != 1) return error.CorruptStore;
-        var model: protocol.Bounded(protocol.max_model_bytes) = .{};
-        try sqlite.readText(statement, 6, &model);
-        if (model.len == 0) return error.CorruptStore;
-        _ = try sqlite.readProvider(statement, 7);
+        if (row.consistent != true) return error.CorruptStore;
+        const model = row.model orelse return error.CorruptStore;
+        if (model.len == 0 or row.provider == null or row.item_id_digest == null) return error.CorruptStore;
+        _ = std.enums.fromInt(OutputItemKind, row.item_kind orelse return error.CorruptStore) orelse return error.CorruptStore;
         requested_model = model;
-        _ = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 8)) orelse return error.CorruptStore;
-        _ = try sqlite.readDigest(statement, 9);
     } else {
-        const content_id = c.sqlite3_column_int64(statement, 2);
-        if (content_id <= 0) return error.CorruptStore;
-        content = try readHistoricalContent(view, statement, 3, content_id, false);
-    }
-    var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
-    if (c.sqlite3_column_type(statement, 11) != c.SQLITE_NULL) {
-        sender = .{};
-        try sqlite.readText(statement, 11, &sender.?);
+        const content_id = row.content_id orelse return error.CorruptStore;
+        // A missing content row leaves its columns NULL.
+        content = .{
+            .view = view,
+            .content_id = @intCast(content_id.get()),
+            .length = row.byte_length orelse return error.CorruptStore,
+            .digest = row.digest orelse return error.CorruptStore,
+        };
+        if (row.private orelse return error.CorruptStore) return error.CorruptStore;
     }
     return .{
-        .position = @intCast(position),
+        .position = row.session_position.get(),
         .kind = kind,
         .requested_model = requested_model,
-        .sender = sender,
+        .sender = row.sender,
         .content = content,
     };
 }
 
-fn activateHistoricalToolGroup(self: *Store, view: *HistoricalView) !?*const HistoricalEntry {
-    _ = self;
+fn activateHistoricalToolGroup(view: *HistoricalView) !?*const HistoricalEntry {
     const entry = if (view.next_tool_group) |*value| value else return null;
     view.active_tool_group_source_id = view.next_tool_group_source_id orelse return error.CorruptStore;
     view.active_tool_group_after_ordinal = null;
@@ -734,86 +836,116 @@ const HistoricalToolGroup = struct {
     source_operation_id: u64,
 };
 
-fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?HistoricalToolGroup {
+// Walk the immutable item population, not just surviving call rows. One
+// item/classification per step also detects wholly missing calls.
+/// The scanned Operation's item at or after ordinal ?2.
+const group_item = rsql.Read(.{
+    .sql = "SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position," ++
+        "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal AS consistent " ++
+        "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
+        "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1",
+    .Args = struct { operation: u64, ordinal: u64 },
+    .Row = struct { item_ordinal: u64, item_kind: u8, session_ref: protocol.Bounded(protocol.max_session_bytes), session_position: rsql.Positive, consistent: bool },
+    .cardinality = .optional,
+});
+
+/// A call past the scanned Operation's call items: there must be none.
+const extra_call = rsql.Read(.{
+    .sql = "SELECT call_ordinal FROM model_tool_call WHERE operation_id=?1 AND call_ordinal>=?2 ORDER BY call_ordinal LIMIT 1",
+    .Args = struct { operation: u64, ordinal: u64 },
+    .Row = struct { call_ordinal: u64 },
+    .cardinality = .optional,
+});
+
+/// A call's accepted result, and whether its rejection or Action agrees.
+const call_outcome = rsql.Read(.{
+    .sql = "SELECT coalesce(tool_call.acceptance_position,action.acceptance_position) AS accepted_position," ++
+        "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id," ++
+        "CASE WHEN tool_call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
+        "action.session_ref=source.session_ref AND action.tool_kind=tool_call.action_kind) THEN 1 ELSE 0 END AS consistent " ++
+        "FROM model_tool_call tool_call JOIN model_operation source ON source.operation_id=tool_call.operation_id " ++
+        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+        "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
+    .Args = struct { operation: u64, ordinal: u64 },
+    .Row = struct { accepted_position: rsql.Positive, content_id: rsql.Positive, consistent: bool },
+    .cardinality = .one,
+});
+
+/// The Session's next Operation after the scan cursor ?2 and before the
+/// view's own, and whether it proposed tools.
+const next_group_source = rsql.Read(.{
+    .sql = "SELECT source.operation_id,current.admission_position AS boundary," ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " AS proposes," ++
+        "source.admission_position,source.output_item_count FROM model_operation current " ++
+        "JOIN model_operation source @index(model_operation_session_history) " ++
+        "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 " ++
+        "AND source.operation_id>?2 AND source.operation_id<current.operation_id " ++
+        "ORDER BY source.operation_id LIMIT 1",
+    .Args = struct { operation: u64, after: u64 },
+    .Row = struct { operation_id: rsql.Positive, boundary: rsql.Positive, proposes: ?bool, admission_position: ?u64, output_item_count: ?u64 },
+    .cardinality = .optional,
+});
+
+/// One step of the tool-group scan, each read in rounds that depend on
+/// the one before: an item, then its Proposal and call outcome together,
+/// then the result's metadata; or, past the last item, the extra call
+/// check; or the next source Operation. A failed step is main's name:
+/// `CorruptStore` for the item, call and metadata reads, the Proposal
+/// read's own, and `HistoricalEntryReadFailed` for the source.
+fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?HistoricalToolGroup {
     const scan = &view.group_scan;
     if (scan.source != 0) {
-        // Walk the immutable item population, not just surviving call rows.
-        // One item/classification per step also detects wholly missing calls.
-        const item = try store_core.cached(self, "SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position," ++
-            "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal " ++
-            "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
-            "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1");
-        defer sqlite.resetCached(item);
-        try sqlite.bindU64(item, 1, scan.source);
-        try sqlite.bindU64(item, 2, scan.item);
-        const result = c.sqlite3_step(item);
-        if (result == c.SQLITE_DONE) {
-            const extra = try store_core.cached(self, "SELECT call_ordinal FROM model_tool_call WHERE operation_id=?1 AND call_ordinal>=?2 ORDER BY call_ordinal LIMIT 1");
-            defer sqlite.resetCached(extra);
-            try sqlite.bindU64(extra, 1, scan.source);
-            try sqlite.bindU64(extra, 2, scan.calls);
-            if (scan.item != scan.expected_items or scan.calls == 0 or scan.position == 0 or scan.position >= scan.boundary or c.sqlite3_step(extra) != c.SQLITE_DONE)
+        var found: group_item.Result = undefined;
+        a.read(group_item, .{ .operation = scan.source, .ordinal = scan.item }, &found);
+        a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+        const item = found orelse {
+            var extra: extra_call.Result = undefined;
+            a.read(extra_call, .{ .operation = scan.source, .ordinal = scan.calls }, &extra);
+            a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+            if (scan.item != scan.expected_items or scan.calls == 0 or scan.position == 0 or scan.position >= scan.boundary or extra != null)
                 return error.CorruptStore;
             const group = HistoricalToolGroup{ .position = scan.position, .source_operation_id = scan.source };
             view.next_tool_group_count = scan.calls;
             scan.source = 0;
             return group;
-        }
-        if (result != c.SQLITE_ROW or c.sqlite3_column_int64(item, 0) != scan.item) return error.CorruptStore;
-        const position = try sqlite.readNullableTokens(item, 3, false) orelse return error.CorruptStore;
-        if (scan.item >= scan.expected_items or c.sqlite3_column_int(item, 4) != 1 or
+        };
+        if (item.item_ordinal != scan.item) return error.CorruptStore;
+        const position = item.session_position.get();
+        if (scan.item >= scan.expected_items or !item.consistent or
             position <= scan.admission or position >= scan.boundary or
             (scan.item != 0 and position != scan.previous_position + 1)) return error.CorruptStore;
         scan.previous_position = position;
         scan.item += 1;
-        if (c.sqlite3_column_int(item, 1) != 3) return error.HistoricalPending;
-        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-        try sqlite.readText(item, 2, &session);
-        const proposal = try reads_domain.proposalLocked(self, session.slice(), position);
-        if (proposal.metadata.operation != scan.source or proposal.metadata.call_ordinal != scan.calls) return error.CorruptStore;
-        const outcome = try store_core.cached(self, "SELECT coalesce(tool_call.acceptance_position,action.acceptance_position)," ++
-            "coalesce(tool_call.rejection_content_id,action.resolution_content_id)," ++
-            "CASE WHEN tool_call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
-            "action.session_ref=source.session_ref AND action.tool_kind=tool_call.action_kind) THEN 1 ELSE 0 END " ++
-            "FROM model_tool_call tool_call JOIN model_operation source ON source.operation_id=tool_call.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-            "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2");
-        defer sqlite.resetCached(outcome);
-        try sqlite.bindU64(outcome, 1, scan.source);
-        try sqlite.bindU64(outcome, 2, scan.calls);
-        if (c.sqlite3_step(outcome) != c.SQLITE_ROW or c.sqlite3_column_int(outcome, 2) != 1) return error.CorruptStore;
-        const accepted = try sqlite.readNullablePositiveI64(outcome, 0) orelse return error.CorruptStore;
-        _ = try content_domain.readPublicContentMetadata(self, try sqlite.readNullablePositiveI64(outcome, 1) orelse return error.CorruptStore);
-        scan.position = @max(scan.position, @as(u64, @intCast(accepted)));
+        if (item.item_kind != 3) return error.HistoricalPending;
+        var proposal: reads_domain.proposal_row.Result = undefined;
+        var outcome: call_outcome.Row = undefined;
+        reads_domain.readProposal(a, item.session_ref.slice(), position, &proposal);
+        a.read(call_outcome, .{ .operation = scan.source, .ordinal = scan.calls }, &outcome);
+        a.run() catch |err| return if (err == error.StatementFailed and a.failedOn(call_outcome)) error.CorruptStore else err;
+        const identity = try reads_domain.proposalIdentity(proposal, position);
+        if (identity.metadata.operation != scan.source or identity.metadata.call_ordinal != scan.calls) return error.CorruptStore;
+        if (!outcome.consistent) return error.CorruptStore;
+        var result: content_metadata.Row = undefined;
+        a.read(content_metadata, .{ .content_id = outcome.content_id.get() }, &result);
+        a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+        _ = try content_domain.publicMetadata(&result);
+        scan.position = @max(scan.position, outcome.accepted_position.get());
         // The call's bytes are authenticated when its entry is served.
         scan.calls += 1;
         return error.HistoricalPending;
     }
-    const statement = try store_core.cached(
-        self,
-        "SELECT source.operation_id,current.admission_position," ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ ",source.admission_position,source.output_item_count FROM model_operation current " ++
-            "JOIN model_operation source INDEXED BY model_operation_session_history " ++
-            "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 " ++
-            "AND source.operation_id>?2 AND source.operation_id<current.operation_id " ++
-            "ORDER BY source.operation_id LIMIT 1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, view.binding.operation_id);
-    try sqlite.bindU64(statement, 2, view.tool_group_source_cursor);
-    const result = c.sqlite3_step(statement);
-    if (result == c.SQLITE_DONE) return null;
-    if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
-    const source_operation_id = c.sqlite3_column_int64(statement, 0);
-    const admission_position = c.sqlite3_column_int64(statement, 1);
-    if (source_operation_id <= 0 or admission_position <= 0) return error.CorruptStore;
-    if (c.sqlite3_column_int(statement, 2) != 1) {
-        view.tool_group_source_cursor = @intCast(source_operation_id);
+    var found: next_group_source.Result = undefined;
+    a.read(next_group_source, .{ .operation = view.binding.operation_id, .after = view.tool_group_source_cursor }, &found);
+    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    const source = found orelse return null;
+    if (source.proposes != true) {
+        view.tool_group_source_cursor = source.operation_id.get();
         return error.HistoricalPending;
     }
-    scan.source = @intCast(source_operation_id);
-    scan.boundary = @intCast(admission_position);
-    scan.admission = try sqlite.readNullableTokens(statement, 3, false) orelse return error.CorruptStore;
-    scan.expected_items = try sqlite.readNullableTokens(statement, 4, false) orelse return error.CorruptStore;
+    scan.source = source.operation_id.get();
+    scan.boundary = source.boundary.get();
+    scan.admission = source.admission_position orelse return error.CorruptStore;
+    scan.expected_items = source.output_item_count orelse return error.CorruptStore;
+    if (scan.admission == 0 or scan.expected_items == 0) return error.CorruptStore;
     scan.previous_position = 0;
     scan.item = 0;
     scan.calls = 0;
@@ -824,59 +956,78 @@ fn readNextHistoricalToolGroup(self: *Store, view: *HistoricalView) !?Historical
 fn readHistoricalOutput(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, readHistoricalOutputLocked(self, view, position));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, readHistoricalOutputLocked(&access, view, position));
 }
 
-fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
-    const statement = try store_core.cached(
-        self,
-        "SELECT item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.extras_content_id," ++
-            "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id,item.part_count,item.message_content_id " ++
-            "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref AND item.session_position=?2 " ++
-            "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
-            "WHERE current.operation_id=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, view.binding.operation_id);
-    try sqlite.bindU64(statement, 2, position);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const operation_id = c.sqlite3_column_int64(statement, 0);
-    const item_ordinal = c.sqlite3_column_int64(statement, 1);
-    if (operation_id <= 0 or item_ordinal < 0) return error.CorruptStore;
-    const kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 2)) orelse return error.CorruptStore;
-    const phase = std.enums.fromInt(output_format.NeutralPhase, c.sqlite3_column_int(statement, 3)) orelse return error.CorruptStore;
-    const omit = c.sqlite3_column_int(statement, 4);
-    if (omit != 0 and omit != 1) return error.CorruptStore;
-    const bag_id = sqlite.optionalColumnId(statement, 5) orelse return error.CorruptStore;
-    const part_count = c.sqlite3_column_int64(statement, 9);
-    if (part_count < 0 or (part_count != 0 and kind != .reasoning and kind != .message)) return error.CorruptStore;
-    const has_call = c.sqlite3_column_type(statement, 6) != c.SQLITE_NULL;
+/// The output item at ?2 in the Operation's Session, with its call's
+/// fields.
+const historical_output = rsql.Read(.{
+    .sql = "SELECT item.operation_id,item.item_ordinal,item.item_kind,item.phase,item.replay_omits_reasoning_text,item.extras_content_id," ++
+        "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id,item.part_count,item.message_content_id " ++
+        "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref AND item.session_position=?2 " ++
+        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
+        "WHERE current.operation_id=?1",
+    .Args = struct { operation: u64, position: u64 },
+    .Row = struct {
+        operation_id: rsql.Positive,
+        item_ordinal: u64,
+        item_kind: u8,
+        phase: u8,
+        replay_omits_reasoning_text: bool,
+        extras_content_id: rsql.Positive,
+        name_content_id: ?rsql.Positive,
+        call_id_content_id: ?rsql.Positive,
+        arguments_content_id: ?rsql.Positive,
+        part_count: u64,
+        message_content_id: ?rsql.Positive,
+    },
+    .cardinality = .one,
+});
+
+/// Round 1 reads the item; round 2 the metadata of its message text, its
+/// call's three fields and its bag together. A failed step is
+/// `CorruptStore`, main's answer for both.
+fn readHistoricalOutputLocked(a: *ReadAccess, view: *HistoricalView, position: u64) !HistoricalOutput {
+    var row: historical_output.Row = undefined;
+    a.read(historical_output, .{ .operation = view.binding.operation_id, .position = position }, &row);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    const kind = std.enums.fromInt(OutputItemKind, row.item_kind) orelse return error.CorruptStore;
+    const phase = std.enums.fromInt(output_format.NeutralPhase, row.phase) orelse return error.CorruptStore;
+    if (row.part_count != 0 and kind != .reasoning and kind != .message) return error.CorruptStore;
+    const has_call = row.name_content_id != null;
     if (has_call != (kind == .function_call)) return error.CorruptStore;
-    var call_ids: [3]i64 = undefined;
-    for (&call_ids, 6..) |*id, column| id.* = sqlite.optionalColumnId(statement, @intCast(column)) orelse if (has_call) return error.CorruptStore else 0;
-    const text_id = sqlite.optionalColumnId(statement, 10);
-    if ((text_id != null) != (kind == .message)) return error.CorruptStore;
-    sqlite.resetCached(statement);
+    var call_ids: [3]u64 = undefined;
+    for (&call_ids, [3]?rsql.Positive{ row.name_content_id, row.call_id_content_id, row.arguments_content_id }) |*id, column| id.* = if (column) |value| value.get() else if (has_call) return error.CorruptStore else 0;
+    if ((row.message_content_id != null) != (kind == .message)) return error.CorruptStore;
+    var text_row: content_metadata.Row = undefined;
+    var call_rows: [3]content_metadata.Row = undefined;
+    var bag_row: content_metadata.Row = undefined;
+    if (row.message_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &text_row);
+    if (has_call) for (&call_rows, call_ids) |*call_row, id| a.read(content_metadata, .{ .content_id = id }, call_row);
+    a.read(content_metadata, .{ .content_id = row.extras_content_id.get() }, &bag_row);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
     var text: ?HistoricalView.MessageText = null;
-    if (text_id) |id| {
-        const content = try historicalContentAs(self, view, id, false);
+    if (row.message_content_id) |id| {
+        const content = try viewContent(view, id.get(), &text_row, false);
         // Its parts' reads check a nonempty text; an empty one is
         // checked here.
         if (content.length == 0 and !std.mem.eql(u8, &content.digest, &protocol.contentDigest(""))) return error.CorruptStore;
-        text = .{ .content_id = id, .length = content.length, .digest = content.digest };
+        text = .{ .content_id = content.content_id, .length = content.length, .digest = content.digest };
     }
     var call: ?[3]HistoricalContent = null;
     if (has_call) {
         var fields: [3]HistoricalContent = undefined;
-        for (&fields, call_ids) |*content, id| content.* = try historicalContentAs(self, view, id, false);
+        for (&fields, call_ids, &call_rows) |*content, id, *call_row| content.* = try viewContent(view, id, call_row, false);
         call = fields;
     }
-    view.output_parts = .{ .operation_id = @intCast(operation_id), .item_ordinal = @intCast(item_ordinal), .kind = kind, .count = @intCast(part_count), .text = text };
+    view.output_parts = .{ .operation_id = row.operation_id.get(), .item_ordinal = row.item_ordinal, .kind = kind, .count = row.part_count, .text = text };
     return .{
         .kind = kind,
         .phase = phase,
-        .omit_reasoning_text = omit == 1,
-        .bag = try historicalBag(self, view, bag_id),
+        .omit_reasoning_text = row.replay_omits_reasoning_text,
+        .bag = try viewBag(view, row.extras_content_id.get(), &bag_row),
         .call = call,
     };
 }
@@ -884,51 +1035,59 @@ fn readHistoricalOutputLocked(self: *Store, view: *HistoricalView, position: u64
 fn readHistoricalPart(self: *Store, view: *HistoricalView) !?HistoricalPart {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, readHistoricalPartLocked(self, view));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, readHistoricalPartLocked(&access, view));
 }
 
-fn readHistoricalPartLocked(self: *Store, view: *HistoricalView) !?HistoricalPart {
+/// The open item's part at or after ordinal ?3.
+const historical_part = rsql.Read(.{
+    .sql = "SELECT part_ordinal,part_array,part_kind,text_length,text_content_id,extras_content_id FROM model_output_part " ++
+        "WHERE operation_id=?1 AND item_ordinal=?2 AND part_ordinal>=?3 ORDER BY part_ordinal LIMIT 1",
+    .Args = struct { operation: u64, item: u64, part: u64 },
+    .Row = struct { part_ordinal: u64, part_array: u8, part_kind: u8, text_length: ?u64, text_content_id: ?rsql.Positive, extras_content_id: rsql.Positive },
+    .cardinality = .optional,
+});
+
+/// Round 1 reads the part; round 2 the metadata of its own text and its
+/// bag together. A failed step is main's name: `HistoricalEntryReadFailed`
+/// for the part, `CorruptStore` for the metadata.
+fn readHistoricalPartLocked(a: *ReadAccess, view: *HistoricalView) !?HistoricalPart {
     const cursor = &view.output_parts.?;
-    const statement = try store_core.cached(
-        self,
-        "SELECT part_ordinal,part_array,part_kind,text_length,text_content_id,extras_content_id FROM model_output_part " ++
-            "WHERE operation_id=?1 AND item_ordinal=?2 AND part_ordinal>=?3 ORDER BY part_ordinal LIMIT 1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, cursor.operation_id);
-    try sqlite.bindU64(statement, 2, cursor.item_ordinal);
-    try sqlite.bindU64(statement, 3, cursor.next);
-    switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => {
-            // A part missing from the end changes what the model saw,
-            // and the text parts cover the whole message text.
-            if (cursor.next != cursor.count) return error.CorruptStore;
-            if (cursor.text) |text| if (text.next != text.length) return error.CorruptStore;
-            view.output_parts = null;
-            return null;
-        },
-        c.SQLITE_ROW => if (cursor.next == cursor.count) return error.CorruptStore,
-        else => return error.HistoricalEntryReadFailed,
-    }
-    if (c.sqlite3_column_int64(statement, 0) != cursor.next) return error.CorruptStore;
-    const array = std.enums.fromInt(output_format.PartArray, c.sqlite3_column_int(statement, 1)) orelse return error.CorruptStore;
-    const kind = std.enums.fromInt(output_format.PartKind, c.sqlite3_column_int(statement, 2)) orelse return error.CorruptStore;
-    const text_length = try sqlite.readNullableTokens(statement, 3, true);
-    const text_id = sqlite.optionalColumnId(statement, 4);
-    const bag_id = sqlite.optionalColumnId(statement, 5) orelse return error.CorruptStore;
+    var found: historical_part.Result = undefined;
+    a.read(historical_part, .{ .operation = cursor.operation_id, .item = cursor.item_ordinal, .part = cursor.next }, &found);
+    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    const row = found orelse {
+        // A part missing from the end changes what the model saw,
+        // and the text parts cover the whole message text.
+        if (cursor.next != cursor.count) return error.CorruptStore;
+        if (cursor.text) |text| if (text.next != text.length) return error.CorruptStore;
+        view.output_parts = null;
+        return null;
+    };
+    if (cursor.next == cursor.count or row.part_ordinal != cursor.next) return error.CorruptStore;
+    const array = std.enums.fromInt(output_format.PartArray, row.part_array) orelse return error.CorruptStore;
+    const kind = std.enums.fromInt(output_format.PartKind, row.part_kind) orelse return error.CorruptStore;
     if (!partFits(cursor.kind, array, kind)) return error.CorruptStore;
+    // Only a summary or reasoning text has a row of its own.
+    const own_text = kind == .summary_text or kind == .reasoning_text;
+    var text_row: content_metadata.Row = undefined;
+    var bag_row: content_metadata.Row = undefined;
+    if (own_text and row.text_length == null) if (row.text_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &text_row);
+    a.read(content_metadata, .{ .content_id = row.extras_content_id.get() }, &bag_row);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
     const text: ?HistoricalContent = switch (kind) {
-        .opaque_block => if (text_length != null or text_id != null) return error.CorruptStore else null,
+        .opaque_block => if (row.text_length != null or row.text_content_id != null) return error.CorruptStore else null,
         .output_text, .refusal => ranged: {
-            const length = text_length orelse return error.CorruptStore;
+            const length = row.text_length orelse return error.CorruptStore;
             const whole = &cursor.text.?;
-            if (text_id != null or length > whole.length - whole.next) return error.CorruptStore;
+            if (row.text_content_id != null or length > whole.length - whole.next) return error.CorruptStore;
             defer whole.next += length;
             break :ranged .{ .view = view, .content_id = whole.content_id, .length = length, .digest = whole.digest, .text_start = whole.next };
         },
-        .summary_text, .reasoning_text => if (text_length != null) return error.CorruptStore else try historicalContentAs(self, view, text_id orelse return error.CorruptStore, true),
+        .summary_text, .reasoning_text => if (row.text_length != null) return error.CorruptStore else try viewContent(view, (row.text_content_id orelse return error.CorruptStore).get(), &text_row, true),
     };
-    const bag = try historicalBag(self, view, bag_id);
+    const bag = try viewBag(view, row.extras_content_id.get(), &bag_row);
     // An opaque block is all bag: at least its type.
     if (kind == .opaque_block and bag == null) return error.CorruptStore;
     // Each array's parts are contiguous, so the writer opens it once.
@@ -937,7 +1096,6 @@ fn readHistoricalPartLocked(self: *Store, view: *HistoricalView) !?HistoricalPar
         if (cursor.array != .none) cursor.closed[@backingInt(cursor.array) - 1] = true;
         cursor.array = array;
     }
-    sqlite.resetCached(statement);
     cursor.next += 1;
     return .{ .array = array, .kind = kind, .text = text, .bag = bag };
 }
@@ -957,8 +1115,8 @@ fn partFits(item: OutputItemKind, array: output_format.PartArray, kind: output_f
 }
 
 /// A saved bag, or null when it is empty: the writer adds nothing for it.
-fn historicalBag(self: *Store, view: *HistoricalView, id: i64) !?HistoricalContent {
-    const bag = try historicalContentAs(self, view, id, true);
+fn viewBag(view: *HistoricalView, content_id: u64, row: *const content_metadata.Row) !?HistoricalContent {
+    const bag = try viewContent(view, content_id, row, true);
     return if (bag.length == 0) null else bag;
 }
 
@@ -968,80 +1126,69 @@ fn readHistoricalToolResult(
 ) !?HistoricalToolResult {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, readHistoricalToolResultLocked(self, view));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, readHistoricalToolResultLocked(&access, view));
 }
 
-fn readHistoricalToolResultLocked(
-    self: *Store,
-    view: *HistoricalView,
-) !?HistoricalToolResult {
+/// The active group's next call accepted before the Operation's admission:
+/// its first, or the one after ordinal ?3 when `after`.
+fn NextCall(comptime after: bool) type {
+    return rsql.Read(.{
+        .sql = "SELECT tool_call.call_ordinal,tool_call.call_id_content_id," ++
+            "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS output_content_id,current.admission_position " ++
+            "FROM model_operation current " ++
+            "CROSS JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
+            "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
+            "ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+            "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
+            "AND coalesce(tool_call.acceptance_position,action.acceptance_position)<current.admission_position " ++
+            (if (after) "AND tool_call.call_ordinal>?3 " else "AND tool_call.call_ordinal>=0 ") ++ "ORDER BY tool_call.call_ordinal LIMIT 1",
+        .Args = if (after) struct { operation: u64, source: u64, after: u64 } else struct { operation: u64, source: u64 },
+        .Row = NextCallRow,
+        .cardinality = .optional,
+    });
+}
+const NextCallRow = struct { call_ordinal: u64, call_id_content_id: rsql.Positive, output_content_id: rsql.Positive, admission_position: rsql.Positive };
+const first_call = NextCall(false);
+const later_call = NextCall(true);
+
+/// Round 1 reads the next call; round 2 its call id's and output's
+/// metadata together. A failed step is main's name:
+/// `HistoricalEntryReadFailed` for the call, `CorruptStore` for the
+/// metadata.
+fn readHistoricalToolResultLocked(a: *ReadAccess, view: *HistoricalView) !?HistoricalToolResult {
     const source_operation_id = view.active_tool_group_source_id orelse unreachable;
-    const after_call_ordinal = view.active_tool_group_after_ordinal;
-    const next_call = "SELECT tool_call.call_ordinal,tool_call.call_id_content_id," ++
-        "coalesce(tool_call.rejection_content_id,action.resolution_content_id),current.admission_position " ++
-        "FROM model_operation current " ++
-        "CROSS JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
-        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
-        "ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
-        "AND coalesce(tool_call.acceptance_position,action.acceptance_position)<current.admission_position ";
-    const statement = if (after_call_ordinal == null)
-        try store_core.cached(self, next_call ++ "AND tool_call.call_ordinal>=0 ORDER BY tool_call.call_ordinal LIMIT 1")
+    var found: ?NextCallRow = undefined;
+    if (view.active_tool_group_after_ordinal) |ordinal|
+        a.read(later_call, .{ .operation = view.binding.operation_id, .source = source_operation_id, .after = ordinal }, &found)
     else
-        try store_core.cached(self, next_call ++ "AND tool_call.call_ordinal>?3 ORDER BY tool_call.call_ordinal LIMIT 1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, view.binding.operation_id);
-    try sqlite.bindU64(statement, 2, source_operation_id);
-    if (after_call_ordinal) |ordinal| try sqlite.bindU64(statement, 3, ordinal);
-    const result = c.sqlite3_step(statement);
-    if (result == c.SQLITE_DONE) {
+        a.read(first_call, .{ .operation = view.binding.operation_id, .source = source_operation_id }, &found);
+    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    const row = found orelse {
         if (view.active_tool_group_count != view.active_tool_group_expected) return error.CorruptStore;
         view.active_tool_group_source_id = null;
         view.active_tool_group_after_ordinal = null;
         view.active_tool_group_count = 0;
         return null;
-    }
-    if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
-    const call_ordinal = c.sqlite3_column_int64(statement, 0);
-    const call_id_content_id = c.sqlite3_column_int64(statement, 1);
-    const output_content_id = c.sqlite3_column_int64(statement, 2);
-    const admission_position = c.sqlite3_column_int64(statement, 3);
-    if (call_ordinal < 0 or call_id_content_id <= 0 or output_content_id <= 0 or admission_position <= 0)
+    };
+    if (row.call_ordinal != view.active_tool_group_count or view.active_tool_group_count >= view.active_tool_group_expected)
         return error.CorruptStore;
-    if (call_ordinal != view.active_tool_group_count or view.active_tool_group_count >= view.active_tool_group_expected)
-        return error.CorruptStore;
-    const call_id = try historicalContent(self, view, call_id_content_id);
-    const output = try historicalContent(self, view, output_content_id);
-    view.active_tool_group_after_ordinal = @intCast(call_ordinal);
+    var call_id_row: content_metadata.Row = undefined;
+    var output_row: content_metadata.Row = undefined;
+    a.read(content_metadata, .{ .content_id = row.call_id_content_id.get() }, &call_id_row);
+    a.read(content_metadata, .{ .content_id = row.output_content_id.get() }, &output_row);
+    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    const call_id = try viewContent(view, row.call_id_content_id.get(), &call_id_row, false);
+    const output = try viewContent(view, row.output_content_id.get(), &output_row, false);
+    view.active_tool_group_after_ordinal = row.call_ordinal;
     view.active_tool_group_count += 1;
     return .{ .call_id = call_id, .output = output };
 }
 
-/// Public content as a view handle. Like a digest lookup of public
-/// content, a private row cannot stand in.
-fn historicalContent(self: *Store, view: *HistoricalView, content_id: i64) !HistoricalContent {
-    return historicalContentAs(self, view, content_id, false);
-}
-
-/// Content as a view handle, only when its privacy is `private`.
-fn historicalContentAs(self: *Store, view: *HistoricalView, content_id: i64, private: bool) !HistoricalContent {
-    const statement = try store_core.cached(self, "SELECT " ++ historical_content_columns_sql ++ " FROM content WHERE content.content_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindI64(statement, 1, content_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return readHistoricalContent(view, statement, 0, content_id, private);
-}
-
-/// Decodes `historical_content_columns_sql` starting at column `first`. A
-/// row whose privacy differs from `private` cannot stand in.
-fn readHistoricalContent(view: *HistoricalView, statement: *c.sqlite3_stmt, first: c_int, content_id: i64, private: bool) !HistoricalContent {
-    if (c.sqlite3_column_type(statement, first) == c.SQLITE_NULL) return error.CorruptStore;
-    const length = c.sqlite3_column_int64(statement, first);
-    if (length < 0 or (c.sqlite3_column_int(statement, first + 2) != 0) != private) return error.CorruptStore;
-    return .{
-        .view = view,
-        .content_id = content_id,
-        .length = @intCast(length),
-        .digest = try sqlite.readDigest(statement, first + 1),
-    };
+/// Content as a view handle, only when its privacy is `private`: like a
+/// digest lookup of public content, a private row cannot stand in.
+fn viewContent(view: *HistoricalView, content_id: u64, row: *const content_metadata.Row, private: bool) error{CorruptStore}!HistoricalContent {
+    if (row.private != private) return error.CorruptStore;
+    return .{ .view = view, .content_id = @intCast(content_id), .length = row.byte_length, .digest = row.digest };
 }

@@ -115,7 +115,8 @@ pub const Store = struct {
     /// current revision, leaving that revision and its frozen inputs intact.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        return historical_domain.readPrefixSealLocked(self, binding);
+        var access = historical_domain.ReadAccess.within(self);
+        return historical_domain.prefixSealOf(&access, binding);
     }
 
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {

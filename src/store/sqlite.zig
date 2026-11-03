@@ -318,12 +318,6 @@ pub fn maxEnumTagBytes(comptime Enum: type) usize {
     return maximum;
 }
 
-/// A positive id column, or null for SQL NULL.
-pub fn optionalColumnId(statement: *c.sqlite3_stmt, column: c_int) ?i64 {
-    if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
-    return c.sqlite3_column_int64(statement, column);
-}
-
 pub fn readDigest(statement: *c.sqlite3_stmt, index: c_int) ![32]u8 {
     if (c.sqlite3_column_bytes(statement, index) != 32) return error.CorruptStore;
     const pointer = c.sqlite3_column_blob(statement, index) orelse return error.CorruptStore;
