@@ -12126,6 +12126,54 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
+test "a forward one-row page of a person's Messages costs the same steps past 10 or 10,000 tool groups" {
+    // Ctrl-N from the first Message steps to the second, with every tool
+    // group completed between it and the third. The page lists no calls, so it reads no
+    // call activity.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "forward-config");
+        try submitTestMessage(&storage, &tmp, "forward-first", "first", session.slice(), "first");
+        try submitTestMessage(&storage, &tmp, "forward-second", "second", session.slice(), "second");
+        const first = try queryU64(storage.database, "SELECT min(admission_position) FROM message_admission");
+        // Foreign keys are off: each tool group names its Turn before the
+        // Turn row exists. A cancelled Turn needs no answer content.
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT 1000+value AS value,next_position+3*(value-1) AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1 FROM history; " ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT value,0,'{1s}',position,3,1,zeroblob(32),0,content,0 FROM history; " ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                "SELECT value,'{1s}',0,0,content,content,content,zeroblob(120),'unknown_tool',content,position+1 FROM history; " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT value,'{1s}',value,value,value,'cancelled',position+2,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+3*{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        try submitTestMessage(&storage, &tmp, "forward-third", "third", session.slice(), "third");
+        var request: protocol.ActivityPage = .{ .position = first, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].position > first and page.more);
+        try std.testing.expectEqual(@as(u64, 0), page.call_activity.total);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
 /// The VM steps every statement of the Store's connection takes to read one
 /// Activity page.
 fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {

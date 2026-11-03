@@ -3260,6 +3260,7 @@ Canonical result content and proposal arguments remain unchanged; descriptions g
 The additional per-call canonical data is at most 100 label bytes plus 120 field-certificate bytes, excluding SQLite row/page overhead; readers retain fixed-size metadata, not commands.
 
 Each Activity page also captures `call_activity` under the same Store lock, with an exact total and at most the three oldest `(operation, ordinal)` identities awaiting presentation.
+A page whose `kinds` leave out `call` reads none and reports an empty `call_activity`.
 Its boundary is the last returned row for a forward page with `more`, otherwise `(end, null)`, including backward opening.
 At the same boundary the page reports `queued`: how many Messages without a sender were admitted and neither applied nor excluded, the oldest one's Admission position, and the newest one's admission ID and position.
 Selection and a stop take admission-order prefixes, and Admission positions follow admission order, so the Store seeks the boundary in the index of those Messages by Admission position and walks down, stopping at the first taken: it reads the waiting Messages and one more, however many Messages precede or follow the boundary.
