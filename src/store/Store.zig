@@ -928,7 +928,7 @@ const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @si
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
 comptime {
-    // A settlement batch of 64 items, 16504 bytes, is the larger use; the
+    // A settlement batch of 64 items, 16528 bytes, is the larger use; the
     // owner accepted about 10 KiB more than the configure reads' 4888.
     if (scratch_bytes > 17 * 1024) @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes; keep it within 17 KiB", .{scratch_bytes}));
 }

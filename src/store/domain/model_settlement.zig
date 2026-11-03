@@ -640,12 +640,18 @@ const duplicate_calls = DuplicateCalls(narrow_width);
 const duplicate_calls_wide = DuplicateCalls(batch_items);
 
 /// The Args a batch binds, in its scratch, not a frame: bound by value
-/// when queued, so one buffer serves each read in turn.
-const DigestArgsBuffer = union {
-    lookup: content_batch.Args,
-    lookup_wide: content_batch_wide.Args,
-    duplicate: duplicate_items.Args,
-    duplicate_wide: duplicate_items_wide.Args,
+/// when queued, so one buffer serves each read in turn (`Batch.argsOf`).
+/// Bytes, not a union: a union value would be built in the frame first.
+const digest_args_types = .{ content_batch.Args, content_batch_wide.Args, duplicate_items.Args, duplicate_items_wide.Args };
+const digest_args_bytes = blk: {
+    var most: usize = 0;
+    for (digest_args_types) |T| most = @max(most, @sizeOf(T));
+    break :blk most;
+};
+const digest_args_align = blk: {
+    var most: usize = 1;
+    for (digest_args_types) |T| most = @max(most, @alignOf(T));
+    break :blk most;
 };
 
 const DuplicateRow = struct { digest: [32]u8 };
@@ -851,7 +857,13 @@ pub const Batch = struct {
     lookups: [max_lookups]LookupVisitor,
     lookup_count: u8,
     duplicates: DuplicateVisitor,
-    args: DigestArgsBuffer,
+    args: [digest_args_bytes]u8 align(digest_args_align),
+
+    /// The batch's Args buffer as `S`'s Args.
+    fn argsOf(batch: *Batch, comptime S: type) *S.Args {
+        comptime std.debug.assert(@sizeOf(S.Args) <= digest_args_bytes and @alignOf(S.Args) <= digest_args_align);
+        return @ptrCast(&batch.args);
+    }
 
     fn reset(batch: *Batch, kind: @FieldType(Batch, "kind"), start: u64) void {
         batch.kind = kind;
@@ -911,32 +923,32 @@ pub const Batch = struct {
             batch.lookup_count += 1;
             const limit = 2 * @as(u64, distinct) + 1;
             if (chunk.identities.len <= narrow_width) {
-                batch.args = .{ .lookup = undefined };
-                bindDigests(&batch.args.lookup, narrow_width, chunk, chunk.identities.len);
-                a.readEach(content_batch, batch.args.lookup, limit, visitor);
+                const args = batch.argsOf(content_batch);
+                bindDigests(args, narrow_width, chunk, chunk.identities.len);
+                a.readEachFrom(content_batch, args, limit, visitor);
             } else {
-                batch.args = .{ .lookup_wide = undefined };
-                bindDigests(&batch.args.lookup_wide, lookup_width, chunk, chunk.identities.len);
-                a.readEach(content_batch_wide, batch.args.lookup_wide, limit, visitor);
+                const args = batch.argsOf(content_batch_wide);
+                bindDigests(args, lookup_width, chunk, chunk.identities.len);
+                a.readEachFrom(content_batch_wide, args, limit, visitor);
             }
         }
         if (batch.digest_count == 0) return;
         const digests: BatchDigests = .{ .digests = batch.digests[0..batch.digest_count] };
         if (batch.digest_count <= narrow_width) {
-            batch.args = .{ .duplicate = undefined };
-            batch.args.duplicate.operation_id = operation_id;
-            bindDigests(&batch.args.duplicate, narrow_width, digests, batch.digest_count);
+            const args = batch.argsOf(duplicate_items);
+            args.operation_id = operation_id;
+            bindDigests(args, narrow_width, digests, batch.digest_count);
             switch (batch.kind) {
-                .items => a.readEach(duplicate_items, batch.args.duplicate, batch_items + 1, &batch.duplicates),
-                .calls => a.readEach(duplicate_calls, batch.args.duplicate, batch_items + 1, &batch.duplicates),
+                .items => a.readEachFrom(duplicate_items, args, batch_items + 1, &batch.duplicates),
+                .calls => a.readEachFrom(duplicate_calls, args, batch_items + 1, &batch.duplicates),
             }
         } else {
-            batch.args = .{ .duplicate_wide = undefined };
-            batch.args.duplicate_wide.operation_id = operation_id;
-            bindDigests(&batch.args.duplicate_wide, batch_items, digests, batch.digest_count);
+            const args = batch.argsOf(duplicate_items_wide);
+            args.operation_id = operation_id;
+            bindDigests(args, batch_items, digests, batch.digest_count);
             switch (batch.kind) {
-                .items => a.readEach(duplicate_items_wide, batch.args.duplicate_wide, batch_items + 1, &batch.duplicates),
-                .calls => a.readEach(duplicate_calls_wide, batch.args.duplicate_wide, batch_items + 1, &batch.duplicates),
+                .items => a.readEachFrom(duplicate_items_wide, args, batch_items + 1, &batch.duplicates),
+                .calls => a.readEachFrom(duplicate_calls_wide, args, batch_items + 1, &batch.duplicates),
             }
         }
     }
