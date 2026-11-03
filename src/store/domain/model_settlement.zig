@@ -193,7 +193,8 @@ fn attemptStanding(facts: AttemptFacts, binding: AttemptBinding) error{ StaleAtt
 /// The Operation `operation_id`'s Attempt as settling it reads it: its
 /// binding, whether it is resolved or interrupted, its purpose and claim,
 /// its Session, and, when `closes`, whether its Turn is open on this
-/// Operation; otherwise `turn_open` is false and unread.
+/// Operation; otherwise `turn_open` is false and unread. A missing Session
+/// row fails to decode, `CorruptStore`, as main's session facts read was.
 const attempt_facts = rsql.Read(.{
     .sql = "SELECT o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved," ++
         "o.interrupted_by_command_key IS NOT NULL AS interrupted,o.purpose AS compaction,o.admission_position," ++
@@ -201,7 +202,7 @@ const attempt_facts = rsql.Read(.{
         rsql.session_head_columns ++ "," ++
         "CASE WHEN ?2 THEN EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
         "AND t.operation_id=o.operation_id) ELSE 0 END AS turn_open " ++
-        "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
+        "FROM model_operation o LEFT JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64, closes: bool },
     .Row = struct {
         turn_id: i64,
@@ -505,19 +506,47 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
 }
 
 /// What settling a success reads beside its Attempt: the Operation's
-/// frozen tools, the Session's permission mode and revision, the Messages
-/// no Turn took and no stop excludes, and the last Conversation ordinal.
+/// frozen tools, null when its revision row is missing (main's
+/// `StaleAttemptBinding`), the Session's permission mode and revision,
+/// and the last Conversation ordinal.
 const success_facts = rsql.Read(.{
     .sql = "SELECT r.tools_mask,s.permission_mode,s.revision," ++
-        "(SELECT count(*) FROM message_admission m WHERE m.session_ref=o.session_ref AND m.turn_id IS NULL AND m.admission_id>coalesce((" ++
-        "SELECT stop.admission_cutoff FROM session_stop stop WHERE stop.session_ref=o.session_ref ORDER BY stop.admission_cutoff DESC LIMIT 1),0)) AS pending," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
-        "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
+        "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { tools_mask: u8, permission_mode: bool, revision: rsql.Positive, pending: u64, entry_base: u64 },
+    .Row = struct { tools_mask: ?u8, permission_mode: bool, revision: rsql.Positive, entry_base: u64 },
     .cardinality = .optional,
 });
+
+/// The Messages of the Operation's Session that no Turn took and no stop
+/// excludes, as main's `countPendingMessages`: one statement of its own, so
+/// a failed step reports main's `SessionStopReadFailed`.
+const pending_messages = rsql.Read(.{
+    .sql = "SELECT count(*) AS pending FROM model_operation o JOIN message_admission m ON m.session_ref=o.session_ref " ++
+        "WHERE o.operation_id=?1 AND m.turn_id IS NULL AND m.admission_id>coalesce((" ++
+        "SELECT stop.admission_cutoff FROM session_stop stop WHERE stop.session_ref=o.session_ref ORDER BY stop.admission_cutoff DESC LIMIT 1),0)",
+    .Args = struct { operation_id: u64 },
+    .Row = struct { pending: u64 },
+    .cardinality = .one,
+});
+
+/// Ends a settlement round, mapping a failed step to the name main gave
+/// that read: the Attempt and the facts read beside it
+/// `OperationReadFailed` (main's operation read joined the revision), the
+/// pending Messages `SessionStopReadFailed`, and the output's content and
+/// duplicate reads `OutputReadFailed`. A write's failed step stays
+/// `StatementFailed`.
+fn runSettlement(a: anytype) !void {
+    a.run() catch |err| {
+        if (err != error.StatementFailed) return err;
+        if (a.failedOn(attempt_facts) or a.failedOn(success_facts)) return error.OperationReadFailed;
+        if (a.failedOn(pending_messages)) return error.SessionStopReadFailed;
+        if (a.failedOn(content_batch) or a.failedOn(content_domain.lookup_content) or
+            a.failedOn(duplicate_items) or a.failedOn(duplicate_calls)) return error.OutputReadFailed;
+        return err;
+    };
+}
 
 /// "?k,?k+1,...": `count` parameters from `first`.
 fn parameters(comptime first: usize, comptime count: usize) []const u8 {
@@ -1013,8 +1042,10 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
     const batch = a.store.settlementBatch();
     var facts: attempt_facts.Result = undefined;
     var success: success_facts.Result = undefined;
+    var pending: pending_messages.Result = undefined;
     a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = true }, &facts);
     a.read(success_facts, .{ .operation_id = binding.operation_id }, &success);
+    a.read(pending_messages, .{ .operation_id = binding.operation_id }, &pending);
     // BEGIN IMMEDIATE ran when the first read was queued.
     if (a.failure == null) if (faults.settlement_trace) |trace| {
         std.debug.assert(c.sqlite3_txn_state(a.store.database, "main") == c.SQLITE_TXN_WRITE);
@@ -1022,12 +1053,15 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
     };
     collectItems(batch, output, io, 0);
     batch.queueReads(a, binding.operation_id);
-    try runOperationRead(a);
+    try runSettlement(a);
     const row = try currentAttempt(&facts, binding);
+    // The Operation was found, so only its revision row can be missing.
     const settling = success orelse return error.CorruptStore;
-    try batch.checkReads();
+    const tools_mask = settling.tools_mask orelse return error.StaleAttemptBinding;
     const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
+    // Main checked the candidate before any output read.
     try validateCandidate(io, output, purpose);
+    try batch.checkReads();
 
     const positions = try a.positions(row.session);
     var settlement: Settlement(@TypeOf(a)) = .{
@@ -1040,7 +1074,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .positions = positions,
         .first_item_position = try positions.take(output.item_count),
         .purpose = purpose,
-        .tools = try configuration_domain.toolSet(settling.tools_mask),
+        .tools = try configuration_domain.toolSet(tools_mask),
         .settling = settling,
         .call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count),
     };
@@ -1066,7 +1100,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .attempt_ordinal = binding.attempt_ordinal,
         .session = row.session,
     });
-    if (turn_policy.completesTurn(output_fact, settling.pending)) {
+    if (turn_policy.completesTurn(output_fact, pending.pending)) {
         if (!row.turn_open) return error.StaleAttemptBinding;
         const answer = settlement.answer_id orelse return error.CorruptOutputMetadata;
         try turn_domain.queueCloseOr(a, positions, binding.turn_id, .{ .completed = @intCast(answer) }, error.StaleAttemptBinding);
@@ -1128,7 +1162,7 @@ fn Settlement(comptime A: type) type {
                 // A batch with nothing to read has nothing to write.
                 if (batch.identity_count != 0 or batch.digest_count != 0) {
                     batch.queueReads(s.a, s.binding.operation_id);
-                    try s.a.run();
+                    try runSettlement(s.a);
                     try batch.checkReads();
                 }
             }
@@ -1153,7 +1187,7 @@ fn Settlement(comptime A: type) type {
             }
             var value = imported;
             content_domain.lookup(s.a, &value);
-            try s.a.run();
+            try runSettlement(s.a);
             if (value.found) |found| return .{ .id = found.content_id.get(), .fresh = false };
             const id = try content_domain.insertRow(s.a, &value);
             try s.a.run();

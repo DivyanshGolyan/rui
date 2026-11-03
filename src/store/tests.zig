@@ -5462,6 +5462,52 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
+test "a success settlement keeps main's answers for a missing Session or revision row" {
+    inline for (.{
+        .{ "DELETE FROM session_revision", error.StaleAttemptBinding, false },
+        .{ "DELETE FROM session", error.CorruptStore, true },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "missing-row-config");
+        try submitTestMessage(&storage, &tmp, "missing-row-input", "missing-row-key", session.slice(), "missing");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.database, case[0]);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        // A missing revision row is a stale binding, as on main; a missing
+        // Session row fences, as main's session facts read did, where an
+        // inner join reported a stale binding that does not fence.
+        try std.testing.expectError(case[1], settleMessagesForTesting(&storage, &tmp, binding, 1, false, null));
+        try std.testing.expectEqual(case[2], storage.isFenced());
+    }
+}
+
+test "a success settlement whose pending Messages read fails reports main's SessionStopReadFailed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "stop-read-config");
+    try submitTestMessage(&storage, &tmp, "stop-read-input", "stop-read-key", session.slice(), "first");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // A pending Message makes the count read the stop cutoff.
+    try submitTestMessage(&storage, &tmp, "stop-read-second", "stop-read-second-key", session.slice(), "second");
+    var insert: [160]u8 = undefined;
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&insert, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES('stop-read-stop','{s}',NULL,0,1)", .{session.slice()}, 0));
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try failAtStepForTesting(storage.database, "session_stop");
+    // Round 1 reads it with the Attempt; a step failure there was
+    // `OperationReadFailed` before each read kept main's name.
+    try std.testing.expectError(error.SessionStopReadFailed, settleMessagesForTesting(&storage, &tmp, binding, 1, false, null));
+    try std.testing.expect(storage.isFenced());
+}
+
 test "equal texts in many batches share one row, and entries keep item order" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

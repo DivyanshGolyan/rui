@@ -234,6 +234,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The first failure; every later call does nothing and every round
         /// reports it.
         failure: ?Error = null,
+        /// The statement whose step recorded `failure`, if one did.
+        failed_statement: ?*c.sqlite3_stmt = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
         /// Logical rounds (`run` and `commit`), each one round trip on a
@@ -367,10 +369,19 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 entry.borrowed.check();
                 entry.run(a, entry) catch |err| {
                     a.failure = err;
+                    a.failed_statement = entry.statement;
                 };
                 if (entry.statement) |statement| sqlite.resetCached(statement);
             }
             a.resetQueued();
+        }
+
+        /// Whether `S`'s step recorded this Access's failure: how a caller
+        /// maps a round's `StatementFailed` to the name main gave the
+        /// statement that failed.
+        pub fn failedOn(a: *const Self, comptime S: type) bool {
+            const statement = a.failed_statement orelse return false;
+            return a.store.statements.find(S.sql.ptr) == statement;
         }
 
         /// Records that this Access changes `head`'s Session, and returns

@@ -103,7 +103,7 @@ pub const ContentReader = struct {
     }
 };
 
-const lookup_content = rsql.Read(.{
+pub const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
     .Args = struct { digest: [32]u8, length: u64, private: bool },
     .Row = struct { content_id: rsql.Positive },
