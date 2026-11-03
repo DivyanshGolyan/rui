@@ -459,8 +459,9 @@ const insert_stop = rsql.Write(.{
 
 /// The most Actions one cancelling write names: the largest count whose
 /// ids, with the content, first position and Session before them and @now
-/// after, fit the 17 parameters the Store allows a statement
-/// (SQLITE_LIMIT_VARIABLE_NUMBER, as in `Store.open`): 3 + 13 + 1.
+/// after, fit 17 parameters: 3 + 13 + 1. The Store allows 65 since a
+/// settlement batch holds 64 items (SQLITE_LIMIT_VARIABLE_NUMBER, as in
+/// `Store.open`); this chunk keeps main's 13.
 const cancel_chunk = 13;
 
 /// `cancel_actions[n - 1]` cancels the `n` Actions it names, keyed from

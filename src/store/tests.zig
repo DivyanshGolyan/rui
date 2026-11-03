@@ -5414,7 +5414,7 @@ fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: 
 }
 
 test "an item id repeated in a later batch or the same batch fails the settlement" {
-    inline for (.{ 17, 1 }) |repeat_at| {
+    inline for (.{ 65, 1 }) |repeat_at| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -5423,14 +5423,62 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
         const session = try configureTestSession(&storage, "repeat-item-config");
         try submitTestMessage(&storage, &tmp, "repeat-item-input", "repeat-item-key", session.slice(), "repeat");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        // Item 17 is in the second batch: a check over one batch's ids
+        // Item 65 is in the second batch: a check over one batch's ids
         // alone passes it, and only the read of the saved items finds it.
-        try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 18, false, repeat_at));
+        try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 66, false, repeat_at));
         try std.testing.expect(!storage.isFenced());
         try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
-        try settleMessagesForTesting(&storage, &tmp, binding, 18, false, null);
-        try std.testing.expectEqual(18, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+        try settleMessagesForTesting(&storage, &tmp, binding, 66, false, null);
+        try std.testing.expectEqual(66, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
         try expectDenseSessionPositions(&storage, session.slice());
+    }
+}
+
+/// How many times a settlement read its saved item ids, then its content
+/// identities, each in a narrow (sixteen digests) and a wide (64)
+/// statement.
+fn digestReadsForTesting(storage: *Store) [4]i64 {
+    var reads: [4]i64 = @splat(0);
+    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+        const sql = std.mem.span(slot.sql.?);
+        const kind: usize = if (std.mem.startsWith(u8, sql, "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1"))
+            0
+        else if (std.mem.startsWith(u8, sql, "SELECT content_id,digest,byte_length,private FROM content WHERE digest IN ("))
+            2
+        else
+            continue;
+        const wide = std.mem.endsWith(u8, sql, "?65)") or std.mem.endsWith(u8, sql, "?64)");
+        reads[kind + @intFromBool(wide)] += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 0);
+    };
+    return reads;
+}
+
+test "a settlement batch holds 64 items, read narrow up to sixteen" {
+    // One batch per 64 items, so a reply of 64 settles in two rounds; a
+    // batch of at most sixteen ids binds main's narrow statement. Each
+    // message imports its text and its bag, and the usage record one
+    // more, so 64 items look up 129 identities: two wide statements of 64
+    // while more than 48 are left, then one narrow; 16 items' 33 take
+    // main's three narrow ones.
+    inline for (.{
+        .{ 1, .{ 1, 0, 1, 0 } },
+        .{ 16, .{ 1, 0, 3, 0 } },
+        .{ 17, .{ 0, 1, 3, 0 } },
+        .{ 64, .{ 0, 1, 1, 2 } },
+        .{ 65, .{ 1, 1, 2, 2 } },
+        .{ 100, .{ 0, 2, 2, 3 } },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "batch-width-config");
+        try submitTestMessage(&storage, &tmp, "batch-width-input", "batch-width-key", session.slice(), "width");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleMessagesForTesting(&storage, &tmp, binding, case[0], false, null);
+        try std.testing.expectEqual([4]i64{ case[1][0], case[1][1], case[1][2], case[1][3] }, digestReadsForTesting(&storage));
+        try std.testing.expectEqual(case[0], try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
     }
 }
 
@@ -5443,12 +5491,12 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
     const session = try configureTestSession(&storage, "full-batch-calls-config");
     try submitTestMessage(&storage, &tmp, "full-batch-calls-input", "full-batch-calls-key", session.slice(), "full");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // Sixteen function_call items fill the first item batch and no usage
+    // 64 function_call items fill the first item batch and no usage
     // record follows, so the next item batch is empty and the call batch
     // is collected before any round steps the last item's queued row.
-    var item_ids: [16][16]u8 = undefined;
-    var call_ids: [16][16]u8 = undefined;
-    var calls: [16]TestingCall = undefined;
+    var item_ids: [64][16]u8 = undefined;
+    var call_ids: [64][16]u8 = undefined;
+    var calls: [64]TestingCall = undefined;
     for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
         const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
         call.* = .{
@@ -5461,14 +5509,14 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
         };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
-    const digest = protocol.contentDigest("item-15");
-    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=15 AND item_id_digest=?1");
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
+    const digest = protocol.contentDigest("item-63");
+    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindBlob(statement, 1, &digest);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(1, c.sqlite3_column_int64(statement, 0));
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
@@ -5518,7 +5566,7 @@ test "a success settlement whose pending Messages read fails reports main's Sess
     try std.testing.expect(storage.isFenced());
 }
 
-test "sixteen calls with distinct unknown names fit one call batch's identities" {
+test "64 calls with distinct unknown names fit one call batch's identities" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -5528,12 +5576,12 @@ test "sixteen calls with distinct unknown names fit one call batch's identities"
     try submitTestMessage(&storage, &tmp, "unknown-calls-input", "unknown-calls-key", session.slice(), "unknown");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // Each call imports four identities: its name, call_id, arguments and
-    // rejection text, 64 in all, which a 48-identity batch split in two.
-    var item_ids: [16][16]u8 = undefined;
-    var call_ids: [16][16]u8 = undefined;
-    var names: [16][16]u8 = undefined;
-    var arguments: [16][32]u8 = undefined;
-    var calls: [16]TestingCall = undefined;
+    // rejection text, 256 in all: exactly one batch's identities.
+    var item_ids: [64][16]u8 = undefined;
+    var call_ids: [64][16]u8 = undefined;
+    var names: [64][16]u8 = undefined;
+    var arguments: [64][32]u8 = undefined;
+    var calls: [64]TestingCall = undefined;
     for (&calls, &item_ids, &call_ids, &names, &arguments, 0..) |*call, *item_id, *call_id, *name, *argument, index| {
         const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
         const text = try std.fmt.bufPrint(argument, "{{}}{d}", .{index});
@@ -5547,9 +5595,9 @@ test "sixteen calls with distinct unknown names fit one call batch's identities"
         };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "unknown-calls", &calls);
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'"));
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT name_content_id) FROM model_tool_call"));
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT name_content_id) FROM model_tool_call"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call"));
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
@@ -5563,9 +5611,9 @@ test "equal texts in many batches share one row, and entries keep item order" {
     try submitTestMessage(&storage, &tmp, "same-text-input", "same-text-key", session.slice(), "same");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // A later batch's lookup runs after the earlier batch's inserts.
-    try settleMessagesForTesting(&storage, &tmp, binding, 40, true, null);
+    try settleMessagesForTesting(&storage, &tmp, binding, 140, true, null);
     try std.testing.expectEqual(1, try queryU64(storage.database, "SELECT count(DISTINCT message_content_id) FROM model_output_item"));
-    try std.testing.expectEqual(40, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"));
+    try std.testing.expectEqual(140, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"));
     try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i " ++
         "ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal WHERE e.session_position<>i.session_position"));
     try expectDenseSessionPositions(&storage, session.slice());
@@ -5580,15 +5628,15 @@ test "an item with more content than a batch holds settles through its own looku
     const session = try configureTestSession(&storage, "wide-item-config");
     try submitTestMessage(&storage, &tmp, "wide-item-input", "wide-item-key", session.slice(), "wide");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // 60 distinct summary texts: more identities than one batch's 48.
-    var reasoning_buffer: [4096]u8 = undefined;
+    // 300 distinct summary texts: more identities than one batch's 256.
+    var reasoning_buffer: [16384]u8 = undefined;
     var writer = std.Io.Writer.fixed(&reasoning_buffer);
     try writer.writeAll("{\"type\":\"reasoning\",\"id\":\"wide\",\"summary\":[");
-    for (0..60) |index| try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"summary {d}\"}}", .{ if (index == 0) "" else ",", index });
+    for (0..300) |index| try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"summary {d}\"}}", .{ if (index == 0) "" else ",", index });
     try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
     const items = [_][]const u8{ writer.buffered(), "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}" };
     try settleItemsForTesting(&storage, &tmp, binding, &items, "done");
-    try std.testing.expectEqual(60, try queryU64(storage.database, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3"));
+    try std.testing.expectEqual(300, try queryU64(storage.database, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3"));
     try std.testing.expectEqual(2, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
     try expectDenseSessionPositions(&storage, session.slice());
 }
@@ -5602,11 +5650,11 @@ test "a call id repeated in a later call batch fails the settlement" {
     const session = try configureTestSession(&storage, "repeat-call-config");
     try submitTestMessage(&storage, &tmp, "repeat-call-input", "repeat-call-key", session.slice(), "repeat");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var item_ids: [17][16]u8 = undefined;
-    var call_ids: [17][16]u8 = undefined;
-    var calls: [17]TestingCall = undefined;
+    var item_ids: [65][16]u8 = undefined;
+    var call_ids: [65][16]u8 = undefined;
+    var calls: [65]TestingCall = undefined;
     for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
-        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{if (index == 16) 0 else index});
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{if (index == 64) 0 else index});
         call.* = .{
             .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
             .name = "bash",
@@ -8348,6 +8396,7 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_threadsafe());
     try std.testing.expectEqual(@as(i64, sqlite_heap_bytes), c.sqlite3_hard_heap_limit64(-1));
     try std.testing.expectEqual(@as(c_int, 16 * 1024), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_SQL_LENGTH, -1));
+    try std.testing.expectEqual(@as(c_int, 65), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_VARIABLE_NUMBER, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_ATTACHED, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_WORKER_THREADS, -1));
 

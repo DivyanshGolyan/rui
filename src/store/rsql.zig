@@ -481,11 +481,17 @@ fn parse(comptime sql: []const u8) Checked {
     }
 }
 
+/// The most parameters a statement binds: the Store's
+/// `SQLITE_LIMIT_VARIABLE_NUMBER` (`Store.open`), which a settlement's wide
+/// duplicate read reaches, its Operation and 64 digests.
+pub const max_parameters = 65;
+
 /// A typed statement as the rules read it, and what its parse counted.
 const Parsed = struct {
     statement: Statement,
-    /// How many times the text uses each of ?1..?64, markers included.
-    uses: [64]usize,
+    /// How many times the text uses each of ?1..?`max_parameters`,
+    /// markers included.
+    uses: [max_parameters]usize,
     /// The k of each `@session(?k)`, wherever it stands.
     sessions: []const usize,
     uses_now: bool,
@@ -672,7 +678,7 @@ const Parser = struct {
     tokens: []const Token,
     at: usize = 0,
     message: []const u8 = "",
-    uses: [64]usize = @splat(0),
+    uses: [max_parameters]usize = @splat(0),
     sessions: []const usize = &.{},
     uses_now: bool = false,
     compounds: usize = 0,
@@ -1101,7 +1107,7 @@ const Parser = struct {
     /// `$name`) are refused, so every parameter is counted.
     fn parameter(p: *Parser, token: Token) Refused!usize {
         const number = std.fmt.parseInt(usize, token.text[1..], 10) catch return p.refuseWith("rsql: write parameters as ?N");
-        if (number == 0 or number > p.uses.len) return p.refuseWith("rsql: a parameter is ?1 to ?64");
+        if (number == 0 or number > p.uses.len) return p.refuseWith(std.fmt.comptimePrint("rsql: a parameter is ?1 to ?{d}", .{max_parameters}));
         p.uses[number - 1] += 1;
         return number;
     }
@@ -1182,7 +1188,7 @@ fn compoundError(comptime kind: StatementKind, comptime parsed: Parsed, comptime
 /// what is checked is the count: the text uses each of ?1..?N, N being
 /// Args' field count, and no higher. The parser admits no other
 /// parameter form.
-fn parameterError(comptime uses: [64]usize, comptime Args: type) ?[]const u8 {
+fn parameterError(comptime uses: [max_parameters]usize, comptime Args: type) ?[]const u8 {
     const arguments = fieldCount(Args);
     var highest: usize = 0;
     for (uses, 1..) |count, number| {

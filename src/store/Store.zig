@@ -210,8 +210,9 @@ pub const Store = struct {
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
-        // 17: a created Session's INSERT binds its sixteen Args as ?1..?16 and `@now` as ?17.
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, 17);
+        // 65: a settlement's wide duplicate read binds its Operation and 64 digests as
+        // ?1..?65 (`model_settlement.batch_items`); a created Session's INSERT binds 17.
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, rsql.max_parameters);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 4096);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_ATTACHED, 0);
@@ -927,15 +928,17 @@ const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @si
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
 comptime {
-    // Settlement's table shares the configure scratch, so it adds no byte.
-    std.debug.assert(@sizeOf(model_settlement_domain.Batch) <= @sizeOf(configuration_domain.ConfigurationReads));
+    // A settlement batch of 64 items, 16504 bytes, is the larger use; the
+    // owner accepted about 10 KiB more than the configure reads' 4888.
+    if (scratch_bytes > 17 * 1024) @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes; keep it within 17 KiB", .{scratch_bytes}));
 }
 
 /// The change ring, and the scratch beside it, in pages of their own,
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: about 5 KiB, the configure reads' size.
+/// resident for the Store's life: at most about 16 KiB, a settlement
+/// batch's size, of which a configure writes about 5 KiB.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
