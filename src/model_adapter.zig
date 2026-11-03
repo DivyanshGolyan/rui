@@ -9,6 +9,7 @@ const protocol = @import("protocol.zig");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
@@ -327,7 +328,7 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
-        error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
+        error.UnsupportedOutputSchema => "unsupported_output_schema",
         error.CodecDeclined => "provider_codec_failed",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
@@ -824,8 +825,8 @@ pub const Preparation = struct {
         switch (self.state.stage) {
             .settings => {
                 try self.view.settings(&self.settings);
-                if (protocol.routeOf(self.state.routes, self.settings.provider) == .chatgpt_device and self.settings.output_schema != null)
-                    return error.UnsupportedCodexConfiguration;
+                if (self.settings.output_schema != null and !providers.acceptsOutputSchema(protocol.routeOf(self.state.routes, self.settings.provider)))
+                    return error.UnsupportedOutputSchema;
                 const codec = self.settings.provider.codec();
                 self.carry = codecs.initialCarry(codec);
                 self.encoder = codecs.resumeFrom(self.carry);

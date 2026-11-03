@@ -259,6 +259,8 @@ pub const Job = struct {
     // The moment the UI's Session line was read at, and whether it still
     // needs the unlabelled Session's name.
     line_read: ?Moment = null,
+    /// The Session's provider, as the UI's Session line last read it.
+    provider: ?protocol.Provider = null,
     hint_wanted: bool = false,
     result: struct {
         // The work the page's own Store read saw: its history, footer and
@@ -536,7 +538,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
-    job.drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) });
+    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) });
     // One shown at its Admission is delivered too.
     job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     if (output.rule_at) |offset| job.result.rule = .{ .at = offset };
@@ -604,7 +606,7 @@ fn newer(job: *Job, task: *Task, state: Newer) !void {
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .end = page.facts.end, .colour = job.colour };
     if (cursor.ordinal == null) try output.rule();
     var compact = false;
-    const drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact, taking);
+    const drawn = try View.render(requests, job.store, job.session, &page, job.provider, &output, job.colour, &compact, taking);
     _ = output.finish();
     const next = page.continuation();
     // Later rows of a page's last position may be on the next page, and
