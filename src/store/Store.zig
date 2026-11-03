@@ -457,7 +457,9 @@ pub const Store = struct {
     pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
     }
 
     // Reverse chronological, with call order breaking ties at a completed
@@ -467,7 +469,9 @@ pub const Store = struct {
     pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out));
     }
 
     // Resolve the public identity again, rather than accepting a global digest:
@@ -475,14 +479,18 @@ pub const Store = struct {
     pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContent(&access, request));
     }
 
     pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
     }
 
     /// Records that a person has seen the Session's conversation through
@@ -493,7 +501,9 @@ pub const Store = struct {
     pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.read_through, reads_domain.markReadLocked(self, request));
+        var access: Access(.single, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.read_through, reads_domain.markRead(&access, request));
     }
 
     /// The Message with no Session sender next to `position` at `end`: one
@@ -502,28 +512,36 @@ pub const Store = struct {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.personMessage(&access, request));
     }
 
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
     }
 
     pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.proposalPage(&access, request, out));
     }
 
     pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.content, reads_domain.openProposalField(&access, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional

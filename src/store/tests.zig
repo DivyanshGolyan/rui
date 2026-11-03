@@ -65,7 +65,6 @@ const StatementCache = sqlite.StatementCache;
 const TestingAnswerPart = store_testing.TestingAnswerPart;
 const TurnOutcome = turn_domain.TurnOutcome;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
-const activity_sequence_guard_sql = reads_domain.activity_sequence_guard_sql;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
@@ -74,7 +73,6 @@ const configureTestSession = store_testing.configureTestSession;
 const empty_active_context = action_domain.empty_active_context;
 const next_action_attempt_sql = action_domain.next_action_attempt_sql;
 const pending_message_count_sql = command_domain.pending_message_count_sql;
-const queued_sql = reads_domain.queued_sql;
 const retry_admission_page_rows = model_admission_domain.retry_admission_page_rows;
 const retry_admission_select_sql = model_admission_domain.retry_admission_select_sql;
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
@@ -10827,7 +10825,7 @@ test "activity revalidation takes the same steps however long a Session's histor
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
-        const guard = try sqlite.prepare(storage.database, activity_sequence_guard_sql);
+        const guard = try sqlite.prepare(storage.database, reads_domain.activity_sequence_guard.sql);
         defer _ = c.sqlite3_finalize(guard);
         try sqlite.bindText(guard, 1, "h1st0r");
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(guard));
@@ -11648,10 +11646,15 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
-        const statement = try store_core.cached(&storage, queued_sql);
+        const statement = try store_core.cachedTyped(&storage, reads_domain.queued);
         for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
             _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
-            try std.testing.expectEqual(protocol.Queued{ .count = 1, .oldest_position = 2 * newest, .newest_admission = newest, .newest_position = 2 * newest }, try reads_domain.readQueuedLocked(&storage, "qu3u3d", end));
+            var access = reads_domain.ReadAccess.within(&storage);
+            defer access.deinit();
+            var waiting: reads_domain.QueuedMessages = .{};
+            access.readEach(reads_domain.queued, .{ .session = "qu3u3d", .position = end }, std.math.maxInt(u64), &waiting);
+            try access.run();
+            try std.testing.expectEqual(protocol.Queued{ .count = 1, .oldest_position = 2 * newest, .newest_admission = newest, .newest_position = 2 * newest }, waiting.queued);
             probe.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
         }
     }
@@ -11877,8 +11880,9 @@ test "persisted tool label corruption fences every publication route" {
         .{ .sql = "'Read' || char(10) || 'files'" },
         .{ .sql = "char(160)" },
         .{ .sql = "'Read' || char(8232) || 'files'" },
-        // Bounded text rejects malformed UTF-8 before semantic validation.
-        .{ .sql = "CAST(X'80' AS TEXT)", .failure = error.InvalidUtf8 },
+        // The typed row's Bounded text rejects malformed UTF-8 before
+        // semantic validation; a typed decode failure is CorruptStore.
+        .{ .sql = "CAST(X'80' AS TEXT)" },
     };
     for (invalid) |description| {
         for ([_]enum { current, full, live_activity, settled_activity, conversation }{ .current, .full, .live_activity, .settled_activity, .conversation }) |route| {
@@ -12038,7 +12042,7 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
         // The history rows bypass the Host's ids.
         try store_core.reloadIdentitiesForTesting(&storage);
-        const tail = (try turn_domain.sessionNextPosition(&storage, session.slice())).?;
+        const tail = (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position;
         try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         var identities: [20][24]u8 = undefined;
@@ -12139,6 +12143,41 @@ test "live tool activity survives completed Turns and split result pages" {
     try std.testing.expectEqual(@as(usize, 0), frozen.count);
     try std.testing.expectEqual(@as(u64, 2), frozen.call_activity.total);
     try std.testing.expectEqual(next.operation_id, frozen.call_activity.entries[0].operation);
+}
+
+test "live tool activity counts calls past the sixteenth Operation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "ops-config");
+    try submitTestMessage(&storage, &tmp, "ops-input", "input", session.slice(), "propose");
+    // One call per Operation, so a read that keeps 16 Operations must
+    // resume to count the rest.
+    var first: u64 = 0;
+    for (0..32) |index| {
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (index == 0) first = binding.operation_id;
+        var identity: [24]u8 = undefined;
+        const id = try std.fmt.bufPrint(&identity, "ops-{d}", .{index});
+        var prefix: [24]u8 = undefined;
+        const calls = [_]TestingCall{.{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" }};
+        try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "ops-calls-{d}", .{index}), &calls);
+    }
+    var stop = try completeSessionStop("ops-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const page = try store_core.activityPageForTesting(&storage, request);
+    // The page shows the first Operations' items; activity counts the
+    // calls whose groups are published after its last item.
+    var sql: [128]u8 = undefined;
+    const after = try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT count(*) FROM model_tool_call WHERE acceptance_position>{d}", .{page.items[page.count - 1].position}, 0));
+    try std.testing.expect(after > 16);
+    try std.testing.expectEqual(after, page.call_activity.total);
+    try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
+    try std.testing.expect(page.call_activity.entries[0].operation > first);
 }
 
 test "compaction overflow admits a new Operation without losing applied input" {
