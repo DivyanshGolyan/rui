@@ -14,8 +14,8 @@ const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const sqlite = @import("../sqlite.zig");
-const turn_domain = @import("turn.zig");
 const c = sqlite.c;
+const turn_domain = @import("turn.zig");
 const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 const AttemptBinding = store_core.AttemptBinding;
 const ContentReference = content_domain.ContentReference;
@@ -28,7 +28,7 @@ const TurnOutcome = turn_domain.TurnOutcome;
 pub const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
 pub const pending_message_count_sql =
-    "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
+    "SELECT count(*) AS pending FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
 
 pub const AcceptedMessage = struct {
     replayed: bool,
@@ -1058,17 +1058,15 @@ pub fn classify(
     return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse return error.CorruptStore };
 }
 
-pub fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
-    const cutoff = try latestSessionStopCutoff(self, session_ref);
-    const statement = try store_core.cached(self, pending_message_count_sql);
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindU64(statement, 2, cutoff);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.MessageAdmissionReadFailed;
-    const count = c.sqlite3_column_int64(statement, 0);
-    if (count < 0) return error.CorruptStore;
-    return @intCast(count);
-}
+/// The Messages of the Session ?1 that no Turn took, after the latest
+/// stop's cutoff ?2 (`stop_cutoff`, 0 without a stop): main's count,
+/// whose one row main stepped once.
+pub const pending_messages = rsql.Read(.{
+    .sql = pending_message_count_sql,
+    .Args = struct { session: []const u8, cutoff: u64 },
+    .Row = struct { pending: u64 },
+    .cardinality = .each,
+});
 
 /// The Session's latest stop's admission cutoff, stepped once.
 pub const stop_cutoff = rsql.Read(.{
@@ -1077,17 +1075,6 @@ pub const stop_cutoff = rsql.Read(.{
     .Row = struct { admission_cutoff: u64 },
     .cardinality = .each,
 });
-
-/// `stop_cutoff` for unconverted code (`countPendingMessages`, the
-/// report's selected Message), in a round of its own; 0 without a stop.
-pub fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
-    var a = reads_domain.ReadAccess.within(self);
-    defer a.deinit();
-    var cutoff: reads_domain.First(stop_cutoff.Row) = .{};
-    a.readEach(stop_cutoff, .{ .session = session_ref }, 1, &cutoff);
-    try store_access.runAs(&a, error.SessionStopReadFailed);
-    return if (cutoff.row) |row| row.admission_cutoff else 0;
-}
 
 const insert_command = rsql.Write(.{
     .sql = "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++

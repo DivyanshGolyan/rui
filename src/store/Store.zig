@@ -573,7 +573,9 @@ pub const Store = struct {
         {
             const entry = try enter(self, .none);
             defer entry.release();
-            try entry.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
+            var access: ReadAccess = .open(&entry);
+            defer access.deinit();
+            try entry.finishCapture(&capture, report_domain.renderSessionReport(&access, session_ref, options.profile, options.execution, &capture));
         }
         return capture.seal();
     }
@@ -1228,9 +1230,19 @@ pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
     return err;
 }
 
+/// The saved Session, as `configuration.readSaved` reads it, through the
+/// unconverted path tests take, as `configuration.readSession` did until
+/// its last caller converted.
 pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
+    var a = ReadAccess.within(self);
+    defer a.deinit();
     var current: CurrentConfiguration = .{};
-    return if (try configuration_domain.readSession(self, session_ref, &current)) current else null;
+    var found: @import("access.zig").Found = undefined;
+    configuration_domain.readSaved(&a, session_ref, &current, &found);
+    try a.run();
+    if (!found.get()) return null;
+    try configuration_domain.checkSaved(&current);
+    return current;
 }
 
 pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {

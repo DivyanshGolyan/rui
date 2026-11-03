@@ -14,7 +14,6 @@ const model_settlement_domain = @import("model_settlement.zig");
 const sqlite = @import("../sqlite.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
-const Access = store_access.Access;
 const c = sqlite.c;
 const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
@@ -481,18 +480,6 @@ pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void
     _ = try toolSet(current.tools_mask);
     _ = try permissionMode(current.permission_mode);
     if (current.label) |*label| try checkLabel(label.slice());
-}
-
-/// `readSaved` and `checkSaved` for unconverted code: whether the Session
-/// exists, writing every field of `current` when it does.
-pub fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfiguration) !bool {
-    var a = Access(.read, error{}).within(self);
-    defer a.deinit();
-    var found: store_access.Found = undefined;
-    readSaved(&a, session_ref, current, &found);
-    try a.run();
-    if (found.get()) try checkSaved(current);
-    return found.get();
 }
 
 /// A fresh Session reference: 32 symbols divide 256 exactly, so six

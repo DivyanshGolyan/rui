@@ -520,8 +520,9 @@ const success_facts = rsql.Read(.{
 });
 
 /// The Messages of the Operation's Session that no Turn took and no stop
-/// excludes, as main's `countPendingMessages`: one statement of its own, so
-/// a failed step reports main's `SessionStopReadFailed`.
+/// excludes, as main's pending count (`command.pending_messages`): one
+/// statement of its own, so a failed step reports main's
+/// `SessionStopReadFailed`.
 const pending_messages = rsql.Read(.{
     .sql = "SELECT count(*) AS pending FROM model_operation o JOIN message_admission m ON m.session_ref=o.session_ref " ++
         "WHERE o.operation_id=?1 AND m.turn_id IS NULL AND m.admission_id>coalesce((" ++

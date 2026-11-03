@@ -5246,7 +5246,14 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
-        try std.testing.expectEqual(@as(u64, 1), try command_domain.countPendingMessages(&storage, session.slice()));
+        var counted: reads_domain.First(command_domain.pending_messages.Row) = .{};
+        {
+            var a = reads_domain.ReadAccess.within(&storage);
+            defer a.deinit();
+            a.readEach(command_domain.pending_messages, .{ .session = session.slice(), .cutoff = history }, 1, &counted);
+            try a.run();
+        }
+        try std.testing.expectEqual(@as(u64, 1), counted.row.?.pending);
 
         const cutoff_statement = try sqlite.prepare(storage.database, session_stop_cutoff_sql);
         defer _ = c.sqlite3_finalize(cutoff_statement);
@@ -13877,17 +13884,14 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     try std.testing.expectEqual(1 + 8 + 6 + 6 + 2 + 2 + 6, a.passes);
 }
 
-/// The rounds a Current report's work, peer facts and first Message take
-/// for a Session of `shape`.
-fn reportFactsRoundsForTesting(shape: TestingWorkShape) !u32 {
+/// The rounds a Current report takes for a Session of `shape`.
+fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try shape.make(&storage, &tmp, "report-rounds");
-    var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
-    try std.testing.expect(try configuration_domain.readSession(&storage, session.slice(), &current));
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
@@ -13896,17 +13900,21 @@ fn reportFactsRoundsForTesting(shape: TestingWorkShape) !u32 {
     defer capture.deinit();
     var a = reads_domain.ReadAccess.within(&storage);
     defer a.deinit();
-    try report_domain.renderWorkAndRowFacts(&a, session.slice(), current.created_at, &capture);
-    try std.testing.expectEqual(a.rounds, a.passes);
+    try report_domain.renderSessionReport(&a, session.slice(), .current, .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 }, &capture);
     return a.rounds;
 }
 
-test "a report's row facts share its work's rounds" {
-    // The work's latest Turn with the peer and first-Message seeks; the
-    // cutoff or Actions with the first Message's row; then the rest of
-    // the work.
-    try std.testing.expectEqual(@as(u32, 3), try reportFactsRoundsForTesting(.idle));
-    try std.testing.expectEqual(@as(u32, 3), try reportFactsRoundsForTesting(.finished));
-    try std.testing.expectEqual(@as(u32, 5), try reportFactsRoundsForTesting(.stopped));
-    try std.testing.expectEqual(@as(u32, 2), try reportFactsRoundsForTesting(.awaiting));
+test "a Current report takes its reads' dependency depth in rounds, not its rows" {
+    // Every shape: the saved Session; the facts' first round, with the
+    // work's and compaction facts' latest Turn; the pending count with
+    // their second stages; then the recent Messages. Idle and finished
+    // work reads the queue after the cutoff in a fourth round; stopped
+    // work then the excluded Message and its stop.
+    try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(.idle));
+    try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(.finished));
+    try std.testing.expectEqual(@as(u32, 7), try reportRoundsForTesting(.stopped));
+    // Awaiting work ends with its Actions in the third round; its Action
+    // adds the unresolved, resolved and actionable lists, and with no
+    // rejected call there is no rejected list.
+    try std.testing.expectEqual(@as(u32, 7), try reportRoundsForTesting(.awaiting));
 }

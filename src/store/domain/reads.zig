@@ -9,7 +9,6 @@ const protocol = @import("../../protocol.zig");
 const model_capability = @import("../../model_capability.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
-const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const report_domain = @import("report.zig");
@@ -24,7 +23,6 @@ const ContentMetadata = content_domain.ContentMetadata;
 const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
-const SessionReportCapture = report_domain.SessionReportCapture;
 const TurnOutcome = turn_domain.TurnOutcome;
 const accepted_resolutions = store_schema.accepted_resolutions;
 const content_metadata = content_domain.content_metadata;
@@ -129,6 +127,8 @@ const read_failures = .{
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
+    .{ call_outcomes, error.CallReadFailed },
+    .{ operation_outcome, error.CallReadFailed },
     .{ queued, error.ActivityReadFailed },
 } ++ report_domain.work_failures;
 
@@ -373,8 +373,8 @@ fn readPublicMetadata(a: *ReadAccess, content_id: u64) !ContentMetadata {
 }
 
 /// Round 1 reads the saved Session; round 2 its instructions' and output
-/// schema's metadata. The pending, Action and rejected call counts are
-/// command and report reads, converted with those files.
+/// schema's metadata with the counts' first round (`report.SessionCounts`);
+/// round 3 the pending count after the latest stop's cutoff.
 pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *SessionObservation) !void {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
@@ -409,15 +409,25 @@ pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *Ses
     if (instructions_id < 0 or (current.output_schema_id orelse 1) < 0) return error.CorruptStore;
     var instructions: content_metadata.Row = undefined;
     var output_schema: content_metadata.Row = undefined;
+    var counts: report_domain.SessionCounts = .{ .session = session_ref };
     a.read(content_metadata, .{ .content_id = @intCast(instructions_id) }, &instructions);
     if (current.output_schema_id) |content_id| a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &output_schema);
-    try store_access.runAs(a, error.CorruptStore);
+    counts.queue(a);
+    try runCounts(a);
     observation.instructions = .{ .length = instructions.byte_length, .digest = instructions.digest };
     if (current.output_schema_id != null) observation.output_schema = .{ .length = output_schema.byte_length, .digest = output_schema.digest };
-    observation.pending_messages = try command_domain.countPendingMessages(a.store, session_ref);
-    try report_domain.validateActiveTurnToolCalls(a.store, session_ref);
-    observation.action_count = try report_domain.countActions(a.store, session_ref);
-    observation.rejected_call_count = try report_domain.countRejectedCalls(a.store, session_ref);
+    counts.queuePending(a);
+    try runCounts(a);
+    const counted = try counts.judge();
+    observation.pending_messages = counted.pending;
+    observation.action_count = counted.actions;
+    observation.rejected_call_count = counted.rejected;
+}
+
+/// Ends a round of `inspectSession`'s counts, naming a failed step as main
+/// did; the content metadata's is `CorruptStore`, as main's.
+fn runCounts(a: *ReadAccess) !void {
+    return store_access.runNamed(a, report_domain.session_count_failures ++ report_domain.work_failures, error.CorruptStore);
 }
 
 /// One public Conversation page: at most 17 rows before cursor (?3, ?4)
@@ -918,17 +928,32 @@ const PresentationRead = struct {
 
     fn finish(read: *PresentationRead) !void {
         try read.proposal.found();
-        const result = read.out;
-        if (result.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.CorruptStore;
-        if (read.code) |code| {
-            result.code = code;
-        } else if (!(read.authorized orelse false)) result.code = .pending_permission;
-        if (result.description == null) switch (result.code) {
-            .unknown_tool, .invalid_arguments => {},
-            else => return error.CorruptStore,
-        };
+        read.out.* = try presentationOf(read.out.description, read.code, read.authorized, read.out.publication_position);
     }
 };
+
+/// A call's presentation from its line, its outcome's code, whether its
+/// Action is authorized, and its group's publication, judged in main's
+/// order: a line must be valid; without a code, a call is unresolved
+/// once authorized and pending permission before; only a call whose tool
+/// or arguments were refused may have no line.
+pub fn presentationOf(
+    description: ?protocol.Bounded(protocol.max_tool_description_bytes),
+    code: ?protocol.ToolPresentation.Code,
+    authorized: ?bool,
+    publication_position: ?u64,
+) error{CorruptStore}!protocol.ToolPresentation {
+    var result: protocol.ToolPresentation = .{ .description = description, .code = .unresolved, .publication_position = publication_position };
+    if (description) |line| if (!protocol.ToolPresentation.validDescription(line.slice())) return error.CorruptStore;
+    if (code) |value| {
+        result.code = value;
+    } else if (!(authorized orelse false)) result.code = .pending_permission;
+    if (description == null) switch (result.code) {
+        .unknown_tool, .invalid_arguments => {},
+        else => return error.CorruptStore,
+    };
+    return result;
+}
 
 /// `PresentationRead` alone, in rounds of its own.
 fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
@@ -989,19 +1014,6 @@ const HostedRead = struct {
         if (!try read.count.found()) return error.ContentNotFound;
     }
 };
-
-/// `toolPresentation` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    const presentation = try toolPresentation(&a, operation, ordinal, publication_position);
-    var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try presentation.writeJson(&writer);
-    try capture.append(",\"presentation\":");
-    try capture.append(writer.buffered());
-}
 
 /// The Session columns an Activity page reads, its workspace into the
 /// page itself. They are the columns main's Session facts read, so a
@@ -1092,12 +1104,12 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     const last = if (forward) boundary else null;
     const call_position = if (last) |item| item.position else end;
     var missing: missing_assistant_entry.Result = null;
-    var calls: CallRows = .{ .activity = &page.call_activity, .position = call_position, .ordinal = if (last) |item| item.ordinal else null };
+    var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
     var waiting: QueuedMessages = .{};
     if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
     // Both count what they read (`CallActivity.total`, `Queued.count`), so
     // neither has a smaller bound than every row its statement returns.
-    a.readEach(call_activity, .{ .session = session_ref, .position = call_position, .ordinal = calls.ordinal }, std.math.maxInt(u64), &calls);
+    a.readEach(call_activity, calls.args, std.math.maxInt(u64), &calls);
     a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
@@ -1196,15 +1208,12 @@ pub fn personMessage(a: *ReadAccess, request: *const protocol.ReadPersonMessage)
 
 // This projection shares the page's canonical capture, not Current's active
 // Turn lifetime. It is staged until the frontend acknowledges that page.
-/// The calls of every Operation whose tool group is still waiting, or
-/// completes after (?2, ?3), in Operation and call order, with each
-/// group's position. A group still waiting has an Action without its
+/// The Operations whose tool group is still waiting, or completes after
+/// (?2, ?3), with each group's position, and their calls after it, as the
+/// CTE `candidates`. A group still waiting has an Action without its
 /// result; one that completes after the page has an acceptance after it.
-/// Only those Operations are grouped, not the Session's history. Each
-/// such Operation is the scope of the tool outcome rule (`ToolOutcome`),
-/// which reads every call of it, so `CallRows` picks main's candidates,
-/// the calls after (?2, ?3), from its rows.
-const call_activity = ToolOutcome("ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
+/// Only those Operations are grouped, not the Session's history.
+const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
     "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
     "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
     "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
@@ -1217,50 +1226,85 @@ const call_activity = ToolOutcome("ops AS (SELECT parent_operation_id AS operati
     "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
     "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
-    "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3))), ", "SELECT operation_id,max(position) AS group_position," ++ expectedCallsSql("candidates.operation_id") ++ " FROM candidates GROUP BY operation_id", struct { session: []const u8, position: u64, ordinal: ?u64 }, true);
+    "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3)))";
+
+const CallArgs = struct { session: []const u8, position: u64, ordinal: ?u64 };
+const CallRow = struct { operation_id: rsql.Positive, call_ordinal: u64, position: ?rsql.Positive };
+
+/// The candidate calls, in Operation and call order, with each group's
+/// position: main's text.
+const call_activity = rsql.Read(.{
+    .sql = "WITH " ++ call_candidates_sql ++ " SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal",
+    .Args = CallArgs,
+    .Row = CallRow,
+    .cardinality = .each,
+    .compound = true,
+});
+
+/// The tool outcome rule (`ToolOutcome`) over the candidates' Operations,
+/// for a page whose candidates span more than `CallRows.max_operations`.
+const call_outcomes = ToolOutcome(call_candidates_sql ++ ", ", "SELECT DISTINCT operation_id," ++ expectedCallsSql("candidates.operation_id") ++ " FROM candidates", CallArgs, true);
 
 /// A page's call activity, as main's walk read it while it stepped: every
-/// candidate call (`candidate`) counted in `activity.total`, each
-/// Operation judged by the tool outcome rule with its group position as
-/// its publication (`ToolOutcomeCheck.published`), and the first three
-/// candidates kept, whose presentations the item rounds after it read
-/// (`queue`, `take`). A kept call's publication is its group position,
-/// which the check holds equal to the Operation's own once its rows end,
-/// before `take` lets any presentation out. It keeps one Operation's
-/// counts, so its read steps every row the statement returns: a count has
-/// no smaller bound.
+/// call counted in `activity.total`, and the first three kept, whose
+/// presentations the item rounds after it read (`queue`, `take`), each
+/// with its group position as its publication. Main checked each
+/// Operation's outcome facts as its first row arrived, and that their
+/// publication was the group position; round 1 judges the same
+/// Operations by the tool outcome rule before any presentation is taken:
+/// each by itself (`operation_outcome`) while they are at most
+/// `max_operations`, which `operations` holds, and else all of them in
+/// one read (`call_outcomes`), whose search for them costs more than one
+/// Operation's own read. The rule implies main's equality: a valid call
+/// is terminal exactly when it has an acceptance, and its rejection's or
+/// result's content then, so an Operation the rule passes is a group, at
+/// its largest acceptance, exactly when every call is terminal, and its
+/// publication is then that acceptance. It keeps no row, so its read
+/// steps every row the statement returns: a count has no smaller bound.
 const CallRows = struct {
     activity: *protocol.CallActivity,
-    /// The page's bound (?2, ?3).
-    position: u64,
-    ordinal: ?u64,
-    check: ToolOutcomeCheck = .{ .published = true },
+    args: CallArgs,
+    /// The candidates' first Operations, in order, and how many there
+    /// are, up to one past what it holds.
+    operations: [max_operations]u64 = undefined,
+    operation_count: usize = 0,
+    check: ToolOutcomeCheck = .{},
     presentations: [@typeInfo(@FieldType(protocol.CallActivity, "entries")).array.len]PresentationRead = undefined,
 
-    pub fn visit(rows: *CallRows, row: *const ToolOutcomeRow) bool {
-        if (!rows.check.visit(row)) return false;
-        const ordinal = row.ordinal orelse return true;
-        const group = optionalPositive(row.group_position);
-        if (!candidate(group, ordinal, rows.position, rows.ordinal)) return true;
-        const operation = row.scope_operation.get();
+    const max_operations = 4;
+
+    pub fn visit(rows: *CallRows, row: *const CallRow) bool {
+        const operation = row.operation_id.get();
+        const held = @min(rows.operation_count, max_operations);
+        if (held == 0 or rows.operations[held - 1] != operation) {
+            if (rows.operation_count < max_operations) rows.operations[rows.operation_count] = operation;
+            if (rows.operation_count <= max_operations) rows.operation_count += 1;
+        }
         const activity = rows.activity;
         activity.total += 1;
         if (activity.count < activity.entries.len) {
             const entry = &activity.entries[activity.count];
-            entry.* = .{ .operation = operation, .ordinal = ordinal, .presentation = undefined };
-            rows.presentations[activity.count] = .init(operation, ordinal, group, &entry.presentation);
+            entry.* = .{ .operation = operation, .ordinal = row.call_ordinal, .presentation = undefined };
+            rows.presentations[activity.count] = .init(operation, row.call_ordinal, optionalPositive(row.position), &entry.presentation);
             activity.count += 1;
         }
         return true;
     }
 
-    /// Queues round `round`'s reads: the kept calls in round 1, their
-    /// Proposals in round 2. The caller queued the call read itself before
-    /// round 0. True when it queued.
+    /// Queues round `round`'s reads: the rule and the kept calls in round
+    /// 1, their Proposals in round 2. The caller queued the call read
+    /// itself before round 0. True when it queued; with no call, there is
+    /// nothing to judge.
     fn queue(rows: *CallRows, a: *ReadAccess, round: u8) bool {
         const kept = rows.presentations[0..rows.activity.count];
         switch (round) {
-            1 => for (kept) |*presentation| presentation.queue(a),
+            1 => {
+                if (rows.operation_count > max_operations)
+                    a.readEach(call_outcomes, rows.args, std.math.maxInt(u64), &rows.check)
+                else for (rows.operations[0..rows.operation_count]) |operation|
+                    a.readEach(operation_outcome, .{ .operation = operation }, std.math.maxInt(u64), &rows.check);
+                for (kept) |*presentation| presentation.queue(a);
+            },
             2 => for (kept) |*presentation| presentation.queueProposal(a),
             else => return false,
         }
@@ -1271,21 +1315,15 @@ const CallRows = struct {
     fn take(rows: *CallRows, round: u8) !void {
         const kept = rows.presentations[0..rows.activity.count];
         switch (round) {
-            0 => try rows.check.finish(),
-            1 => for (kept) |*presentation| try presentation.checkCall(),
+            1 => {
+                try rows.check.finish();
+                for (kept) |*presentation| try presentation.checkCall();
+            },
             2 => for (kept) |*presentation| try presentation.finish(),
             else => {},
         }
     }
 };
-
-/// Whether a call is one of main's candidates after the page's bound
-/// (`position`, `ordinal`): its group has no position, or one after the
-/// bound's, or the bound's with the call after the bound's ordinal.
-fn candidate(group: ?u64, call: u64, position: u64, ordinal: ?u64) bool {
-    const at = group orelse return true;
-    return at > position or (at == position and ordinal != null and call + 1 > ordinal.?);
-}
 
 /// The Messages a person or script sent that were admitted at or before
 /// a position and not taken there (`queued`). Selection and a stop's
@@ -2050,8 +2088,8 @@ fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]protocol
 /// main's `readToolOutcomeFacts` checked each: one row per call of each
 /// Operation, in Operation and call order, or one row with no call for an
 /// Operation that has none (`ordinal` NULL). `scope` is the text of a CTE
-/// that selects `operation_id`, `group_position` and `expected`, the
-/// count of the Operation's call items, after the CTEs in `with`, if any.
+/// that selects `operation_id` and `expected`, the count of the
+/// Operation's call items, after the CTEs in `with`, if any.
 /// The scope must not be flattened into the join, so `expected` is
 /// counted once per Operation and not once per call: a scope selects
 /// DISTINCT or groups. Each row joins its call's item and reads, off that
@@ -2062,7 +2100,7 @@ fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]protocol
 pub fn ToolOutcome(comptime with: []const u8, comptime scope: []const u8, comptime Args: type, comptime compound: bool) type {
     return rsql.Read(.{
         .sql = "WITH " ++ with ++ "scope AS (" ++ scope ++ ") " ++
-            "SELECT scope.operation_id AS scope_operation,scope.expected,scope.group_position,proposed.call_ordinal AS ordinal,item.item_kind," ++
+            "SELECT scope.operation_id AS scope_operation,scope.expected,proposed.call_ordinal AS ordinal,item.item_kind," ++
             "tool_call.acceptance_position AS call_acceptance,rejection.content_id IS NOT NULL AS rejection_present," ++
             "action.resolution_code IS NOT NULL AS action_resolved,action.resolution_content_id IS NOT NULL AS action_content," ++
             "action.acceptance_position AS action_acceptance,result.content_id IS NOT NULL AS result_present," ++ proposal_columns ++ " " ++
@@ -2087,9 +2125,6 @@ pub fn expectedCallsSql(comptime operation: []const u8) []const u8 {
 pub const ToolOutcomeRow = struct {
     scope_operation: rsql.Positive,
     expected: u64,
-    /// The position the scope says the Operation's tool group published
-    /// at, for a scope that says one (`ToolOutcomeCheck.published`).
-    group_position: ?rsql.Positive,
     ordinal: ?u64,
     item_kind: ?u64,
     call_acceptance: ?rsql.Positive,
@@ -2139,15 +2174,13 @@ pub const ToolOutcomeRow = struct {
 /// either rejected with its rejection's content and acceptance and no
 /// Action, or has an Action that is unresolved, with no result and no
 /// acceptance, or resolved, with its result's content and acceptance;
-/// with `terminal`, every call is rejected or resolved. Its publication is
-/// its largest acceptance when every call is, and none otherwise; with
-/// `published`, it is the scope's `group_position`. For each call, as
+/// with `terminal`, every call is rejected or resolved, and has its
+/// publication, its largest acceptance. For each call, as
 /// main's per-call Proposal read: its Proposal is consistent and its
 /// fields certified (`certifiedFields`). Every failure is `CorruptStore`,
 /// main's answer for each, so which one it meets first changes nothing.
 pub const ToolOutcomeCheck = struct {
     terminal: bool = false,
-    published: bool = false,
     failed: bool = false,
     operation: u64 = 0,
     expected: u64 = 0,
@@ -2155,9 +2188,11 @@ pub const ToolOutcomeCheck = struct {
     valid: u64 = 0,
     terminals: u64 = 0,
     position: ?u64 = null,
-    group: ?u64 = null,
 
+    /// One check may judge several reads' rows, each after the other's,
+    /// in Operation order; after a failure it takes no more.
     pub fn visit(check: *ToolOutcomeCheck, row: *const ToolOutcomeRow) bool {
+        if (check.failed) return false;
         check.take(row) catch {
             check.failed = true;
             return false;
@@ -2171,7 +2206,7 @@ pub const ToolOutcomeCheck = struct {
         const operation = row.scope_operation.get();
         if (operation != check.operation) {
             try check.close();
-            check.* = .{ .terminal = check.terminal, .published = check.published, .operation = operation, .expected = row.expected, .group = optionalPositive(row.group_position) };
+            check.* = .{ .terminal = check.terminal, .operation = operation, .expected = row.expected };
         }
         if (row.ordinal == null) return;
         check.calls += 1;
@@ -2190,9 +2225,7 @@ pub const ToolOutcomeCheck = struct {
         if (check.operation == 0) return;
         if (check.expected == 0 or check.calls != check.expected or check.valid != check.expected or
             (check.terminal and check.terminals != check.expected)) return error.CorruptStore;
-        const publication = if (check.terminals == check.expected) check.position else null;
-        if (check.terminal and publication == null) return error.CorruptStore;
-        if (check.published and publication != check.group) return error.CorruptStore;
+        if (check.terminal and check.position == null) return error.CorruptStore;
         check.operation = 0;
     }
 
@@ -2207,8 +2240,9 @@ fn optionalPositive(value: ?rsql.Positive) ?u64 {
     return if (value) |positive| positive.get() else null;
 }
 
-/// One Operation, every call outcome terminal: a public tool result's.
-const operation_outcome = ToolOutcome("", "SELECT DISTINCT ?1 AS operation_id,NULL AS group_position," ++ expectedCallsSql("?1"), struct { operation: u64 }, false);
+/// One Operation: a public Tool Result's, every outcome terminal, or an
+/// Activity page's candidates'.
+const operation_outcome = ToolOutcome("", "SELECT DISTINCT ?1 AS operation_id," ++ expectedCallsSql("?1"), struct { operation: u64 }, false);
 
 /// Queues reading the Proposal at `read.position`; `read.found` follows
 /// its round.
@@ -2224,14 +2258,6 @@ pub fn proposal(a: anytype, session: []const u8, position: u64) !ProposalIdentit
     try a.run();
     try read.found();
     return identity;
-}
-
-/// `proposal` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    return proposal(&a, session, position);
 }
 
 pub fn openProposalField(a: *ReadAccess, request: *const protocol.ReadProposalField) !ContentLocation {
