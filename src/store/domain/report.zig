@@ -822,12 +822,12 @@ pub const session_count_failures = .{
 
 /// What the Current report and Session inspection count, with the tool
 /// outcome rule over the active Turn's calls (`active_tool_calls`). Round
-/// 1 (`queue`) reads the latest stop's cutoff, whether the active Turn
-/// proposed calls, and the two counts; round 2 (`queuePending`) the
-/// Messages pending after the cutoff and, only when it proposed calls,
-/// the rule's rows. Each count steps its one row once, as main's did.
-/// `judge` follows round 2, in main's order: the pending count, the rule,
-/// the Actions, the rejected calls.
+/// 1 (`queue`) reads the latest stop's cutoff and whether the active Turn
+/// proposed calls; round 2 (`queuePending`), in main's order, the
+/// Messages pending after the cutoff, only when it proposed calls the
+/// rule's rows, then the two counts, so a fault on a table both step
+/// answers the rule's name, as on main. Each count steps its one row
+/// once, as main's did. `judge` follows round 2, in the same order.
 pub const SessionCounts = struct {
     session: []const u8,
     cutoff: reads_domain.First(command_domain.stop_cutoff.Row) = .{},
@@ -842,8 +842,6 @@ pub const SessionCounts = struct {
     pub fn queue(counts: *SessionCounts, a: *ReadAccess) void {
         a.readEach(command_domain.stop_cutoff, .{ .session = counts.session }, 1, &counts.cutoff);
         a.readEach(active_proposer, .{ .session = counts.session }, 1, &counts.proposer);
-        a.readEach(action_count, .{ .session = counts.session }, 1, &counts.actions);
-        a.readEach(rejected_call_count, .{ .session = counts.session }, 1, &counts.rejected);
     }
 
     /// The latest stop's admission cutoff, 0 without a stop, once round 1
@@ -855,6 +853,8 @@ pub const SessionCounts = struct {
     pub fn queuePending(counts: *SessionCounts, a: *ReadAccess) void {
         a.readEach(command_domain.pending_messages, .{ .session = counts.session, .cutoff = counts.stopCutoff() }, 1, &counts.pending);
         if (counts.proposer.row != null) a.readEach(active_tool_calls, .{ .session = counts.session }, std.math.maxInt(u64), &counts.check);
+        a.readEach(action_count, .{ .session = counts.session }, 1, &counts.actions);
+        a.readEach(rejected_call_count, .{ .session = counts.session }, 1, &counts.rejected);
     }
 
     /// After round 2. An aggregate always has its row, so a missing one is

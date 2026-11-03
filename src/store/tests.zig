@@ -13934,14 +13934,14 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
 
 test "a Current report's step faults answer the name of the earliest round that steps the table" {
     // Each read keeps main's name; when reads in two rounds fail, the
-    // earlier round's name wins. The Action count steps in the round
-    // before the tool outcome rule, where main read the rule's facts
-    // first and answered CallReadFailed for a faulted action_operation.
-    // A list with nothing to show is not read, where main read every
-    // list and answered ActionReadFailed for a faulted session_revision.
+    // earlier round's name wins. The Action count steps after the tool
+    // outcome rule in their round, so a faulted action_operation answers
+    // the rule's CallReadFailed, as on main. A list with nothing to show
+    // is not read, where main read every list and answered
+    // ActionReadFailed for a faulted session_revision.
     inline for (.{
         .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
-        .{ TestingWorkShape.awaiting, "action_operation", error.ActionReadFailed },
+        .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
         .{ TestingWorkShape.awaiting, "session_revision", error.ActionReadFailed },
         .{ TestingWorkShape.idle, "session_revision", null },
     }) |case| {

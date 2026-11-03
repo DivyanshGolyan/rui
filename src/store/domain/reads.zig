@@ -366,7 +366,9 @@ fn readPublicMetadata(a: *ReadAccess, content_id: u64) !ContentMetadata {
 
 /// Round 1 reads the saved Session; round 2 its instructions' and output
 /// schema's metadata with the counts' first round (`report.SessionCounts`);
-/// round 3 the pending count after the latest stop's cutoff.
+/// round 3 the counts' second round: the pending count after the latest
+/// stop's cutoff, the tool outcome rule, and the Action and rejected-call
+/// counts.
 pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *SessionObservation) !void {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
