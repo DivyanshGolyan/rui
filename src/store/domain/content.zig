@@ -204,6 +204,18 @@ pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
     return .{ .id = @intCast(id), .existing = false };
 }
 
+/// Queues a new row for (`digest`, `length`, `private`) with a Host
+/// identity and a zeroed payload, and returns its id. It records nothing
+/// on the Access: it is for a caller that keeps its own table of the
+/// identities it imports, as model settlement's batches do, where
+/// `importSlot` records each row in the Access's `max_inserted` table for
+/// an entry point's few values. `digest` must outlive the round.
+pub fn insertRow(a: anytype, digest: *const [32]u8, length: u64, private: bool) !u64 {
+    const id = try a.identity(.content_id);
+    a.write(insert_content, .{ .content_id = id, .digest = digest, .length = length, .private = private });
+    return id;
+}
+
 /// After `lookup`'s round: the id of `bytes`, whose identity `value` is,
 /// queueing the row and its payload when none exists. `bytes` must outlive
 /// the round that writes them.
@@ -212,40 +224,6 @@ pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
     const slot = try importSlot(a, value);
     if (!slot.existing) a.writeContent(@intCast(slot.id), bytes);
     return @intCast(slot.id);
-}
-
-/// `importSlot` for unconverted code, inside its transaction.
-pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var value: Import = .{ .digest = digest.*, .length = length, .private = private };
-    lookup(&a, &value);
-    try a.run();
-    const slot = try importSlot(&a, &value);
-    try a.apply();
-    return slot;
-}
-
-/// `importBytes` for unconverted code, inside its transaction.
-pub fn importBytesContent(self: *Store, bytes: []const u8, private: bool, fail_import: bool) !i64 {
-    if (fail_import) return error.InjectedContentImportFailure;
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var value: Import = .ofBytes(bytes, private);
-    lookup(&a, &value);
-    try a.run();
-    const id = try importBytes(&a, &value, bytes);
-    try a.apply();
-    return @intCast(id);
-}
-
-pub fn writeCheckedBytes(_: *Store, blob: ?*c.sqlite3_blob, hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8, written: *u64, length: u64) !void {
-    if (bytes.len > length - written.*) return error.OutputSourceChanged;
-    hash.update(bytes);
-    if (blob) |value| {
-        if (c.sqlite3_blob_write(value, bytes.ptr, @intCast(bytes.len), @intCast(written.*)) != c.SQLITE_OK) return error.ContentWriteFailed;
-    }
-    written.* += bytes.len;
 }
 
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
@@ -306,10 +284,6 @@ fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8)
         @memcpy(destination[filled..][0..count], window[offset..][0..count]);
         filled += count;
     }
-}
-
-pub fn importEmptyContent(self: *Store) !i64 {
-    return importBytesContent(self, "", false, false);
 }
 
 /// The identity of sealed caller content, as `lookup` finds it.

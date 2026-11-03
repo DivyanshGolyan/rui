@@ -219,6 +219,9 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
 // - `returnsOneRow`: when a read needs no step to rule out a second row;
 // - the markers, as they are parsed (`Parser.marker`, `Parser.source`).
 
+/// Bytes a statement binds as a blob, read in place like text.
+pub const Bytes = struct { bytes: []const u8 };
+
 /// A stored integer that is never 0 or negative: an id or a position.
 pub const Positive = enum(u64) {
     _,

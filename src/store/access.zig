@@ -71,7 +71,8 @@ pub const Positions = struct {
     /// Claims `count` consecutive positions and returns the first.
     pub fn take(self: *Positions, count: u64) error{SessionPositionExhausted}!u64 {
         const first = self.head.next_position.get() + self.taken;
-        if (first > std.math.maxInt(i64) - count) return error.SessionPositionExhausted;
+        // `first` is at most maxInt(i64), so this never wraps, for any count.
+        if (count > std.math.maxInt(i64) - first) return error.SessionPositionExhausted;
         self.taken += count;
         return first;
     }
@@ -462,9 +463,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// The queued writes, then one compare-and-set per claiming
-        /// Session, in the round that commits.
+        /// Session, in the round that commits. The compare-and-sets are
+        /// bound only once the writes stepped without a failure.
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
+            a.pass();
+            if (a.failure) |err| return err;
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} }, &.{claim.head.ref});

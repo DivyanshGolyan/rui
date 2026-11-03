@@ -1,5 +1,5 @@
-//! Turn lifecycle: closing a Turn with its outcome, recording continuations,
-//! and claiming Session positions.
+//! Turn lifecycle: closing a Turn with its outcome and recording
+//! continuations.
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -71,15 +71,6 @@ pub const TurnOutcome = union(enum) {
     }
 };
 
-/// The open Turn's Session, when `operation_id` (if given) is its Operation.
-const open_turn = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM turn t JOIN session s ON s.session_ref=t.session_ref " ++
-        "WHERE t.turn_id=?1 AND t.outcome_code IS NULL AND (?2 IS NULL OR t.operation_id=?2)",
-    .Args = struct { turn_id: u64, operation_id: ?u64 },
-    .Row = struct { session: rsql.SessionHead },
-    .cardinality = .optional,
-});
-
 /// A row exactly when a Session stop selected the open Turn and every
 /// Action of its Operation is resolved, except `resolving_action_id`, which
 /// the same transaction resolves.
@@ -148,19 +139,6 @@ pub fn queueContinuation(a: anytype, turn_id: u64, session: rsql.SessionHead) vo
     a.write(record_continuation, .{ .turn_id = turn_id, .session = session });
 }
 
-/// `queueContinuation` for unconverted code, inside its transaction, for
-/// `session_ref`, the Turn's Session, which the caller has touched: the
-/// same statement, stepped at once, so it costs one statement as on main.
-pub fn recordContinuation(self: *Store, turn_id: u64, session_ref: []const u8) !void {
-    const statement = try store_core.cachedTyped(self, record_continuation);
-    defer sqlite.resetCached(statement);
-    comptime std.debug.assert(std.mem.eql(u8, @typeInfo(record_continuation.Args).@"struct".field_names[0], "turn_id"));
-    try sqlite.bindU64(statement, 1, turn_id);
-    try sqlite.bindText(statement, 2, session_ref);
-    try sqlite.expectDone(statement);
-    if (c.sqlite3_changes(self.database) > 1) return error.CorruptStore;
-}
-
 /// The Session's next position, or null when it does not exist: what page
 /// cursors and existence checks need, without its 4.6 KB configuration.
 pub fn sessionNextPosition(self: *Store, session_ref: []const u8) !?u64 {
@@ -173,51 +151,4 @@ pub fn sessionNextPosition(self: *Store, session_ref: []const u8) !?u64 {
     const next_position = c.sqlite3_column_int64(statement, 0);
     if (next_position <= 0) return error.CorruptStore;
     return @intCast(next_position);
-}
-
-/// The only code that advances `session.next_position`. Claims `count`
-/// consecutive positions and returns the first. Called only inside the
-/// owning write transaction; no separate frontier.
-pub fn claimSessionPositions(self: *Store, session: []const u8, count: u64) !u64 {
-    // Every activity row claims here, so every writer of one touches.
-    try store_core.touch(self, session);
-    if (count > std.math.maxInt(i64)) return error.SessionPositionExhausted;
-    // A read then a write: UPDATE RETURNING would buffer its row in a
-    // temporary b-tree on every claim.
-    const select = try store_core.cached(self, "SELECT next_position FROM session WHERE session_ref=?1");
-    defer sqlite.resetCached(select);
-    try sqlite.bindText(select, 1, session);
-    if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.SessionPositionExhausted;
-    const position = try sqlite.readNullablePositiveI64(select, 0) orelse return error.CorruptStore;
-    const claimed: i64 = @intCast(count);
-    if (position > std.math.maxInt(i64) - claimed) return error.SessionPositionExhausted;
-    const update = try store_core.cached(self, "UPDATE session SET next_position=?2 WHERE session_ref=?1 AND next_position=?3");
-    defer sqlite.resetCached(update);
-    try sqlite.bindText(update, 1, session);
-    try sqlite.bindI64(update, 2, position + claimed);
-    try sqlite.bindI64(update, 3, position);
-    try sqlite.expectDone(update);
-    if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
-    return @intCast(position);
-}
-
-pub fn claimSessionPosition(self: *Store, session: []const u8) !u64 {
-    return claimSessionPositions(self, session, 1);
-}
-
-/// Ends an open Turn, saving its outcome and the position that orders it
-/// in Session activity together. `operation_id` names the Operation the
-/// caller expects the Turn to own. Returns false when the Turn is already
-/// closed or owned by another Operation. `queueClose` for unconverted code,
-/// inside its transaction.
-pub fn closeTurn(self: *Store, turn_id: u64, operation_id: ?u64, outcome: TurnOutcome) !bool {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var open: open_turn.Result = undefined;
-    a.read(open_turn, .{ .turn_id = turn_id, .operation_id = operation_id }, &open);
-    try a.run();
-    const row = open orelse return false;
-    try queueClose(&a, try a.positions(row.session), turn_id, outcome);
-    try a.apply();
-    return true;
 }

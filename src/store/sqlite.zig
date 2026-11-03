@@ -416,6 +416,7 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
     // An empty slice may carry any address; "" is a real one, so it binds '' and not NULL.
     if (T == []const u8) return bindText(statement, index, if (value.len == 0) "" else value);
     if (T == rsql.Positive) return bindU64(statement, index, value.get());
+    if (T == rsql.Bytes) return bindBlob(statement, index, value.bytes);
     switch (@typeInfo(T)) {
         .optional => |optional| if (value) |present| try bindValue(statement, index, optional.child, present) else {
             if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;

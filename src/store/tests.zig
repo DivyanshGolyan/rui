@@ -317,9 +317,15 @@ fn busyStatements(database: *c.sqlite3) usize {
 /// Imports `bytes` as public content in a transaction of its own, as
 /// identities are taken only inside one.
 fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
-    try store_core.begin(storage);
-    _ = try content_domain.importBytesContent(storage, bytes, false, false);
-    try store_core.commit(storage);
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{}) = .open(&entry);
+    defer a.deinit();
+    var value: content_domain.Import = .ofBytes(bytes, false);
+    content_domain.lookup(&a, &value);
+    try a.run();
+    _ = try content_domain.importBytes(&a, &value, bytes);
+    try a.commit();
 }
 
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
@@ -3474,12 +3480,17 @@ test "claiming Session positions stops at the largest position, and fails when i
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        try std.testing.expectEqual(last - 2, try turn_domain.claimSessionPositions(&storage, session.slice(), 2));
-        try std.testing.expectError(error.SessionPositionExhausted, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
-        try std.testing.expectEqual(last, try turn_domain.claimSessionPositions(&storage, session.slice(), 0));
-        try std.testing.expectError(error.SessionPositionExhausted, turn_domain.claimSessionPositions(&storage, session.slice(), last + 1));
-        try store_core.execute(&storage, "COMMIT");
+        var a: store_access.Access(.write, error{}) = .open(&entry);
+        defer a.deinit();
+        var loaded: TestingRound.head.Result = undefined;
+        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
+        try a.run();
+        const positions = try a.positions(loaded.head);
+        try std.testing.expectEqual(last - 2, try positions.take(2));
+        try std.testing.expectError(error.SessionPositionExhausted, positions.take(1));
+        try std.testing.expectEqual(last, try positions.take(0));
+        try std.testing.expectError(error.SessionPositionExhausted, positions.take(last + 1));
+        try a.commit();
     }
     try std.testing.expectEqual(last, try queryU64(storage.database, "SELECT next_position FROM session"));
 
@@ -3488,9 +3499,14 @@ test "claiming Session positions stops at the largest position, and fails when i
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        try std.testing.expectError(error.CorruptStore, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
-        try store_core.execute(&storage, "ROLLBACK");
+        var a: store_access.Access(.write, error{}) = .open(&entry);
+        defer a.deinit();
+        var loaded: TestingRound.head.Result = undefined;
+        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
+        try a.run();
+        _ = try (try a.positions(loaded.head)).take(1);
+        try std.testing.expectError(error.CorruptStore, a.commit());
+        try a.abandon(.{});
     }
 }
 
@@ -5336,6 +5352,111 @@ test "duplicate trustworthy call identity rolls back every imported consequence"
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
+}
+
+/// `count` message items, each its own id and text unless `same_text`,
+/// whose item `repeat_at` (if any) repeats item 0's id; the last answers.
+fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, comptime count: usize, same_text: bool, repeat_at: ?usize) !void {
+    var buffers: [count][128]u8 = undefined;
+    var items: [count][]const u8 = undefined;
+    var answer_buffer: [32]u8 = undefined;
+    var answer: []const u8 = "";
+    for (&buffers, &items, 0..) |*buffer, *item, index| {
+        const id = if (repeat_at == index) 0 else index;
+        const text = if (same_text) 0 else index;
+        item.* = try std.fmt.bufPrint(buffer, "{{\"type\":\"message\",\"id\":\"m{d}\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"t{d}\"}}]}}", .{ id, text });
+        answer = try std.fmt.bufPrint(&answer_buffer, "t{d}", .{text});
+    }
+    try settleItemsForTesting(storage, tmp, binding, &items, answer);
+}
+
+test "an item id repeated in a later batch or the same batch fails the settlement" {
+    inline for (.{ 17, 1 }) |repeat_at| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "repeat-item-config");
+        try submitTestMessage(&storage, &tmp, "repeat-item-input", "repeat-item-key", session.slice(), "repeat");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // Item 17 is in the second batch: a check over one batch's ids
+        // alone passes it, and only the read of the saved items finds it.
+        try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 18, false, repeat_at));
+        try std.testing.expect(!storage.isFenced());
+        try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+        try settleMessagesForTesting(&storage, &tmp, binding, 18, false, null);
+        try std.testing.expectEqual(18, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+        try expectDenseSessionPositions(&storage, session.slice());
+    }
+}
+
+test "equal texts in many batches share one row, and entries keep item order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "same-text-config");
+    try submitTestMessage(&storage, &tmp, "same-text-input", "same-text-key", session.slice(), "same");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // A later batch's lookup runs after the earlier batch's inserts.
+    try settleMessagesForTesting(&storage, &tmp, binding, 40, true, null);
+    try std.testing.expectEqual(1, try queryU64(storage.database, "SELECT count(DISTINCT message_content_id) FROM model_output_item"));
+    try std.testing.expectEqual(40, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"));
+    try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i " ++
+        "ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal WHERE e.session_position<>i.session_position"));
+    try expectDenseSessionPositions(&storage, session.slice());
+}
+
+test "an item with more content than a batch holds settles through its own lookups" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "wide-item-config");
+    try submitTestMessage(&storage, &tmp, "wide-item-input", "wide-item-key", session.slice(), "wide");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // 60 distinct summary texts: more identities than one batch's 48.
+    var reasoning_buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&reasoning_buffer);
+    try writer.writeAll("{\"type\":\"reasoning\",\"id\":\"wide\",\"summary\":[");
+    for (0..60) |index| try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"summary {d}\"}}", .{ if (index == 0) "" else ",", index });
+    try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
+    const items = [_][]const u8{ writer.buffered(), "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}" };
+    try settleItemsForTesting(&storage, &tmp, binding, &items, "done");
+    try std.testing.expectEqual(60, try queryU64(storage.database, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3"));
+    try std.testing.expectEqual(2, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+    try expectDenseSessionPositions(&storage, session.slice());
+}
+
+test "a call id repeated in a later call batch fails the settlement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "repeat-call-config");
+    try submitTestMessage(&storage, &tmp, "repeat-call-input", "repeat-call-key", session.slice(), "repeat");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var item_ids: [17][16]u8 = undefined;
+    var call_ids: [17][16]u8 = undefined;
+    var calls: [17]TestingCall = undefined;
+    for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{if (index == 16) 0 else index});
+        call.* = .{
+            .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
+            .name = "bash",
+            .encoded_call_id = id,
+            .decoded_call_id = id,
+            .encoded_arguments = "{\\\"description\\\":\\\"Run it\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run it\",\"cmd\":\"true\",\"timeout_ms\":null}",
+        };
+    }
+    try std.testing.expectError(error.InvalidProviderEnvelope, settleCallsForTesting(&storage, &tmp, binding, "repeat-call", &calls));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
 }
 
 test "valid and rejected call populations grow independently" {

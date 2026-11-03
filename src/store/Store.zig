@@ -322,6 +322,14 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    /// Model settlement's batch tables, at one address the Store owns
+    /// beside its change ring, so no frame on the engine thread holds
+    /// them. Only `settleModelSuccess` uses them, under the mutex.
+    pub fn settlementBatches(self: *Store) *model_settlement_domain.SettlementBatches {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        return &owned.settlement_batches;
+    }
+
     /// What a configure reads, over 4.6 KB, at one address the Store owns
     /// beside its change ring, so no Host stack frame holds it. A
     /// configure or a creating Message uses it under the mutex, and no
@@ -784,7 +792,9 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .fromSettlement(faults.settlement_trace));
         defer entry.release();
-        return entry.finishTransaction(Ordinary.model_success, faults, model_settlement_domain.settleModelSuccessLocked(self, binding, output, faults));
+        var access: Access(.write, Ordinary.model_success) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.model_success, faults, access.end(faults, model_settlement_domain.settleModelSuccess(&access, self.io, binding, output, faults)));
     }
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
@@ -870,6 +880,7 @@ comptime {
 const OutOfLine = struct {
     ring: change_ring.Ring,
     configuration_reads: configuration_domain.ConfigurationReads,
+    settlement_batches: model_settlement_domain.SettlementBatches,
 };
 
 /// The change ring, and `Store.configurationReads` beside it, in pages of
