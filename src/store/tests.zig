@@ -5508,6 +5508,41 @@ test "a success settlement whose pending Messages read fails reports main's Sess
     try std.testing.expect(storage.isFenced());
 }
 
+test "sixteen calls with distinct unknown names fit one call batch's identities" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "unknown-calls-config");
+    try submitTestMessage(&storage, &tmp, "unknown-calls-input", "unknown-calls-key", session.slice(), "unknown");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Each call imports four identities: its name, call_id, arguments and
+    // rejection text, 64 in all, which a 48-identity batch split in two.
+    var item_ids: [16][16]u8 = undefined;
+    var call_ids: [16][16]u8 = undefined;
+    var names: [16][16]u8 = undefined;
+    var arguments: [16][32]u8 = undefined;
+    var calls: [16]TestingCall = undefined;
+    for (&calls, &item_ids, &call_ids, &names, &arguments, 0..) |*call, *item_id, *call_id, *name, *argument, index| {
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
+        const text = try std.fmt.bufPrint(argument, "{{}}{d}", .{index});
+        call.* = .{
+            .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
+            .name = try std.fmt.bufPrint(name, "tool_{d}", .{index}),
+            .encoded_call_id = id,
+            .decoded_call_id = id,
+            .encoded_arguments = text,
+            .decoded_arguments = text,
+        };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "unknown-calls", &calls);
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'"));
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT name_content_id) FROM model_tool_call"));
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call"));
+    try expectDenseSessionPositions(&storage, session.slice());
+}
+
 test "equal texts in many batches share one row, and entries keep item order" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

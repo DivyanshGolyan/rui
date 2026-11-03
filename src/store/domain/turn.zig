@@ -6,7 +6,6 @@ const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const store_access = @import("../access.zig");
-const Access = store_access.Access;
 const rsql = @import("../rsql.zig");
 const model_admission_domain = @import("model_admission.zig");
 const sqlite = @import("../sqlite.zig");
