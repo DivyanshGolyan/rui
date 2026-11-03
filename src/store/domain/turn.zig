@@ -94,13 +94,16 @@ pub const stopped_turn = rsql.Read(.{
     .cardinality = .optional,
 });
 
-const close_turn = rsql.Write(.{
-    .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now " ++
-        "WHERE turn_id=?1 AND session_ref=@session(?5) AND outcome_code IS NULL",
-    .Args = struct { turn_id: u64, code: []const u8, content_id: ?u64, position: u64, session: rsql.SessionHead },
-    // Its round read the Turn open, under the single writer.
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
+/// Ends an open Turn; `otherwise` is the guard's error when it is not
+/// open. One text, so the statement differs only in what it reports.
+fn CloseTurn(comptime otherwise: anyerror) type {
+    return rsql.Write(.{
+        .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now " ++
+            "WHERE turn_id=?1 AND session_ref=@session(?5) AND outcome_code IS NULL",
+        .Args = struct { turn_id: u64, code: []const u8, content_id: ?u64, position: u64, session: rsql.SessionHead },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = otherwise } },
+    });
+}
 
 const record_continuation = rsql.Write(.{
     .sql = "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND session_ref=@session(?2) AND outcome_code IS NULL " ++
@@ -111,12 +114,19 @@ const record_continuation = rsql.Write(.{
 });
 
 /// Queues ending the open Turn `turn_id` of `positions`' Session with
-/// `outcome`, at the Session's next position.
+/// `outcome`, at the Session's next position. Its round read the Turn
+/// open, under the single writer, so a closed one is a corrupt Store.
 pub fn queueClose(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome) !void {
+    return queueCloseOr(a, positions, turn_id, outcome, error.CorruptStore);
+}
+
+/// `queueClose`, reporting `otherwise` when the Turn is not open: a model
+/// interruption's target changed, as on main.
+pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome, comptime otherwise: anyerror) !void {
     const content_id = outcome.content();
     // A failure code spelling a fixed outcome would read back as that outcome.
     std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
-    a.write(close_turn, .{
+    a.write(CloseTurn(otherwise), .{
         .turn_id = turn_id,
         .code = outcome.code(),
         .content_id = if (content_id) |id| @intCast(id) else null,
@@ -138,17 +148,6 @@ pub fn queueContinuation(a: anytype, turn_id: u64, session: rsql.SessionHead) vo
     a.write(record_continuation, .{ .turn_id = turn_id, .session = session });
 }
 
-/// `queueStopCompletion` for unconverted code, inside its transaction.
-pub fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var ready: stopped_turn.Result = undefined;
-    a.read(stopped_turn, .{ .turn_id = turn_id, .resolving_action_id = 0 }, &ready);
-    try a.run();
-    try queueStopCompletion(&a, ready, turn_id);
-    try a.apply();
-}
-
 /// `queueContinuation` for unconverted code, inside its transaction, for
 /// `session_ref`, the Turn's Session, which the caller has touched: the
 /// same statement, stepped at once, so it costs one statement as on main.
@@ -160,14 +159,6 @@ pub fn recordContinuation(self: *Store, turn_id: u64, session_ref: []const u8) !
     try sqlite.bindText(statement, 2, session_ref);
     try sqlite.expectDone(statement);
     if (c.sqlite3_changes(self.database) > 1) return error.CorruptStore;
-}
-
-pub fn turnIsComplete(self: *Store, turn_id: u64) !bool {
-    const statement = try store_core.cached(self, "SELECT outcome_code FROM turn WHERE turn_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, turn_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL;
 }
 
 /// The Session's next position, or null when it does not exist: what page
