@@ -950,7 +950,9 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 
 /// Collects the next calls from `start`, as `collectItems` does items:
 /// each call's name, call_id and arguments, and, when the catalog rejects
-/// it, its rejection text. `inspected` holds its catalog facts.
+/// it, its rejection text. `calls` holds each call's catalog facts. A
+/// call whose three identities do not fit closes the batch before it is
+/// inspected, unless it is the batch's first call.
 fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, frozen_tools: tool_catalog.ToolSet) void {
     batch.reset(.calls, start);
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
@@ -982,6 +984,11 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                 var fits = batch.add(&name_record.content_digest, name_record.decoded_length, false) and
                     batch.add(&call_id_record.content_digest, call_id_record.decoded_length, false) and
                     batch.add(&record.content_digest, record.decoded_length, false);
+                if (!fits and batch.digest_count != 0) {
+                    batch.identity_count = before;
+                    batch.end = call_start;
+                    return;
+                }
                 const inspected = inspectOutputCall(io, output.source, name_record, record);
                 if (fits) if (inspected) |facts| {
                     if (tool_catalog.classifyCall(facts.name, facts.bash_arguments != null, frozen_tools)) |code| {
@@ -1041,9 +1048,11 @@ fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelO
 /// purpose, as main does before any import. Each later round writes one
 /// batch, its new content streamed into its rows in process, and reads
 /// the next batch's (`importBatches`). The last round resolves the
-/// Operation, closes its Turn or records its continuation, and commits:
-/// 1 + ceil(items/16) + ceil(calls/16) rounds while every item's and
-/// call's identities fit a batch.
+/// Operation, closes its Turn or records its continuation, and commits.
+/// A batch closes at 16 items or calls or at 48 identities, whichever
+/// comes first, so the rounds are one per batch plus one. An identity a
+/// batch did not collect adds a lookup round, and a second when it
+/// inserts.
 pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, output: *const ValidatedOutput, faults: Faults) !void {
     const storage = a.store.settlementBatches();
     var facts: attempt_facts.Result = undefined;
