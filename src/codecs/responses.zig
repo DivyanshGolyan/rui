@@ -200,15 +200,46 @@ pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Heade
     out.add(RequestHeader.originator, "rui");
 }
 
+/// The provider codes that resending the same request cannot fix, from
+/// Codex 970111f6 codex-api/src/sse/responses_error.rs, each named by what
+/// the person can do about it. Any other code narrows nothing.
+const RefusalCode = enum {
+    insufficient_quota,
+    credit_balance_exhausted,
+    organization_spend_limit_exceeded,
+    project_spend_limit_exceeded,
+    usage_limit_reached,
+    usage_not_included,
+    cyber_policy,
+    bio_policy,
+    misalignment_policy_violation,
+    invalid_prompt,
+    model_not_found,
+};
+
+fn refusalOf(code: []const u8) ?codec_abi.Refusal {
+    return switch (std.meta.stringToEnum(RefusalCode, code) orelse return null) {
+        .insufficient_quota, .credit_balance_exhausted, .organization_spend_limit_exceeded, .project_spend_limit_exceeded, .usage_limit_reached => .quota,
+        .usage_not_included => .plan,
+        .cyber_policy, .bio_policy, .misalignment_policy_violation, .invalid_prompt => .policy,
+        .model_not_found => .model_unavailable,
+    };
+}
+
+comptime {
+    // The reader keeps every code this codec knows.
+    for (std.meta.fieldNames(RefusalCode)) |name| std.debug.assert(name.len <= json.max_text_bytes);
+}
+
 /// Reads an HTTP error body. A Responses body is one JSON object whose
-/// `error` object names the failure: its `code` (and, for a quota, its
+/// `error` object names the failure: its `code` (and, for a refusal, its
 /// `resets_at`), its `type` standing in for a missing code in the report,
 /// and its `message`, else a bare `detail`; a body without `error` reports
 /// only its own `message` or `detail`. Only a whole valid body and members
 /// that appear once count.
 pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
     out.context_overflow = false;
-    out.code = null;
+    out.refusal = null;
     out.resets_at = null;
     out.report = .{ .code = null, .message = null };
     scratch.init();
@@ -230,8 +261,8 @@ pub const ClassifyScratch = struct {
     envelope: std.enums.EnumArray(Outer, Member),
     failure: std.enums.EnumArray(Inner, Member),
     /// The error object's code, when it is a string of at most
-    /// max_code_bytes; empty otherwise.
-    code: [codec_abi.max_code_bytes]u8 = undefined,
+    /// `json.max_text_bytes`; empty otherwise.
+    code: [json.max_text_bytes]u8 = undefined,
     code_length: u8,
     /// The error object's `resets_at`, when it is a plain integer.
     resets_at: ?u64,
@@ -280,8 +311,8 @@ pub const ClassifyScratch = struct {
             const text = self.code[0..self.code_length];
             if (std.mem.eql(u8, text, "context_length_exceeded")) {
                 found.context_overflow = true;
-            } else {
-                found.code = .of(text);
+            } else if (refusalOf(text)) |refusal| {
+                found.refusal = refusal;
                 if (self.failure.get(.resets_at).count == 1) found.resets_at = self.resets_at;
             }
         }
@@ -1539,10 +1570,10 @@ fn streamError(scratch: *InterpretScratch, data: []const u8, reported: ?*const N
     }
     const value = code orelse return error.ReportedProviderFailure;
     if (value.word == .context_length_exceeded) return error.ContextOverflow;
-    if (value.decoded <= codec_abi.max_code_bytes) {
+    if (value.decoded <= json.max_text_bytes) {
         var text: json.Text = .{ .length = 0 };
         json.decode(slice(data, value.range), &text);
-        failed.refusal = .of(text.slice().?);
+        failed.refusal = refusalOf(text.slice().?);
     }
     return error.ReportedProviderFailure;
 }
@@ -1925,8 +1956,7 @@ test "classify answers the same with 0xAA or leftover scratch" {
     const same = struct {
         fn body(expected: *const codec_abi.ErrorBody, actual: *const codec_abi.ErrorBody) !void {
             try std.testing.expectEqual(expected.context_overflow, actual.context_overflow);
-            try std.testing.expectEqual(expected.code == null, actual.code == null);
-            if (expected.code) |*code| try std.testing.expectEqualStrings(code.slice(), actual.code.?.slice());
+            try std.testing.expectEqual(expected.refusal, actual.refusal);
             try std.testing.expectEqual(expected.resets_at, actual.resets_at);
             try std.testing.expectEqual(expected.report.code, actual.report.code);
             try std.testing.expectEqual(expected.report.message, actual.report.message);
@@ -1947,7 +1977,7 @@ test "classify answers the same with 0xAA or leftover scratch" {
     }
     @memset(std.mem.asBytes(&scratch), 0xAA);
     classify(&scratch, bodies[0], &fresh);
-    try std.testing.expectEqualStrings("usage_limit_reached", fresh.code.?.slice());
+    try std.testing.expectEqual(codec_abi.Refusal.quota, fresh.refusal.?);
     try std.testing.expectEqual(@as(?u64, 1_800_000_123), fresh.resets_at);
     try std.testing.expectEqualStrings("Out.", bodies[0][fresh.report.message.?.start..][0..fresh.report.message.?.length]);
 }
@@ -1984,7 +2014,7 @@ fn describeForTesting(events: []const []const u8, scratch: *InterpretScratch, ou
             },
             .failed => |failed| {
                 try out.print("failed {t}", .{failed.reason});
-                if (failed.refusal) |*code| try out.print(" refusal {s}", .{code.slice()});
+                if (failed.refusal) |refusal| try out.print(" refusal {t}", .{refusal});
                 inline for (.{ "code", "message" }) |name| if (@field(failed.report, name)) |range| try out.print(" " ++ name ++ " {d}+{d}", .{ range.start, range.length });
                 try out.writeByte('\n');
             },
@@ -2118,7 +2148,7 @@ test "a provider's error names its report, its refusal and context overflow" {
     );
     try expectDescribed(&.{"{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"cyber_policy\",\"message\":\"no\"}}}"},
         \\at event null
-        \\failed reported_provider_failure refusal cyber_policy code 73+12 message 98+2
+        \\failed reported_provider_failure refusal policy code 73+12 message 98+2
         \\finish provider_connection_closed
         \\
     );

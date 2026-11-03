@@ -161,7 +161,7 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
     try pending_file.writeStreamingAll(io, try policy.encode(&record, &serialized));
     pending_file.close(io);
     try std.testing.expectError(error.RefreshRequiresLogin, forceRefresh(io, path, true, 2));
-    try std.testing.expectEqualStrings("provider_authentication_failed", failureCode(error.RefreshRequiresLogin));
+    try std.testing.expectEqualStrings("provider_sign_in_required", failureCode(error.RefreshRequiresLogin));
 }
 
 const Response = struct {
