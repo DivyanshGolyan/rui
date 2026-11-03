@@ -1217,8 +1217,8 @@ const call_outcomes = ToolOutcome(call_candidates_sql ++ ", ", "SELECT DISTINCT 
 /// `max_operations`, which `operations` holds, and else all of them in
 /// one read (`call_outcomes`). One read repeats the candidates' search,
 /// so it steps more than the reads one per Operation at every count
-/// measured, and more than main (3 Operations: 13026 steps against
-/// 12368 and main's 12613; 33: 29520 against 25022 and 26497); only the
+/// measured, and more than main (3 Operations: 14135 steps against
+/// 13477 and main's 13722; 33: 30629 against 26131 and 27606); only the
 /// frame bounds `max_operations`. Main's equality holds by the schema's
 /// CHECKs, not the rule: a call has an acceptance exactly when it is
 /// rejected (`model_tool_call`'s) or its Action resolved
