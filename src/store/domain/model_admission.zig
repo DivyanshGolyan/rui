@@ -340,27 +340,26 @@ fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, pr
 }
 
 /// The Session ?1's newest compaction base before the position ?2, as the
-/// one-row CTE `base`: its admission position `frontier`, or 0 when it has
-/// none.
-const compaction_base_sql = "base AS (SELECT coalesce((SELECT admission_position FROM model_operation @index(model_operation_compaction_bases) " ++
+/// CTE `base`: zero rows or one.
+const compaction_base_sql = "base AS (SELECT admission_position FROM model_operation @index(model_operation_compaction_bases) " ++
     "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 " ++
-    "ORDER BY admission_position DESC LIMIT 1),0) AS frontier)";
+    "ORDER BY admission_position DESC LIMIT 1)";
 
 /// Over `compaction_base_sql`: true when there is no base, or the base has
 /// a changed suffix before ?2. Any changed suffix of the newest base also
 /// belongs to every older base, so older bases cannot change the answer.
-const changed_since_base_sql = "(base.frontier=0 " ++
-    "OR EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
-    "AND e.entry_kind IN (1,2) AND e.session_position>base.frontier AND e.session_position<?2) " ++
-    "OR EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
+const changed_since_base_sql = "NOT EXISTS(SELECT 1 FROM base " ++
+    "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
+    "AND e.entry_kind IN (1,2) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
+    "AND NOT EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
     "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
     "WHERE item.session_ref=?1 AND suffix.session_ref=?1 AND suffix.purpose=0 " ++
-    "AND item.session_position>base.frontier AND item.session_position<?2))";
+    "AND item.session_position>base.admission_position AND item.session_position<?2))";
 
 /// True when the Session has no compaction base before `boundary`, or
-/// the newest one has a changed suffix before it.
+/// the newest one has a changed suffix before it. Its text is main's.
 pub const context_changed = rsql.Read(.{
-    .sql = "WITH " ++ compaction_base_sql ++ " SELECT " ++ changed_since_base_sql ++ " AS changed FROM base",
+    .sql = "WITH " ++ compaction_base_sql ++ " SELECT " ++ changed_since_base_sql ++ " AS changed",
     .Args = struct { session: []const u8, boundary: u64 },
     .Row = struct { changed: bool },
     .cardinality = .one,
@@ -441,15 +440,17 @@ const admission_facts = rsql.Read(.{
 /// base (`context_changed`), and, only when it did, the newest usage
 /// after that base and the bytes it does not cover (`contextEstimate`'s
 /// rules). Otherwise the usage is NULL and the bytes 0. Admission reads it
-/// only when `turn_policy.forcedPurpose` leaves the purpose open. `base`,
-/// `since` and `usage` are each named once, so SQLite need not
-/// materialize them. The newest usage at or after the base is the newest
+/// only when `turn_policy.forcedPurpose` leaves the purpose open. `since`
+/// and `usage` are each named once, so SQLite need not materialize them.
+/// `base` is `context_changed`'s and named twice: a one-row `base` named
+/// once measured 5 steps cheaper here and 11 dearer in `context_changed`.
+/// The newest usage at or after the base is the newest
 /// usage, when that one is at or after the base, and none otherwise; so
 /// `usage` reads the newest, and the join holds it to the base. `provider`
 /// and `model` are the Session's settings, as `admission_facts` read them.
 const admission_context = rsql.Read(.{
     .sql = "WITH " ++ compaction_base_sql ++ "," ++
-        "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,base.frontier FROM base)," ++
+        "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,coalesce((SELECT admission_position FROM base),0) AS frontier)," ++
         "usage AS (" ++ latestUsageSql("0", "?3", "?4") ++ ")," ++
         "measured AS (SELECT since.changed,since.frontier,usage.uncached,usage.cache_read,usage.cache_write,usage.output," ++
         "usage.usage_position,usage.result_admission," ++
