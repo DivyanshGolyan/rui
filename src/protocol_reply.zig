@@ -2008,7 +2008,7 @@ test "a work state reads back exactly the facts its kind owns" {
     var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
     try cause.set("provider_temporary_http_429");
     var quota: protocol.Bounded(protocol.max_code_bytes) = .{};
-    try quota.set("provider_usage_limit_reached");
+    try quota.set("provider_quota");
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set("Run \u{1}the resize tests");
     const states = [_]protocol.WorkState{

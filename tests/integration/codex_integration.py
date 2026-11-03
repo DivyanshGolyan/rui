@@ -142,7 +142,7 @@ def run():
         session = configured["answer"]["session"]
         fixture.message(state, store, "pending-message", session, "run the proof")
         pending = fixture.wait_for(lambda: fixture.observe(store, "pending-message").get("result"), "authentication failure")
-        assert pending["code"] == "provider_authentication_failed", pending
+        assert pending["code"] == "provider_sign_in_required", pending
         assert not endpoint.requests, "pending refresh reached transport"
         fixture.stop_host(host)
         host = None
@@ -587,7 +587,7 @@ def forced_refresh_journey():
             lambda: (value := fixture.observe(store, "login-required")).get("result", {}).get("code") and value,
             "authentication failure after pending refresh",
         )
-        assert failure["result"]["code"] == "provider_authentication_failed", failure
+        assert failure["result"]["code"] == "provider_sign_in_required", failure
         time.sleep(0.4)
         assert len(endpoint.requests) == 5, "a login-required refresh resent a model request"
         assert credential_facts(credential_file) == ("3", "refresh_pending")

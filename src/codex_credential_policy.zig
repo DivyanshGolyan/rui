@@ -9,6 +9,7 @@
 //! "Authentication and transport lifetime".
 const std = @import("std");
 const json_scalar = @import("json_scalar.zig");
+const failure_class = @import("failure_class.zig");
 
 pub const max_account_id_bytes = 1024;
 pub const max_token_bytes = 16 * 1024;
@@ -184,36 +185,22 @@ pub fn localStatus(record: *const Record, now_seconds: i64, scratch: *ClaimScrat
     return if (refreshDue(record, now_seconds, 0)) .renewal_due else .configured;
 }
 
-/// Credential failures the user can resolve by logging in again are
-/// authentication failures; everything else is a backend failure.
+/// Credential failures the user can resolve by logging in again save a
+/// sign-in code (`failure_class.sign_in_prefix`), naming the refresh
+/// token's fate when the backend gave one; everything else is a backend
+/// failure.
 pub fn failureCode(err: anyerror) []const u8 {
+    const sign_in = failure_class.sign_in_prefix;
     switch (err) {
-        error.RefreshTokenExpired => return "provider_refresh_token_expired",
-        error.RefreshTokenReused => return "provider_refresh_token_reused",
-        error.RefreshTokenInvalidated => return "provider_refresh_token_invalidated",
+        error.RefreshTokenExpired => return sign_in ++ "refresh_token_expired",
+        error.RefreshTokenReused => return sign_in ++ "refresh_token_reused",
+        error.RefreshTokenInvalidated => return sign_in ++ "refresh_token_invalidated",
         else => {},
     }
     inline for (@typeInfo(LoginRequired).error_set.error_names.?) |name| {
-        if (err == @field(anyerror, name)) return "provider_authentication_failed";
+        if (err == @field(anyerror, name)) return sign_in ++ "required";
     }
     return "provider_authentication_backend_failed";
-}
-
-/// Failure codes a new `rui auth login` resolves.
-pub const login_codes = codes: {
-    var codes: []const []const u8 = &.{"provider_http_401"};
-    for (@typeInfo(LoginRequired).error_set.error_names.?) |name| {
-        const code = failureCode(@field(anyerror, name));
-        for (codes) |known| {
-            if (std.mem.eql(u8, known, code)) break;
-        } else codes = codes ++ .{code};
-    }
-    break :codes codes;
-};
-
-pub fn requiresLogin(code: []const u8) bool {
-    for (login_codes) |known| if (std.mem.eql(u8, known, code)) return true;
-    return false;
 }
 
 /// Credential failures that only a new login resolves.
@@ -686,7 +673,8 @@ test "a replacement must be complete and ready" {
 
 test "only failures resolved by logging in again are authentication failures" {
     for ([_]anyerror{ error.RefreshRejected, error.RefreshRequiresLogin, error.ExpiredCredential, error.AccountMismatch, error.AccountChanged, error.InvalidCredentialExpiry }) |err|
-        try std.testing.expectEqualStrings("provider_authentication_failed", failureCode(err));
+        try std.testing.expectEqualStrings("provider_sign_in_required", failureCode(err));
+    inline for (@typeInfo(LoginRequired).error_set.error_names.?) |name| try std.testing.expectEqual(failure_class.Class.sign_in, failure_class.of(failureCode(@field(anyerror, name))));
     for ([_]anyerror{ error.TransportFailed, error.GenerationMismatch, error.CredentialFileTooLarge, error.FixtureRequiresSyntheticCredential }) |err|
         try std.testing.expectEqualStrings("provider_authentication_backend_failed", failureCode(err));
 }

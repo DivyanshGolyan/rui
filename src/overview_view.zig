@@ -18,7 +18,6 @@ const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
 const command_value = @import("command_value.zig");
 const shortPath = @import("home_path.zig").shortPath;
-const codex_credential_policy = @import("codex_credential_policy.zig");
 const draft_layout = @import("draft_layout.zig");
 const failure_class = @import("failure_class.zig");
 const keymap = @import("keymap.zig");
@@ -5367,7 +5366,7 @@ test "the overview says when it next needs a tick" {
     _ = try step(&state, .{ .tick = start });
     // Nothing falls due while the first listing is in flight.
     try std.testing.expectEqual(@as(?u64, null), state.wakeAt());
-    const quota = failedRow("q1q1q1", 60, "provider_usage_limit_reached", test_now_s + 300);
+    const quota = failedRow("q1q1q1", 60, "provider_quota", test_now_s + 300);
     _ = try respond(&state, .full, testToken(1), &.{ retryRow("r1r1r1", "provider_temporary_http_429", 12), quota });
     // The next listing comes first; while it is in flight, the retry falling
     // due, then the quota reset.
@@ -5379,7 +5378,7 @@ test "the overview says when it next needs a tick" {
     try std.testing.expect(state.find("r1r1r1".*).?.state == .pending);
     // Then the quota resets.
     try std.testing.expectEqual(@as(?u64, (test_now_s + 300) * 1000), state.wakeAt());
-    _ = try respond(&state, .full, testToken(2), &.{failedRow("q1q1q1", 60, "provider_usage_limit_reached", std.math.maxInt(i64))});
+    _ = try respond(&state, .full, testToken(2), &.{failedRow("q1q1q1", 60, "provider_quota", std.math.maxInt(i64))});
     _ = try step(&state, .{ .tick = start + 16_000 });
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), state.wakeAt());
 }
@@ -5435,8 +5434,8 @@ fn bandOf(rows: []const Listed, login_at: ?u64) !?Band {
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
     // Sign-in: an authentication failure newer than the newest completion.
-    for (codex_credential_policy.login_codes) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
-    try std.testing.expect(signInCode("provider_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_authentication_failed"));
+    for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
+    try std.testing.expect(signInCode("provider_sign_in_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_sign_in_required"));
     try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     // A later completion clears it; a login in this terminal hides it until a newer failure.
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
@@ -5446,9 +5445,9 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expectEqual(Band{ .trouble = .api_key }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
     try std.testing.expect(!signInCode(failure_class.api_key_rejected));
     // Quota: shown with its reset time until that time passes.
-    try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200 }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_usage_limit_reached", test_now_s + 1200) }, null)).?);
-    try std.testing.expectEqual(Band{ .trouble = .quota }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_insufficient_quota", null) }, null)).?);
-    try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_usage_not_included", test_now_s) }, null));
+    try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200 }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
+    try std.testing.expectEqual(Band{ .trouble = .quota }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
+    try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_plan", test_now_s) }, null));
     // Rate limit: while any row retries for a 429.
     try std.testing.expectEqual(Band{ .trouble = .rate_limit, .sessions = 2 }, (try bandOf(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20), retryRow("cccccc", "provider_temporary_error", 20) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{retryRow("aaaaaa", "provider_temporary_error", 10)}, null));
@@ -5457,8 +5456,8 @@ test "the band derives provider trouble from rows, in priority order" {
     defer state.deinit();
     try std.testing.expectEqual(@as(?Band, null), band(state.rows.items, (test_now_s + 10) * 1000, null));
     // Priority: sign-in, then quota, then rate limit.
-    try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_usage_limit_reached", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
-    try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_usage_limit_reached", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+    try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
 /// Renders `state` at 80x24 and 200x60 and compares both screens.
@@ -5515,14 +5514,14 @@ fn expectBand(rows: []const Listed, small: []const u8, small_styles: []const u8,
 }
 
 test "a quota reset far in the future still draws its band" {
-    var state = try opened(&.{failedRow("q1q1q1", 60, "provider_usage_limit_reached", 100_000_000_000_000_000)});
+    var state = try opened(&.{failedRow("q1q1q1", 60, "provider_quota", 100_000_000_000_000_000)});
     defer state.deinit();
     try expectScreenLine(&state, 1, " Quota used up. Resets in 999d.");
 }
 
 test "render draws each band" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Summarize the CI failures" });
-    try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_refresh_token_expired", null) },
+    try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_sign_in_refresh_token_expired", null) },
         \\ रुई rui  ~/code/rui
         \\ Sign-in expired. Run rui auth login codex.
         \\
@@ -5637,7 +5636,7 @@ test "render draws each band" {
         \\ ↑↓ select · enter open
         \\
     );
-    try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_usage_limit_reached", test_now_s + 20 * 60) },
+    try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 20 * 60) },
         \\ रुई rui  ~/code/rui
         \\ Quota used up. Resets in 20m.
         \\
@@ -6639,7 +6638,7 @@ test "since you looked: a failure or a Host restart shows until the next keypres
 }
 
 test "the Host-stopped band comes first, over the provider bands and the faded rows" {
-    var state = try opened(&.{ failedRow("aaaaaa", 60, "provider_refresh_token_expired", null), session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Profile it" }) });
+    var state = try opened(&.{ failedRow("aaaaaa", 60, "provider_sign_in_refresh_token_expired", null), session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Profile it" }) });
     defer state.deinit();
     try expectScreenLine(&state, 1, " Sign-in expired. Run rui auth login codex.");
     _ = try step(&state, .{ .tick = (test_now_s + 1) * 1000 });

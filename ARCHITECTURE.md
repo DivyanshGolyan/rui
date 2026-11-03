@@ -1002,7 +1002,8 @@ If request preparation fails, or the exchange ends before that point (URL, resol
 The failed acquisition still returns an error; a later acquisition can refresh.
 Counting at packing rather than at a successful write means a partial or failed send is never taken as unsent.
 Every failure after packing, including a timeout, a lost connection, an interrupted or failed wait and a received rejection body, leaves the record pending.
-Refresh error bodies distinguish `refresh_token_expired`, `refresh_token_reused` and `refresh_token_invalidated` as `provider_refresh_token_expired`, `provider_refresh_token_reused` and `provider_refresh_token_invalidated`.
+Refresh error bodies distinguish `refresh_token_expired`, `refresh_token_reused` and `refresh_token_invalidated` as `provider_sign_in_refresh_token_expired`, `provider_sign_in_refresh_token_reused` and `provider_sign_in_refresh_token_invalidated`.
+Every failure only a new sign-in resolves saves a code under `failure_class.sign_in_prefix` (`provider_sign_in_`), so core reads it as a sign-in without knowing which source saved it.
 Unknown bodies retain the generic authentication failure.
 No response text enters these codes.
 
@@ -1034,7 +1035,7 @@ The authentication worker then refreshes under the credential lock, but only whi
 - A committed refresh settles the Attempt as `provider_http_401` with the provider's correlation and makes one replacement Attempt due immediately within the existing allowance.
   No backoff or jitter applies.
 - If another Host or a login has already advanced the generation, the Attempt fails as answered, with no refresh and no replacement.
-- A refresh failure saves its own authentication code, such as `provider_authentication_failed` for a record that requires login, and also sends no replacement.
+- A refresh failure saves its own authentication code, such as `provider_sign_in_required` for a record that requires login, and also sends no replacement.
 
 A second 401, a stop, a crash after the claim, or restart recovery never refreshes the same Operation again.
 Transport authentication failures, other HTTP statuses and unmanaged endpoints keep the ordinary failure policy.
@@ -1404,7 +1405,7 @@ To classify an HTTP error body, the shell maps the sealed body read-only and giv
 The classifier writes its answer into one value the shell lends: context overflow, or else the error's code with a quota's reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
 The map shares the capture's page cache, so it makes no second copy of the body.
 The shell alone decides the failure.
-It reads only 4xx and 5xx bodies; it takes a quota only at HTTP 429, then context overflow, then a refusal at any status; it maps each code through `transport_policy`'s closed `Quota` and `Refusal` sets, so a code it does not know narrows nothing; and it decodes, bounds and control-strips the report itself.
+It reads only 4xx and 5xx bodies; it takes a quota only at HTTP 429, then context overflow, then a refusal at any status; the codec alone knows its provider's codes and names each one it knows as a neutral `codec_abi.Refusal` (quota, plan, policy or model unavailable), so a code it does not know narrows nothing; and it decodes, bounds and control-strips the report itself.
 Every narrowing settles as a failure that no retry can fix, so a codec can narrow a failure but never make one retryable.
 A body the classifier cannot read names nothing, so the status rule decides alone; a report range outside the body is a Host defect caught by slice bounds, not a runtime failure.
 A sealed body shorter than its recorded length, or one that fails to map, stays `response_read_failed`.
@@ -1509,14 +1510,15 @@ The WAL name needs four bytes beyond the database path, within the eight reserve
 
 Sealed SSE `error` and `response.failed` events classify exact provider codes.
 Overload, rate limits and unknown codes are temporary failures.
-Known quota, request and policy failures (`transport_policy.Refusal`) are permanent refusals, in an event or an HTTP error body at any status, and each saves its own `provider_<code>` failure code; exact context overflow retains its compaction path.
+Known quota, plan, policy and model failures are permanent refusals, in an event or an HTTP error body at any status.
+The codec names each as a neutral `codec_abi.Refusal`, which saves `provider_quota`, `provider_plan`, `provider_policy` or `provider_model_unavailable` whatever the provider called it; the provider's own code stays in the report; exact context overflow retains its compaction path.
 A clean framed close without `response.completed` is a temporary connection failure.
 Malformed JSON or framing, explicit incomplete generation and contradictory completion remain permanent output failures.
 No failed prefix becomes accepted output.
 Scheduled retries save no rejection content; exhaustion retains only the settling Attempt's diagnostic and request correlation in the existing Resolution.
 
-HTTP 429 with exact `error.code` of `usage_limit_reached`, `insufficient_quota` or `usage_not_included` is a permanent quota refusal, not a temporary rate limit.
-Each retains its distinct `provider_` failure code, recognized provider code and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
+HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted` and the two spend limits a quota and `usage_not_included` a plan.
+Each retains its neutral failure code, its refusal and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
 Missing, null, invalid or duplicate reset metadata stays absent without making the quota refusal retryable.
 Provider prose is not copied into the diagnostic.
 Other HTTP 429 responses retain their temporary status classification unless their code is a known refusal.
