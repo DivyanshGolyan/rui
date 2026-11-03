@@ -76,7 +76,7 @@ const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
 /// the scan.
 pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]const u8 {
     comptime {
-        @setEvalBranchQuota(1000 * text.len + 1000);
+        @setEvalBranchQuota(100 * text.len + 1000);
         var index: usize = 0;
         // The word just scanned, or "" after any other token.
         var previous: []const u8 = "";
@@ -1899,6 +1899,8 @@ test "only a type Read or Write made counts as a typed statement" {
 }
 
 test "a reserved word is a keyword only in its own place, and a name anywhere else" {
+    // Its OVER texts scan past portabilityError's own quota of 100 per byte.
+    @setEvalBranchQuota(20_000);
     const Case = struct { sql: []const u8, word: []const u8 };
     inline for ([_]Case{
         .{ .sql = "SELECT o.x FROM model_operation offset", .word = "offset" },
