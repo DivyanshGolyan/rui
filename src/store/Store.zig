@@ -120,7 +120,7 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return historical_domain.prefixSealOf(&access, binding);
+        return entry.finish(Ordinary.none, historical_domain.prefixSealOf(&access, binding));
     }
 
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
@@ -1210,9 +1210,9 @@ pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentCon
     var current: CurrentConfiguration = .{};
     var found: @import("access.zig").Found = undefined;
     configuration_domain.readSaved(&a, session_ref, &current, &found);
-    try a.run();
+    try entry.finish(Ordinary.none, a.run());
     if (!found.get()) return null;
-    try configuration_domain.checkSaved(&current);
+    try entry.finish(Ordinary.none, configuration_domain.checkSaved(&current));
     return current;
 }
 
