@@ -328,7 +328,9 @@ fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
 
 /// A content row's length and digest, for a test's own checks.
 fn testingContentReference(storage: *Store, content_id: u64) !ContentReference {
-    var a = reads_domain.ReadAccess.within(storage);
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     var row: content_domain.content_metadata.Row = undefined;
     a.read(content_domain.content_metadata, .{ .content_id = content_id }, &row);
@@ -1130,16 +1132,15 @@ test "a Session creation that rolls back never reaches a since listing" {
         const create = try completeConfiguration("rollback-create", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        var a = store_access.Access(.nested, error{SessionUpdateFailed}).within(&storage);
+        var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer a.deinit();
         const reads = storage.configurationReads();
         reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         configuration_domain.prepareConfiguration(&a, "", &create.configuration, reads);
         try a.run();
         try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, .{}, reads) == .accepted);
-        try a.apply();
-        try store_core.rollbackAfterError(&storage, .{});
+        try a.run();
+        try a.abandon(.{});
     }
     // The rolled-back insert still moved the commit counter. The hint
     // forgot instead of naming a Session that does not exist.
@@ -1267,8 +1268,8 @@ test "a content sink opens only a content id its Access itself took, stepping it
     a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
     const first = try a.identity(.content_id);
     a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
-    // Taken by other code between this Access's own ids, as `.nested`
-    // callers may: inside the range of the ids it took, but not its own.
+    // Taken outside this Access between its own ids: inside the range of
+    // the ids it took, but not its own.
     const between = try store_core.takeIdentity(&storage, .content_id);
     const never = try a.identity(.content_id);
     const last = try a.identity(.content_id);
@@ -1536,7 +1537,7 @@ test "an Access that touches a fifth Session records everything and still commit
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(DISTINCT created_at) FROM session"));
 }
 
-test "every Access in one transaction dates its rows with the transaction's second" {
+test "every round of a write Access dates its rows with the transaction's second" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1544,31 +1545,26 @@ test "every Access in one transaction dates its rows with the transaction's seco
     defer storage.close() catch unreachable;
     const first = try configureTestSession(&storage, "second-first");
     const second = try configureTestSession(&storage, "second-second");
-
-    const Nested = struct {
-        fn date(store: *Store, session: []const u8) !void {
-            var a = store_access.Access(.nested, error{TestingGuard}).within(store);
-            defer a.deinit();
-            var loaded: TestingRound.head.Result = undefined;
-            a.read(TestingRound.head, .{ .session_ref = session }, &loaded);
-            try a.run();
-            a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
-            try a.apply();
-        }
-
-        fn clockPassed(dated: i64) !bool {
+    const Clock = struct {
+        fn passed(dated: i64) !bool {
             return @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000) > dated;
         }
     };
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
-    try store_core.begin(&storage);
-    try Nested.date(&storage, first.slice());
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    var heads: [2]TestingRound.head.Result = undefined;
+    a.read(TestingRound.head, .{ .session_ref = first.slice() }, &heads[0]);
+    a.read(TestingRound.head, .{ .session_ref = second.slice() }, &heads[1]);
+    try a.run();
+    a.write(TestingRound.date_session, .{ .session = heads[0].head, .revision = 1 });
+    try a.run();
     const dated = try store_core.transactionSecond(&storage);
-    // The clock moves on to a later second before the second Access dates.
-    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), dated, Nested.clockPassed);
-    try Nested.date(&storage, second.slice());
-    try store_core.commit(&storage);
+    // The clock moves on to a later second before the next round dates.
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), dated, Clock.passed);
+    a.write(TestingRound.date_session, .{ .session = heads[1].head, .revision = 1 });
+    try a.commit();
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(DISTINCT created_at) FROM session"));
     try std.testing.expectEqual(@as(u64, @intCast(dated)), try queryU64(storage.database, "SELECT max(created_at) FROM session"));
     // Commit cleared it: the next transaction reads the clock again.
@@ -5260,7 +5256,9 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         try sqlite.exec(storage.database, insert);
         var counted: reads_domain.First(command_domain.pending_messages.Row) = .{};
         {
-            var a = reads_domain.ReadAccess.within(&storage);
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
             defer a.deinit();
             a.readEach(command_domain.pending_messages, .{ .session = session.slice(), .cutoff = history }, 1, &counted);
             try a.run();
@@ -11621,19 +11619,25 @@ fn pageRounds(storage: *Store, proposals: *const protocol.ProposalPage, conversa
     var public_page: reads_domain.PublicConversationPage = undefined;
     var activity_page: protocol.ActivityFacts = undefined;
     {
-        var a = reads_domain.ReadAccess.within(storage);
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try reads_domain.proposalPage(&a, proposals, &proposal_page);
         result.rounds[0] = a.rounds;
     }
     {
-        var a = reads_domain.ReadAccess.within(storage);
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try reads_domain.publicConversationPage(&a, conversation, &public_page);
         result.rounds[1] = a.rounds;
     }
     {
-        var a = reads_domain.ReadAccess.within(storage);
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try reads_domain.activityPage(&a, activity, &activity_page);
         result.rounds[2] = a.rounds;
@@ -11818,7 +11822,9 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         const statement = try store_core.cachedTyped(&storage, reads_domain.queued);
         for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
             _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
-            var access = reads_domain.ReadAccess.within(&storage);
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var access: reads_domain.ReadAccess = .open(&entry);
             defer access.deinit();
             var waiting: reads_domain.QueuedMessages = .{};
             access.readEach(reads_domain.queued, .{ .session = "qu3u3d", .position = end }, std.math.maxInt(u64), &waiting);
@@ -13849,7 +13855,9 @@ fn listRoundsForTesting(count: usize) !u32 {
     var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
-    var a = reads_domain.ReadAccess.within(&storage);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     try report_domain.renderSessionList(&a, &.{}, &capture);
     var report = try capture.seal();
@@ -14065,7 +14073,9 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
-    var a = reads_domain.ReadAccess.within(&storage);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     try report_domain.renderSessionList(&a, &.{}, &capture);
     var report = try capture.seal();
@@ -14128,7 +14138,9 @@ fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
-    var a = reads_domain.ReadAccess.within(&storage);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
     return a.rounds;
@@ -14160,7 +14172,9 @@ fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []cons
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
     {
-        var a = reads_domain.ReadAccess.within(storage);
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         defer storage.read_blob.close();
         try capture.append("{\"head\":0");

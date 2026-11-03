@@ -116,7 +116,10 @@ pub const Store = struct {
     /// current revision, leaving that revision and its frozen inputs intact.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        var access = historical_domain.ReadAccess.within(self);
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
         return historical_domain.prefixSealOf(&access, binding);
     }
 
@@ -1142,18 +1145,9 @@ pub fn commit(self: *Store) !void {
     self.ids.second = 0;
 }
 
-/// Rolls back the open transaction. A Session it created no longer
-/// exists, so the entry point has touched everything.
-pub fn rollback(self: *Store) !void {
-    self.touched.everything = true;
-    self.ids.second = 0;
-    try execute(self, "ROLLBACK");
-    try loadIdentities(self, self.ids.taken);
-}
-
 /// The open transaction's second, bound to every `@now` in it: read from
-/// the clock at its first use, and held until commit or rollback, so a
-/// nested Access dates its rows with its caller's second. Outside a
+/// the clock at its first use, and held until commit or rollback, so every
+/// round of a write Access dates its rows with one second. Outside a
 /// transaction (a read Access), each use reads the clock.
 pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
     if (self.ids.second != 0) return self.ids.second;
@@ -1206,11 +1200,12 @@ pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
     return err;
 }
 
-/// The saved Session, as `configuration.readSaved` reads it, through the
-/// unconverted path tests take, as `configuration.readSession` did until
-/// its last caller converted.
+/// The saved Session, as `configuration.readSaved` reads it, in an Entry
+/// of its own.
 pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
-    var a = ReadAccess.within(self);
+    const entry = try enter(self, .none);
+    defer entry.release();
+    var a: ReadAccess = .open(&entry);
     defer a.deinit();
     var current: CurrentConfiguration = .{};
     var found: @import("access.zig").Found = undefined;
