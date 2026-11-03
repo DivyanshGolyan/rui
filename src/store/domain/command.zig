@@ -1292,7 +1292,8 @@ const message_result = rsql.Read(.{
 pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
     var result: message_result.Result = null;
     a.read(message_result, .{ .key = key }, &result);
-    try a.run();
+    // The Host's fence names this read, as on main.
+    a.run() catch |err| return if (err == error.StatementFailed) error.ResultReadFailed else err;
     const row = result orelse return error.ResultNotFound;
     const outcome = row.outcome_code orelse return if (row.stopped) error.ResultFailed else error.ResultNotReady;
     switch (try TurnOutcome.decode(outcome.slice(), if (row.outcome_content_id) |id| @intCast(id.get()) else null)) {
