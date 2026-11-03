@@ -36,6 +36,11 @@ pub const ModelAdmissionKind = enum { message, tool_continuation };
 /// term `item.item_ordinal>=0`, always true, keeps SQLite on
 /// model_output_item's primary key: without it the session_ref tie draws
 /// the planner to model_output_call_history, a scan of the Session's calls.
+/// `@index` cannot say this: it names only an index the schema declares,
+/// and the primary key of this WITHOUT ROWID table is the table itself,
+/// named only by SQLite's internal `sqlite_autoindex_model_output_item_1`.
+/// The fragment also reaches `firstRunnableAdmission`'s untyped text,
+/// where no marker renders.
 const complete_tool_results_sql =
     store_schema.resolutionIs("current.resolution_code", .tool_proposals) ++ " AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3" ++
