@@ -68,7 +68,7 @@ pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
     try sink.feed(Mark.reset);
 }
 
-test "peer Messages render as one dim line each, named, grouped with tool rows, with time in the margin and `…` when they continue" {
+test "peer Messages render as one dim line each, named, grouped with tool rows, with time in the margin and never their text" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,
@@ -96,55 +96,15 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     const S = Mark.summary;
     const N = Mark.sidenote;
     const R = Mark.reset;
-    const preview: [200]u8 = @splat('x');
-    // Leading blank lines and trailing blanks never show; later lines never
-    // do, but a later non-blank one ends the line in `…`. A line ending in
-    // `…` is a collapsed block (`true`), whose Message Ctrl-O opens.
-    inline for (.{
-        .{ .inbound, "\n  \nPlease review\t \nsecond line", "\n" ++ S ++ "← Received message from 9f8e7d · Please review…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .outbound, "first\n\n \t\n  \nsecond", "\n" ++ S ++ "→ Messaged 9f8e7d · first…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .outbound, "done", "\n" ++ S ++ "→ Messaged 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
-        .{ .inbound, "done\n \n\t\r\n\n", "\n" ++ S ++ "← Received message from 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
-        .{ .inbound, " \n", "\n" ++ S ++ "← Received message from 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", false },
-        // Peer text cannot draw controls or styles.
-        .{ .outbound, "\x1b[2mx", "\n" ++ S ++ "→ Messaged 9f8e7d · \\x1b[2mx" ++ N ++ "08:00" ++ R ++ "\n", false },
-        // A whole preview needs no `…`; one byte more does.
-        .{ .inbound, &preview, "\n" ++ S ++ "← Received message from 9f8e7d · " ++ preview ++ N ++ "08:00" ++ R ++ "\n", false },
-        .{ .inbound, preview ++ "y", "\n" ++ S ++ "← Received message from 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .inbound, preview ++ "\ny", "\n" ++ S ++ "← Received message from 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        // A line already ending in `…` looks continued, so it opens too.
-        .{ .outbound, "wait…", "\n" ++ S ++ "→ Messaged 9f8e7d · wait…" ++ N ++ "08:00" ++ R ++ "\n", true },
-        .{ .outbound, "wait…\nmore", "\n" ++ S ++ "→ Messaged 9f8e7d · wait……" ++ N ++ "08:00" ++ R ++ "\n", true },
-    }) |case| {
-        for (0..case[1].len + 1) |split| {
-            var sink: Sink = .{};
-            var line: PeerLine(*Sink) = undefined;
-            var compact = false;
-            try line.init(&sink, case[0], peer, case[1].len, &compact);
-            try line.feed(case[1][0..split]);
-            try line.feed(case[1][split..]);
-            try std.testing.expectEqual(case[3], try line.finish(1_800_000_000));
-            try std.testing.expectEqualStrings(case[2], sink.bytes[0..sink.length]);
-        }
-    }
-    // A first line past the preview keeps whole graphemes and says it continues.
     var sink: Sink = .{};
-    var line: PeerLine(*Sink) = undefined;
-    const long = comptime repeat("é", 500);
     var compact = false;
-    try line.init(&sink, .inbound, peer, long.len, &compact);
-    try line.feed(long);
-    try std.testing.expect(try line.finish(1_800_000_000));
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from 9f8e7d · " ++ comptime repeat("é", 100) ++ "…" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
-    // Unread bytes are more than the line shows; without a time the margin
-    // stays empty.
+    try peerLine(&sink, .inbound, peer, 1_800_000_000, &compact);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    // Without a time the margin stays empty.
     sink = .{};
     compact = false;
-    try line.init(&sink, .inbound, peer, 9000, &compact);
-    line.received = 9000;
-    line.phase = .more;
-    try std.testing.expect(try line.finish(std.math.maxInt(u64)));
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from 9f8e7d · …" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged 9f8e7d" ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
     try sendFailed(&failed, peer, &compact);
     try std.testing.expectEqualStrings("\n" ++ S ++ "! Messaged 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
@@ -152,116 +112,32 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     // A named peer shows by its name, escaped as a label is, and rows in a
     // row share one group with no blank line between them.
     var named = peer;
-    try named.label.set("Review the WAL");
+    try named.label.set("Review\x1b[2m the WAL");
     var group: Sink = .{};
-    compact = false;
-    try line.init(&group, .outbound, named, 2, &compact);
-    try line.feed("hi");
-    _ = try line.finish(1_800_000_000);
-    try line.init(&group, .inbound, named, 2, &compact);
-    try line.feed("ok");
-    _ = try line.finish(1_800_000_000);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged Review the WAL · hi" ++ N ++ "08:00" ++ R ++ "\n" ++
-        S ++ "← Received message from Review the WAL · ok" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
-    // A name ending in `…` over a blank Message ends the line in `…`, which
-    // the viewport counts as a collapsed block, so the row opens as one.
-    try named.label.set("Plan…");
-    var dotted: Sink = .{};
-    try line.init(&dotted, .inbound, named, 2, &compact);
-    try line.feed(" \n");
-    try std.testing.expect(try line.finish(1_800_000_000));
-}
-
-/// A line's end before trailing blanks.
-fn trimmed(bytes: []const u8) []const u8 {
-    var end = bytes.len;
-    while (end > 0 and blank(bytes[end - 1])) end -= 1;
-    return bytes[0..end];
+    try peerLine(&group, .outbound, named, 1_800_000_000, &compact);
+    try peerLine(&group, .inbound, named, 1_800_000_000, &compact);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n" ++
+        S ++ "← Received message from Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
 }
 
 /// One peer Message as one upright dim line, never `›`, in the tool rows'
-/// group: `← Received message from NAME · first line` from a peer,
-/// `→ Messaged NAME · first line` sent to one, NAME being its label or, with
-/// none, its ID. Its admission time goes in the right margin. A Message with
-/// more than its preview shows ends in `…`. Initialize in final storage, feed
-/// the Message's exact bytes, then finish.
-pub fn PeerLine(comptime Sink: type) type {
-    return struct {
-        const Self = @This();
-        sink: Sink,
-        length: u64,
-        received: u64 = 0,
-        line: [preview_bytes + 4]u8 = undefined,
-        line_bytes: usize = 0,
-        // Before the first non-blank byte, in it, past its line, or past a
-        // later non-blank byte. A caller that reads no bytes sets `more`.
-        phase: enum { leading, first, after, more } = .leading,
-        longer: bool = false,
-        // A name ending in `…` ends a line with no text after it, which
-        // then reads as continued and opens as one.
-        named_ellipsis: bool = false,
-
-        /// `compact` is the tool rows' grouping: a row after another one
-        /// joins it without a blank line.
-        pub fn init(self: *Self, sink: Sink, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, length: u64, compact: *bool) !void {
-            self.* = .{ .sink = sink, .length = length };
-            if (!compact.*) try sink.feed("\n");
-            compact.* = true;
-            try sink.feed(Mark.summary);
-            try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
-            try peerName(sink, peer);
-            self.named_ellipsis = std.mem.endsWith(u8, peer.name(), "…");
-        }
-
-        pub fn feed(self: *Self, bytes: []const u8) anyerror!void {
-            self.received += bytes.len;
-            if (self.received > self.length) return error.ContentLengthMismatch;
-            for (bytes) |byte| switch (self.phase) {
-                .leading => if (byte != '\n' and !blank(byte)) {
-                    self.phase = .first;
-                    self.push(byte);
-                },
-                .first => if (byte == '\n') {
-                    self.phase = .after;
-                } else self.push(byte),
-                .after => if (byte != '\n' and !blank(byte)) {
-                    self.phase = .more;
-                },
-                .more => return,
-            };
-        }
-
-        fn push(self: *Self, byte: u8) void {
-            if (self.line_bytes == self.line.len) {
-                self.longer = true;
-                return;
-            }
-            self.line[self.line_bytes] = byte;
-            self.line_bytes += 1;
-        }
-
-        /// Returns whether the line ends in `…`, its own or the preview's:
-        /// the caller notes it as a collapsed block, which Ctrl-O opens.
-        /// `ConversationViewport.collapsed` counts such lines alike.
-        pub fn finish(self: *Self, admitted_at: u64) anyerror!bool {
-            if (self.received != self.length) return error.ContentLengthMismatch;
-            const kept = trimmed(self.line[0..self.line_bytes]);
-            const cut = if (!self.longer and kept.len <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
-            const continues = self.phase == .more or self.longer or cut != kept.len;
-            if (kept.len != 0 or continues) try self.sink.feed(" · ");
-            var escaped: Escaped(Sink) = .{ .sink = self.sink, .text = .{ .mode = .multiline } };
-            try escaped.feed(kept[0..cut]);
-            try escaped.finish();
-            if (continues) try self.sink.feed("…");
-            var buffer: [5]u8 = undefined;
-            if (clock(admitted_at, &buffer)) |time| {
-                try self.sink.feed(Mark.sidenote);
-                try self.sink.feed(time);
-            }
-            try self.sink.feed(Mark.reset ++ "\n");
-            return continues or std.mem.endsWith(u8, kept, "…") or (kept.len == 0 and self.named_ellipsis);
-        }
-    };
+/// group: `← Received message from NAME` from a peer, `→ Messaged NAME` sent
+/// to one, NAME being its label or, with none, its ID. Its admission time goes
+/// in the right margin. The Message's text never shows; the model reads it.
+/// `compact` is the tool rows' grouping: a row after another one joins it
+/// without a blank line.
+pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64, compact: *bool) !void {
+    if (!compact.*) try sink.feed("\n");
+    compact.* = true;
+    try sink.feed(Mark.summary);
+    try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
+    try peerName(sink, peer);
+    var buffer: [5]u8 = undefined;
+    if (clock(admitted_at, &buffer)) |time| {
+        try sink.feed(Mark.sidenote);
+        try sink.feed(time);
+    }
+    try sink.feed(Mark.reset ++ "\n");
 }
 
 /// A send this Session made that its target refused: set apart, as a failed
@@ -1129,14 +1005,8 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
         compact.* = false;
         try print(sink, "\n{s}", .{text});
     }
+    if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at, compact);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
-    if (value.sender) |sender| {
-        var line: PeerLine(@TypeOf(sink)) = undefined;
-        try line.init(sink, .inbound, sender, value.content.length, compact);
-        try content(requests, store, session, item, value.content, &line);
-        if (try line.finish(value.admitted_at)) try noteCollapsed(sink, block);
-        return;
-    }
     compact.* = false;
     try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
@@ -1604,13 +1474,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 compact_tools.* = false;
                 try sink.feed("\n! Session stopped.\n");
             },
-            .sent => |sent| {
-                var line: PeerLine(@TypeOf(sink)) = undefined;
-                try line.init(sink, .outbound, sent.target, sent.content.length, compact_tools);
-                try content(requests, store, session, item, sent.content, &line);
-                // Conversation pages hold no sent Message, so no row exports it.
-                if (try line.finish(sent.admitted_at)) try noteCollapsed(sink, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = sent.content, .row = false });
-            },
+            .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
             .send_failed => |failed| {
                 try sendFailed(sink, failed.target, compact_tools);
             },

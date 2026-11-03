@@ -1992,13 +1992,9 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     // A ┄ the user typed is body text, not a block's summary.
     try screen.append("\n› " ++ View.Mark.body ++ "typed ┄ 3" ++ View.Mark.reset ++ "\n");
-    // The middle block is a peer Message's line, which ends in `…`.
     for (0..3) |block| {
         var line: [64]u8 = undefined;
-        try screen.append(if (block == 1)
-            "\n" ++ View.Mark.summary ++ "← 9f8e7d · preview 1…" ++ View.Mark.sidenote ++ "08:00" ++ View.Mark.reset ++ "\n"
-        else
-            try std.fmt.bufPrint(&line, "\n› " ++ View.Mark.body ++ "preview {d}\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n", .{block}));
+        try screen.append(try std.fmt.bufPrint(&line, "\n› " ++ View.Mark.body ++ "preview {d}\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n", .{block}));
         for (0..12) |row| try screen.append(try std.fmt.bufPrint(&line, "answer {d} row {d}\n", .{ block, row }));
     }
     _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
