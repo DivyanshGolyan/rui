@@ -326,6 +326,16 @@ fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
     try a.commit();
 }
 
+/// A content row's length and digest, for a test's own checks.
+fn testingContentReference(storage: *Store, content_id: u64) !ContentReference {
+    var a = reads_domain.ReadAccess.within(storage);
+    defer a.deinit();
+    var row: content_domain.content_metadata.Row = undefined;
+    a.read(content_domain.content_metadata, .{ .content_id = content_id }, &row);
+    try a.run();
+    return .{ .length = row.byte_length, .digest = row.digest };
+}
+
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
     const statement = try sqlite.prepare(database, sql);
     defer _ = c.sqlite3_finalize(statement);
@@ -2805,11 +2815,8 @@ test "Action settlement atomically yields to an earlier Session stop" {
         storage.database,
         "SELECT resolution_content_id FROM action_operation",
     );
-    const result_metadata = try content_domain.readContentMetadata(&storage, @intCast(result_content_id));
-    try expectContent(&storage, .{
-        .length = result_metadata.length,
-        .digest = result_metadata.digest,
-    }, "Cancelled by Session stop.");
+    const result_metadata = try testingContentReference(&storage, result_content_id);
+    try expectContent(&storage, result_metadata, "Cancelled by Session stop.");
     try std.testing.expectEqual(@as(u64, 1), try querySessionU64(
         storage.database,
         "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code='cancelled'",
@@ -2882,11 +2889,8 @@ test "earlier Action settlement remains authoritative after Session stop" {
         storage.database,
         "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'",
     ));
-    const result_metadata = try content_domain.readContentMetadata(&storage, @intCast(original_content_id));
-    try expectContent(&storage, .{
-        .length = result_metadata.length,
-        .digest = result_metadata.digest,
-    }, "Original Bash result.");
+    const result_metadata = try testingContentReference(&storage, original_content_id);
+    try expectContent(&storage, result_metadata, "Original Bash result.");
     try std.testing.expectError(
         error.StaleActionAttemptBinding,
         storage.settleActionAttempt(action_binding, .cancelled, "Late stop result.", .{}),
@@ -3309,9 +3313,9 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
             storage.database,
             "SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=5",
         );
-        const metadata = try content_domain.readContentMetadata(&storage, @intCast(content_id));
+        const metadata = try testingContentReference(&storage, content_id);
         var reader: ContentReader = undefined;
-        reader.open(try storage.openContent(.{ .length = metadata.length, .digest = metadata.digest }));
+        reader.open(try storage.openContent(metadata));
         defer reader.close();
         var result: [192]u8 = undefined;
         const count = try reader.read(0, &result);
@@ -14135,4 +14139,298 @@ test "a Current report takes its reads' dependency depth in rounds, not its rows
     // adds the unresolved, resolved and actionable lists, and with no
     // rejected call there is no rejected list.
     try std.testing.expectEqual(@as(u32, 7), try reportRoundsForTesting(.awaiting));
+}
+
+/// `session`'s Full history rendered alone, on an Access of its own, as
+/// `renderFull` follows the Current facts, inside `{"head":0...}` so it
+/// parses. The bytes are the caller's; `rounds` gets the Access's rounds.
+fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, rounds: ?*u32) ![]u8 {
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 8 * 1024 * 1024 } };
+    try capture.create(root[0..length], 1, false);
+    defer capture.deinit();
+    {
+        var a = reads_domain.ReadAccess.within(storage);
+        defer a.deinit();
+        defer storage.read_blob.close();
+        try capture.append("{\"head\":0");
+        try report_domain.renderFull(&a, session, &capture);
+        try capture.append("}");
+        if (rounds) |out| out.* = a.rounds;
+    }
+    var report = try capture.seal();
+    defer report.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
+    errdefer std.testing.allocator.free(bytes);
+    var offset: usize = 0;
+    while (offset < bytes.len) offset += try report.read(offset, bytes[offset..@min(bytes.len, offset + SessionReport.read_window_bytes)]);
+    return bytes;
+}
+
+/// How many times `S` ran since the last call for it.
+fn testingRuns(storage: *Store, comptime S: type) i64 {
+    const statement = storage.statements.find(S.sql.ptr) orelse return 0;
+    return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
+}
+
+test "a Full list takes a statement per 256 rows, and lists each row once in order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "chunked-stops-config");
+    for ([_]usize{ 256, 257 }) |rows| {
+        while (try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE kind=3") < rows) {
+            var key: [32]u8 = undefined;
+            var stop = try completeSessionStop(try std.fmt.bufPrint(&key, "chunked-stop-{d:0>3}", .{try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE kind=3")}), session.slice());
+            _ = storage.stopSession(&stop, .{});
+        }
+        _ = testingRuns(&storage, report_domain.full_stops);
+        const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
+        defer std.testing.allocator.free(full);
+        // 256 rows and the 257th row's absence fit one statement; a 257th
+        // row takes a second.
+        try std.testing.expectEqual(@as(i64, if (rows == 256) 1 else 2), testingRuns(&storage, report_domain.full_stops));
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+        defer parsed.deinit();
+        const stops = parsed.value.object.get("full").?.object.get("session_stops").?.array.items;
+        try std.testing.expectEqual(rows, stops.len);
+        for (stops, 0..) |stop, index| {
+            var key: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&key, "chunked-stop-{d:0>3}", .{index}), stop.object.get("command_key").?.string);
+        }
+    }
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a Full list keeps the rows whose content it shows whole for after their chunk, in order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "chunked-messages-config");
+    // Each Message's text is longer than one content window. Two chunks'
+    // kept rows take two statements, the second finding no row after its
+    // last; one more row takes a third.
+    const pending = report_domain.Messages.pending;
+    var text: [2100]u8 = undefined;
+    var count: usize = 0;
+    for ([_]usize{ 2 * pending, 2 * pending + 1 }, [_]i64{ 2, 3 }) |rows, statements| {
+        while (count < rows) : (count += 1) {
+            var name: [32]u8 = undefined;
+            var key: [32]u8 = undefined;
+            @memset(&text, @intCast('a' + count));
+            try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&name, "chunked-message-{d}", .{count}), try std.fmt.bufPrint(&key, "chunked-message-{d}", .{count}), session.slice(), &text);
+        }
+        _ = testingRuns(&storage, report_domain.full_messages);
+        const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
+        defer std.testing.allocator.free(full);
+        try std.testing.expectEqual(statements, testingRuns(&storage, report_domain.full_messages));
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+        defer parsed.deinit();
+        const messages = parsed.value.object.get("full").?.object.get("messages").?.array.items;
+        try std.testing.expectEqual(rows, messages.len);
+        for (messages, 0..) |message, index| {
+            var key: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&key, "chunked-message-{d}", .{index}), message.object.get("command_key").?.string);
+            @memset(&text, @intCast('a' + index));
+            try std.testing.expectEqualStrings(&text, message.object.get("content").?.object.get("text").?.string);
+        }
+    }
+}
+
+test "Full Messages refuse a position that leaves one out or lists one before an earlier admission" {
+    const faults = [_][:0]const u8{
+        "UPDATE message_admission SET admission_position=NULL WHERE command_key='ordered-message-1'",
+        "UPDATE message_admission SET admission_position=1000000 WHERE command_key='ordered-message-0'",
+    };
+    for ([_]?[:0]const u8{null} ++ faults) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "ordered-messages-config");
+        try submitTestMessage(&storage, &tmp, "ordered-message-0", "ordered-message-0", session.slice(), "first");
+        try submitTestMessage(&storage, &tmp, "ordered-message-1", "ordered-message-1", session.slice(), "second");
+        if (fault) |sql| {
+            try sqlite.exec(storage.database, sql);
+            try std.testing.expectError(error.CorruptStore, testingFullHistory(&storage, &tmp, session.slice(), null));
+        } else std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), null));
+    }
+}
+
+test "Full Conversation refuses an accepted assistant message without its entry" {
+    for ([_]bool{ false, true }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "assistant-entry-config");
+        const answer = [_]TestingAnswerPart{.{ .encoded = "hello", .decoded = "hello" }};
+        try answerTestTurn(&storage, &tmp, session.slice(), "assistant-entry", &answer);
+        if (fault) {
+            try sqlite.exec(storage.database, "DELETE FROM conversation_entry WHERE entry_kind=3");
+            try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
+        } else std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
+    }
+}
+
+test "Full history refuses content whose bytes no longer match their digest" {
+    for ([_]bool{ false, true }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "digest-config");
+        // Longer than one content window, so the digest spans windows.
+        const text: [2100]u8 = @splat('d');
+        try submitTestMessage(&storage, &tmp, "digest-message", "digest-message", session.slice(), &text);
+        if (fault) {
+            try sqlite.exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='digest-message')");
+            try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
+        } else std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
+    }
+}
+
+test "Full history's step faults keep main's names, and its content and stop reads take their list's" {
+    // Main read the Messages' stops in a statement of their own
+    // (SessionStopReadFailed) and every content's metadata apart
+    // (CorruptStore); each is a column of its list's statement now. The
+    // Current facts read both tables first, so only the history alone
+    // reaches them.
+    inline for (.{
+        .{ "session_stop", error.MessageReadFailed, false },
+        .{ "content", error.SessionReadFailed, false },
+        .{ "permission_decision_command", error.PermissionReadFailed, true },
+        .{ "model_interruption_command", error.InterruptionReadFailed, true },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "history-faults-config");
+        // A Message no Turn took, so its stop is looked for.
+        try submitTestMessage(&storage, &tmp, "history-faults-message", "history-faults-message", session.slice(), "queued");
+        try failAtStepForTesting(storage.database, case[0]);
+        if (case[2]) {
+            try std.testing.expectError(case[1], testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
+        } else try std.testing.expectError(case[1], testingFullHistory(&storage, &tmp, session.slice(), null));
+    }
+}
+
+test "Full history takes a round per chunk" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "history-rounds-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "hello", .decoded = "hello" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "history-rounds", &answer);
+    var rounds: u32 = 0;
+    std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), &rounds));
+    // Each list is one chunk: the revision and the Message keep their
+    // content for after their round, and find no row after it.
+    try std.testing.expectEqual(@as(u32, 11), rounds);
+}
+
+test "Full revisions show each content whole where it first occurs, across ownership windows" {
+    // `mixed`: new, older and repeated content, past one window. `same`:
+    // one older content, so after the first revision a window's rows all
+    // render in the pass, and a chunk ends only where its window does.
+    for ([_]bool{ false, true }, [_]usize{ report_domain.owner_window + 6, 2 * report_domain.owner_window + 2 }, [_]i64{ 2, 3 }) |same, revisions, windows| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        // Content another Session admitted first is older than this
+        // Session's.
+        const other = try configureTestSessionAsk(&storage, "owners-other");
+        const session = try configureTestSessionAsk(&storage, "owners-session");
+        var texts: [256][32]u8 = undefined;
+        var lengths: [256]usize = undefined;
+        for (0..10) |index| {
+            lengths[index] = (try std.fmt.bufPrint(&texts[index], "{{\"title\":\"old {d}\"}}", .{index})).len;
+            var key: [48]u8 = undefined;
+            var reconfigure: protocol.ConfigureCommand = .{};
+            try reconfigure.key.set(try std.fmt.bufPrint(&key, "owners-other-{d}", .{index}));
+            try reconfigure.session.set(other.slice());
+            reconfigure.configuration.instructions = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-other-i-{d}", .{index}), texts[index][0..lengths[index]]);
+            try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+        }
+        // Each revision's text, as an index into `texts` (`null`: none);
+        // the first revision's instructions are empty.
+        var instructions: [256]?usize = undefined;
+        var output_schema: [256]?usize = undefined;
+        var fresh: usize = 10;
+        for (2..revisions + 1) |revision| {
+            instructions[revision] = if (same) 0 else switch (revision % 5) {
+                // Older content, out of id order.
+                0 => (revision * 7) % 10,
+                // An earlier revision's instructions.
+                1 => instructions[revision - 3] orelse 0,
+                else => blk: {
+                    lengths[fresh] = (try std.fmt.bufPrint(&texts[fresh], "{{\"title\":\"fresh {d}\"}}", .{revision})).len;
+                    fresh += 1;
+                    break :blk fresh - 1;
+                },
+            };
+            output_schema[revision] = if (same) null else switch (revision % 3) {
+                0 => null,
+                1 => instructions[revision],
+                else => (revision * 3) % 10,
+            };
+            var key: [48]u8 = undefined;
+            var reconfigure: protocol.ConfigureCommand = .{};
+            try reconfigure.key.set(try std.fmt.bufPrint(&key, "owners-revision-{d}", .{revision}));
+            try reconfigure.session.set(session.slice());
+            const i = instructions[revision].?;
+            reconfigure.configuration.instructions = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-i-{d}", .{revision}), texts[i][0..lengths[i]]);
+            if (output_schema[revision]) |o| {
+                reconfigure.configuration.output_schema = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-s-{d}", .{revision}), texts[o][0..lengths[o]]);
+            } else reconfigure.configuration.output_schema.state = .explicit_null;
+            try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+        }
+        _ = testingRuns(&storage, report_domain.revision_owners);
+        const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
+        defer std.testing.allocator.free(full);
+        // One ownership read per window of revisions.
+        try std.testing.expectEqual(windows, testingRuns(&storage, report_domain.revision_owners));
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+        defer parsed.deinit();
+        const listed = parsed.value.object.get("full").?.object.get("session_revisions").?.array.items;
+        try std.testing.expectEqual(revisions, listed.len);
+        // Each text's first occurrence, as `revision*2+field`.
+        var owners: [256]?u64 = @splat(null);
+        for (listed[1..], 2..) |row, revision| {
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(parsed.arena.allocator(), "{d}", .{revision}), row.object.get("revision").?.string);
+            for ([_]?usize{ instructions[revision], output_schema[revision] }, [_][]const u8{ "instructions", "output_schema" }, 0..) |text, field, order| {
+                const shown = row.object.get(field).?;
+                const index = text orelse {
+                    try std.testing.expect(shown == .null);
+                    continue;
+                };
+                const owner = owners[index] orelse blk: {
+                    owners[index] = revision * 2 + order;
+                    break :blk revision * 2 + order;
+                };
+                if (owner == revision * 2 + order) {
+                    try std.testing.expectEqualStrings(texts[index][0..lengths[index]], shown.object.get("text").?.string);
+                } else {
+                    const reference = shown.object.get("owner").?.object;
+                    try std.testing.expectEqualStrings(try std.fmt.allocPrint(parsed.arena.allocator(), "{d}", .{owner / 2}), reference.get("revision").?.string);
+                    try std.testing.expectEqualStrings(if (owner % 2 == 0) "instructions" else "output_schema", reference.get("field").?.string);
+                }
+            }
+        }
+    }
 }

@@ -21,12 +21,9 @@ const content_domain = @import("content.zig");
 const model_admission_domain = @import("model_admission.zig");
 const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
-const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
-const c = sqlite.c;
 const AttemptBinding = store_core.AttemptBinding;
 const ContentReference = content_domain.ContentReference;
-const ContentSource = reads_domain.ContentSource;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const RevisionContentField = configuration_domain.RevisionContentField;
 const TurnOutcome = turn_domain.TurnOutcome;
@@ -690,45 +687,18 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
     try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow.Fields }}, .{&fields});
 }
 
-/// A Session report under `entry`: its saved Session and Current facts
-/// on one Access (`renderHead`), then, for the Full profile, its history
-/// through unconverted statements under the same Entry. The Access and
-/// the saved Session live in `headUnder`'s frame, which returns before
-/// any history content is read, so neither adds to the deepest chain.
+/// A Session report on the report's Access `a`: its saved Session and
+/// Current facts (`renderHead`), then, for the Full profile, its history
+/// (`renderFull`), all under one Entry, so one snapshot.
 pub fn renderSessionReport(
-    entry: *const store_core.Entry,
+    a: *ReadAccess,
     session_ref: []const u8,
     profile: protocol.ReportProfile,
     execution: SessionReportExecution,
     capture: *SessionReportCapture,
 ) !void {
-    if (!try headUnder(entry, session_ref, profile, capture)) return;
-    if (profile == .full) {
-        const self = entry.store;
-        try capture.append(",\"full\":{\"session_revisions\":[");
-        try appendSessionRevisions(self, session_ref, capture);
-        try capture.append("],\"messages\":[");
-        try appendMessages(self, session_ref, capture);
-        try capture.append("],\"conversation\":[");
-        try appendConversation(self, session_ref, capture);
-        try capture.append("],\"turns\":[");
-        try appendTurns(self, session_ref, capture);
-        try capture.append("],\"model_operations\":[");
-        try appendModelOperations(self, session_ref, capture);
-        try capture.append("],\"tool_calls\":[");
-        try appendToolCalls(self, session_ref, capture);
-        try capture.append("],\"actions\":[");
-        try appendAllActions(self, session_ref, capture);
-        try capture.append("],\"permission_decisions\":[");
-        try appendPermissionDecisions(self, session_ref, capture);
-        try capture.append("],\"session_stops\":[");
-        try appendSessionStops(self, session_ref, capture);
-        try capture.append("],\"model_interruptions\":[");
-        try appendModelInterruptions(self, session_ref, capture);
-        try capture.append("],\"tool_results\":[");
-        try appendToolResults(self, session_ref, capture);
-        try capture.append("]}");
-    }
+    if (!try renderHead(a, session_ref, profile, capture)) return;
+    if (profile == .full) try renderFull(a, session_ref, capture);
     try capture.appendFmt(",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\"]}}}}", .{
         if (execution.dispatch_fenced) "true" else "false",
         execution.custody_occupied,
@@ -736,17 +706,12 @@ pub fn renderSessionReport(
     });
 }
 
-/// `renderHead` on an Access of its own under `entry`.
-noinline fn headUnder(entry: *const store_core.Entry, session_ref: []const u8, profile: protocol.ReportProfile, capture: *SessionReportCapture) !bool {
-    var a: ReadAccess = .open(entry);
-    defer a.deinit();
-    return renderHead(&a, session_ref, profile, capture);
-}
-
 /// A report's head, whose rounds tests count: round 1 reads the saved
 /// Session, and a missing one ends the report there, with its execution
-/// (false); the Current facts follow (`renderCurrent`).
-pub fn renderHead(a: *ReadAccess, session_ref: []const u8, profile: protocol.ReportProfile, capture: *SessionReportCapture) !bool {
+/// (false); the Current facts follow (`renderCurrent`). Not inlined: the
+/// saved Session lives in its frame, which returns before any history
+/// content is read.
+pub noinline fn renderHead(a: *ReadAccess, session_ref: []const u8, profile: protocol.ReportProfile, capture: *SessionReportCapture) !bool {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
     configuration_domain.readSaved(a, session_ref, &current, &found);
@@ -1607,163 +1572,497 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
     }
 }
 
-/// Inline, as main's compiler chose: outlined, its 968-byte frame sits
-/// between the report's frame and `appendRevisionContent` on the intake
-/// worker's and main thread's deepest chains.
-inline fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(
-        self,
-        "WITH occurrence(revision,field_order,content_id) AS MATERIALIZED (" ++
-            "SELECT revision,0,instructions_content_id FROM session_revision WHERE session_ref=?1 UNION ALL " ++
-            "SELECT revision,1,output_schema_content_id FROM session_revision WHERE session_ref=?1 AND output_schema_content_id IS NOT NULL)," ++
-            "ownership AS MATERIALIZED (SELECT revision,field_order,content_id," ++
-            "first_value(revision) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_revision," ++
-            "first_value(field_order) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_field FROM occurrence) " ++
-            "SELECT revision_row.revision,revision_row.command_key,revision_row.workspace,revision_row.model," ++
-            "revision_row.tools_mask,revision_row.permission_mode,revision_row.instructions_content_id,revision_row.output_schema_content_id," ++
-            "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider,revision_row.compaction_trigger,revision_row.output_reservation,revision_row.reasoning_effort,revision_row.label " ++
-            "FROM session_revision revision_row JOIN ownership instructions ON instructions.revision=revision_row.revision AND instructions.field_order=0 " ++
-            "LEFT JOIN ownership output_schema ON output_schema.revision=revision_row.revision AND output_schema.field_order=1 " ++
-            "WHERE revision_row.session_ref=?1 ORDER BY revision_row.revision",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
+/// The Full profile's history, after the Current facts, on the report's
+/// Access: each list in keyset chunks of `chunk_rows` rows (revisions in
+/// windows of `owner_window`), in output order. Rows render as their
+/// chunk's pass steps them, so a round keeps no row but those whose
+/// inline content streams after it.
+pub fn renderFull(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
+    try capture.append(",\"full\":{\"session_revisions\":[");
+    try renderRevisions(a, session_ref, capture);
+    try capture.append("],\"messages\":[");
+    try renderChunks(a, Messages, session_ref, capture);
+    try capture.append("],\"conversation\":[");
+    try renderChunks(a, Conversation, session_ref, capture);
+    try capture.append("],\"turns\":[");
+    try renderChunks(a, Turns, session_ref, capture);
+    try capture.append("],\"model_operations\":[");
+    try renderChunks(a, Operations, session_ref, capture);
+    try capture.append("],\"tool_calls\":[");
+    try renderChunks(a, Calls, session_ref, capture);
+    try capture.append("],\"actions\":[");
+    try renderChunks(a, Actions, session_ref, capture);
+    try capture.append("],\"permission_decisions\":[");
+    try renderChunks(a, Decisions, session_ref, capture);
+    try capture.append("],\"session_stops\":[");
+    try renderChunks(a, Stops, session_ref, capture);
+    try capture.append("],\"model_interruptions\":[");
+    try renderChunks(a, Interruptions, session_ref, capture);
+    try capture.append("],\"tool_results\":[");
+    try renderChunks(a, Results, session_ref, capture);
+    try capture.append("]}");
+}
+
+/// The rows a Full list renders per chunk. Each list's text reads one row
+/// more (`chunk_limit`), so a list of at most this many rows without
+/// inline content takes one statement, and each further `chunk_rows`
+/// rows take one more.
+const chunk_rows = 256;
+const chunk_limit = " LIMIT 257";
+
+/// A content value a Full row shows whole, with the metadata its row
+/// joined; `streamInline` reads it.
+const InlineValue = struct { id: u64, length: u64, digest: [32]u8 };
+
+/// A content value's id and joined metadata, as a row decodes them: no
+/// id is none, and an id without metadata names no content row.
+fn optionalValue(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8) error{CorruptStore}!?InlineValue {
+    const content_id = id orelse return null;
+    return .{ .id = content_id.get(), .length = length orelse return error.CorruptStore, .digest = digest orelse return error.CorruptStore };
+}
+
+/// Shows `value` whole: its metadata, then its text, read through `a` in
+/// windows of main's 2048 bytes, each a round of its own on a network
+/// engine. Reaching the last byte checks the digest, as main's content
+/// reader did. Not inlined, so its window sits only on the chains that
+/// stream.
+noinline fn streamInline(a: *ReadAccess, capture: *SessionReportCapture, value: InlineValue) !void {
+    try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{value.length});
+    try capture.append(&std.fmt.bytesToHex(value.digest, .lower));
+    try capture.append("\",\"text\":\"");
+    var copy: content_domain.HashedWindow(2048) = .{ .hash = protocol.contentHasher() };
+    var offset: u64 = 0;
+    while (offset < value.length) {
+        const bytes = copy.window[0..@intCast(@min(copy.window.len, value.length - offset))];
+        try a.readRaw(value.id, offset, bytes);
+        copy.hash.update(bytes);
+        offset += bytes.len;
+        if (offset == value.length and !std.mem.eql(u8, &copy.hash.finalResult(), &value.digest)) return error.CorruptStore;
+        try capture.appendJsonStringBytes(bytes);
+    }
+    try capture.append("\"}");
+}
+
+/// A Full list read in chunks (`renderChunks`). `L` declares:
+/// - `S`, its statement, whose Args are the Session and the key after
+///   which a chunk starts, 0 before the first;
+/// - `after(session, row)`, the Args of the chunk after `row`;
+/// - `failed`, the name main gave its statement's failed step;
+/// - `pending`, how many rows with inline content a chunk keeps for after
+///   its round, and `streams(row)`, whether a row has any (a list with
+///   none has `pending` 0);
+/// - `render(a, capture, row)`, which streams the row's inline content.
+/// Optionally `State`, which `check(state, row)` updates for every row in
+/// order, and `First` with `queueFirst`/`checkFirst`, a read the first
+/// chunk's round queues before the list and judges before any row's
+/// failure. These are found by `@hasDecl`, which sees only `pub` ones.
+fn Chunk(comptime L: type) type {
+    return struct {
+        const Row = L.S.Row;
+        const State = if (@hasDecl(L, "State")) L.State else void;
+        const Failure = @typeInfo(@typeInfo(@TypeOf(L.render)).@"fn".return_type.?).error_union.error_set ||
+            if (@hasDecl(L, "check")) @typeInfo(@typeInfo(@TypeOf(L.check)).@"fn".return_type.?).error_union.error_set else error{};
+
+        a: *ReadAccess,
+        capture: *SessionReportCapture,
+        first: *bool,
+        state: *State,
+        after: L.S.Args,
+        rows: u16 = 0,
+        more: bool = false,
+        kept: [L.pending]Row = undefined,
+        count: u8 = 0,
+        failure: ?Failure = null,
+
+        /// Takes `row`, unless the chunk is full, of rows or of kept rows:
+        /// then `row` is the next chunk's first, and the chunk stops.
+        pub fn visit(chunk: *@This(), row: *const Row) bool {
+            if (chunk.rows == chunk_rows or (L.pending != 0 and chunk.count == L.pending)) {
+                chunk.more = true;
+                return false;
+            }
+            chunk.rows += 1;
+            chunk.after = L.after(chunk.after.session, row);
+            chunk.take(row) catch |err| {
+                chunk.failure = err;
+                return false;
+            };
+            return true;
+        }
+
+        /// Renders `row` in the pass, unless it or a row before it in
+        /// this chunk has inline content: then keeps it, in order.
+        fn take(chunk: *@This(), row: *const Row) Failure!void {
+            if (@hasDecl(L, "check")) try L.check(chunk.state, row);
+            if (L.pending == 0 or (chunk.count == 0 and !L.streams(row))) return chunk.render(row);
+            chunk.kept[chunk.count] = row.*;
+            chunk.count += 1;
+        }
+
+        fn render(chunk: *@This(), row: *const Row) Failure!void {
+            if (!chunk.first.*) try chunk.capture.append(",");
+            chunk.first.* = false;
+            try L.render(chunk.a, chunk.capture, row);
+        }
+    };
+}
+
+/// Renders list `L` (`Chunk`): a round per chunk, each a keyset read
+/// after the last row the chunk before it took, and after each round the
+/// rows it kept, with their inline content. Main's order of failures
+/// holds but one way: when a kept row's content fails and a later row of
+/// its chunk failed its step, the step's name answers. Not inlined, so
+/// each list's kept rows take only their own chain.
+noinline fn renderChunks(a: *ReadAccess, comptime L: type, session_ref: []const u8, capture: *SessionReportCapture) !void {
+    var state: Chunk(L).State = if (@hasDecl(L, "State")) .{} else {};
     var first = true;
-    while (try nextReportRow(statement, &first, capture, error.SessionReadFailed)) {
-        const revision = c.sqlite3_column_int64(statement, 0);
-        const tools = c.sqlite3_column_int(statement, 4);
-        const permission = c.sqlite3_column_int(statement, 5);
-        const instructions_id = c.sqlite3_column_int64(statement, 6);
-        if (revision <= 0 or tools < 0 or tools > tool_catalog.all_tools_mask or permission < 0 or permission > 1 or instructions_id <= 0) return error.CorruptStore;
-        try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{revision});
-        try appendColumnString(statement, 1, 128, capture);
-        try capture.append(",\"workspace\":");
-        try appendColumnString(statement, 2, protocol.max_workspace_bytes, capture);
-        try capture.append(",\"provider\":");
-        const provider = try sqlite.boundedColumnText(statement, 12, protocol.max_provider_bytes);
-        try capture.appendJsonString(@tagName(std.meta.stringToEnum(protocol.Provider, provider) orelse return error.CorruptStore));
-        try capture.append(",\"model\":");
-        try appendColumnString(statement, 3, protocol.max_model_bytes, capture);
-        try capture.append(",\"compaction_trigger\":");
-        try appendNullablePositiveInteger(statement, 13, capture);
-        try capture.append(",\"output_reservation\":");
-        try appendNullableNonnegativeInteger(statement, 14, capture);
-        try capture.append(",\"reasoning_effort\":");
-        try appendNullableEffort(try sqlite.readNullableEffort(statement, 15), capture);
-        try capture.append(",\"label\":");
-        if (c.sqlite3_column_type(statement, 16) == c.SQLITE_NULL) {
-            try capture.append("null");
-        } else {
-            // Read in place: a label buffer would take a slot in the report's frame.
-            const label = try sqlite.boundedColumnText(statement, 16, protocol.max_label_bytes);
-            try configuration_domain.checkLabel(label);
-            try capture.appendJsonString(label);
-        }
-        try capture.append(",\"tools\":");
-        try capture.appendTools(@intCast(tools));
-        try capture.append(",\"permission_mode\":");
-        try capture.appendPermissionMode(@intCast(permission));
-        try capture.append(",\"instructions\":");
-        try appendRevisionContent(
-            self,
-            instructions_id,
-            revision,
-            .instructions,
-            c.sqlite3_column_int64(statement, 8),
-            c.sqlite3_column_int(statement, 9),
-            capture,
-        );
-        try capture.append(",\"output_schema\":");
-        if (try sqlite.readNullablePositiveI64(statement, 7)) |content_id| {
-            if (c.sqlite3_column_type(statement, 10) == c.SQLITE_NULL or c.sqlite3_column_type(statement, 11) == c.SQLITE_NULL) return error.CorruptStore;
-            try appendRevisionContent(
-                self,
-                content_id,
-                revision,
-                .output_schema,
-                c.sqlite3_column_int64(statement, 10),
-                c.sqlite3_column_int(statement, 11),
-                capture,
-            );
-        } else {
-            if (c.sqlite3_column_type(statement, 10) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 11) != c.SQLITE_NULL) return error.CorruptStore;
-            try capture.append("null");
-        }
-        try capture.append("}");
+    var after: L.S.Args = .{ .session = session_ref };
+    var first_chunk = true;
+    while (true) {
+        var chunk: Chunk(L) = .{ .a = a, .capture = capture, .first = &first, .state = &state, .after = after };
+        var first_read: if (@hasDecl(L, "queueFirst")) L.First else void = undefined;
+        if (@hasDecl(L, "queueFirst")) if (first_chunk) L.queueFirst(a, session_ref, &first_read);
+        a.readEach(L.S, after, chunk_rows + 1, &chunk);
+        const ran = store_access.runAs(a, L.failed);
+        // Main judged this read before any row, and a failed round
+        // stepped no row after it.
+        if (@hasDecl(L, "queueFirst")) if (first_chunk) if (ran) |_| try L.checkFirst(&first_read) else |_| {};
+        if (chunk.failure) |err| return err;
+        try ran;
+        for (chunk.kept[0..chunk.count]) |*row| try chunk.render(row);
+        if (!chunk.more) return;
+        after = chunk.after;
+        first_chunk = false;
     }
 }
 
-fn appendRevisionContent(
-    self: *Store,
-    content_id: i64,
-    revision: i64,
-    field: RevisionContentField,
-    owner_revision: i64,
-    owner_field_value: c_int,
+/// How many revisions an ownership window holds (`OwnerWindow`).
+pub const owner_window = 64;
+
+/// The owners of the contents of the Session's next `owner_window`
+/// revisions after ?2, by `revision`. A content's owner is its first
+/// occurrence in the Session's revisions, instructions before output
+/// schema within one, as `revision*2+field`: the least such value over
+/// every revision of the Session, which is the first up to the row's,
+/// since the row holds the content itself. Each run groups the Session's
+/// revisions once, where a per-row lookup would read every earlier
+/// revision for content none of them holds.
+pub const revision_owners = rsql.Read(.{
+    .sql = "WITH occurrence AS (SELECT instructions_content_id AS content_id,revision*2 AS owner FROM session_revision WHERE session_ref=?1 UNION ALL " ++
+        "SELECT output_schema_content_id AS content_id,revision*2+1 AS owner FROM session_revision WHERE session_ref=?1 AND output_schema_content_id IS NOT NULL)," ++
+        "first_occurrence AS (SELECT content_id,min(owner) AS owner FROM occurrence GROUP BY content_id) " ++
+        "SELECT r.revision,instructions.owner AS instructions_owner,output_schema.owner AS output_schema_owner FROM session_revision r " ++
+        "LEFT JOIN first_occurrence instructions ON instructions.content_id=r.instructions_content_id " ++
+        "LEFT JOIN first_occurrence output_schema ON output_schema.content_id=r.output_schema_content_id " ++
+        "WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY r.revision LIMIT " ++ std.fmt.comptimePrint("{d}", .{owner_window}),
+    .compound = true,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        revision: rsql.Positive,
+        instructions_owner: rsql.Positive,
+        output_schema_owner: ?rsql.Positive,
+    },
+    .cardinality = .each,
+});
+
+/// The Session's revisions, by `revision`, with each content's metadata.
+const full_revisions = rsql.Read(.{
+    .sql = "SELECT r.revision,r.command_key,r.workspace,r.provider,r.model,r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++
+        "r.tools_mask,r.permission_mode,r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length," ++
+        "instructions.digest AS instructions_digest," ++
+        "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest " ++
+        "FROM session_revision r LEFT JOIN content instructions ON instructions.content_id=r.instructions_content_id " ++
+        "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id " ++
+        "WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY r.revision LIMIT " ++ std.fmt.comptimePrint("{d}", .{owner_window + 1}),
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        revision: rsql.Positive,
+        command_key: protocol.Bounded(128),
+        workspace: protocol.Bounded(protocol.max_workspace_bytes),
+        provider: protocol.Provider,
+        model: protocol.Bounded(protocol.max_model_bytes),
+        compaction_trigger: ?rsql.Positive,
+        output_reservation: ?u64,
+        reasoning_effort: ?protocol.ReasoningEffort,
+        label: ?protocol.Bounded(protocol.max_label_bytes),
+        tools_mask: u8,
+        permission_mode: u8,
+        instructions_id: rsql.Positive,
+        instructions_length: u64,
+        instructions_digest: [32]u8,
+        output_schema_id: ?rsql.Positive,
+        output_schema_length: ?u64,
+        output_schema_digest: ?[32]u8,
+    },
+    .cardinality = .each,
+});
+
+/// The owners `revision_owners` read for the revisions a window covers,
+/// in order.
+const OwnerWindow = struct {
+    owners: [owner_window]Owners = undefined,
+    count: u8 = 0,
+
+    const Owners = struct { revision: u64, instructions: u64, output_schema: ?u64 };
+
+    pub fn visit(window: *OwnerWindow, row: *const revision_owners.Row) bool {
+        window.owners[window.count] = .{
+            .revision = row.revision.get(),
+            .instructions = row.instructions_owner.get(),
+            .output_schema = if (row.output_schema_owner) |owner| owner.get() else null,
+        };
+        window.count += 1;
+        return true;
+    }
+};
+
+/// A revision's content, as its row shows it: whole where the revision
+/// owns it, else a reference to its owner.
+const RevisionContent = struct {
+    value: InlineValue,
+    owner_revision: u64,
+    owner_field: RevisionContentField,
+    owned: bool,
+
+    fn of(value: InlineValue, owner: u64, revision: u64, field: RevisionContentField) RevisionContent {
+        const owner_field: RevisionContentField = if (owner % 2 == 0) .instructions else .output_schema;
+        return .{ .value = value, .owner_revision = owner / 2, .owner_field = owner_field, .owned = owner / 2 == revision and owner_field == field };
+    }
+
+    /// Inline, so streaming adds no frame between the revisions' and
+    /// `streamInline`'s.
+    inline fn render(content: *const RevisionContent, a: *ReadAccess, capture: *SessionReportCapture) !void {
+        if (content.owned) return streamInline(a, capture, content.value);
+        try content.renderReference(capture);
+    }
+
+    /// Not inlined: its formatting takes no frame on the streaming chain.
+    noinline fn renderReference(content: *const RevisionContent, capture: *SessionReportCapture) !void {
+        try capture.appendOwnedContentReference(.{ .length = content.value.length, .digest = content.value.digest }, @intCast(content.owner_revision), content.owner_field);
+    }
+};
+
+/// What follows a revision's settings: its instructions and output schema.
+const RevisionTail = struct {
+    instructions: RevisionContent,
+    output_schema: ?RevisionContent,
+
+    fn render(tail: *const RevisionTail, a: *ReadAccess, capture: *SessionReportCapture) !void {
+        try capture.append(",\"instructions\":");
+        try tail.instructions.render(a, capture);
+        try capture.append(",\"output_schema\":");
+        if (tail.output_schema) |*content| try content.render(a, capture) else try capture.append("null");
+        try capture.append("}");
+    }
+
+    fn streams(tail: *const RevisionTail) bool {
+        return tail.instructions.owned or (tail.output_schema != null and tail.output_schema.?.owned);
+    }
+};
+
+/// Renders the revisions as their chunks step: each row's settings, then
+/// its contents, which wait for the round's end when the row owns one, so
+/// the chunk stops at the row after it, which its next chunk starts with.
+/// A row holds a workspace of up to 4 KiB, so only that tail is kept. A
+/// chunk also stops at a row past its ownership window.
+const RevisionChunk = struct {
+    a: *ReadAccess,
     capture: *SessionReportCapture,
-) !void {
-    if (content_id <= 0 or revision <= 0 or owner_revision <= 0 or owner_revision > revision) return error.CorruptStore;
-    const owner_field: RevisionContentField = switch (owner_field_value) {
-        0 => .instructions,
-        1 => .output_schema,
-        else => return error.CorruptStore,
-    };
-    if (owner_revision == revision and @backingInt(owner_field) > @backingInt(field)) return error.CorruptStore;
-    if (owner_revision == revision and owner_field == field) return appendInlineContent(self, content_id, capture);
-    const metadata = try content_domain.readContentMetadata(self, content_id);
-    try capture.appendOwnedContentReference(
-        .{ .length = metadata.length, .digest = metadata.digest },
-        owner_revision,
-        owner_field,
-    );
+    window: *const OwnerWindow,
+    /// The window's next owners.
+    next: u8,
+    first: bool,
+    after: u64,
+    more: bool = false,
+    tail: ?RevisionTail = null,
+    failure: ?Failure = null,
+    decoded: full_revisions.Row = undefined,
+
+    const Failure = SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore } ||
+        @typeInfo(@typeInfo(@TypeOf(RevisionTail.render)).@"fn".return_type.?).error_union.error_set;
+
+    /// Takes `row`, unless the chunk keeps a tail or its window has no
+    /// owners left: then `row` is the next chunk's first, and the chunk
+    /// stops.
+    pub fn visit(chunk: *RevisionChunk, row: *const full_revisions.Row) bool {
+        if (chunk.tail != null or chunk.next == chunk.window.count) {
+            chunk.more = true;
+            return false;
+        }
+        const owners = &chunk.window.owners[chunk.next];
+        // Both reads list the Session's revisions after the same one, in
+        // one snapshot.
+        std.debug.assert(owners.revision == row.revision.get());
+        chunk.next += 1;
+        chunk.after = row.revision.get();
+        chunk.take(row, owners) catch |err| {
+            chunk.failure = err;
+            return false;
+        };
+        return true;
+    }
+
+    /// Renders `row`, keeping a tail that streams; a tail of references
+    /// renders in the pass.
+    fn take(chunk: *RevisionChunk, row: *const full_revisions.Row, owners: *const OwnerWindow.Owners) Failure!void {
+        const tail = try chunk.renderSettings(row, owners);
+        if (!tail.streams()) return tail.render(chunk.a, chunk.capture);
+        chunk.tail = tail;
+    }
+
+    fn renderSettings(chunk: *RevisionChunk, row: *const full_revisions.Row, owners: *const OwnerWindow.Owners) (SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore })!RevisionTail {
+        const capture = chunk.capture;
+        if (!chunk.first) try capture.append(",");
+        chunk.first = false;
+        const revision = row.revision.get();
+        try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{revision});
+        try capture.appendJsonString(row.command_key.slice());
+        try capture.append(",\"workspace\":");
+        try capture.appendJsonString(row.workspace.slice());
+        try capture.append(",\"provider\":");
+        try capture.appendJsonString(@tagName(row.provider));
+        try capture.append(",\"model\":");
+        try capture.appendJsonString(row.model.slice());
+        try capture.append(",\"compaction_trigger\":");
+        try appendOptionalPositive(row.compaction_trigger, capture);
+        try capture.append(",\"output_reservation\":");
+        if (row.output_reservation) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
+        try capture.append(",\"reasoning_effort\":");
+        try appendNullableEffort(row.reasoning_effort, capture);
+        try capture.append(",\"label\":");
+        if (row.label) |*label| {
+            try configuration_domain.checkLabel(label.slice());
+            try capture.appendJsonString(label.slice());
+        } else try capture.append("null");
+        try capture.append(",\"tools\":");
+        try capture.appendTools(row.tools_mask);
+        try capture.append(",\"permission_mode\":");
+        try capture.appendPermissionMode(row.permission_mode);
+        const instructions: InlineValue = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
+        const output_schema = try optionalValue(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
+        return .{
+            .instructions = .of(instructions, owners.instructions, revision, .instructions),
+            // The row itself holds its output schema, so it has an owner.
+            .output_schema = if (output_schema) |value| .of(value, owners.output_schema.?, revision, .output_schema) else null,
+        };
+    }
+};
+
+/// The revisions list (`RevisionChunk`), whose step failure is main's
+/// `SessionReadFailed`. A chunk that starts where its ownership window
+/// ends queues the next window's read before it, in its round. Not
+/// inlined: its chunk holds a decoded row.
+noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
+    var first = true;
+    var after: u64 = 0;
+    var window: OwnerWindow = .{};
+    var next: u8 = 0;
+    while (true) {
+        if (next == window.count) {
+            window = .{};
+            next = 0;
+            a.readEach(revision_owners, .{ .session = session_ref, .after = after }, owner_window, &window);
+        }
+        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .window = &window, .next = next, .first = first, .after = after };
+        a.readEach(full_revisions, .{ .session = session_ref, .after = after }, owner_window + 1, &chunk);
+        const ran = store_access.runAs(a, error.SessionReadFailed);
+        if (chunk.failure) |err| return err;
+        try ran;
+        if (chunk.tail) |*tail| try tail.render(a, capture);
+        if (!chunk.more) return;
+        first = chunk.first;
+        after = chunk.after;
+        next = chunk.next;
+    }
 }
 
-fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
-            "t.outcome_code,t.outcome_content_id " ++
-            "FROM message_admission m LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
-            "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
-            "WHERE m.session_ref=?1 ORDER BY m.admission_id",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    const stops = try store_core.cached(
-        self,
-        "SELECT stopped.command_key,stopped.admission_cutoff FROM session_stop stopped " ++
-            "JOIN core_command command ON command.command_key=stopped.command_key " ++
-            "WHERE stopped.session_ref=?1 ORDER BY command.command_seq",
-    );
-    defer sqlite.resetCached(stops);
-    try sqlite.bindText(stops, 1, session_ref);
-    var stop_result = c.sqlite3_step(stops);
-    if (stop_result != c.SQLITE_ROW and stop_result != c.SQLITE_DONE) return error.SessionStopReadFailed;
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.MessageReadFailed)) {
-        const admission_id = c.sqlite3_column_int64(statement, 2);
-        if (admission_id <= 0) return error.CorruptStore;
-        var excluding_key: protocol.Bounded(128) = .{};
-        var excluding_stop: ?[]const u8 = null;
-        if (c.sqlite3_column_type(statement, 4) == c.SQLITE_NULL) {
-            while (stop_result == c.SQLITE_ROW) {
-                const cutoff = c.sqlite3_column_int64(stops, 1);
-                if (cutoff < 0) return error.CorruptStore;
-                if (cutoff >= admission_id) {
-                    try sqlite.readText(stops, 0, &excluding_key);
-                    excluding_stop = excluding_key.slice();
-                    break;
-                }
-                stop_result = c.sqlite3_step(stops);
-                if (stop_result != c.SQLITE_ROW and stop_result != c.SQLITE_DONE) return error.SessionStopReadFailed;
-            }
-        }
-        const projection = try command_domain.readMessageProjectionRow(statement, excluding_stop);
-        if (!projection.session.eql(session_ref)) return error.CorruptStore;
+/// The Session's Messages, by `admission_position` and then id, each
+/// with its content, its Turn's outcome and, for one no Turn took, the
+/// stop with the least cutoff that reaches it, the first by position
+/// among equal cutoffs. Main walked the stops in command order and took
+/// the first that reaches it: the same stop, since a stop's cutoff is its
+/// Session's newest admission when it commits and its position is claimed
+/// in that commit, so neither falls in command order. Nothing checks this
+/// at run time. The seek (`session_stop_exclusion`) keeps the work linear
+/// in Messages and stops.
+pub const full_messages = rsql.Read(.{
+    .sql = "SELECT m.admission_position,m.admission_id,m.command_key,m.content_id,input.byte_length AS content_length,input.digest AS content_digest," ++
+        "m.turn_id,t.operation_id,o.attempt_ordinal,t.outcome_code,t.outcome_content_id,outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest," ++
+        "CASE WHEN m.turn_id IS NULL THEN (SELECT stopped.command_key FROM session_stop stopped " ++
+        "WHERE stopped.session_ref=m.session_ref AND stopped.admission_cutoff>=m.admission_id " ++
+        "ORDER BY stopped.admission_cutoff,stopped.position LIMIT 1) END AS excluding_stop " ++
+        "FROM message_admission m @index(message_admission_position) LEFT JOIN content input ON input.content_id=m.content_id " ++
+        "LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+        "LEFT JOIN content outcome ON outcome.content_id=t.outcome_content_id " ++
+        "WHERE m.session_ref=?1 AND m.admission_position>=?2 AND (m.admission_position>?2 OR m.admission_id>?3) " ++
+        "ORDER BY m.admission_position,m.admission_id" ++ chunk_limit,
+    .Args = struct { session: []const u8, position: u64 = 0, admission: u64 = 0 },
+    .Row = struct {
+        admission_position: rsql.Positive,
+        admission_id: rsql.Positive,
+        command_key: protocol.Bounded(128),
+        content_id: rsql.Positive,
+        content_length: u64,
+        content_digest: [32]u8,
+        turn_id: ?rsql.Positive,
+        operation_id: ?rsql.Positive,
+        attempt_ordinal: ?rsql.Positive,
+        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        outcome_length: ?u64,
+        outcome_digest: ?[32]u8,
+        excluding_stop: ?protocol.Bounded(128),
+    },
+    .cardinality = .each,
+});
+
+/// Whether the Session has a Message without a position, which a list by
+/// position would leave out.
+const unpositioned_message = rsql.Read(.{
+    .sql = "SELECT 1 AS found FROM message_admission @index(message_admission_unpositioned) WHERE session_ref=?1 AND admission_position IS NULL LIMIT 1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { found: bool },
+    .cardinality = .optional,
+});
+
+pub const Messages = struct {
+    const S = full_messages;
+    const failed = error.MessageReadFailed;
+    pub const pending = 4;
+    pub const First = unpositioned_message.Result;
+    /// The last admission listed: main listed Messages by admission, so
+    /// positions must order them the same way.
+    pub const State = struct { admission: u64 = 0 };
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .position = row.admission_position.get(), .admission = row.admission_id.get() };
+    }
+
+    pub fn queueFirst(a: *ReadAccess, session: []const u8, found: *First) void {
+        a.read(unpositioned_message, .{ .session = session }, found);
+    }
+
+    /// A Message without a position is `CorruptStore`, where main listed it.
+    pub fn checkFirst(found: *const First) error{CorruptStore}!void {
+        if (found.* != null) return error.CorruptStore;
+    }
+
+    /// A Message admitted before one listed ahead of it is `CorruptStore`.
+    pub fn check(state: *State, row: *const S.Row) error{CorruptStore}!void {
+        if (row.admission_id.get() <= state.admission) return error.CorruptStore;
+        state.admission = row.admission_id.get();
+    }
+
+    fn streams(_: *const S.Row) bool {
+        return true;
+    }
+
+    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        const projection = try command_domain.projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
         try capture.appendFmt("{{\"admission\":\"{d}\",\"command_key\":", .{projection.admission_id});
         try capture.appendJsonString(projection.command_key.slice());
         try capture.append(",\"content\":");
-        try appendInlineContent(self, projection.content_id, capture);
+        try streamInline(a, capture, .{ .id = row.content_id.get(), .length = row.content_length, .digest = row.content_digest });
         try capture.append(",\"turn\":");
         switch (projection.state) {
             .applied => |applied| try capture.appendFmt("\"{d}\"", .{applied.binding.turn_id}),
@@ -1786,312 +2085,508 @@ fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReport
                 try capture.append("{\"code\":");
                 try capture.appendJsonString(code.slice());
                 try capture.append(",\"content\":");
-                if (applied.outcome_content_id) |content_id| {
-                    const metadata = try content_domain.readContentMetadata(self, content_id);
-                    try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
-                } else try capture.append("null");
+                try appendReference(row.outcome_content_id, row.outcome_length, row.outcome_digest, capture);
                 try capture.append("}");
             } else try capture.append("null"),
             .pending, .excluded => try capture.append("null"),
         }
         try capture.append("}");
     }
+};
+
+/// Content shown by reference, or null for none.
+fn appendReference(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8, capture: *SessionReportCapture) !void {
+    const value = try optionalValue(id, length, digest) orelse return capture.append("null");
+    try capture.appendBareContentReference(.{ .length = value.length, .digest = value.digest });
 }
 
-fn appendConversation(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    try reads_domain.validateAssistantEntries(self, session_ref, 0, std.math.maxInt(i64));
-    const statement = try store_core.cached(
-        self,
-        "SELECT entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id " ++
-            "FROM conversation_entry WHERE session_ref=?1 ORDER BY entry_ordinal",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.ConversationReadFailed)) {
-        const ordinal = c.sqlite3_column_int64(statement, 0);
-        const position = c.sqlite3_column_int64(statement, 1);
-        const kind = c.sqlite3_column_int(statement, 2);
-        const turn_id = c.sqlite3_column_int64(statement, 3);
-        const content_id = c.sqlite3_column_int64(statement, 7);
-        if (ordinal <= 0 or position <= 0 or kind < 1 or kind > 3 or turn_id <= 0 or content_id <= 0) return error.CorruptStore;
-        if (kind != 2 and (try reads_domain.publicConversationContentLocked(self, session_ref, @intCast(position), 0)).id != content_id) return error.CorruptStore;
-        try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":\"{d}\",\"source_admission\":", .{ ordinal, position, switch (kind) {
-            1 => "message",
-            2 => "settings",
-            3 => "assistant",
-            else => unreachable,
-        }, turn_id });
-        try appendNullablePositiveInteger(statement, 4, capture);
-        try capture.append(",\"source_revision\":");
-        try appendNullablePositiveInteger(statement, 5, capture);
-        try capture.append(",\"source_operation\":");
-        try appendNullablePositiveInteger(statement, 6, capture);
-        try capture.append(",\"content\":");
-        const metadata = try content_domain.readContentMetadata(self, content_id);
-        try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
-        try capture.append("}");
+/// A Turn's or Operation's outcome code, with no content when it has none.
+fn checkOutcome(code: anytype, content_id: ?rsql.Positive) error{CorruptStore}!void {
+    if (code.* == null and content_id != null) return error.CorruptStore;
+}
+
+/// The Session's Conversation entries, by `entry_ordinal`, each with its
+/// content's metadata and, for a message or assistant entry, whether it
+/// is public (`reads.public_entry_consistent`), which main read per row.
+const full_conversation = rsql.Read(.{
+    .sql = "SELECT e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id," ++
+        "c.byte_length AS content_length,c.digest AS content_digest,CASE WHEN e.entry_kind=2 OR " ++ reads_domain.public_entry_consistent ++
+        " THEN 1 ELSE 0 END AS consistent FROM conversation_entry e " ++ reads_domain.public_entry_joins ++
+        " WHERE e.session_ref=?1 AND e.entry_ordinal>?2 ORDER BY e.entry_ordinal" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        entry_ordinal: rsql.Positive,
+        session_position: rsql.Positive,
+        entry_kind: u8,
+        turn_id: rsql.Positive,
+        source_admission_id: ?rsql.Positive,
+        source_revision: ?rsql.Positive,
+        source_operation_id: ?rsql.Positive,
+        content_length: u64,
+        content_digest: [32]u8,
+        consistent: bool,
+    },
+    .cardinality = .each,
+});
+
+const Conversation = struct {
+    const S = full_conversation;
+    const failed = error.ConversationReadFailed;
+    const pending = 0;
+    pub const First = reads_domain.missing_assistant_entry.Result;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.entry_ordinal.get() };
     }
-}
 
-fn appendTurns(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT turn_id,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id FROM turn WHERE session_ref=?1 ORDER BY turn_id");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.TurnReadFailed)) {
-        const turn_id = c.sqlite3_column_int64(statement, 0);
-        const first_admission = c.sqlite3_column_int64(statement, 1);
-        const cutoff = c.sqlite3_column_int64(statement, 2);
-        const operation = c.sqlite3_column_int64(statement, 3);
-        if (turn_id <= 0 or first_admission <= 0 or cutoff < first_admission or operation <= 0) return error.CorruptStore;
-        try capture.appendFmt("{{\"turn\":\"{d}\",\"first_admission\":\"{d}\",\"input_cutoff\":\"{d}\",\"operation\":\"{d}\",\"outcome\":", .{ turn_id, first_admission, cutoff, operation });
-        try appendReferencedOutcome(self, statement, 4, 5, capture);
-        try capture.append("}");
+    /// Every accepted assistant message has its entry, at any position,
+    /// as main checked before the list; it implies main's check per row.
+    pub fn queueFirst(a: *ReadAccess, session: []const u8, missing: *First) void {
+        a.read(reads_domain.missing_assistant_entry, .{ .session = session, .lower = 0, .upper = std.math.maxInt(i64) }, missing);
     }
-}
 
-fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision,request_id,reasoning_effort FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.OperationReadFailed)) {
-        const operation = c.sqlite3_column_int64(statement, 0);
-        const turn_id = c.sqlite3_column_int64(statement, 1);
-        if (operation <= 0 or turn_id <= 0) return error.CorruptStore;
-        try capture.appendFmt("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"resolution\":", .{ operation, turn_id });
-        try appendInlineOutcome(self, statement, 2, 3, capture);
-        try capture.append(",\"interrupted_by\":");
-        try appendNullableColumnString(statement, 4, 128, capture);
-        const revision = c.sqlite3_column_int64(statement, 5);
-        if (revision <= 0) return error.CorruptStore;
-        try capture.appendFmt(",\"settings_revision\":\"{d}\"", .{revision});
-        try capture.append(",\"request_id\":");
-        try appendNullableColumnString(statement, 6, 256, capture);
-        try capture.append(",\"reasoning_effort\":");
-        try appendNullableEffort(try sqlite.readNullableEffort(statement, 7), capture);
-        try capture.append("}");
+    pub fn checkFirst(missing: *const First) error{CorruptStore}!void {
+        if (missing.* != null) return error.CorruptStore;
     }
-}
 
-fn appendToolCalls(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.item_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
-            "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id,tool_call.rejection_content_id " ++
-            "FROM model_tool_call tool_call JOIN model_operation operation ON operation.operation_id=tool_call.operation_id " ++
-            "WHERE operation.session_ref=?1 ORDER BY tool_call.operation_id,tool_call.call_ordinal",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.CallReadFailed)) {
-        const operation = c.sqlite3_column_int64(statement, 0);
-        const ordinal = c.sqlite3_column_int64(statement, 1);
-        const item = c.sqlite3_column_int64(statement, 2);
-        if (operation <= 0 or ordinal < 0 or item < 0) return error.CorruptStore;
-        try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"item_ordinal\":\"{d}\",\"rejection\":", .{ operation, ordinal, item });
-        try appendNullableColumnString(statement, 3, 32, capture);
-        try capture.append(",\"acceptance_position\":");
-        try appendNullablePositiveInteger(statement, 4, capture);
-        inline for (.{ .{ "name", 5 }, .{ "call_id", 6 }, .{ "arguments", 7 } }) |field| {
-            try capture.append(",\"");
-            try capture.append(field[0]);
-            try capture.append("\":");
-            const content_id = c.sqlite3_column_int64(statement, field[1]);
-            if (content_id <= 0) return error.CorruptStore;
-            try appendInlineContent(self, content_id, capture);
-        }
-        try capture.append(",\"rejection_result\":");
-        if (try sqlite.readNullablePositiveI64(statement, 8)) |content_id| try appendInlineContent(self, content_id, capture) else try capture.append("null");
-        try capture.append("}");
-    }
-}
-
-fn appendAllActions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT action_id,parent_operation_id,call_ordinal,permission_revision," ++
-        "CASE WHEN resolution_code IS 'denied' THEN 'denied' WHEN authorized=1 THEN 'authorized' ELSE 'requested' END,resolution_code,resolution_content_id,acceptance_position FROM action_operation WHERE session_ref=?1 ORDER BY action_id");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.ActionReadFailed)) {
-        const action = c.sqlite3_column_int64(statement, 0);
-        const parent = c.sqlite3_column_int64(statement, 1);
-        const ordinal = c.sqlite3_column_int64(statement, 2);
-        const revision = c.sqlite3_column_int64(statement, 3);
-        var permission: protocol.Bounded(16) = .{};
-        try sqlite.readText(statement, 4, &permission);
-        if (action <= 0 or parent <= 0 or ordinal < 0 or revision <= 0) return error.CorruptStore;
-        try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"permission_revision\":\"{d}\",\"permission\":\"{s}\",\"resolution\":", .{ action, parent, ordinal, revision, permission.slice() });
-        try appendNullableColumnString(statement, 5, max_action_resolution_code_bytes, capture);
-        try capture.append(",\"result\":");
-        if (try sqlite.readNullablePositiveI64(statement, 6)) |content_id| try appendInlineContent(self, content_id, capture) else try capture.append("null");
-        try capture.append(",\"acceptance_position\":");
-        try appendNullablePositiveInteger(statement, 7, capture);
-        try capture.append("}");
-    }
-}
-
-fn appendPermissionDecisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT decision.command_key,decision.action_id,decision.decision,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.command_seq");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.PermissionReadFailed)) {
-        try capture.append("{\"command_key\":");
-        try appendColumnString(statement, 0, 128, capture);
-        try capture.append(",\"action\":");
-        try appendColumnString(statement, 1, 20, capture);
-        var decision_text: protocol.Bounded(max_permission_decision_bytes) = .{};
-        try sqlite.readText(statement, 2, &decision_text);
-        const decision = std.meta.stringToEnum(protocol.PermissionDecision, decision_text.slice()) orelse return error.CorruptStore;
-        try capture.appendFmt(",\"decision\":\"{s}\",\"status\":\"{s}\",\"code\":", .{
-            @tagName(decision),
-            if (c.sqlite3_column_int(statement, 3) == 0) "rejected" else "accepted",
+    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        if (row.entry_kind < 1 or row.entry_kind > 3 or !row.consistent) return error.CorruptStore;
+        try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":\"{d}\",\"source_admission\":", .{
+            row.entry_ordinal.get(),
+            row.session_position.get(),
+            switch (row.entry_kind) {
+                1 => "message",
+                2 => "settings",
+                3 => "assistant",
+                else => unreachable,
+            },
+            row.turn_id.get(),
         });
-        try appendColumnString(statement, 4, 96, capture);
+        try appendOptionalPositive(row.source_admission_id, capture);
+        try capture.append(",\"source_revision\":");
+        try appendOptionalPositive(row.source_revision, capture);
+        try capture.append(",\"source_operation\":");
+        try appendOptionalPositive(row.source_operation_id, capture);
+        try capture.append(",\"content\":");
+        try capture.appendBareContentReference(.{ .length = row.content_length, .digest = row.content_digest });
         try capture.append("}");
     }
+};
+
+fn appendOptionalPositive(value: ?rsql.Positive, capture: *SessionReportCapture) !void {
+    if (value) |positive| try capture.appendFmt("\"{d}\"", .{positive.get()}) else try capture.append("null");
 }
 
-fn appendSessionStops(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key WHERE command.kind=3 AND command.target=?1 ORDER BY command.command_seq");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.SessionStopReadFailed)) {
-        try capture.append("{\"command_key\":");
-        try appendColumnString(statement, 0, 128, capture);
-        try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{if (c.sqlite3_column_int(statement, 1) == 0) "rejected" else "accepted"});
-        try appendColumnString(statement, 2, 96, capture);
-        try capture.append(",\"selected_turn\":");
-        try appendNullablePositiveInteger(statement, 3, capture);
-        try capture.append(",\"admission_cutoff\":");
-        try appendNullableNonnegativeInteger(statement, 4, capture);
+/// The Session's Turns, by `turn_id`, with their outcomes' metadata.
+const full_turns = rsql.Read(.{
+    .sql = "SELECT t.turn_id,t.first_admission_id,t.input_cutoff,t.operation_id,t.outcome_code,t.outcome_content_id," ++
+        "outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest " ++
+        "FROM turn t @index(turn_session_latest) LEFT JOIN content outcome ON outcome.content_id=t.outcome_content_id " ++
+        "WHERE t.session_ref=?1 AND t.turn_id>?2 ORDER BY t.turn_id" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        turn_id: rsql.Positive,
+        first_admission_id: rsql.Positive,
+        input_cutoff: u64,
+        operation_id: rsql.Positive,
+        outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        outcome_length: ?u64,
+        outcome_digest: ?[32]u8,
+    },
+    .cardinality = .each,
+});
+
+const Turns = struct {
+    const S = full_turns;
+    const failed = error.TurnReadFailed;
+    const pending = 0;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.turn_id.get() };
+    }
+
+    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        if (row.input_cutoff < row.first_admission_id.get()) return error.CorruptStore;
+        try checkOutcome(&row.outcome_code, row.outcome_content_id);
+        try capture.appendFmt("{{\"turn\":\"{d}\",\"first_admission\":\"{d}\",\"input_cutoff\":\"{d}\",\"operation\":\"{d}\",\"outcome\":", .{
+            row.turn_id.get(),
+            row.first_admission_id.get(),
+            row.input_cutoff,
+            row.operation_id.get(),
+        });
+        if (row.outcome_code) |*code| {
+            try capture.append("{\"code\":");
+            try capture.appendJsonString(code.slice());
+            try capture.append(",\"content\":");
+            try appendReference(row.outcome_content_id, row.outcome_length, row.outcome_digest, capture);
+            try capture.append("}");
+        } else try capture.append("null");
         try capture.append("}");
     }
-}
+};
 
-fn appendModelInterruptions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(self, "SELECT command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id FROM model_interruption_command interruption JOIN core_command command ON command.command_key=interruption.command_key WHERE interruption.session_ref=?1 ORDER BY command.command_seq");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.InterruptionReadFailed)) {
-        try capture.append("{\"command_key\":");
-        try appendColumnString(statement, 0, 128, capture);
-        try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{if (c.sqlite3_column_int(statement, 1) == 0) "rejected" else "accepted"});
-        try appendColumnString(statement, 2, 96, capture);
-        try capture.append(",\"turn\":");
-        try appendColumnString(statement, 3, 20, capture);
-        try capture.append(",\"operation\":");
-        try appendColumnString(statement, 4, 20, capture);
+/// The Session's Operations, by `operation_id`, with their resolutions'
+/// metadata.
+const full_operations = rsql.Read(.{
+    .sql = "SELECT o.operation_id,o.turn_id,o.resolution_code,o.resolution_content_id,resolution.byte_length AS resolution_length," ++
+        "resolution.digest AS resolution_digest,o.interrupted_by_command_key,o.settings_revision,o.request_id,o.reasoning_effort " ++
+        "FROM model_operation o @index(model_operation_session_history) LEFT JOIN content resolution ON resolution.content_id=o.resolution_content_id " ++
+        "WHERE o.session_ref=?1 AND o.operation_id>?2 ORDER BY o.operation_id" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        operation_id: rsql.Positive,
+        turn_id: rsql.Positive,
+        resolution_code: ?protocol.Bounded(protocol.max_code_bytes),
+        resolution_content_id: ?rsql.Positive,
+        resolution_length: ?u64,
+        resolution_digest: ?[32]u8,
+        interrupted_by_command_key: ?protocol.Bounded(128),
+        settings_revision: rsql.Positive,
+        request_id: ?protocol.Bounded(256),
+        reasoning_effort: ?protocol.ReasoningEffort,
+    },
+    .cardinality = .each,
+});
+
+const Operations = struct {
+    const S = full_operations;
+    const failed = error.OperationReadFailed;
+    const pending = 4;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.operation_id.get() };
+    }
+
+    fn streams(row: *const S.Row) bool {
+        return row.resolution_content_id != null;
+    }
+
+    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        try checkOutcome(&row.resolution_code, row.resolution_content_id);
+        try capture.appendFmt("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"resolution\":", .{ row.operation_id.get(), row.turn_id.get() });
+        if (row.resolution_code) |*code| {
+            try capture.append("{\"code\":");
+            try capture.appendJsonString(code.slice());
+            try capture.append(",\"content\":");
+            try appendInline(a, row.resolution_content_id, row.resolution_length, row.resolution_digest, capture);
+            try capture.append("}");
+        } else try capture.append("null");
+        try capture.append(",\"interrupted_by\":");
+        try appendOptionalText(&row.interrupted_by_command_key, capture);
+        try capture.appendFmt(",\"settings_revision\":\"{d}\",\"request_id\":", .{row.settings_revision.get()});
+        try appendOptionalText(&row.request_id, capture);
+        try capture.append(",\"reasoning_effort\":");
+        try appendNullableEffort(row.reasoning_effort, capture);
         try capture.append("}");
     }
+};
+
+/// Content shown whole, or null for none.
+fn appendInline(a: *ReadAccess, id: ?rsql.Positive, length: ?u64, digest: ?[32]u8, capture: *SessionReportCapture) !void {
+    const value = try optionalValue(id, length, digest) orelse return capture.append("null");
+    try streamInline(a, capture, value);
 }
 
-fn appendToolResults(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT tool_call.operation_id,tool_call.call_ordinal,coalesce(tool_call.acceptance_position,action.acceptance_position)," ++
-            "tool_call.call_id_content_id,coalesce(tool_call.rejection_code,action.resolution_code)," ++
-            "coalesce(tool_call.rejection_content_id,action.resolution_content_id) FROM model_tool_call tool_call " ++
-            "JOIN model_operation operation ON operation.operation_id=tool_call.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-            "WHERE operation.session_ref=?1 AND coalesce(tool_call.rejection_code,action.resolution_code) IS NOT NULL " ++
-            "ORDER BY tool_call.operation_id,coalesce(tool_call.acceptance_position,action.acceptance_position)",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    var first = true;
-    while (try nextReportRow(statement, &first, capture, error.CallReadFailed)) {
-        const operation = c.sqlite3_column_int64(statement, 0);
-        const ordinal = c.sqlite3_column_int64(statement, 1);
-        const position = c.sqlite3_column_int64(statement, 2);
-        const call_id = c.sqlite3_column_int64(statement, 3);
-        const result = c.sqlite3_column_int64(statement, 5);
-        if (operation <= 0 or ordinal < 0 or position <= 0 or call_id <= 0 or result <= 0) return error.CorruptStore;
-        try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"acceptance_position\":\"{d}\",\"call_id\":", .{ operation, ordinal, position });
-        try appendInlineContent(self, call_id, capture);
-        try capture.append(",\"code\":");
-        try appendColumnString(statement, 4, 32, capture);
+fn appendOptionalText(text: anytype, capture: *SessionReportCapture) !void {
+    if (text.*) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
+}
+
+/// The Session's calls, by Operation and ordinal, each with its contents'
+/// metadata.
+const full_calls = rsql.Read(.{
+    .sql = "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.item_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
+        "tool_call.name_content_id AS name_id,name_content.byte_length AS name_length,name_content.digest AS name_digest," ++
+        "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
+        "tool_call.arguments_content_id AS arguments_id,arguments_content.byte_length AS arguments_length,arguments_content.digest AS arguments_digest," ++
+        "tool_call.rejection_content_id AS rejection_id,rejection_content.byte_length AS rejection_length,rejection_content.digest AS rejection_digest " ++
+        "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
+        "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id " ++
+        "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+        "LEFT JOIN content arguments_content ON arguments_content.content_id=tool_call.arguments_content_id " ++
+        "LEFT JOIN content rejection_content ON rejection_content.content_id=tool_call.rejection_content_id " ++
+        "WHERE operation.session_ref=?1 AND operation.operation_id>=?2 AND (operation.operation_id>?2 OR tool_call.call_ordinal>=?3) " ++
+        "ORDER BY operation.operation_id,tool_call.call_ordinal" ++ chunk_limit,
+    .Args = struct { session: []const u8, operation: u64 = 0, ordinal: u64 = 0 },
+    .Row = struct {
+        operation_id: rsql.Positive,
+        call_ordinal: u64,
+        item_ordinal: u64,
+        rejection_code: ?protocol.Bounded(32),
+        acceptance_position: ?rsql.Positive,
+        name_id: rsql.Positive,
+        name_length: u64,
+        name_digest: [32]u8,
+        call_id: rsql.Positive,
+        call_id_length: u64,
+        call_id_digest: [32]u8,
+        arguments_id: rsql.Positive,
+        arguments_length: u64,
+        arguments_digest: [32]u8,
+        rejection_id: ?rsql.Positive,
+        rejection_length: ?u64,
+        rejection_digest: ?[32]u8,
+    },
+    .cardinality = .each,
+});
+
+const Calls = struct {
+    const S = full_calls;
+    const failed = error.CallReadFailed;
+    const pending = 8;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .operation = row.operation_id.get(), .ordinal = row.call_ordinal + 1 };
+    }
+
+    fn streams(_: *const S.Row) bool {
+        return true;
+    }
+
+    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"item_ordinal\":\"{d}\",\"rejection\":", .{ row.operation_id.get(), row.call_ordinal, row.item_ordinal });
+        try appendOptionalText(&row.rejection_code, capture);
+        try capture.append(",\"acceptance_position\":");
+        try appendOptionalPositive(row.acceptance_position, capture);
+        try capture.append(",\"name\":");
+        try streamInline(a, capture, .{ .id = row.name_id.get(), .length = row.name_length, .digest = row.name_digest });
+        try capture.append(",\"call_id\":");
+        try streamInline(a, capture, .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest });
+        try capture.append(",\"arguments\":");
+        try streamInline(a, capture, .{ .id = row.arguments_id.get(), .length = row.arguments_length, .digest = row.arguments_digest });
+        try capture.append(",\"rejection_result\":");
+        try appendInline(a, row.rejection_id, row.rejection_length, row.rejection_digest, capture);
+        try capture.append("}");
+    }
+};
+
+/// The Session's Actions, by `action_id`, with their results' metadata.
+const full_actions = rsql.Read(.{
+    .sql = "SELECT action.action_id,action.parent_operation_id,action.call_ordinal,action.permission_revision," ++
+        "CASE WHEN @same(action.resolution_code,'denied') THEN 'denied' WHEN action.authorized=1 THEN 'authorized' ELSE 'requested' END AS permission," ++
+        "action.resolution_code,action.resolution_content_id,result.byte_length AS result_length,result.digest AS result_digest,action.acceptance_position " ++
+        "FROM action_operation action @index(action_operation_session_order) LEFT JOIN content result ON result.content_id=action.resolution_content_id " ++
+        "WHERE action.session_ref=?1 AND action.action_id>?2 ORDER BY action.action_id" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        action_id: rsql.Positive,
+        parent_operation_id: rsql.Positive,
+        call_ordinal: u64,
+        permission_revision: rsql.Positive,
+        permission: protocol.Bounded(16),
+        resolution_code: ?protocol.Bounded(max_action_resolution_code_bytes),
+        resolution_content_id: ?rsql.Positive,
+        result_length: ?u64,
+        result_digest: ?[32]u8,
+        acceptance_position: ?rsql.Positive,
+    },
+    .cardinality = .each,
+});
+
+const Actions = struct {
+    const S = full_actions;
+    const failed = error.ActionReadFailed;
+    const pending = 4;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.action_id.get() };
+    }
+
+    fn streams(row: *const S.Row) bool {
+        return row.resolution_content_id != null;
+    }
+
+    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"permission_revision\":\"{d}\",\"permission\":\"{s}\",\"resolution\":", .{
+            row.action_id.get(),
+            row.parent_operation_id.get(),
+            row.call_ordinal,
+            row.permission_revision.get(),
+            row.permission.slice(),
+        });
+        try appendOptionalText(&row.resolution_code, capture);
         try capture.append(",\"result\":");
-        try appendInlineContent(self, result, capture);
+        try appendInline(a, row.resolution_content_id, row.result_length, row.result_digest, capture);
+        try capture.append(",\"acceptance_position\":");
+        try appendOptionalPositive(row.acceptance_position, capture);
         try capture.append("}");
     }
-}
+};
 
-fn appendReferencedOutcome(self: *Store, statement: *c.sqlite3_stmt, code_index: c_int, content_id_index: c_int, capture: *SessionReportCapture) !void {
-    if (c.sqlite3_column_type(statement, code_index) == c.SQLITE_NULL) {
-        if (c.sqlite3_column_type(statement, content_id_index) != c.SQLITE_NULL) return error.CorruptStore;
-        return capture.append("null");
+/// The Session's permission decisions, by command order, as main scanned
+/// the commands.
+const full_decisions = rsql.Read(.{
+    .sql = "SELECT command.command_seq,decision.command_key,decision.action_id,decision.decision,command.accepted,command.code " ++
+        "FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key " ++
+        "WHERE command.kind=5 AND command.target=?1 AND command.command_seq>?2 ORDER BY command.command_seq" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        command_seq: rsql.Positive,
+        command_key: protocol.Bounded(128),
+        action_id: protocol.Bounded(20),
+        decision: protocol.PermissionDecision,
+        accepted: bool,
+        code: protocol.Bounded(96),
+    },
+    .cardinality = .each,
+});
+
+const Decisions = struct {
+    const S = full_decisions;
+    const failed = error.PermissionReadFailed;
+    const pending = 0;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.command_seq.get() };
     }
-    try capture.append("{\"code\":");
-    try appendColumnString(statement, code_index, 96, capture);
-    try capture.append(",\"content\":");
-    if (try sqlite.readNullablePositiveI64(statement, content_id_index)) |content_id| {
-        const metadata = try content_domain.readContentMetadata(self, content_id);
-        try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
-    } else try capture.append("null");
-    try capture.append("}");
-}
 
-fn appendInlineOutcome(self: *Store, statement: *c.sqlite3_stmt, code_index: c_int, content_id_index: c_int, capture: *SessionReportCapture) !void {
-    if (c.sqlite3_column_type(statement, code_index) == c.SQLITE_NULL) {
-        if (c.sqlite3_column_type(statement, content_id_index) != c.SQLITE_NULL) return error.CorruptStore;
-        return capture.append("null");
+    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        try capture.append("{\"command_key\":");
+        try capture.appendJsonString(row.command_key.slice());
+        try capture.append(",\"action\":");
+        try capture.appendJsonString(row.action_id.slice());
+        try capture.appendFmt(",\"decision\":\"{s}\",\"status\":\"{s}\",\"code\":", .{ @tagName(row.decision), status(row.accepted) });
+        try capture.appendJsonString(row.code.slice());
+        try capture.append("}");
     }
-    try capture.append("{\"code\":");
-    try appendColumnString(statement, code_index, 96, capture);
-    try capture.append(",\"content\":");
-    if (try sqlite.readNullablePositiveI64(statement, content_id_index)) |content_id| try appendInlineContent(self, content_id, capture) else try capture.append("null");
-    try capture.append("}");
+};
+
+fn status(accepted: bool) []const u8 {
+    return if (accepted) "accepted" else "rejected";
 }
 
-fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCapture) !void {
-    const metadata = try content_domain.readContentMetadata(self, content_id);
-    var source: ContentSource = .{ .store = self, .end = metadata.length };
-    source.reader.open(.{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest } });
-    defer source.reader.close();
-    try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
-    try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
-    try capture.append("\",\"text\":\"");
-    while (try source.nextWindow()) |bytes| try capture.appendJsonStringBytes(bytes);
-    try capture.append("\"}");
-}
+/// The Session's stop commands, by command order, as main scanned them.
+pub const full_stops = rsql.Read(.{
+    .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff " ++
+        "FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key " ++
+        "WHERE command.kind=3 AND command.target=?1 AND command.command_seq>?2 ORDER BY command.command_seq" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        command_seq: rsql.Positive,
+        command_key: protocol.Bounded(128),
+        accepted: bool,
+        code: protocol.Bounded(96),
+        selected_turn_id: ?rsql.Positive,
+        admission_cutoff: ?u64,
+    },
+    .cardinality = .each,
+});
 
-fn nextReportRow(statement: *c.sqlite3_stmt, first: *bool, capture: *SessionReportCapture, read_error: anyerror) !bool {
-    const result = c.sqlite3_step(statement);
-    if (result == c.SQLITE_DONE) return false;
-    if (result != c.SQLITE_ROW) return read_error;
-    if (!first.*) try capture.append(",");
-    first.* = false;
-    return true;
-}
+const Stops = struct {
+    const S = full_stops;
+    const failed = error.SessionStopReadFailed;
+    const pending = 0;
 
-fn appendColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
-    try capture.appendJsonString(try sqlite.boundedColumnText(statement, index, capacity));
-}
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.command_seq.get() };
+    }
 
-fn appendNullableColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
-    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return capture.append("null");
-    try appendColumnString(statement, index, capacity, capture);
-}
+    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        try capture.append("{\"command_key\":");
+        try capture.appendJsonString(row.command_key.slice());
+        try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{status(row.accepted)});
+        try capture.appendJsonString(row.code.slice());
+        try capture.append(",\"selected_turn\":");
+        try appendOptionalPositive(row.selected_turn_id, capture);
+        try capture.append(",\"admission_cutoff\":");
+        if (row.admission_cutoff) |cutoff| try capture.appendFmt("\"{d}\"", .{cutoff}) else try capture.append("null");
+        try capture.append("}");
+    }
+};
 
-fn appendNullablePositiveInteger(statement: *c.sqlite3_stmt, index: c_int, capture: *SessionReportCapture) !void {
-    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return capture.append("null");
-    const value = c.sqlite3_column_int64(statement, index);
-    if (value <= 0) return error.CorruptStore;
-    try capture.appendFmt("\"{d}\"", .{value});
-}
+/// The Session's interruption commands, by command order, as main sorted
+/// them: CROSS JOIN keeps main's plan, the Session's interruptions first.
+const full_interruptions = rsql.Read(.{
+    .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id " ++
+        "FROM model_interruption_command interruption CROSS JOIN core_command command ON command.command_key=interruption.command_key " ++
+        "WHERE interruption.session_ref=?1 AND command.command_seq>?2 ORDER BY command.command_seq" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        command_seq: rsql.Positive,
+        command_key: protocol.Bounded(128),
+        accepted: bool,
+        code: protocol.Bounded(96),
+        turn_id: protocol.Bounded(20),
+        operation_id: protocol.Bounded(20),
+    },
+    .cardinality = .each,
+});
 
-fn appendNullableNonnegativeInteger(statement: *c.sqlite3_stmt, index: c_int, capture: *SessionReportCapture) !void {
-    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return capture.append("null");
-    const value = c.sqlite3_column_int64(statement, index);
-    if (value < 0) return error.CorruptStore;
-    try capture.appendFmt("\"{d}\"", .{value});
-}
+const Interruptions = struct {
+    const S = full_interruptions;
+    const failed = error.InterruptionReadFailed;
+    const pending = 0;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.command_seq.get() };
+    }
+
+    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        try capture.append("{\"command_key\":");
+        try capture.appendJsonString(row.command_key.slice());
+        try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{status(row.accepted)});
+        try capture.appendJsonString(row.code.slice());
+        try capture.append(",\"turn\":");
+        try capture.appendJsonString(row.turn_id.slice());
+        try capture.append(",\"operation\":");
+        try capture.appendJsonString(row.operation_id.slice());
+        try capture.append("}");
+    }
+};
+
+/// The Session's Tool Results, by Operation, then acceptance and ordinal.
+const full_results = rsql.Read(.{
+    .sql = "SELECT tool_call.operation_id,tool_call.call_ordinal,coalesce(tool_call.acceptance_position,action.acceptance_position) AS acceptance_position," ++
+        "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
+        "coalesce(tool_call.rejection_code,action.resolution_code) AS code," ++
+        "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS result_id,result.byte_length AS result_length,result.digest AS result_digest " ++
+        "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
+        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+        "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+        "LEFT JOIN content result ON result.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "WHERE operation.session_ref=?1 AND coalesce(tool_call.rejection_code,action.resolution_code) IS NOT NULL " ++
+        "AND operation.operation_id>=?2 AND (operation.operation_id>?2 OR coalesce(tool_call.acceptance_position,action.acceptance_position)>?3 " ++
+        "OR (coalesce(tool_call.acceptance_position,action.acceptance_position)=?3 AND tool_call.call_ordinal>=?4)) " ++
+        "ORDER BY operation.operation_id,coalesce(tool_call.acceptance_position,action.acceptance_position),tool_call.call_ordinal" ++ chunk_limit,
+    .Args = struct { session: []const u8, operation: u64 = 0, acceptance: u64 = 0, ordinal: u64 = 0 },
+    .Row = struct {
+        operation_id: rsql.Positive,
+        call_ordinal: u64,
+        acceptance_position: rsql.Positive,
+        call_id: rsql.Positive,
+        call_id_length: u64,
+        call_id_digest: [32]u8,
+        code: protocol.Bounded(32),
+        result_id: rsql.Positive,
+        result_length: u64,
+        result_digest: [32]u8,
+    },
+    .cardinality = .each,
+});
+
+const Results = struct {
+    const S = full_results;
+    const failed = error.CallReadFailed;
+    const pending = 8;
+
+    fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .operation = row.operation_id.get(), .acceptance = row.acceptance_position.get(), .ordinal = row.call_ordinal + 1 };
+    }
+
+    fn streams(_: *const S.Row) bool {
+        return true;
+    }
+
+    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+        try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"acceptance_position\":\"{d}\",\"call_id\":", .{ row.operation_id.get(), row.call_ordinal, row.acceptance_position.get() });
+        try streamInline(a, capture, .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest });
+        try capture.append(",\"code\":");
+        try capture.appendJsonString(row.code.slice());
+        try capture.append(",\"result\":");
+        try streamInline(a, capture, .{ .id = row.result_id.get(), .length = row.result_length, .digest = row.result_digest });
+        try capture.append("}");
+    }
+};
 
 fn appendNullableEffort(value: ?protocol.ReasoningEffort, capture: *SessionReportCapture) !void {
     if (value) |effort| return capture.appendJsonString(@tagName(effort));

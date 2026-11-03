@@ -251,13 +251,6 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     return wanted;
 }
 
-/// `readWindow` for unconverted code, under the Entry it holds.
-pub fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
-    var a = Access(.read, error{}).within(self);
-    defer a.deinit();
-    return readWindow(&a, reader, start, destination);
-}
-
 /// Fills all of `destination` from `reader`'s content at `start`, or
 /// fails, so no reader sees a short window. Each reader owns its copied
 /// source window: neither interleaved readers nor another row at the same
@@ -336,26 +329,6 @@ pub fn metadataOf(row: *const content_metadata.Row) ContentMetadata {
 pub fn publicMetadata(row: *const content_metadata.Row) error{CorruptStore}!ContentMetadata {
     if (row.private) return error.CorruptStore;
     return metadataOf(row);
-}
-
-/// `content_metadata` for unconverted code, in a round of its own
-/// (`readContentRow`).
-pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-    return metadataOf(&try readContentRow(self, content_id));
-}
-
-/// A failed step is `CorruptStore`, main's answer for it. An id below 1
-/// is `CorruptStore` without a read, where main read it and found no row
-/// unless one had that id. Not inlined, so its Access takes no slot in its
-/// callers' frames.
-noinline fn readContentRow(self: *Store, content_id: i64) !content_metadata.Row {
-    if (content_id <= 0) return error.CorruptStore;
-    var a = Access(.read, error{}).within(self);
-    defer a.deinit();
-    var row: content_metadata.Row = undefined;
-    a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &row);
-    try store_access.runAs(&a, error.CorruptStore);
-    return row;
 }
 
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {

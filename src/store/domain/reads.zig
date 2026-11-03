@@ -15,12 +15,10 @@ const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
-const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const ContentLocation = content_domain.ContentLocation;
 const ContentMetadata = content_domain.ContentMetadata;
-const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const TurnOutcome = turn_domain.TurnOutcome;
@@ -617,41 +615,30 @@ pub const missing_assistant_entry = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Checks the positions `lower` through `upper` in a round of its own. A
-/// failed step is `ConversationReadFailed`, main's name for it.
-fn checkAssistantEntries(a: *ReadAccess, session: []const u8, lower: u64, upper: u64) !void {
-    if (lower > upper) return;
-    var missing: missing_assistant_entry.Result = undefined;
-    a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
-    try store_access.runAs(a, error.ConversationReadFailed);
-    if (missing != null) return error.CorruptStore;
-}
+/// Whether a Conversation entry `e` is public: its content is, and its
+/// message or assistant provenance agrees with it, over `public_entry_joins`.
+pub const public_entry_consistent = "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+    "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+    "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
+    "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
+    "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
+    "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ ")))";
 
-/// `checkAssistantEntries` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn validateAssistantEntries(self: *Store, session: []const u8, lower: u64, upper: u64) !void {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    return checkAssistantEntries(&a, session, lower, upper);
-}
+/// The rows `public_entry_consistent` reads for an entry `e`. LEFT JOIN
+/// retains damage instead of hiding dependencies.
+pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+    "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+    "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+    "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+    "LEFT JOIN content c ON c.content_id=e.content_id";
 
 /// An ordinary entry at a position, with the provenance that makes it
 /// public. One indexed ordinary identity owns provenance for pages,
-/// cursors and bytes. LEFT JOIN retains damage instead of hiding
-/// dependencies.
+/// cursors and bytes.
 const public_entry = rsql.Read(.{
-    .sql = "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
-        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
-        "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
-        "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
-        "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
-        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ ")) THEN 1 ELSE 0 END AS consistent," ++
+    .sql = "SELECT e.content_id,CASE WHEN " ++ public_entry_consistent ++ " THEN 1 ELSE 0 END AS consistent," ++
         "CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at " ++
-        "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
-        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
-        "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
-        "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
-        "LEFT JOIN content c ON c.content_id=e.content_id " ++
+        "FROM conversation_entry e " ++ public_entry_joins ++ " " ++
         "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct { content_id: rsql.Positive, consistent: bool, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive },
@@ -772,97 +759,6 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     try read.takeMetadata();
     return read.content;
 }
-
-/// `publicConversationContent` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !PublicContent {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    return publicConversationContent(&a, session, position, ordinal);
-}
-
-/// One content value read in order under the Store lock, a window at a
-/// time. Declared with a literal of its Store and length, which leaves
-/// the reader and this window unwritten, then `reader.open`ed;
-/// `= undefined` would fill the window with 0xAA.
-pub const ContentSource = struct {
-    store: *Store,
-    reader: ContentReader = undefined,
-    position: u64 = 0,
-    end: u64,
-    window: [2048]u8 = undefined,
-    used: usize = 0,
-    count: usize = 0,
-
-    /// Reads under the held lock, checking the digest at the end as
-    /// every content reader does; the caller's Entry fences on error.
-    fn read(source: *ContentSource, start: u64, destination: []u8) !void {
-        try content_domain.readOwnedContentLocked(source.store, &source.reader, start, destination);
-        if (!source.reader.absorb(start, destination)) return error.CorruptStore;
-    }
-
-    /// The next window of bytes, consumed whole; null at the end.
-    pub fn nextWindow(source: *ContentSource) !?[]const u8 {
-        std.debug.assert(source.used == source.count);
-        const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
-        if (wanted == 0) return null;
-        try source.read(source.position, source.window[0..wanted]);
-        source.position += wanted;
-        return source.window[0..wanted];
-    }
-
-    pub fn peek(source: *@This()) !?u8 {
-        if (source.used == source.count) {
-            const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
-            try source.read(source.position, source.window[0..wanted]);
-            source.count = wanted;
-            source.used = 0;
-            if (source.count == 0) return null;
-        }
-        return source.window[source.used];
-    }
-
-    pub fn take(source: *@This()) !u8 {
-        const byte = try source.peek() orelse return error.UnexpectedEof;
-        source.used += 1;
-        source.position += 1;
-        return byte;
-    }
-
-    pub fn next(source: *@This()) !?u8 {
-        return if (try source.peek() != null) try source.take() else null;
-    }
-
-    pub fn offset(source: *@This()) u64 {
-        return source.position;
-    }
-
-    pub fn setRange(source: *@This(), start: u64, length: u64) !void {
-        const end = try std.math.add(u64, start, length);
-        if (end > source.reader.reference.length) return error.CorruptStore;
-        source.position = start;
-        source.end = end;
-        source.used = 0;
-        source.count = 0;
-    }
-
-    pub fn space(source: *@This()) !void {
-        while (try source.peek()) |byte| switch (byte) {
-            ' ', '\t', '\r', '\n' => _ = try source.take(),
-            else => return,
-        };
-    }
-
-    pub fn expect(source: *@This(), expected: u8) !void {
-        try source.space();
-        if (try source.take() != expected) return error.CorruptStore;
-    }
-
-    pub fn expectEnd(source: *@This()) !void {
-        try source.space();
-        if (try source.peek() != null) return error.CorruptStore;
-    }
-};
 
 /// A call's line and outcome, with the item that proposed it.
 const tool_presentation = rsql.Read(.{
