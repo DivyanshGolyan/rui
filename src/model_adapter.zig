@@ -345,9 +345,9 @@ pub fn validateKeyEndpoint(endpoint: []const u8, ca_file: ?[]const u8, fixture: 
     } else if (!std.mem.startsWith(u8, endpoint, "https://")) return error.InsecureKeyEndpoint;
 }
 
-/// The fields the credential path writes after the codec's headers:
-/// the credential, user-agent, FedRAMP and the Turn's turn state, each named
-/// in `provider.host_request_fields` so no codec header can name it.
+/// The fields the Host writes after the codec's headers: the credential,
+/// user-agent, FedRAMP and the Turn's routing value, each named in
+/// `provider.host_request_fields` so no codec header can name it.
 pub const Headers = struct {
     entries: [5]h2.Field = undefined,
     length: usize = 0,
@@ -359,9 +359,7 @@ pub const Headers = struct {
     /// Initialize in final stack storage. The fields are borrowed only until
     /// Transfer.start, whose stream copies the per-request ones; h2 borrows
     /// the credential (its Transfer then holds the use) and the literals.
-    /// A nonempty turn state comes from TurnStates.replay for this Attempt's
-    /// Turn, and is borrowed too.
-    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, shared_credentials: *provider.Credentials, turn_state: []const u8) !void {
+    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, shared_credentials: *provider.Credentials) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
         if (authentication.fixture) {
@@ -388,10 +386,6 @@ pub const Headers = struct {
             self.entries[self.length] = .{ .name = "x-openai-fedramp", .value = "true", .borrowed = true };
             self.length += 1;
         }
-        if (turn_state.len != 0) {
-            self.entries[self.length] = .{ .name = "x-codex-turn-state", .value = turn_state };
-            self.length += 1;
-        }
     }
 
     /// An API key's fields: the key and user-agent. The key goes only over
@@ -409,6 +403,16 @@ pub const Headers = struct {
         self.length = 2;
     }
 
+    /// The Turn's routing value under the codec's routing header, last and
+    /// only when the Turn has one: whatever credential the request carries,
+    /// a provider that never sent the header is never sent one. Borrowed
+    /// until Transfer.start, like the others.
+    pub fn routing(self: *Headers, name: []const u8, value: []const u8) void {
+        if (name.len == 0 or value.len == 0) return;
+        self.entries[self.length] = .{ .name = name, .value = value };
+        self.length += 1;
+    }
+
     pub fn fields(self: *const Headers) []const h2.Field {
         return self.entries[0..self.length];
     }
@@ -421,115 +425,6 @@ pub const Headers = struct {
     pub fn deinit(self: *Headers) void {
         if (self.credential) |shared| self.credentials.release(shared);
         self.* = undefined;
-    }
-};
-
-/// Codex sticky routing for the Turns this Host runs. The provider returns
-/// `x-codex-turn-state` on a Turn's first successful response; every later
-/// request of that Turn (retries, replacement Attempts, tool continuations
-/// and in-Turn compaction) sends the first value unchanged, and no other
-/// Turn ever sends it. Process memory only: a fresh Host starts each Turn
-/// without it, and the Store never holds it. Each value belongs to the
-/// account binding that received it. Refresh keeps that binding; another
-/// account or FedRAMP binding drops every value and retires outstanding
-/// captures from the previous binding epoch. The table is bounded by
-/// execution capacity and replaces the least recently used Turn; a dropped
-/// value only loses stickiness, since every request carries full input.
-pub const TurnStates = struct {
-    entries: []Entry = &.{},
-    account: ?Owner = null,
-    epoch: u64 = 0,
-    uses: u64 = 0,
-
-    pub const Owner = [32]u8;
-    pub const Replay = struct {
-        epoch: u64,
-        /// Borrowed until the next mutation of this TurnStates owner.
-        value: []const u8,
-    };
-    /// Zero bytes are an empty entry. A held value is malloc'd at its real
-    /// length, so the table costs a few words per unit of capacity and a
-    /// Turn's value costs its own bytes.
-    pub const Entry = struct {
-        held: ?Held = null,
-        used: u64 = 0,
-    };
-    pub const Held = struct {
-        turn_id: u64,
-        value: []const u8,
-    };
-
-    /// Every managed transfer's header callback delivers its value straight
-    /// here, keyed by the Turn and the epoch its launch selected.
-    pub fn sink(self: *TurnStates) provider.TurnStateSink {
-        return .{ .context = self, .capture = observe };
-    }
-
-    fn observe(context: *anyopaque, key: provider.TurnStateKey, value: []const u8) void {
-        const self: *TurnStates = @ptrCast(@alignCast(context));
-        self.capture(key.turn_id, key.epoch, value);
-    }
-
-    pub fn owner(record: *const codex_credentials.Record) Owner {
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update(&.{@intFromBool(record.fedramp)});
-        hash.update(record.account_id.slice());
-        return hash.finalResult();
-    }
-
-    /// Select the launch binding and return this Turn's value and capture
-    /// epoch. An observed account change invalidates every cached Turn.
-    pub fn replay(self: *TurnStates, turn_id: u64, account: Owner) Replay {
-        if (self.account == null or !std.mem.eql(u8, &self.account.?, &account)) {
-            // Only occupied entries are reset, so an unused entry stays untouched.
-            for (self.entries) |*entry| if (entry.held != null) release(entry);
-            self.account = account;
-            self.epoch += 1;
-            self.uses = 0;
-        }
-        const entry = self.find(turn_id) orelse return .{ .epoch = self.epoch, .value = "" };
-        self.uses += 1;
-        entry.used = self.uses;
-        return .{ .epoch = self.epoch, .value = entry.held.?.value };
-    }
-
-    /// Record a transport-validated value from the selected launch epoch;
-    /// the Turn's first one wins. A late completion cannot revive old state,
-    /// including after the same account has returned in a new epoch.
-    pub fn capture(self: *TurnStates, turn_id: u64, epoch: u64, value: []const u8) void {
-        if (epoch != self.epoch or self.account == null or value.len == 0 or self.entries.len == 0) return;
-        const target = self.find(turn_id) orelse lru: {
-            var oldest = &self.entries[0];
-            for (self.entries) |*entry| if (entry.used < oldest.used) {
-                oldest = entry;
-            };
-            break :lru oldest;
-        };
-        if (target.held != null and target.held.?.turn_id == turn_id) return;
-        std.debug.assert(value.len <= provider.max_turn_state_bytes);
-        // Without memory the value is dropped, which only loses stickiness.
-        const owned = std.heap.c_allocator.dupe(u8, value) catch return;
-        if (target.held != null) release(target);
-        self.uses += 1;
-        target.held = .{ .turn_id = turn_id, .value = owned };
-        target.used = self.uses;
-    }
-
-    pub fn deinit(self: *TurnStates) void {
-        for (self.entries) |*entry| if (entry.held != null) release(entry);
-        self.* = undefined;
-    }
-
-    /// An emptied entry also forgets its recency, so capture fills it
-    /// before evicting any held Turn.
-    fn release(entry: *Entry) void {
-        std.heap.c_allocator.free(entry.held.?.value);
-        entry.* = .{};
-    }
-
-    fn find(self: *TurnStates, turn_id: u64) ?*Entry {
-        for (self.entries) |*entry| if (entry.held != null and entry.held.?.turn_id == turn_id) return entry;
-        return null;
     }
 };
 
@@ -549,102 +444,6 @@ fn testRecord(account_id: []const u8, fedramp: bool, access: []const u8, generat
     return record;
 }
 
-test "Codex turn state replays one Turn's first value and never another Turn's" {
-    var storage: [2]TurnStates.Entry = @splat(.{});
-    var states: TurnStates = .{ .entries = &storage };
-    defer states.deinit();
-    const account = TurnStates.owner(&try testRecord("acct", false, "token-1", 1));
-    // A refresh changes token and generation, not the account binding.
-    const refreshed = TurnStates.owner(&try testRecord("acct", false, "token-2", 2));
-    try std.testing.expectEqualSlices(u8, &account, &refreshed);
-    const launch = states.replay(7, account);
-    try std.testing.expectEqualStrings("", launch.value);
-    states.capture(7, launch.epoch, "");
-    try std.testing.expectEqualStrings("", states.replay(7, account).value);
-    states.capture(7, launch.epoch, "first");
-    const refresh = states.replay(7, refreshed);
-    try std.testing.expectEqual(launch.epoch, refresh.epoch);
-    states.capture(7, refresh.epoch, "second");
-    try std.testing.expectEqualStrings("first", states.replay(7, refreshed).value);
-    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
-    try std.testing.expectEqualStrings("", states.replay(8, account).value);
-    states.capture(8, launch.epoch, "eight");
-    try std.testing.expectEqualStrings("eight", states.replay(8, account).value);
-    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
-
-    // Turn 8 is least recently used, so Turn 9 replaces it, not Turn 7.
-    states.capture(9, launch.epoch, "nine");
-    try std.testing.expectEqualStrings("", states.replay(8, account).value);
-    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
-    try std.testing.expectEqualStrings("nine", states.replay(9, account).value);
-
-    // After a binding change the emptied entries take new Turns before any
-    // held Turn is evicted, whatever their recency before the change.
-    const other = TurnStates.owner(&try testRecord("other", false, "token-1", 3));
-    const rebound = states.replay(10, other);
-    states.capture(10, rebound.epoch, "ten");
-    states.capture(11, rebound.epoch, "eleven");
-    try std.testing.expectEqualStrings("ten", states.replay(10, other).value);
-    try std.testing.expectEqualStrings("eleven", states.replay(11, other).value);
-
-    // Another account or FedRAMP binding never receives the value, and the
-    // original account does not regain it after the change.
-    for ([_]codex_credentials.Record{ try testRecord("other", false, "token-1", 3), try testRecord("acct", true, "token-1", 3) }) |record| {
-        var owned: [1]TurnStates.Entry = @splat(.{});
-        var isolated: TurnStates = .{ .entries = &owned };
-        defer isolated.deinit();
-        const original = isolated.replay(5, account);
-        isolated.capture(5, original.epoch, "acct-value");
-        const changed = TurnStates.owner(&record);
-        try std.testing.expect(!std.mem.eql(u8, &account, &changed));
-        try std.testing.expectEqualStrings("", isolated.replay(5, changed).value);
-        try std.testing.expectEqualStrings("", isolated.replay(5, account).value);
-        const replacement = isolated.replay(5, changed);
-        isolated.capture(5, replacement.epoch, "changed-value");
-        try std.testing.expectEqualStrings("changed-value", isolated.replay(5, changed).value);
-        try std.testing.expectEqualStrings("", isolated.replay(5, account).value);
-    }
-
-    var unused: TurnStates = .{};
-    defer unused.deinit();
-    const ignored = unused.replay(1, account);
-    unused.capture(1, ignored.epoch, "value");
-    try std.testing.expectEqualStrings("", unused.replay(1, account).value);
-}
-
-test "Codex turn state owner changes invalidate paused Turns and stale completions" {
-    const account = TurnStates.owner(&try testRecord("acct", false, "token-1", 1));
-    for ([_]codex_credentials.Record{ try testRecord("other", false, "token-2", 2), try testRecord("acct", true, "token-3", 3) }) |record| {
-        const changed = TurnStates.owner(&record);
-        for ([_]bool{ false, true }) |late_completion| {
-            var storage: [2]TurnStates.Entry = @splat(.{});
-            var states: TurnStates = .{ .entries = &storage };
-            defer states.deinit();
-            const original = states.replay(1, account);
-            try std.testing.expectEqualStrings("", original.value);
-            if (!late_completion) states.capture(1, original.epoch, "paused-a");
-            try std.testing.expectEqualStrings("", states.replay(2, account).value);
-            states.capture(2, original.epoch, "active-a");
-            const replacement = states.replay(2, changed);
-            try std.testing.expectEqualStrings("", replacement.value);
-            states.capture(2, replacement.epoch, "active-b");
-            if (late_completion) states.capture(1, original.epoch, "late-a");
-            // A Turn untouched during A -> B must not resurrect A's hint
-            // when A returns, including an A completion delivered under B.
-            const returned = states.replay(1, account);
-            try std.testing.expectEqualStrings("", returned.value);
-            // A completion from the original A epoch is stale even after
-            // another request has observed B -> A.
-            states.capture(1, original.epoch, "late-original-a");
-            states.capture(2, replacement.epoch, "late-b");
-            try std.testing.expectEqualStrings("", states.replay(1, account).value);
-            try std.testing.expectEqualStrings("", states.replay(2, account).value);
-            states.capture(1, returned.epoch, "fresh-a");
-            try std.testing.expectEqualStrings("fresh-a", states.replay(1, account).value);
-        }
-    }
-}
-
 test "an API key goes only over https or to a loopback fixture, with no account" {
     var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
     const own = "https://api.openai.com/v1/responses";
@@ -659,6 +458,10 @@ test "an API key goes only over https or to a loopback fixture, with no account"
         try std.testing.expect(entries[0].sensitive);
         try std.testing.expectEqualStrings("user-agent", entries[1].name);
         for (entries) |entry| try std.testing.expect(provider.hostField(entry.name));
+        // A key's request echoes a routing value the same way a sign-in's does.
+        headers.routing("x-codex-turn-state", "sticky");
+        try std.testing.expectEqual(@as(usize, 3), headers.fields().len);
+        try std.testing.expectEqualStrings("sticky", headers.fields()[2].value);
     }
     {
         var headers: Headers = .{};
@@ -672,7 +475,7 @@ test "an API key goes only over https or to a loopback fixture, with no account"
     try std.testing.expectEqual(@as(?*provider.SharedCredential, null), credentials.head);
 }
 
-test "Codex headers carry turn state only when the Turn has one" {
+test "ChatGPT headers carry the routing value only when the Turn has one" {
     var credential: Credential = undefined;
     var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
     for ([_]bool{ false, true }) |fedramp| {
@@ -680,7 +483,8 @@ test "Codex headers carry turn state only when the Turn has one" {
         for ([_][]const u8{ "", "sticky value", &@as([provider.max_turn_state_bytes]u8, @splat('v')) }) |turn_state| {
             var headers: Headers = .{};
             defer headers.deinit();
-            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials, turn_state);
+            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials);
+            headers.routing("x-codex-turn-state", turn_state);
             const entries = headers.fields();
             var found: ?[]const u8 = null;
             var fedramp_found = false;

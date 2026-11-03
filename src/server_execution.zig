@@ -15,6 +15,7 @@ const platform = @import("platform.zig");
 const process = @import("os/process.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
+const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -405,6 +406,10 @@ const observed_codec = blk: {
     break :blk codec;
 };
 
+/// The header a Turn's routing value is echoed under: the one the Reactor
+/// observes it in.
+const routing_header = codecs.manifest(observed_codec).observe.turn_state;
+
 pub fn executionMain(host: *Host) void {
     const mapped_workspace = pages.Mapped(Workspace).map() catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
@@ -435,11 +440,12 @@ pub fn executionMain(host: *Host) void {
         return;
     };
     defer unmapZeroed(slots);
-    const turn_states = mapZeroed(model_adapter.TurnStates.Entry, slots.len) catch |err| {
+    // One table per provider, each as large as the slots.
+    const turn_states = mapZeroed(turn_states_module.TurnStates.Entry, slots.len * std.enums.values(protocol.Provider).len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
     };
-    host.turn_states = .{ .entries = turn_states };
+    host.turn_states = .init(turn_states);
     defer {
         host.turn_states.deinit();
         host.turn_states = .{};
@@ -486,7 +492,7 @@ pub fn executionMain(host: *Host) void {
             .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
             .observation = .{
                 .names = codecs.manifest(observed_codec).observe,
-                .turn_state = if (host.providers.chatgpt() != null) host.turn_states.sink() else null,
+                .turn_state = host.turn_states.sink(),
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
@@ -1002,14 +1008,14 @@ test "zeroed pages are free slots and empty Turn and history memo entries" {
     for (slots) |*slot| try std.testing.expect(slotIsFree(slot));
     try std.testing.expectEqual(slots.len, countFreeSlots(slots));
     // A value is held at its real length, so an entry is a few words.
-    try std.testing.expect(@sizeOf(model_adapter.TurnStates.Entry) < 64);
-    const entries = try mapZeroed(model_adapter.TurnStates.Entry, 2);
+    try std.testing.expect(@sizeOf(turn_states_module.TurnStates.Entry) < 64);
+    const entries = try mapZeroed(turn_states_module.TurnStates.Entry, 2);
     defer unmapZeroed(entries);
     for (entries) |entry| {
-        try std.testing.expectEqual(@as(?model_adapter.TurnStates.Held, null), entry.held);
+        try std.testing.expectEqual(@as(?turn_states_module.TurnStates.Held, null), entry.held);
         try std.testing.expectEqual(@as(u64, 0), entry.used);
     }
-    var states: model_adapter.TurnStates = .{ .entries = entries };
+    var states: turn_states_module.TurnStates = .{ .entries = entries };
     defer states.deinit();
     try std.testing.expectEqualStrings("", states.replay(7, @splat(1)).value);
     const memos = try mapZeroed(model_adapter.HistoryMemos.Entry, 2);
@@ -1707,21 +1713,17 @@ fn launchPreparedRequest(
     }
     var retained_response: ?named_scratch.Owner = null;
     if (failedAtProviderPrepare(host, slot, token, binding, request)) return;
+    const served = host.providers.get(request.provider).?;
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
-    var turn_state: provider.TurnStateKey = .{};
     if (credential) |value| {
-        const account = model_adapter.TurnStates.owner(&value.record);
-        const replay = host.turn_states.replay(binding.turn_id, account);
-        turn_state = .{ .turn_id = binding.turn_id, .epoch = replay.epoch };
-        const served = host.providers.get(request.provider).?;
-        headers.init(served.endpoint, host.providers.ca_file, served.credential.chatgpt_device, value, &reactor.credentials, replay.value) catch |err| {
+        headers.init(served.endpoint, host.providers.ca_file, served.credential.chatgpt_device, value, &reactor.credentials) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot);
             return;
         };
-    } else if (host.providers.get(request.provider)) |served| switch (served.credential) {
+    } else switch (served.credential) {
         .key_file => |key| headers.initKey(served.endpoint, host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
             request.deinit(host.io, host.scratch_budget.?);
             fenceDispatch(host, "provider preparation", err);
@@ -1729,13 +1731,18 @@ fn launchPreparedRequest(
             return;
         },
         .none, .chatgpt_device => {},
-    };
+    }
+    // Every request echoes its Turn's routing value, whatever its provider:
+    // one that never sends the codec's routing header has none to echo.
+    const replay = host.turn_states.get(request.provider).replay(binding.turn_id, served.credential.routingOwner(credential));
+    headers.routing(routing_header, replay.value);
+    const turn_state: provider.TurnStateKey = .{ .provider = request.provider, .turn_id = binding.turn_id, .epoch = replay.epoch };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding },
         .credential_generation = if (credential) |value| value.record.generation else null,
-        .presented_key = if (host.providers.get(request.provider)) |served| served.credential == .key_file else false,
+        .presented_key = served.credential == .key_file,
     });
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{

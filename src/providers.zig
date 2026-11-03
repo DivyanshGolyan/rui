@@ -4,6 +4,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const model_adapter = @import("model_adapter.zig");
 const provider_transport = @import("provider.zig");
+const turn_states = @import("turn_states.zig");
 
 const Provider = protocol.Provider;
 
@@ -56,6 +57,24 @@ pub const Credential = union(enum) {
     /// An API key, borrowed for the Host's life. It goes only to its entry's
     /// endpoint, over https; `fixture` admits a loopback endpoint instead.
     key_file: struct { key: []const u8, fixture: bool = false },
+
+    /// Who a Turn's routing value belongs to (`turn_states`): a signed-in
+    /// account's values go back only to that account. A sign-in owner is
+    /// its account and FedRAMP binding, which a refresh keeps, read from
+    /// `lease`. A key or no credential is fixed for the Host's life, so it
+    /// is one owner.
+    pub fn routingOwner(self: Credential, lease: ?*const model_adapter.Credential) turn_states.TurnStates.Owner {
+        return switch (self) {
+            .none, .key_file => @splat(0),
+            .chatgpt_device => owner: {
+                const record = &lease.?.record;
+                var hash = std.crypto.hash.sha2.Sha256.init(.{});
+                hash.update(&.{@intFromBool(record.fedramp)});
+                hash.update(record.account_id.slice());
+                break :owner hash.finalResult();
+            },
+        };
+    }
 
     pub fn route(self: Credential) protocol.Route {
         return switch (self) {
@@ -131,6 +150,24 @@ test "a Host's routes name each provider it serves and its credential" {
     providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
     try std.testing.expectEqual(protocol.Route.chatgpt_device, providers.routes().codex);
     try std.testing.expectEqualStrings("/c", providers.chatgpt().?.path);
+}
+
+test "a sign-in's routing owner is its account and FedRAMP binding, which a refresh keeps" {
+    const signed_in: Credential = .{ .chatgpt_device = .{ .path = "/c" } };
+    var owners: [4]turn_states.TurnStates.Owner = undefined;
+    for ([_][]const u8{ "acct", "acct", "other", "acct" }, [_]bool{ false, false, false, true }, [_][]const u8{ "token-1", "token-2", "token-1", "token-1" }, &owners) |account, fedramp, access, *owner| {
+        var lease: model_adapter.Credential = undefined;
+        lease.record = .{ .generation = 1, .account_id = .{}, .fedramp = fedramp, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 0 };
+        try lease.record.account_id.set(account);
+        try lease.record.access_token.set(access);
+        owner.* = signed_in.routingOwner(&lease);
+    }
+    // A refreshed token is the same owner; another account or FedRAMP is not.
+    try std.testing.expectEqualSlices(u8, &owners[0], &owners[1]);
+    try std.testing.expect(!std.mem.eql(u8, &owners[0], &owners[2]));
+    try std.testing.expect(!std.mem.eql(u8, &owners[0], &owners[3]));
+    const keyed: Credential = .{ .key_file = .{ .key = "sk-test" } };
+    try std.testing.expectEqualSlices(u8, &keyed.routingOwner(null), &Credential.routingOwner(.none, null));
 }
 
 test "a base URL names the https Responses endpoint under it, or nothing" {

@@ -14,6 +14,7 @@ const platform = @import("platform.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider = @import("provider.zig");
 const providers_module = @import("providers.zig");
+const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -269,8 +270,8 @@ pub const Host = struct {
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
     scratch_budget: ?provider.ScratchBudget = null,
-    /// Execution-thread-owned Codex sticky routing; in memory only.
-    turn_states: model_adapter.TurnStates = .{},
+    /// Execution-thread-owned per-Turn sticky routing; in memory only.
+    turn_states: turn_states_module.PerProvider = .{},
     /// Execution-thread-owned history memos: an index preallocated at
     /// start, with span bytes in scratch files deleted at stop.
     history_memos: model_adapter.HistoryMemos = .{},
