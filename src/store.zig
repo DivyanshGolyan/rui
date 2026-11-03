@@ -45,7 +45,6 @@ pub const ModelInterruptionTarget = command_domain.ModelInterruptionTarget;
 pub const OpenOptions = store_core.OpenOptions;
 pub const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 pub const PrefixSeal = historical_domain.PrefixSeal;
-pub const ProposalPage = reads_domain.ProposalPage;
 pub const PublicConversationPage = reads_domain.PublicConversationPage;
 pub const schema_version = store_schema.schema_version;
 pub const SessionReport = report_domain.SessionReport;

@@ -21,18 +21,16 @@ if [ "${3:-}" = parallel ]; then
     test_binary=$4
     host_status_actor=$5
     session_list_client=$6
-    proposal_client=$7
-    activity_client=$8
-    preference_policy_actor=$9
-    terminal_notice=${10}
+    activity_client=$7
+    preference_policy_actor=$8
+    terminal_notice=$9
 else
     host_status_actor=$3
     session_list_client=$4
-    proposal_client=$5
-    activity_client=$6
-    preference_policy_actor=$7
-    part=${8:-all}
-    terminal_notice=${9}
+    activity_client=$5
+    preference_policy_actor=$6
+    part=${7:-all}
+    terminal_notice=${8}
     case "$part" in
         all|execution|callers) ;;
         *) printf 'Unknown full-check part: %s\n' "$part" >&2; exit 2 ;;
@@ -64,7 +62,6 @@ cases() {
     run_case execution control python3 "$directory/control_integration.py" "$release_safe"
     run_case callers session-list python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
     run_case callers conversation-page python3 "$directory/conversation_page_integration.py" "$release_safe"
-    run_case callers proposal python3 "$directory/proposal_integration.py" "$release_safe" "$proposal_client"
     run_case callers activity python3 "$directory/activity_integration.py" "$release_safe" "$activity_client"
     run_case execution descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
     run_case callers host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"

@@ -1334,7 +1334,7 @@ Once migrations keep old Stores usable across format changes, Rui should switch 
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
-The unreleased wire label is `7`: it changed when the Activity page dropped `read_through` and `beyond_unseen` and the Host dropped the `mark_read` request, which Divyansh asked to remove on 2026-11-03 with the rest of the "new since you looked" feature.
+The unreleased wire label is `7`: it changed when the Activity page dropped `read_through` and `beyond_unseen` and the Host dropped the `mark_read` request, which Divyansh asked to remove on 2026-11-03 with the rest of the "new since you looked" feature, and when the Host dropped the `proposal_page` and `proposal_field` requests the same day.
 The Store records the wire label it was created with in `store_meta` and opens only at the current one.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
 Pre-provider captures are not accepted or defaulted to Codex.
@@ -2989,7 +2989,7 @@ The output summary uses one fixed 256-byte line buffer.
 A longer line receives shortening and `/details` guidance; subsequent metadata lines remain visible until the first output-tail delimiter.
 The remaining stream drains without retention.
 Tool Result streams validate even when their bytes are not displayed; label-only observation uses admission-certified metadata under the public Session activity contract.
-Fresh exact proposal and Action inspection authenticates all three complete proposal fields.
+Fresh Action inspection authenticates all three complete proposal fields.
 Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
 `/details` shows the latest Conversation page with full saved Tool Results through the same bounded history owner, without moving the older-navigation or live Activity cursor.
 Older results remain available through `/history`; oversized items retain exact raw export.
@@ -3218,33 +3218,18 @@ An empty or one-window canonical failure returns an error before successful head
 A later fault fences the Host and closes an incomplete advertised body without another HTTP response; a caller must not treat that prefix as a complete value.
 Sequential decoded work avoids repeated prefix positioning, but does not guarantee traversal time or a measured speedup.
 
-### Historical proposal reads
+### Tool Call proposals
 
-Historical proposal discovery is a separate bounded projection of the existing Tool Call inventory, not an expanded Conversation or a complete Session activity chronology.
-`POST /v1/proposal-page` takes `kind:"proposal_page"`, `session`, `end` (null to capture the current committed Session end, otherwise a decimal string including zero) and decimal-string `after`.
-It returns at most 16 accepted proposals in increasing immutable model-output-item position, with `end`, `items` and `more`.
-Continue with the same end and the last returned position; restart at after zero to replay that fixed prefix.
-Zero freezes empty history rather than recapturing.
-Nonzero cursors identify a proposal in this Session at or before end.
-Cursor values fit SQLite's signed domain; absent Sessions and invalid cursors fail without changing saved work.
-Query work can grow with non-proposal history; bounded metadata is not a traversal-time guarantee.
-
-Each row owns position, producing model Operation and Turn, zero-based call ordinal, the actual optional Action ID, the closed optional rejection (`unknown_tool`, `invalid_arguments`), and exact length/content digest for `name`, `call_id` and `arguments`.
-Accepted rejected calls remain discoverable after settlement and restart, with no invented Action.
-Fields and classification are immutable; current permission or later outcomes do not rewrite the page.
-`POST /v1/proposal-field` takes `kind:"proposal_field"`, `session`, decimal-string `position` and one of those three field names.
-The Store resolves the Session/proposal/field again, not a global content digest, and checks producing Operation/Turn/call/Action linkage, the call's binding to its accepted item by ordinal, and public exposed metadata.
+A proposal is an accepted Tool Call in the model's output: Activity pages list each one as a call row, and Action inspection and replay read its fields.
+Each proposal owns its position, producing model Operation and Turn, zero-based call ordinal, the actual optional Action ID, the closed optional rejection (`unknown_tool`, `invalid_arguments`), and exact length/content digest for `name`, `call_id` and `arguments`.
+Accepted rejected calls stay after settlement and restart, with no invented Action.
+Fields and classification are immutable; current permission or later outcomes do not rewrite them.
+Every read resolves the Session/proposal again, not a global content digest, and checks producing Operation/Turn/call/Action linkage, the call's binding to its accepted item by ordinal, and public exposed metadata.
 Each field's content must have the length and digest admission certified for this call.
 Acceptance decoded every field once into its own content row; a reference to other content, including a deduplicated backing, is authority only when it matches that certificate.
 The provider item ID is not a call field: it stays in the item bag, and its digest only rejects a duplicate item ID within one output; this persisted-format change follows the [Store format policy](#store-format-and-upgrades).
 Missing proposal identity is an ordinary unavailable read; contradictory provenance, missing owners or private/missing exposed fields fence rather than disappear.
-
-Each field delivers its complete decoded bytes once through the same sequential public-content reader, 4-KiB window, fixed-length octet framing, cleanup and failure policy as whole-stream Conversation content.
-There is no complete payload copy, staging, cache, registry, worker or persistent state.
-Typed Client returns owned fixed-size page facts and streams fields into caller-owned synchronous sinks; malformed metadata, inconsistent framing or truncated delivery cannot become successful partial values.
-A sink may have received prefix bytes before a late failure.
-These historical reads grant no authorization: a later approval still binds the freshly inspected exact pending Action through the existing decision route.
-Proposal reads alone do not satisfy the complete Session-opening contract.
+Proposal metadata grants no authorization: a later approval still binds the freshly inspected exact pending Action through the existing decision route.
 
 ### Public Session activity
 
@@ -3269,7 +3254,7 @@ Every screen draws a description as one line of prose: controls, bidi controls a
 Lightweight Current, Activity, Conversation and idle-classification reads validate call/Operation/Turn/Action linkage, complete sibling groups and public field metadata against the admission certificate without reopening command or private provider payloads.
 Presentation read work is independent of command byte length, not call count or history size.
 These reads trust immutable admitted metadata: later corruption confined to undisplayed payload bytes need not be detected by polling.
-Exact proposal reads, full Session inspection, Action arguments/call-ID inspection, execution input and model replay check each field against its admission certificate and verify the digest of every byte they read; streamed public content retains its own integrity checks.
+Full Session inspection, Action arguments/call-ID inspection, execution input and model replay check each field against its admission certificate and verify the digest of every byte they read; streamed public content retains its own integrity checks.
 Canonical result content and proposal arguments remain unchanged; descriptions grant neither execution nor permission authority.
 The additional per-call canonical data is at most 100 label bytes plus 120 field-certificate bytes, excluding SQLite row/page overhead; readers retain fixed-size metadata, not commands.
 
@@ -3325,7 +3310,7 @@ A forward page's live call activity reads only the calls accepted after the page
 A Store test holds an opening page and a forward page to equal SQLite VM steps after 10 and 10,000 earlier rows.
 
 `POST /v1/activity-content` takes `kind:"activity_content"`, `session`, decimal-string `position` and `ordinal`, resolving the public row and provenance again.
-Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls use proposal-field reads, while stops and contentless outcomes have no byte value.
+Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls carry field references only, and stops and contentless outcomes have no byte value.
 Client returns owned fixed-size typed facts/cursors and synchronous borrowed content windows.
 Invalid identities/cursors do not mutate work; contradictory canonical facts fence.
 Ordinary connection capacity bounds readers, fixed metadata/scanner storage and 4-KiB windows; no worker, payload stage/cache or per-Session traversal survives return.

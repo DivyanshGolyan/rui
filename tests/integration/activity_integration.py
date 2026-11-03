@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Seven-kind Session activity through real writers and the typed native Client."""
 import copy
+import hashlib
 import http.server
 import json
 import os
@@ -19,7 +20,6 @@ from conversation_page_integration import host_resources, idle_resources, provid
 from model_fixture import sse_tool_calls
 import host_process
 from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
-from proposal_integration import digest
 from one_reply import one_reply
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
@@ -55,6 +55,11 @@ def history(store, end="null", position=0, direction="forward"):
         if reply["next"] is None: return captured, rows
         c = reply["next"]
         reply = page(store, c["end"], c["position"], c["ordinal"], c["direction"])
+
+
+def digest(data):
+    domain = b"rui/content/v1"
+    return hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).digest()
 
 
 def kind(row):
@@ -133,7 +138,6 @@ def main():
                 for field, reference, expected in zip(("name", "call_id", "arguments"), row["value"]["call"]["fields"], CALLS[i]):
                     data = expected.encode()
                     assert reference == {"bytes": str(len(data)), "sha256": digest(data).hex()}
-                    assert caller(store, "field", row["position"], field) == data
             caller(store, "content", calls[0]["position"], 0, ok=False)
             caller(store, "content", pending[0]["position"], 0, session=foreign, ok=False)
             for row in pending[:2]: assert caller(store, "content", row["position"], 0) == TEXT.encode()

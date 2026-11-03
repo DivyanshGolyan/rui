@@ -48,7 +48,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | CLI, client, preferences, provider selection | `check`, `admission-debug-integration` | Covers preference publication and unnamed human CLI consumers |
 | Frontend consent, departure and submission recovery | `test-logic`, `test`, `admission-debug-integration`, `terminal-restoration-integration`, `canonical-failure-integration` | `Terminal*` owners omit `test`; the selector owns their exact mapping. Mixed strict or non-frontend code retains `check` |
 | Store SQL owners | Linux `check`, Mac `test`, `dispatch-debug-integration` on both systems, changed owning integration targets | The Debug failure-correlation subset checks saved provider bytes through reopen |
-| Proposal and activity fixtures, typed read clients | `proposal-integration` or `activity-integration` on both systems | Both run in `check` and `check-full`; select separately only without a composed gate |
+| Activity fixture, typed read client | `activity-integration` on both systems | Runs in `check` and `check-full`; select separately only without a composed gate |
 | Preference privacy fixture and native actor | `preference-policy-integration` on both systems | Runs in `check` and `check-full` |
 | Server, protocol, shared execution and scratch | `check` on both systems | None |
 | Server admission or capture owner, admission fixture | Also `admission-debug-integration` on both systems | The routine Debug smoke does not cover the recovery matrix |
@@ -536,7 +536,7 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 | Host refuses a missing header, an oversized or malformed environment, a repeated name and the header on another route before admission | `bash_environment_integration.py`, `"a Message's environment header and entries are checked before admission"` | None |
 | Evidence layers | `test-logic`, `bash-owner-integration`, `bash-lifecycle-integration` | No reruns to pass |
 | [Frozen catalog and permission mode](ARCHITECTURE.md#authorizing-exact-actions) | `'frozen catalog'`, `'allow once survives'` | Workflow bypass across restart: none located |
-| Bash-only catalog and configuration: exact `bash`/`none` CLI, `["bash"]`/`[]` wire; removed Edit and duplicate/alternate spellings reject | `human_cli_integration.py`, `proposal_integration.py`, `dispatch_integration.py`, `'Current facts'` | Public arrays and private SQLite masks remain distinct representations |
+| Bash-only catalog and configuration: exact `bash`/`none` CLI, `["bash"]`/`[]` wire; removed Edit and duplicate/alternate spellings reject | `human_cli_integration.py`, `dispatch_integration.py`, `'Current facts'` | Public arrays and private SQLite masks remain distinct representations |
 
 ## Exact Edit
 
@@ -654,7 +654,6 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 | Controls queue behind settlement | `'active model settlement'`, `control_integration.py` | Store hold proves exclusion, not latency. Unordered contention reports unavailable |
 | Host reply and request bounds | `'exact worst-case'` | Each bound derives from the JSON shape its writer writes; full 128-byte keys, escaped Store, Session and workspace strings and escaped 96-byte codes. No fixed 8 KiB allowance |
 | [Conversation pages](ARCHITECTURE.md#public-conversation-pages) and streaming | `'public'`, `'sequential work'`, `'public assistant message provenance'`, `conversation_page_integration.py` | Exact message item, public part text, Session, Turn and Attempt bindings. Whole-value reads check stored bytes against their digest at the end; ranged reads past the start do not. No aggregate memory |
-| [Proposal reads](ARCHITECTURE.md#historical-proposal-reads) | `proposal-integration` | Not activity chronology. Cannot clear historical Mac reds |
 | [Session activity](ARCHITECTURE.md#public-session-activity) and tool labels | `activity-integration`, `'tool label'` | `RUI_ACTIVITY_MEASURE=1` samples. No latency bound |
 | [Content step faults fence](ARCHITECTURE.md#canonical-content-reads-and-retention) | `'public content SQLite step'` | None |
 

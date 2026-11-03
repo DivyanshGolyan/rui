@@ -74,8 +74,6 @@ RULES = (
      "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance"),
     (("tests/integration/peer_integration.py",), ("check",), ("check",),
      "Peer round trip through installed Bash, runtime address and capture recovery"),
-    (("tests/integration/proposal_*",),
-     ("proposal-integration",), ("proposal-integration",), "Historical proposal fixture and typed Client"),
     (("tests/integration/activity_*",),
      ("activity-integration",), ("activity-integration",), "Session activity fixture and typed Client"),
     (("tests/integration/preference_policy*",),
@@ -202,7 +200,7 @@ CHECK_COVERS = {
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration",
-    "proposal-integration", "activity-integration", "preference-policy-integration",
+    "activity-integration", "preference-policy-integration",
     "canonical-failure-integration",  # human_cli_integration.main executes all cases.
     "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
 }

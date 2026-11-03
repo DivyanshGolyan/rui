@@ -237,44 +237,6 @@ pub const Requests = struct {
         return readPublicContentResponse(self, fd, expected, sink);
     }
 
-    /// Returns owned metadata only; no scratch, payload or traversal escapes.
-    pub fn proposalPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ProposalCursor) !protocol_reply.ProposalPageReply {
-        try self.check();
-        try protocol_reply.validateIdentityInputs("", session);
-        try (protocol.ProposalPage{ .end = cursor.end, .after = cursor.after }).validate();
-        const paths = try platform.resolveClientPaths(self.io, store_path);
-        var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.proposal_page_request, .{ paths.store.slice(), session, cursor.end, cursor.after });
-        const fd = try openRead(self, &paths, "/v1/proposal-page", body.slice());
-        defer closeSocket(self.io, fd);
-        const Sink = struct {
-            buffer: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{},
-            pub fn feed(s: *@This(), bytes: []const u8) !void {
-                try s.buffer.append(bytes);
-            }
-        };
-        var sink: Sink = .{};
-        var reply_buffer: ReplyBuffer = .{};
-        return switch (try readReportResponse(self, fd, &sink, &reply_buffer)) {
-            .report => .{ .page = try protocol_reply.ProposalPage.parse(sink.buffer.slice(), cursor) },
-            .command => |reply| .{ .failure = try protocol_reply.decodeReadFailure(reply, false) },
-        };
-    }
-
-    /// Complete bytes once, through the ordinary synchronous sink contract.
-    /// Failure may follow delivered prefix bytes; it never returns success then.
-    pub fn readProposalField(self: Requests, store_path: []const u8, session: []const u8, position: u64, field: ProposalField, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
-        try self.check();
-        try protocol_reply.validateIdentityInputs("", session);
-        if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
-        const paths = try platform.resolveClientPaths(self.io, store_path);
-        var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.proposal_field_request, .{ paths.store.slice(), session, position, field });
-        const fd = try openRead(self, &paths, "/v1/proposal-field", body.slice());
-        defer closeSocket(self.io, fd);
-        return readPublicContentResponse(self, fd, expected, sink);
-    }
-
     pub fn activityPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
@@ -349,7 +311,7 @@ pub const Requests = struct {
         };
     }
 
-    /// Complete scoped bytes once; callers still use readProposalField for calls.
+    /// Complete scoped bytes once.
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
@@ -449,8 +411,6 @@ fn completeContentEOF(requests: Requests, fd: std.posix.fd_t, actual: [32]u8, ex
     var tail: [1]u8 = undefined;
     if (try readRequest(requests, fd, &tail, ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true)) != 0) return error.InvalidResponse;
 }
-
-pub const ProposalField = protocol.ProposalField;
 
 pub const OptionalText = struct {
     present: bool = false,
@@ -2227,8 +2187,6 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidTarget, requests.readActionCallId("/never-open", session, 1, file, &reply));
         try std.testing.expectError(error.InvalidSession, requests.conversationPage("/never-open", session, .{ .end = 0 }));
         try std.testing.expectError(error.InvalidSession, requests.readConversationContent("/never-open", session, 1, 0, null, file));
-        try std.testing.expectError(error.InvalidSession, requests.proposalPage("/never-open", session, .{}));
-        try std.testing.expectError(error.InvalidSession, requests.readProposalField("/never-open", session, 1, .name, null, file));
         try std.testing.expectError(error.InvalidSession, requests.activityPage("/never-open", session, .{}));
         try std.testing.expectError(error.InvalidSession, requests.readActivityContent("/never-open", session, 1, 0, null, file));
     }
@@ -3201,8 +3159,6 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
         .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
         .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
-        .{ protocol.proposal_page_request, .{ &store, &session, optional_id, id }, protocol.max_proposal_page_request_bytes },
-        .{ protocol.proposal_field_request, .{ &store, &session, id, protocol.ProposalField.arguments }, protocol.max_proposal_field_request_bytes },
         .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
         .{ protocol.person_message_request, .{ &store, &session, optional_id, id, Direction.backward }, protocol.max_person_message_request_bytes },

@@ -3338,14 +3338,6 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
         assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "signal after inspection handoff did not restore terminal"
-        # Opening uses certified labels, not undisplayed exact proposal fields.
-        # Explicit inspection and permission above still read the exact command.
-        hidden_reads = []
-        proxy.route = "/v1/proposal-field"
-        def observe_hidden_read(response):
-            hidden_reads.append(len(response))
-            return response
-        proxy.rewrite = observe_hidden_read
         # Tall enough that the whole reopened conversation is one frame.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 160, 100, 0, 0))
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
@@ -3359,7 +3351,6 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert "✓ Prepare external approval 1\n✓ External approval 1\n" in reopened, ("reopening lost compact successes", reopened)
         if signal_failure:
             assert "Process-group signaling reported a failure." in reopened, ("reopening hid cleanup warning", reopened)
-        assert not hidden_reads, ("label-only opening read undisplayed proposal bytes", hidden_reads)
         os.write(master, b"/exit\n")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors

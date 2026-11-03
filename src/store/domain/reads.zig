@@ -121,7 +121,6 @@ const read_failures = .{
     .{ public_page, error.ConversationReadFailed },
     .{ activity_forward, error.ActivityReadFailed },
     .{ activity_backward, error.ActivityReadFailed },
-    .{ proposal_positions, error.ProposalReadFailed },
     .{ public_entry, error.ConversationReadFailed },
     .{ public_tool_result, error.PublicContentReadFailed },
     .{ hosted_call, error.ActivityReadFailed },
@@ -277,13 +276,6 @@ pub const PublicConversationPage = struct {
     pub const capacity = protocol.public_conversation_page_items;
     end: u64,
     items: [capacity]PublicConversationItem = undefined,
-    count: usize = 0,
-    more: bool = false,
-};
-
-pub const ProposalPage = struct {
-    end: u64,
-    items: [protocol.proposal_page_items]protocol.ProposalMetadata = undefined,
     count: usize = 0,
     more: bool = false,
 };
@@ -1837,55 +1829,10 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
 }
 
-/// The positions of a Session's proposed calls after ?2 through ?3: the
-/// immutable accepted item owns discovery, including rejected calls. Do
-/// not filter on live Actions, permissions or Turn state.
-const proposal_positions = rsql.Read(.{
-    .sql = "SELECT session_position FROM model_output_item " ++
-        "WHERE session_ref=?1 AND session_position>?2 AND session_position<=?3 AND item_kind=3 " ++
-        "ORDER BY session_position LIMIT 17",
-    .Args = struct { session: []const u8, after: u64, end: u64 },
-    .Row = struct { session_position: rsql.Positive },
-    .cardinality = .each,
-});
-
-/// Round 1 reads the Session's next position; round 2 the page's positions
-/// into this frame, with the cursor's Proposal; round 3 every row's
-/// Proposal. A failed step of the positions read is `ProposalReadFailed`,
-/// main's name.
-pub fn proposalPage(a: *ReadAccess, request: *const protocol.ProposalPage, page: *ProposalPage) !void {
-    const session = request.session.slice();
-    const next = try readNextPosition(a, session) orelse return error.SessionNotFound;
-    const end = request.end orelse next - 1;
-    if (end >= next) return error.InvalidCursor;
-    page.* = .{ .end = end };
-    var rows: Collected(proposal_positions.Row, protocol.proposal_page_items + 1) = .{};
-    var cursor: ProposalRead = .{ .position = request.after };
-    if (request.after != 0) readProposal(a, session, &cursor);
-    a.readEach(proposal_positions, .{ .session = session, .after = request.after, .end = end }, rows.items.len, &rows);
-    try runRows(a);
-    if (request.after != 0) cursor.found() catch |err| switch (err) {
-        error.ContentNotFound => return error.InvalidCursor,
-        else => return err,
-    };
-    page.more = rows.len > page.items.len;
-    page.count = @min(rows.len, page.items.len);
-    if (page.count == 0) return;
-    var reads: [protocol.proposal_page_items]ProposalRead = undefined;
-    for (rows.slice()[0..page.count], page.items[0..page.count], reads[0..page.count]) |row, *item, *read| {
-        read.* = .{ .position = row.session_position.get(), .metadata = item };
-        readProposal(a, session, read);
-    }
-    try runRows(a);
-    for (reads[0..page.count]) |*read| try read.found();
-}
-
-pub const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [3]i64 };
-
 /// The content columns of a Proposal's three fields, in ProposalField order.
 const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", "arguments_content_id" };
 
-// The page, continuation cursor and byte route share one provenance check.
+// Every caller (Activity pages, Action reads, call outcomes, the report) shares one provenance check.
 // LEFT JOIN keeps missing/contradictory owners visible as corruption.
 /// The Proposal at a Session position, with each field's content row.
 pub const proposal_row = rsql.Read(.{
@@ -1935,14 +1882,12 @@ pub const proposal_row = rsql.Read(.{
 });
 
 /// The Proposal at `position`, read in a round it may share with other
-/// rows (`readProposal`), into `metadata` and `content_ids` when the
-/// caller keeps them. Each field's content must be public and match the
+/// rows (`readProposal`), into `metadata` when the caller keeps it. Each field's content must be public and match the
 /// metadata admission certified, so reference substitution is detectable
 /// without reopening payloads.
 pub const ProposalRead = struct {
     position: u64,
     metadata: ?*protocol.ProposalMetadata = null,
-    content_ids: ?*[3]i64 = null,
     count: RowCount = .{},
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
@@ -1952,14 +1897,13 @@ pub const ProposalRead = struct {
     fn keep(read: *ProposalRead, row: *const proposal_row.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         var fields: [3]protocol.ProposalFieldReference = undefined;
-        inline for (proposal_fields, 0..) |column, index| {
+        inline for (0..proposal_fields.len) |index| {
             const suffix = std.fmt.comptimePrint("{d}", .{index});
             const length: u64 = @field(row, "length" ++ suffix);
             const digest: [32]u8 = @field(row, "digest" ++ suffix);
             const certified = row.field_metadata[index * 40 ..][0..40];
             if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
                 !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
-            if (read.content_ids) |ids| ids[index] = @intCast(@field(row, column).get());
             fields[index] = .{ .length = length, .digest = digest };
         }
         if (read.metadata) |metadata| metadata.* = .{
@@ -1987,29 +1931,19 @@ pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
 }
 
 /// `readProposal` in a round of its own.
-pub fn proposal(a: anytype, session: []const u8, position: u64) !ProposalIdentity {
-    var identity: ProposalIdentity = undefined;
-    var read: ProposalRead = .{ .position = position, .metadata = &identity.metadata, .content_ids = &identity.content_ids };
+pub fn proposal(a: anytype, session: []const u8, position: u64) !protocol.ProposalMetadata {
+    var metadata: protocol.ProposalMetadata = undefined;
+    var read: ProposalRead = .{ .position = position, .metadata = &metadata };
     readProposal(a, session, &read);
     try a.run();
     try read.found();
-    return identity;
+    return metadata;
 }
 
 /// `proposal` for unconverted code (`report.zig`). Not inlined, so its
 /// Access takes no slot in the report's frame.
-pub noinline fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
+pub noinline fn proposalLocked(self: *Store, session: []const u8, position: u64) !protocol.ProposalMetadata {
     var a = ReadAccess.within(self);
     defer a.deinit();
     return proposal(&a, session, position);
-}
-
-pub fn openProposalField(a: *ReadAccess, request: *const protocol.ReadProposalField) !ContentLocation {
-    const identity = proposal(a, request.session.slice(), request.position) catch |err| switch (err) {
-        error.ContentNotFound => return err,
-        else => return store_core.fence(a.store, err),
-    };
-    const index = @backingInt(request.field);
-    const field = identity.metadata.fields[index];
-    return .{ .store = a.store, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest } };
 }

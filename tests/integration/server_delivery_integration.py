@@ -68,9 +68,7 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
         store.mkdir(mode=0o700)
         text = "asymmetric-é中-0123456789\n" * repetitions
         user_text = "raw-user-prefix:" + text
-        arguments = "proposal-arguments-é\n" * repetitions
         endpoint = model.SuccessEndpoint([
-            model.sse_tool_calls("checkpoint", [("unknown", "checkpoint-call", arguments)]),
             model.sse_answer("checkpoint-final", "private", "answer", text)[0],
         ], chunk_sizes=chunk_sizes)
         worker = threading.Thread(target=endpoint.serve_forever)
@@ -101,16 +99,11 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
             items = json.loads(body)["items"]
             user = next(item["position"] for item in items if item["kind"] == "user")
             assistant = next(item["position"] for item in items if item["kind"] == "assistant")
-            head, body = read("/v1/proposal-page", "proposal_page", session=session, end=None, after="0")
-            assert head.startswith(b"HTTP/1.1 200 "), head
-            proposal = json.loads(body)["items"][0]["position"]
             routes = [
                 ("/v1/read-result", "read_result", {"key": "message"}, text),
                 *[("/v1/conversation-content", "conversation_content",
                    {"session": session, "position": position, "ordinal": "0", "start": "0", "stream": True}, expected)
                   for position, expected in ((user, user_text), (assistant, text))],
-                ("/v1/proposal-field", "proposal_field",
-                 {"session": session, "position": proposal, "field": "arguments"}, arguments),
                 *[("/v1/activity-content", "activity_content",
                    {"session": session, "position": position, "ordinal": "0"}, expected)
                   for position, expected in ((user, user_text), (assistant, text))],

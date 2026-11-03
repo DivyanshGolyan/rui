@@ -11353,83 +11353,48 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
 }
 
-test "public proposal structural corruption fences independently on every route" {
+test "public proposal structural corruption fences the activity page" {
     const faults = [_][:0]const u8{
         "UPDATE content SET private=1,payload=zeroblob(byte_length) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=0)",
         "DELETE FROM model_tool_call WHERE call_ordinal=0",
         "UPDATE turn SET session_ref='f0re1g'",
         "UPDATE model_tool_call SET name_content_id=(SELECT call_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=0)",
     };
     for (faults) |fault| {
-        for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try testingStore(&storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSession(&storage, "config");
-            try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "run tools");
-            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const calls = [_]TestingCall{
-                .{ .item_id = "original", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-                .{ .item_id = "replacement", .name = "unknown", .encoded_call_id = "sibling", .decoded_call_id = "sibling", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-            };
-            try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
-            var request: protocol.ProposalPage = .{};
-            try request.session.set(session.slice());
-            const healthy = try store_core.proposalPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(usize, 2), healthy.count);
-            const item = healthy.items[0];
-            try std.testing.expectEqual(binding.operation_id, item.operation);
-            try std.testing.expectEqual(binding.turn_id, item.turn);
-            try std.testing.expectEqual(@as(u64, 0), item.call_ordinal);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("unknown"), &item.fields[0].digest);
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-            try sqlite.exec(storage.database, fault);
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
-            request.end = healthy.end;
-            if (route == .cursor) request.after = item.position;
-            const result: anyerror!void = if (route == .content)
-                if (storage.openProposalField(&.{ .session = request.session, .position = item.position, .field = .name })) |value| blk: {
-                    var reader: ContentReader = undefined;
-                    reader.open(value);
-                    reader.close();
-                    break :blk {};
-                } else |err| err
-            else if (store_core.proposalPageForTesting(&storage, request)) |_| {} else |err| err;
-            try std.testing.expectError(error.CorruptStore, result);
-            try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, store_core.proposalPageForTesting(&storage, request));
-            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
-        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "config");
+        try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "run tools");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "original", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "replacement", .name = "unknown", .encoded_call_id = "sibling", .decoded_call_id = "sibling", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        const healthy = try store_core.activityPageForTesting(&storage, request);
+        const call = for (healthy.items[0..healthy.count]) |item| {
+            if (item.value == .call) break item.value.call;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqual(binding.operation_id, call.operation);
+        try std.testing.expectEqual(binding.turn_id, call.turn);
+        try std.testing.expectEqual(@as(u64, 0), call.call_ordinal);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("unknown"), &call.fields[0].digest);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.database, fault);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
+        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
-}
-
-test "proposal callable cursor domain preserves healthy Store" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSessionAsk(&storage, "proposal-config");
-    var request: protocol.ProposalPage = .{};
-    try request.session.set(session.slice());
-    request.end = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
-    request.end = null;
-    request.after = 1;
-    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
-    request.end = 0;
-    request.after = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
-    request.after = 0;
-    const page = try store_core.proposalPageForTesting(&storage, request);
-    try std.testing.expectEqual(@as(u64, 0), page.end);
-    try std.testing.expectEqual(@as(usize, 0), page.count);
-    try std.testing.expect(!page.more and !storage.isFenced());
-    try std.testing.expectError(error.ContentNotFound, storage.openProposalField(&.{ .position = std.math.maxInt(u64) }));
 }
 
 test "public activity admission corruption fences page and content independently" {
@@ -11521,59 +11486,45 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
         call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "rounds-output", &calls);
-    var proposals: protocol.ProposalPage = .{};
-    try proposals.session.set(session.slice());
     var conversation: protocol.ConversationPage = .{};
     try conversation.session.set(session.slice());
     var activity: protocol.ActivityPage = .{};
     try activity.session.set(session.slice());
-    const full = try pageRounds(&storage, &proposals, &conversation, &activity);
-    try std.testing.expectEqual(@as(usize, 16), full.proposals);
+    const full = try pageRounds(&storage, &conversation, &activity);
     try std.testing.expectEqual(@as(usize, 16), full.conversation);
     try std.testing.expectEqual(@as(usize, 16), full.activity);
-    // Smaller pages of the same kinds: the first Proposal; the first Tool
-    // Result and the User entry before it; the rows through the first call.
-    proposals.end = full.first_call;
+    // Smaller pages of the same kinds: the first Tool Result and the User
+    // entry before it; the rows through the first call.
     conversation = .{ .session = conversation.session, .end = full.end, .before_position = full.results, .before_ordinal = 2 };
-    activity.end = full.first_call;
-    const small = try pageRounds(&storage, &proposals, &conversation, &activity);
-    try std.testing.expectEqual(@as(usize, 1), small.proposals);
+    activity.end = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
+    const small = try pageRounds(&storage, &conversation, &activity);
     try std.testing.expectEqual(@as(usize, 2), small.conversation);
     try std.testing.expect(small.activity < 16);
     try std.testing.expectEqual(small.rounds, full.rounds);
 }
 
-const PageRounds = struct { rounds: [3]u32, proposals: usize, conversation: usize, activity: usize, first_call: u64, results: u64, end: u64 };
+const PageRounds = struct { rounds: [2]u32, conversation: usize, activity: usize, results: u64, end: u64 };
 
 /// The rounds each page read takes, with its row counts and the positions
 /// its caller bounds smaller pages with.
-fn pageRounds(storage: *Store, proposals: *const protocol.ProposalPage, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
+fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
     var result: PageRounds = undefined;
-    var proposal_page: reads_domain.ProposalPage = undefined;
     var public_page: reads_domain.PublicConversationPage = undefined;
     var activity_page: protocol.ActivityFacts = undefined;
     {
         var a = reads_domain.ReadAccess.within(storage);
         defer a.deinit();
-        try reads_domain.proposalPage(&a, proposals, &proposal_page);
+        try reads_domain.publicConversationPage(&a, conversation, &public_page);
         result.rounds[0] = a.rounds;
     }
     {
         var a = reads_domain.ReadAccess.within(storage);
         defer a.deinit();
-        try reads_domain.publicConversationPage(&a, conversation, &public_page);
+        try reads_domain.activityPage(&a, activity, &activity_page);
         result.rounds[1] = a.rounds;
     }
-    {
-        var a = reads_domain.ReadAccess.within(storage);
-        defer a.deinit();
-        try reads_domain.activityPage(&a, activity, &activity_page);
-        result.rounds[2] = a.rounds;
-    }
-    result.proposals = proposal_page.count;
     result.conversation = public_page.count;
     result.activity = activity_page.count;
-    result.first_call = proposal_page.items[0].position;
     result.results = public_page.items[0].position;
     result.end = public_page.end;
     return result;

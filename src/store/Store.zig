@@ -45,7 +45,6 @@ const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const PrefixSeal = historical_domain.PrefixSeal;
-const ProposalPage = reads_domain.ProposalPage;
 const PublicConversationPage = reads_domain.PublicConversationPage;
 const SessionListOptions = report_domain.SessionListOptions;
 const SessionObservation = reads_domain.SessionObservation;
@@ -513,24 +512,6 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
-    }
-
-    pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
-        try request.validate();
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.proposalPage(&access, request, out));
-    }
-
-    pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
-        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.content, reads_domain.openProposalField(&access, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -1230,12 +1211,6 @@ pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !pro
 pub fn publicConversationPageForTesting(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
     try self.publicConversationPage(&request, &page);
-    return page;
-}
-
-pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !ProposalPage {
-    var page: ProposalPage = undefined;
-    try self.proposalPage(&request, &page);
     return page;
 }
 
