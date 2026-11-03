@@ -1738,7 +1738,7 @@ fn launchPreparedRequest(
     // one that never sends the codec's routing header has none to echo.
     const replay = host.turn_states.get(request.provider).replay(binding.turn_id, served.credential.routingOwner(credential));
     headers.routing(routing_header, replay.value);
-    const turn_state: provider.TurnStateKey = .{ .provider = request.provider, .turn_id = binding.turn_id, .epoch = replay.epoch };
+    const turn_state = provider.TurnStateKey{ .provider = request.provider, .turn_id = binding.turn_id, .epoch = replay.epoch };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
