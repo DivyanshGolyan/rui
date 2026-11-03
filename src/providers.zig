@@ -48,6 +48,12 @@ pub fn leaseFailureCode(err: anyerror) []const u8 {
     return codex_auth.failureCode(err);
 }
 
+/// Whether a Session served over `route` may ask for structured output:
+/// the ChatGPT backend refuses it.
+pub fn acceptsOutputSchema(route: protocol.Route) bool {
+    return route != .chatgpt_device;
+}
+
 /// A provider's own endpoint, the only one its credential is sent to.
 pub fn endpoint(provider: Provider) []const u8 {
     return switch (provider) {

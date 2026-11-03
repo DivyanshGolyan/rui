@@ -136,6 +136,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
+| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, its sign-in name, whether its credential is a sign-in or a key, and whether its model list is Rui's table or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
 | Model capability | `src/model_capability.zig`: Codex identifier syntax, the reasoning-effort grammar and the model table, one row per release-supported ID with its default effort, `max` support, parallel tool-call policy and context window. |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
@@ -1002,7 +1003,8 @@ If request preparation fails, or the exchange ends before that point (URL, resol
 The failed acquisition still returns an error; a later acquisition can refresh.
 Counting at packing rather than at a successful write means a partial or failed send is never taken as unsent.
 Every failure after packing, including a timeout, a lost connection, an interrupted or failed wait and a received rejection body, leaves the record pending.
-Refresh error bodies distinguish `refresh_token_expired`, `refresh_token_reused` and `refresh_token_invalidated` as `provider_refresh_token_expired`, `provider_refresh_token_reused` and `provider_refresh_token_invalidated`.
+Refresh error bodies distinguish `refresh_token_expired`, `refresh_token_reused` and `refresh_token_invalidated` as `provider_sign_in_refresh_token_expired`, `provider_sign_in_refresh_token_reused` and `provider_sign_in_refresh_token_invalidated`.
+Every failure only a new sign-in resolves saves a code under `failure_class.sign_in_prefix` (`provider_sign_in_`), so core reads it as a sign-in without knowing which source saved it.
 Unknown bodies retain the generic authentication failure.
 No response text enters these codes.
 
@@ -1034,7 +1036,7 @@ The authentication worker then refreshes under the credential lock, but only whi
 - A committed refresh settles the Attempt as `provider_http_401` with the provider's correlation and makes one replacement Attempt due immediately within the existing allowance.
   No backoff or jitter applies.
 - If another Host or a login has already advanced the generation, the Attempt fails as answered, with no refresh and no replacement.
-- A refresh failure saves its own authentication code, such as `provider_authentication_failed` for a record that requires login, and also sends no replacement.
+- A refresh failure saves its own authentication code, such as `provider_sign_in_required` for a record that requires login, and also sends no replacement.
 
 A second 401, a stop, a crash after the claim, or restart recovery never refreshes the same Operation again.
 Transport authentication failures, other HTTP statuses and unmanaged endpoints keep the ordinary failure policy.
@@ -1401,10 +1403,10 @@ Each name is a lowercase token that names no field the Host or h2 writes itself 
 The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT sign-in's `authorization` and `chatgpt-account-id`, or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
 A route without a credential sends the codec's headers and no credential-path fields.
 To classify an HTTP error body, the shell maps the sealed body read-only and gives it whole, as one slice, to the classifier of the codec the request was encoded with, with scratch the shell lends for that call and the classifier writes before it reads.
-The classifier writes its answer into one value the shell lends: context overflow, or else the error's code with a quota's reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
+The classifier writes its answer into one value the shell lends: context overflow, or else the `codec_abi.Refusal` its code names with the reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
 The map shares the capture's page cache, so it makes no second copy of the body.
 The shell alone decides the failure.
-It reads only 4xx and 5xx bodies; it takes a quota only at HTTP 429, then context overflow, then a refusal at any status; it maps each code through `transport_policy`'s closed `Quota` and `Refusal` sets, so a code it does not know narrows nothing; and it decodes, bounds and control-strips the report itself.
+It reads only 4xx and 5xx bodies; it takes a quota only at HTTP 429, then context overflow, then a refusal at any status; the codec alone knows its provider's codes and names each one it knows as a neutral `codec_abi.Refusal` (quota, plan, policy or model unavailable), so a code it does not know narrows nothing; and it decodes, bounds and control-strips the report itself.
 Every narrowing settles as a failure that no retry can fix, so a codec can narrow a failure but never make one retryable.
 A body the classifier cannot read names nothing, so the status rule decides alone; a report range outside the body is a Host defect caught by slice bounds, not a runtime failure.
 A sealed body shorter than its recorded length, or one that fails to map, stays `response_read_failed`.
@@ -1509,14 +1511,16 @@ The WAL name needs four bytes beyond the database path, within the eight reserve
 
 Sealed SSE `error` and `response.failed` events classify exact provider codes.
 Overload, rate limits and unknown codes are temporary failures.
-Known quota, request and policy failures (`transport_policy.Refusal`) are permanent refusals, in an event or an HTTP error body at any status, and each saves its own `provider_<code>` failure code; exact context overflow retains its compaction path.
+Known quota, plan, policy and model failures are permanent refusals, in an event or an HTTP error body at any status.
+The codec names each as a neutral `codec_abi.Refusal`, which saves `provider_quota`, `provider_plan`, `provider_policy` or `provider_model_unavailable` whatever the provider called it; the provider's own code stays in the report; exact context overflow retains its compaction path.
 A clean framed close without `response.completed` is a temporary connection failure.
 Malformed JSON or framing, explicit incomplete generation and contradictory completion remain permanent output failures.
 No failed prefix becomes accepted output.
 Scheduled retries save no rejection content; exhaustion retains only the settling Attempt's diagnostic and request correlation in the existing Resolution.
 
-HTTP 429 with exact `error.code` of `usage_limit_reached`, `insufficient_quota` or `usage_not_included` is a permanent quota refusal, not a temporary rate limit.
-Each retains its distinct `provider_` failure code, recognized provider code and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
+HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted` and the two spend limits a quota and `usage_not_included` a plan.
+Each retains its neutral failure code, its refusal and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
+A Turn saved before refusal and sign-in codes became neutral keeps its old code (such as `provider_usage_limit_reached` or `provider_authentication_failed`), which now reads as an unknown failure: it shows its code, no trouble band and no reset time, and the Store does not fence it.
 Missing, null, invalid or duplicate reset metadata stays absent without making the quota refusal retryable.
 Provider prose is not copied into the diagnostic.
 Other HTTP 429 responses retain their temporary status classification unless their code is a known refusal.

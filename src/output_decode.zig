@@ -36,7 +36,7 @@ comptime {
     std.debug.assert(protocol.max_report_bytes == 2 * max_part_bytes + ": ".len + 2 * shortened_mark.len);
 }
 
-/// What a provider said of a failure: the refusal its exact code names, if
+/// What a provider said of a failure: the refusal its codec read in it, if
 /// any, and its report. Callers clear it with `clear`, which leaves the
 /// report's bytes unwritten.
 pub const ProviderFailure = struct {
@@ -82,16 +82,11 @@ pub fn writeReport(report: *Report, code: *const ReportPart, message: *const Rep
     };
 }
 
-comptime {
-    // A codec's code holds every code the Host knows.
-    for (std.enums.values(transport_policy.Refusal)) |refusal| std.debug.assert(@tagName(refusal).len <= codec_abi.max_code_bytes);
-}
-
 /// Classify the sealed HTTP error body, the first `length` bytes of `body`,
 /// with `codec`'s classifier, and fill `failure` with its refusal and
 /// report, for every answer. Only a 4xx or 5xx body is read. A codec can
-/// narrow the status rule only by a code the Host knows: quota at HTTP 429,
-/// then context overflow, then a refusal at any status. A failed read is
+/// narrow the status rule only by what it names: a quota or plan refusal at
+/// HTTP 429, then context overflow, then a refusal at any status. A failed read is
 /// `.unreadable`. Never inlined: the codec's classifier, which inlines here,
 /// stays out of the engine's frames.
 pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, body: std.Io.File, length: u64, status: u16, failure: *ProviderFailure) execution.ErrorResponse {
@@ -112,10 +107,9 @@ pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, bod
         if (report) |range| readPart(bytes[@intCast(range.start)..][0..@intCast(range.length)], range.escape, part);
     }
     writeReport(&failure.report, &decode.code, &decode.message);
-    const code = if (found.code) |*code| code.slice() else null;
-    failure.refusal = if (code) |text| .ofProviderCode(text) else null;
-    if (status == 429) if (code) |text| if (transport_policy.Quota.ofProviderCode(text)) |known| {
-        return .{ .quota = .{ .code = known, .resets_at = found.resets_at } };
+    failure.refusal = found.refusal;
+    if (status == 429) if (found.refusal) |refusal| if (transport_policy.Quota.admits(refusal)) {
+        return .{ .quota = .{ .refusal = refusal, .resets_at = found.resets_at } };
     };
     if (found.context_overflow) return .context_overflow;
     return if (failure.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
@@ -394,7 +388,7 @@ pub noinline fn interpret(
             .rejected = .{
                 .reason = err,
                 // A refusal saves the code it names, whatever carried it.
-                .code = if (provider_failure.refusal) |refusal| refusal.failureCode() else failureCode(err),
+                .code = if (provider_failure.refusal) |refusal| transport_policy.refusalCode(refusal) else failureCode(err),
                 .location = rejection,
                 .kind = switch (err) {
                     error.ContextOverflow => .context_overflow,
@@ -833,8 +827,8 @@ const Grammar = struct {
     }
 
     /// The codec's verdict on the event, with the provider's report when it
-    /// gave one. A reported failure is permanent when its code is a refusal
-    /// the Host knows.
+    /// gave one. A reported failure is permanent when the codec names a
+    /// refusal in it.
     noinline fn fail(self: *Grammar, data: []const u8, failed: *const codec_abi.Failed) anyerror {
         if (failed.report.code != null or failed.report.message != null) {
             for ([_]*ReportPart{ &self.code, &self.message }, [_]?codec_abi.ReportRange{ failed.report.code, failed.report.message }) |part, report| {
@@ -845,7 +839,7 @@ const Grammar = struct {
             writeReport(&self.provider_failure.report, &self.code, &self.message);
         }
         if (failed.reason != .reported_provider_failure) return reasonError(failed.reason);
-        self.provider_failure.refusal = if (failed.refusal) |*code| .ofProviderCode(code.slice()) else null;
+        self.provider_failure.refusal = failed.refusal;
         return if (self.provider_failure.refusal != null) error.PermanentProviderFailure else error.TemporaryProviderFailure;
     }
 
@@ -886,7 +880,7 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const cases = [_]struct { body: []const u8, status: u16, refusal: ?transport_policy.Refusal, report: []const u8 }{
-        .{ .body = "{\"error\":{\"message\":\"The model `gpt-x` does not exist.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"model_not_found\"}}", .status = 404, .refusal = .model_not_found, .report = "model_not_found: The model `gpt-x` does not exist." },
+        .{ .body = "{\"error\":{\"message\":\"The model `gpt-x` does not exist.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"model_not_found\"}}", .status = 404, .refusal = .model_unavailable, .report = "model_not_found: The model `gpt-x` does not exist." },
         .{ .body = "{\"error\":{\"message\":\"Unsupported parameter.\",\"type\":\"invalid_request_error\",\"code\":null}}", .status = 400, .refusal = null, .report = "invalid_request_error: Unsupported parameter." },
         // The managed route's bare detail.
         .{ .body = "{\"detail\":\"Unsupported model\"}", .status = 400, .refusal = null, .report = "Unsupported model" },
@@ -1365,18 +1359,18 @@ test "a provider error event keeps its refusal and the provider's own words" {
     const long = comptime repeat("é", 200);
     const cases = [_]struct { event: []const u8, err: anyerror, refusal: ?transport_policy.Refusal, report: []const u8 }{
         // The refusal that ended the bug-swarm Sessions, as a stream event.
-        .{ .event = "{\"type\":\"error\",\"code\":\"cyber_policy\",\"message\":\"This request has been flagged for potentially high-risk cyber activity.\",\"param\":null}", .err = error.PermanentProviderFailure, .refusal = .cyber_policy, .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity." },
-        .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"model_not_found\",\"message\":\"No such model.\"}}}", .err = error.PermanentProviderFailure, .refusal = .model_not_found, .report = "model_not_found: No such model." },
+        .{ .event = "{\"type\":\"error\",\"code\":\"cyber_policy\",\"message\":\"This request has been flagged for potentially high-risk cyber activity.\",\"param\":null}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity." },
+        .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"model_not_found\",\"message\":\"No such model.\"}}}", .err = error.PermanentProviderFailure, .refusal = .model_unavailable, .report = "model_not_found: No such model." },
         // A retryable failure keeps its words too; an object's type stands in
         // for a missing code, and line breaks read as spaces.
         .{ .event = "{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"Overloaded,\\ntry\\tlater.\"}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "server_error: Overloaded, try later." },
         // An event's own type is only its name.
         .{ .event = "{\"type\":\"error\",\"code\":null,\"message\":\"Something failed.\"}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "Something failed." },
         // A malformed message is left out; the code still decides.
-        .{ .event = "{\"type\":\"error\",\"code\":\"insufficient_quota\",\"message\":7}", .err = error.PermanentProviderFailure, .refusal = .insufficient_quota, .report = "insufficient_quota" },
+        .{ .event = "{\"type\":\"error\",\"code\":\"insufficient_quota\",\"message\":7}", .err = error.PermanentProviderFailure, .refusal = .quota, .report = "insufficient_quota" },
         // A long message keeps its first 256 bytes, cut at a whole scalar.
-        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .bio_policy, .report = "bio_policy: " ++ comptime repeat("é", 128) ++ "…" },
-        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"x" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .bio_policy, .report = "bio_policy: x" ++ comptime repeat("é", 127) ++ "…" },
+        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: " ++ comptime repeat("é", 128) ++ "…" },
+        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"x" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: x" ++ comptime repeat("é", 127) ++ "…" },
         .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "" },
         // An overflow keeps its words too; DEL reads as a space.
         .{ .event = "{\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"Too\\u007flong.\"}", .err = error.ContextOverflow, .refusal = null, .report = "context_length_exceeded: Too long." },

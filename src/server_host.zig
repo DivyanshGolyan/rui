@@ -343,20 +343,22 @@ pub const Host = struct {
     }
 };
 
-/// The OpenAI API key's model list: the execution owner fetches it once as
-/// the Host starts and publishes it here, where it stays until the Host
-/// stops. The key is read once at start, so the list never needs fetching
-/// again. ChatGPT has no public list; its list is always the table.
+/// The live model list of the provider whose list is live
+/// (`Facts.model_list`): the execution owner fetches it once as the Host
+/// starts and publishes it here, where it stays until the Host stops. The
+/// key is read once at start, so the list never needs fetching again. Every
+/// other provider's list is always the table.
 pub const ModelLists = struct {
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
     providers: *const providers_module.Providers = &providers_module.none,
     mutex: std.Io.Mutex = .init,
     /// A live list's IDs are exact length, from `allocator`.
-    openai: model_list.List = .table,
+    /// `Provider.onlyLiveList()`'s, the one provider with a live list.
+    live: model_list.List = .table,
 
     pub fn deinit(self: *ModelLists) void {
-        switch (self.openai) {
+        switch (self.live) {
             .live => |ids| self.allocator.free(ids.bytes),
             .table, .pending, .table_fallback => {},
         }
@@ -367,14 +369,14 @@ pub const ModelLists = struct {
     pub fn set(self: *ModelLists, list: model_list.List) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        std.debug.assert(self.openai == .pending);
-        self.openai = list;
+        std.debug.assert(self.live == .pending);
+        self.live = list;
     }
 
     /// Publishes a fetched answer: its IDs, kept, or why there are none.
     pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
         const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
-            stderr.print("rui: OpenAI model list unavailable ({s}); the picker shows Rui's models\n", .{@errorName(err)});
+            stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ comptime protocol.Provider.onlyLiveList().shown(), @errorName(err) });
             break :failed .table_fallback;
         };
         self.set(list);
@@ -398,9 +400,9 @@ pub const ModelLists = struct {
         var count: usize = 0;
         for (std.enums.values(protocol.Provider)) |name| {
             if (!self.providers.serves(name)) continue;
-            entries[count] = .{ .provider = name, .list = switch (name) {
-                .codex => .table,
-                .openai => self.openai,
+            entries[count] = .{ .provider = name, .list = switch (name.facts().model_list) {
+                .table => .table,
+                .live => self.live,
             } };
             count += 1;
         }
@@ -1053,12 +1055,13 @@ fn appendOptionalSigned(
     } else try trace.append("null");
 }
 
-/// A managed Transfer's connection reuse and request correlation, for tests.
-pub inline fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    if (host.providers.leasedSignIn() != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
+/// A Transfer's connection reuse and request correlation, for tests. Only a
+/// Host serving a sign-in traces it: the managed-route journeys read it.
+pub inline fn traceTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
+    if (host.providers.leasedSignIn() != null and host.hooks.phase_trace) writeTransferTrace(host, transfer, binding);
 }
 
-noinline fn writeCodexTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
+noinline fn writeTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, "codex_transfer", null);
     defer if (publication) |*value| value.finish();
     const observation = transfer.protocolObservation();

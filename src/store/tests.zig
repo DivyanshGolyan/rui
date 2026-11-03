@@ -2438,14 +2438,14 @@ test "Current, activity pages and Message progress report one work in each state
     // A quota failure carries its saved reset time.
     const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
     var diagnostic: [512]u8 = undefined;
-    const quota: @import("../transport_policy.zig").Quota = .{ .code = .usage_limit_reached, .resets_at = 1792940000 };
+    const quota: @import("../transport_policy.zig").Quota = .{ .refusal = .quota, .resets_at = 1792940000 };
     try storage.settleModelAttemptFailure(retry, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = "" } }, .ordinary, .{});
     try std.testing.expectEqual(try queryU64(storage.database, "SELECT outcome_at FROM turn"), try expectOneWork(&storage, &tmp, session.slice(), "failed"));
     {
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
         const failed = (try store_core.activityPageForTesting(&storage, request)).work.work.state.failed;
-        try std.testing.expectEqualStrings("provider_usage_limit_reached", failed.code.slice());
+        try std.testing.expectEqualStrings("provider_quota", failed.code.slice());
         try std.testing.expectEqual(@as(?u64, 1792940000), failed.resets_at);
     }
 
@@ -2519,14 +2519,14 @@ test "a quota reset is read from a saved record and never fences" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     for ([_]struct { code: []const u8, diagnostic: ?[]const u8, resets_at: ?u64 }{
-        .{ .code = "provider_insufficient_quota", .diagnostic = "{\"provider_code\":\"insufficient_quota\",\"resets_at\":null}", .resets_at = null },
-        .{ .code = "provider_usage_not_included", .diagnostic = "{\"provider_code\":\"usage_not_included\",\"resets_at\":42}", .resets_at = 42 },
+        .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":null}", .resets_at = null },
+        .{ .code = "provider_plan", .diagnostic = "{\"refusal\":\"plan\",\"resets_at\":42}", .resets_at = 42 },
         // A missing, corrupt or mismatched record gives no time.
-        .{ .code = "provider_usage_limit_reached", .diagnostic = null, .resets_at = null },
-        .{ .code = "provider_usage_limit_reached", .diagnostic = "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":4x}", .resets_at = null },
-        .{ .code = "provider_usage_limit_reached", .diagnostic = "{\"provider_code\":\"insufficient_quota\",\"resets_at\":42}", .resets_at = null },
+        .{ .code = "provider_quota", .diagnostic = null, .resets_at = null },
+        .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":4x}", .resets_at = null },
+        .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"plan\",\"resets_at\":42}", .resets_at = null },
         // Only a quota code reads one.
-        .{ .code = "provider_http_403", .diagnostic = "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":42}", .resets_at = null },
+        .{ .code = "provider_http_403", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":42}", .resets_at = null },
     }, 0..) |case, index| {
         var key_buffer: [32]u8 = undefined;
         const key = try std.fmt.bufPrint(&key_buffer, "quota-{d}", .{index});
@@ -10053,8 +10053,8 @@ test "a failed Turn's activity outcome references the provider's report" {
         const message = try std.fmt.bufPrint(&key, "report-{d}", .{index});
         try submitTestMessage(&storage, &tmp, message, message, session.slice(), "work");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_cyber_policy", .request_id = .{}, .report = words } }, .ordinary, .{});
-        try expectActivityOutcome(&storage, session.slice(), binding, "provider_cyber_policy");
+        try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_policy", .request_id = .{}, .report = words } }, .ordinary, .{});
+        try expectActivityOutcome(&storage, session.slice(), binding, "provider_policy");
         var request: protocol.ActivityPage = .{ .direction = .backward };
         try request.session.set(session.slice());
         const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.outcome;
@@ -11453,7 +11453,7 @@ test "queued input is pending from the newer of its admission and the latest out
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try submitTestMessage(&storage, &tmp, "stepped-queue-input", "stepped-queue-input", session.slice(), "queued");
                 var diagnostic: [512]u8 = undefined;
-                const quota: @import("../transport_policy.zig").Quota = .{ .code = .usage_limit_reached, .resets_at = 1792940000 };
+                const quota: @import("../transport_policy.zig").Quota = .{ .refusal = .quota, .resets_at = 1792940000 };
                 try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = "" } }, .ordinary, .{});
                 try sqlite.exec(storage.database, "UPDATE message_admission SET admitted_at=200 WHERE command_key='stepped-queue-input';UPDATE turn SET outcome_at=100");
             },
@@ -12971,7 +12971,7 @@ test "saved Turn outcomes read back as the outcome that closed the Turn" {
         .{ .code = "ResourceExceeded", .content_id = 10, .tag = .resource_exceeded },
         .{ .code = "retry_exhausted", .content_id = 8, .tag = .retry_exhausted },
         .{ .code = "provider_http_401", .content_id = null, .tag = .failed },
-        .{ .code = "provider_cyber_policy", .content_id = 9, .tag = .failed },
+        .{ .code = "provider_policy", .content_id = 9, .tag = .failed },
     };
     for (saved) |row| {
         const outcome = try TurnOutcome.decode(row.code, row.content_id);

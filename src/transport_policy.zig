@@ -3,6 +3,7 @@
 //! Retry-After is read. `provider.zig` owns the h2 Client, the capture and
 //! the clock reads, and passes their facts here.
 const std = @import("std");
+const codec_abi = @import("codec_abi.zig");
 
 pub const Disposition = enum {
     success,
@@ -36,96 +37,70 @@ pub const Evidence = struct {
     retry_after_deadline_ms: ?i64 = null,
 };
 
-/// Provider error codes that resending the same request cannot fix, from
-/// Codex 970111f6 codex-api/src/sse/responses_error.rs. Each saves its own
-/// failure code whether it arrived in a stream event or an HTTP error body.
-pub const Refusal = enum {
-    insufficient_quota,
-    credit_balance_exhausted,
-    organization_spend_limit_exceeded,
-    project_spend_limit_exceeded,
-    usage_not_included,
-    usage_limit_reached,
-    cyber_policy,
-    bio_policy,
-    misalignment_policy_violation,
-    invalid_prompt,
-    model_not_found,
+/// What a provider's error code means, as its codec names it. Each saves
+/// `provider_<tag>` whether it arrived in a stream event or an HTTP error
+/// body; the provider's own code stays in the report.
+pub const Refusal = codec_abi.Refusal;
 
-    /// What the person can do about it: each class has one next step.
-    pub const Class = enum { quota, policy, model };
+const refusal_prefix = "provider_";
 
-    pub fn class(self: Refusal) Class {
-        return switch (self) {
-            .insufficient_quota, .credit_balance_exhausted, .organization_spend_limit_exceeded, .project_spend_limit_exceeded, .usage_not_included, .usage_limit_reached => .quota,
-            .cyber_policy, .bio_policy, .misalignment_policy_violation, .invalid_prompt => .policy,
-            .model_not_found => .model,
-        };
-    }
+pub fn refusalCode(refusal: Refusal) []const u8 {
+    return switch (refusal) {
+        inline else => |known| refusal_prefix ++ @tagName(known),
+    };
+}
 
-    pub fn ofProviderCode(code: []const u8) ?Refusal {
-        return std.meta.stringToEnum(Refusal, code);
-    }
+/// The refusal a saved failure code names, if any.
+pub fn refusalOfCode(code: []const u8) ?Refusal {
+    if (!std.mem.startsWith(u8, code, refusal_prefix)) return null;
+    return std.meta.stringToEnum(Refusal, code[refusal_prefix.len..]);
+}
 
-    pub fn failureCode(self: Refusal) []const u8 {
-        return switch (self) {
-            inline else => |refusal| "provider_" ++ @tagName(refusal),
-        };
-    }
-
-    /// The refusal a saved failure code names, if any.
-    pub fn ofFailureCode(code: []const u8) ?Refusal {
-        if (!std.mem.startsWith(u8, code, "provider_")) return null;
-        return ofProviderCode(code["provider_".len..]);
-    }
-};
-
-/// Recognized HTTP 429 refusals, not temporary rate limits. Only this closed
-/// code and a valid reset timestamp may enter the saved diagnostic.
+/// An HTTP 429 that names a quota or plan refusal, not a temporary rate
+/// limit. Only its refusal and a valid reset timestamp enter the saved
+/// diagnostic.
 pub const Quota = struct {
-    /// One of `codes`.
-    code: Refusal,
+    /// One that `admits` accepts.
+    refusal: Refusal,
     resets_at: ?u64 = null,
 
-    pub const codes = [_]Refusal{ .usage_limit_reached, .insufficient_quota, .usage_not_included };
-
-    /// The HTTP 429 quota refusal this provider code names, if any.
-    pub fn ofProviderCode(code: []const u8) ?Refusal {
-        const refusal = Refusal.ofProviderCode(code) orelse return null;
-        return if (std.mem.indexOfScalar(Refusal, &codes, refusal) != null) refusal else null;
+    /// Whether `refusal` at HTTP 429 is a quota record.
+    pub fn admits(refusal: Refusal) bool {
+        return refusal == .quota or refusal == .plan;
     }
 
     /// The quota refusal a saved failure code names, if any.
     pub fn ofFailureCode(code: []const u8) ?Refusal {
-        if (!std.mem.startsWith(u8, code, "provider_")) return null;
-        return ofProviderCode(code["provider_".len..]);
+        const refusal = refusalOfCode(code) orelse return null;
+        return if (admits(refusal)) refusal else null;
     }
 
     /// The same code as the stream refusal it is.
     pub fn failureCode(self: Quota) []const u8 {
-        return self.code.failureCode();
+        return refusalCode(self.refusal);
     }
 
     pub fn format(self: Quota, buffer: *[512]u8) []const u8 {
-        return std.fmt.bufPrint(buffer, "{{\"provider_code\":\"{s}\",\"resets_at\":{?d}}}", .{
-            @tagName(self.code), self.resets_at,
+        return std.fmt.bufPrint(buffer, "{{\"refusal\":\"{t}\",\"resets_at\":{?d}}}", .{
+            self.refusal, self.resets_at,
         }) catch unreachable;
     }
 
     /// The inverse of `format`, for exactly the bytes it writes. Anything
     /// else is not a saved quota record.
     pub fn parse(bytes: []const u8) ?Quota {
-        const head = "{\"provider_code\":\"";
+        const head = "{\"refusal\":\"";
         const middle = "\",\"resets_at\":";
         if (!std.mem.startsWith(u8, bytes, head) or !std.mem.endsWith(u8, bytes, "}")) return null;
         const rest = bytes[head.len .. bytes.len - 1];
         const split = std.mem.indexOf(u8, rest, middle) orelse return null;
-        const code = ofProviderCode(rest[0..split]) orelse return null;
+        const refusal = std.meta.stringToEnum(Refusal, rest[0..split]) orelse return null;
+        if (!admits(refusal)) return null;
         const reset = rest[split + middle.len ..];
-        if (std.mem.eql(u8, reset, "null")) return .{ .code = code };
+        if (std.mem.eql(u8, reset, "null")) return .{ .refusal = refusal };
         if (reset.len == 0 or (reset.len > 1 and reset[0] == '0')) return null;
         for (reset) |byte| if (!std.ascii.isDigit(byte)) return null;
-        return .{ .code = code, .resets_at = std.fmt.parseInt(u64, reset, 10) catch return null };
+        return .{ .refusal = refusal, .resets_at = std.fmt.parseInt(u64, reset, 10) catch return null };
     }
 };
 
@@ -360,47 +335,44 @@ fn digits(comptime T: type, text: []const u8) ?T {
 }
 
 test "every refusal saves one provider code that reads back to it" {
-    for (std.enums.values(Refusal)) |refusal| {
-        try std.testing.expectEqual(refusal, Refusal.ofFailureCode(refusal.failureCode()).?);
-        try std.testing.expectEqual(refusal, Refusal.ofProviderCode(@tagName(refusal)).?);
-    }
+    for (std.enums.values(Refusal)) |refusal| try std.testing.expectEqual(refusal, refusalOfCode(refusalCode(refusal)).?);
     // A quota refusal saves the same code from an HTTP 429 as from a stream.
-    for (Quota.codes) |code| {
-        const refusal = Refusal.ofFailureCode((Quota{ .code = code }).failureCode()).?;
-        try std.testing.expectEqual(.quota, refusal.class());
-    }
-    try std.testing.expect(Refusal.ofFailureCode("cyber_policy") == null);
-    try std.testing.expect(Refusal.ofFailureCode("provider_http_403") == null);
-    try std.testing.expect(Refusal.ofProviderCode("server_is_overloaded") == null);
+    try std.testing.expectEqualStrings("provider_quota", (Quota{ .refusal = .quota }).failureCode());
+    try std.testing.expectEqualStrings("provider_model_unavailable", refusalCode(.model_unavailable));
+    try std.testing.expect(refusalOfCode("quota") == null);
+    try std.testing.expect(refusalOfCode("provider_http_403") == null);
+    try std.testing.expect(refusalOfCode("provider_usage_limit_reached") == null);
 }
 
 test "a saved quota record reads back exactly what was written" {
     var buffer: [512]u8 = undefined;
     for ([_]Quota{
-        .{ .code = .usage_limit_reached, .resets_at = 1792940000 },
-        .{ .code = .insufficient_quota },
-        .{ .code = .usage_not_included, .resets_at = 0 },
-        .{ .code = .usage_limit_reached, .resets_at = std.math.maxInt(u64) },
+        .{ .refusal = .quota, .resets_at = 1792940000 },
+        .{ .refusal = .quota },
+        .{ .refusal = .plan, .resets_at = 0 },
+        .{ .refusal = .quota, .resets_at = std.math.maxInt(u64) },
     }) |quota| {
         const parsed = Quota.parse(quota.format(&buffer)) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(quota.code, parsed.code);
+        try std.testing.expectEqual(quota.refusal, parsed.refusal);
         try std.testing.expectEqual(quota.resets_at, parsed.resets_at);
     }
-    for (Quota.codes) |code| try std.testing.expectEqual(code, Quota.ofFailureCode((Quota{ .code = code }).failureCode()).?);
-    // A stream-only refusal is no HTTP 429 quota record.
-    try std.testing.expect(Quota.ofFailureCode("provider_credit_balance_exhausted") == null);
-    try std.testing.expect(Quota.ofFailureCode("usage_limit_reached") == null);
+    for ([_]Refusal{ .quota, .plan }) |refusal| try std.testing.expectEqual(refusal, Quota.ofFailureCode((Quota{ .refusal = refusal }).failureCode()).?);
+    // A policy or model refusal is no HTTP 429 quota record.
+    try std.testing.expect(Quota.ofFailureCode("provider_policy") == null);
+    try std.testing.expect(Quota.ofFailureCode("provider_model_unavailable") == null);
+    try std.testing.expect(Quota.ofFailureCode("quota") == null);
     try std.testing.expect(Quota.ofFailureCode("provider_temporary_http_429") == null);
     for ([_][]const u8{
         "",
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":}",
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":01}",
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":-1}",
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":18446744073709551616}",
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":1 }",
-        "{\"provider_code\":\"rate_limited\",\"resets_at\":1}",
-        "{\"resets_at\":1,\"provider_code\":\"usage_limit_reached\"}",
-        " {\"provider_code\":\"usage_limit_reached\",\"resets_at\":1}",
+        "{\"refusal\":\"quota\",\"resets_at\":}",
+        "{\"refusal\":\"quota\",\"resets_at\":01}",
+        "{\"refusal\":\"quota\",\"resets_at\":-1}",
+        "{\"refusal\":\"quota\",\"resets_at\":18446744073709551616}",
+        "{\"refusal\":\"quota\",\"resets_at\":1 }",
+        "{\"refusal\":\"policy\",\"resets_at\":1}",
+        "{\"refusal\":\"usage_limit_reached\",\"resets_at\":1}",
+        "{\"resets_at\":1,\"refusal\":\"quota\"}",
+        " {\"refusal\":\"quota\",\"resets_at\":1}",
     }) |bytes| try std.testing.expect(Quota.parse(bytes) == null);
 }
 

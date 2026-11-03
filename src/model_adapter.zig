@@ -1,6 +1,5 @@
 const std = @import("std");
 const execution = @import("execution.zig");
-const transport_policy = @import("transport_policy.zig");
 const named_scratch = @import("named_scratch.zig");
 const history_memo = @import("history_memo.zig");
 const prefix_seal = @import("prefix_seal.zig");
@@ -10,6 +9,7 @@ const protocol = @import("protocol.zig");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
+const providers = @import("providers.zig");
 const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
@@ -51,7 +51,15 @@ var testing_decode: output_decode.Decode = undefined;
 test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    for ([_][]const u8{ "usage_limit_reached", "insufficient_quota", "usage_not_included" }) |code| {
+    // A spend limit at HTTP 429 is a quota too, and keeps its reset.
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "usage_limit_reached", "provider_quota" },
+        .{ "insufficient_quota", "provider_quota" },
+        .{ "credit_balance_exhausted", "provider_quota" },
+        .{ "usage_not_included", "provider_plan" },
+    };
+    for (cases) |case| {
+        const code, const saved = case;
         const bytes = try std.testing.allocator.print("{{\"error\":{{\"code\":\"{s}\",\"resets_at\":1800000123}}}}", .{code});
         defer std.testing.allocator.free(bytes);
         const file = try tmp.dir.createFile(std.testing.io, "quota", .{ .read = true });
@@ -65,8 +73,8 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
         } }, response);
         try std.testing.expectEqual(execution.FailureKind.permanent, decision.fail.kind);
         var actual: [96]u8 = undefined;
-        var expected: [96]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "provider_{s}", .{code}), decision.fail.codeText(&actual));
+        try std.testing.expectEqualStrings(saved, decision.fail.codeText(&actual));
+        try std.testing.expectEqual(@as(?u64, 1_800_000_123), decision.fail.quota.?.resets_at);
         try std.testing.expect(decision.fail.answered);
         try std.testing.expect(decision.fail.retry_after_ms == null);
     }
@@ -254,7 +262,7 @@ test "provider interpretation retries overloaded stream errors" {
 
 test "provider interpretation retries response failed and nested error envelopes" {
     try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"future_error\"}}}\n\n", .temporary, "provider_temporary_error");
-    try expectStreamFailure("data: {\"type\":\"error\",\"error\":{\"code\":\"insufficient_quota\"}}\n\n", .permanent, "provider_insufficient_quota");
+    try expectStreamFailure("data: {\"type\":\"error\",\"error\":{\"code\":\"insufficient_quota\"}}\n\n", .permanent, "provider_quota");
     try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}\n\n", .temporary, "provider_temporary_error");
     try expectStreamFailure("data: {\"type\":\"error\",\"code\":null}\n\n", .temporary, "provider_temporary_error");
 }
@@ -274,10 +282,24 @@ test "provider interpretation retries unknown stream failures without inferring 
 }
 
 test "provider interpretation keeps quota and policy stream failures permanent" {
-    // Each saves its own code, so a refusal says which one it was.
-    inline for (comptime std.meta.fieldNames(transport_policy.Refusal)) |code| {
-        try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"" ++ code ++ "\"}\n\n", .permanent, "provider_" ++ code);
-        try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"" ++ code ++ "\"}}}\n\n", .permanent, "provider_" ++ code);
+    // Each saves what the person can do about it; the report keeps the
+    // provider's own code.
+    const cases = .{
+        .{ "insufficient_quota", "provider_quota" },
+        .{ "credit_balance_exhausted", "provider_quota" },
+        .{ "organization_spend_limit_exceeded", "provider_quota" },
+        .{ "project_spend_limit_exceeded", "provider_quota" },
+        .{ "usage_limit_reached", "provider_quota" },
+        .{ "usage_not_included", "provider_plan" },
+        .{ "cyber_policy", "provider_policy" },
+        .{ "bio_policy", "provider_policy" },
+        .{ "misalignment_policy_violation", "provider_policy" },
+        .{ "invalid_prompt", "provider_policy" },
+        .{ "model_not_found", "provider_model_unavailable" },
+    };
+    inline for (cases) |case| {
+        try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"" ++ case[0] ++ "\"}\n\n", .permanent, case[1]);
+        try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"" ++ case[0] ++ "\"}}}\n\n", .permanent, case[1]);
     }
 }
 
@@ -306,7 +328,7 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
-        error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
+        error.UnsupportedOutputSchemaRoute => "unsupported_output_schema_route",
         error.CodecDeclined => "provider_codec_failed",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
@@ -803,8 +825,8 @@ pub const Preparation = struct {
         switch (self.state.stage) {
             .settings => {
                 try self.view.settings(&self.settings);
-                if (protocol.routeOf(self.state.routes, self.settings.provider) == .chatgpt_device and self.settings.output_schema != null)
-                    return error.UnsupportedCodexConfiguration;
+                if (self.settings.output_schema != null and !providers.acceptsOutputSchema(protocol.routeOf(self.state.routes, self.settings.provider)))
+                    return error.UnsupportedOutputSchemaRoute;
                 const codec = self.settings.provider.codec();
                 self.carry = codecs.initialCarry(codec);
                 self.encoder = codecs.resumeFrom(self.carry);

@@ -259,6 +259,8 @@ pub const Job = struct {
     // The moment the UI's Session line was read at, and whether it still
     // needs the unlabelled Session's name.
     line_read: ?Moment = null,
+    /// The Session's provider, as the UI's Session line last read it.
+    provider: ?protocol.Provider = null,
     hint_wanted: bool = false,
     result: struct {
         // The work the page's own Store read saw: its history, footer and
@@ -536,7 +538,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
-    job.drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) });
+    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) });
     // One shown at its Admission is delivered too.
     job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     if (output.rule_at) |offset| job.result.rule = .{ .at = offset };
@@ -604,7 +606,7 @@ fn newer(job: *Job, task: *Task, state: Newer) !void {
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .end = page.facts.end, .colour = job.colour };
     if (cursor.ordinal == null) try output.rule();
     var compact = false;
-    const drawn = try View.render(requests, job.store, job.session, &page, &output, job.colour, &compact, taking);
+    const drawn = try View.render(requests, job.store, job.session, &page, job.provider, &output, job.colour, &compact, taking);
     _ = output.finish();
     const next = page.continuation();
     // Later rows of a page's last position may be on the next page, and
@@ -1692,7 +1694,8 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: " ++ comptime protocol.Provider.codex.login() ++ " in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
+        try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
