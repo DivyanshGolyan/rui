@@ -502,9 +502,7 @@ pub const Store = struct {
     pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.single, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.read_through, reads_domain.markRead(&access, request));
+        return entry.finish(Ordinary.read_through, reads_domain.markRead(&entry, request));
     }
 
     /// The Message with no Session sender next to `position` at `end`: one

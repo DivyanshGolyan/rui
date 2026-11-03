@@ -104,19 +104,22 @@ pub const Column = struct {
     /// two (`sessionColumns`). Every other table's one Session reads all
     /// of its columns, and leaves this `.recipient`.
     read_by: ReadBy = .recipient,
-    /// Whether a Session list row shows this column. An UPDATE that
-    /// assigns only columns no list shows changes no list's facts, so the
-    /// Access that queues it touches no Session (`rsql.Write.touches`), and
-    /// the touch oracle does not watch those columns
-    /// (`sqlite.createTouchOracleForTesting`).
+    /// Whether a Session list row shows this column. Only
+    /// `rsql.Write.touches` reads it: an UPDATE that assigns only columns
+    /// no list shows makes the Access that queues it touch no Session. The
+    /// test touch oracle keeps its own list of the columns it does not
+    /// watch (`sqlite.touch_oracle_unwatched`), and a Store test holds the
+    /// two equal.
     listed: bool = true,
 };
 
 /// The Sessions whose pages read a column of a table that names two
 /// Sessions: `.recipient`, only its `session_ref`'s; `.both`, its
 /// `sender_session_ref`'s too. A change to a `.both` column changes the
-/// sender's facts, so its writer touches the sender (`rsql.sessionError`)
-/// and the touch oracle records the sender (`sqlite.createTouchOracleForTesting`).
+/// sender's facts, so its writer names the sender (`rsql.sessionError`)
+/// and touches it unless `rsql.Write.touches` is false, and the touch
+/// oracle records the sender unless the column is one it does not watch
+/// (`sqlite.touch_oracle_unwatched`).
 pub const ReadBy = enum { recipient, both };
 
 /// Checked when its row is written, on every engine: writers insert a
@@ -704,21 +707,6 @@ pub fn isListed(comptime table: []const u8, comptime column: []const u8) bool {
             if (!std.mem.eql(u8, candidate.name, table)) continue;
             for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return each.listed;
             @compileError("schema: no column " ++ column ++ " in " ++ table);
-        }
-        @compileError("schema: no table named " ++ table);
-    }
-}
-
-/// The columns of `table` a Session list row shows, in order.
-pub fn listedColumns(comptime table: []const u8) []const []const u8 {
-    comptime {
-        for (tables) |candidate| {
-            if (!std.mem.eql(u8, candidate.name, table)) continue;
-            var names: []const []const u8 = &.{};
-            for (candidate.columns) |column| if (column.listed) {
-                names = names ++ .{column.name};
-            };
-            return names;
         }
         @compileError("schema: no table named " ++ table);
     }

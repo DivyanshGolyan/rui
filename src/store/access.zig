@@ -397,9 +397,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Queues a write, touching each Session its @session markers
-        /// name, unless no list row shows a column it assigns
-        /// (`rsql.Write.touches`). A failed guard fails the round that
-        /// runs it.
+        /// name, unless it is an UPDATE that assigns only columns no list
+        /// row shows (`rsql.Write.touches` false). A failed guard fails the
+        /// round that runs it.
         pub fn write(a: *Self, comptime S: type, args: S.Args) void {
             if (S.expect == .counted) @compileError("rsql: a .counted write states its rows through writeCount: " ++ S.sql);
             a.queueWrite(S, &args, .{ .none = {} });

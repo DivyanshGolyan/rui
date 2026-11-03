@@ -11499,6 +11499,21 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
 }
 
+test "the touch oracle leaves unwatched exactly the columns the schema marks unlisted" {
+    comptime var unlisted: []const []const u8 = &.{};
+    inline for (store_schema.tables) |table| inline for (table.columns) |column| if (!column.listed) {
+        unlisted = unlisted ++ .{table.name ++ "." ++ column.name};
+    };
+    try std.testing.expectEqual(unlisted.len, sqlite.touch_oracle_unwatched.len);
+    for (unlisted) |name| {
+        const found = for (sqlite.touch_oracle_unwatched) |unwatched| {
+            if (std.mem.eql(u8, unwatched, name)) break true;
+        } else false;
+        if (!found) std.debug.print("unlisted but watched: {s}\n", .{name});
+        try std.testing.expect(found);
+    }
+}
+
 test "read-through only advances, within the Session's committed positions, touches no list, and pages carry it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

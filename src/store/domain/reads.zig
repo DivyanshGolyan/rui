@@ -856,39 +856,42 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
 
 const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };
 
-/// How far a person read, and the bound it stays below. The Session is
-/// named by the head its own row gives.
-const read_state = rsql.Read(.{
-    .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.read_through FROM session s WHERE s.session_ref=?1",
-    .Args = struct { session: []const u8 },
-    .Row = struct { head: rsql.SessionHead, read_through: ?rsql.Positive },
-    .cardinality = .optional,
-});
-
-/// No Session list row shows `read_through` (`schema` marks it unlisted),
-/// so the write touches nothing.
+/// Main's one guarded UPDATE: how far a person read moves only forward,
+/// and stays below the Session's next position. No Session list row shows
+/// `read_through` (`schema` marks it unlisted), so the write touches no
+/// Session and names it by its reference alone.
 const advance_read_through = rsql.Write(.{
-    .sql = "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1)",
-    .Args = struct { session: rsql.SessionHead, position: u64 },
-    // The row was read under the Entry's lock, which excludes every writer.
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    .sql = "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1) AND ?2<next_position AND (read_through IS NULL OR read_through<?2)",
+    .Args = struct { session: rsql.SessionRef, position: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ReadThroughKept } },
 });
 
-/// Round 1 reads the Session's head and how far it was read; Zig decides;
-/// the one write, which commits itself, follows only when the position
-/// moves forward. A failed read is `SessionReadFailed`, main's name for
-/// its fallback read.
-pub fn markRead(a: *store_access.Access(.single, error{}), request: *const protocol.MarkRead) !void {
+/// Round 1 is the guarded write, which commits itself. Only when it
+/// changes no row does a read round ask why, as main did: an unknown
+/// Session, a position not reached, or one already read, which is no
+/// error. A failed read is `SessionReadFailed`, main's name for it.
+pub fn markRead(entry: *const store_core.Entry, request: *const protocol.MarkRead) !void {
     // Main's bind refused a position past maxInt(i64), which fences.
     if (request.position > std.math.maxInt(i64)) return error.IntegerOutOfRange;
-    var found: read_state.Result = undefined;
-    a.read(read_state, .{ .session = request.session.slice() }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.SessionReadFailed else err;
-    const row = found orelse return error.SessionNotFound;
-    if (request.position >= row.head.next_position.get()) return error.PositionNotReached;
-    if (row.read_through) |read| if (read.get() >= request.position) return;
-    a.write(advance_read_through, .{ .session = row.head, .position = request.position });
-    try a.commit();
+    const session = request.session.slice();
+    const Ref = @FieldType(rsql.SessionRef, "ref");
+    // The schema's check holds every session_ref to this length, so a
+    // text of any other names no Session.
+    if (session.len != @sizeOf(Ref)) return error.SessionNotFound;
+    kept: {
+        var a: store_access.Access(.single, error{ReadThroughKept}) = .open(entry);
+        defer a.deinit();
+        a.write(advance_read_through, .{ .session = .{ .ref = session[0..@sizeOf(Ref)].* }, .position = request.position });
+        a.commit() catch |err| switch (err) {
+            error.ReadThroughKept => break :kept,
+            else => |failed| return failed,
+        };
+        return;
+    }
+    var a: ReadAccess = .open(entry);
+    defer a.deinit();
+    const next = try readNextPosition(&a, session) orelse return error.SessionNotFound;
+    if (request.position >= next) return error.PositionNotReached;
 }
 
 const PersonMessageArgs = struct { session: []const u8, after: u64, before: u64 };
