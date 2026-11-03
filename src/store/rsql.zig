@@ -74,6 +74,7 @@ const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
 /// `rowid` count only when `reserved`. String literals are not inspected;
 /// comments and quoted identifiers are refused, so nothing else escapes
 /// the scan.
+/// `reserved` mirrors `identifierError`'s on purpose: both take `reserved_names_checked`, one switch for names and text.
 pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]const u8 {
     comptime {
         @setEvalBranchQuota(100 * text.len + 1000);
