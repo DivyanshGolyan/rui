@@ -14076,6 +14076,32 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     try std.testing.expectEqual(1 + 8 + 6 + 6 + 2 + 2 + 6, a.passes);
 }
 
+test "a Current report's step faults answer the name of the earliest round that steps the table" {
+    // Each read keeps main's name; when reads in two rounds fail, the
+    // earlier round's name wins. The Action count steps in the round
+    // before the tool outcome rule, where main read the rule's facts
+    // first and answered CallReadFailed for a faulted action_operation.
+    // A list with nothing to show is not read, where main read every
+    // list and answered ActionReadFailed for a faulted session_revision.
+    inline for (.{
+        .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
+        .{ TestingWorkShape.awaiting, "action_operation", error.ActionReadFailed },
+        .{ TestingWorkShape.awaiting, "session_revision", error.ActionReadFailed },
+        .{ TestingWorkShape.idle, "session_revision", null },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try case[0].make(&storage, &tmp, "fault-names");
+        try failAtStepForTesting(storage.database, case[1]);
+        if (comptime @TypeOf(case[2]) == @TypeOf(null)) {
+            std.testing.allocator.free(try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+        } else try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    }
+}
+
 /// The rounds a Current report takes for a Session of `shape`.
 fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     var tmp = std.testing.tmpDir(.{});
