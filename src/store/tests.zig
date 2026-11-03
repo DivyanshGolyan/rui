@@ -1222,7 +1222,7 @@ const TestingRound = struct {
     }
 };
 
-test "a content sink opens only the row its Access last took, once its insert ran" {
+test "a content sink opens only a content id its Access took, stepping its queued insert" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1236,16 +1236,35 @@ test "a content sink opens only the row its Access last took, once its insert ra
     defer entry.release();
     var a: store_access.Access(.write, error{}) = .open(&entry);
     defer a.deinit();
+    // Opens the transaction, so the next id is taken in it, before this
+    // Access takes any.
+    _ = try a.identity(.turn_id);
+    const before = try store_core.takeIdentity(&storage, .content_id);
+    // Distinct identities, since content is unique by identity.
+    const digests = [3][32]u8{ protocol.contentDigest("sink0"), protocol.contentDigest("sink1"), protocol.contentDigest("sink2") };
+    a.write(TestingRound.insert_content, .{ .content_id = before, .digest = &digests[0], .length = 4 });
+    const first = try a.identity(.content_id);
+    a.write(TestingRound.insert_content, .{ .content_id = first, .digest = &digests[1], .length = 4 });
+    const never = try a.identity(.content_id);
+    const last = try a.identity(.content_id);
+    a.write(TestingRound.insert_content, .{ .content_id = last, .digest = &digests[2], .length = 4 });
+    try std.testing.expectEqual(first + 2, last);
+    // Refused: 0, a committed row, one taken in this transaction before
+    // this Access's first, and one past its last.
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(0));
     try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-    const id = try a.identity(.content_id);
-    const digest = protocol.contentDigest("sink");
-    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 4 });
-    try std.testing.expectError(error.ContentNotInserted, a.contentSink(id));
-    try a.run();
-    try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-    const sink = try a.contentSink(id);
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(before));
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1));
+    // The old rule took only the last id, with nothing queued: here the
+    // first id opens while inserts are queued, and the pass steps them.
+    const sink = try a.contentSink(first);
     try sink.write("sink", 0);
     sink.close();
+    try std.testing.expectEqual(0, a.queued);
+    const again = try a.contentSink(last);
+    again.close();
+    // Taken but never inserted: there is no row to open.
+    try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never));
     try a.abandon(.{});
 }
 

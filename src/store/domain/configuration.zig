@@ -253,7 +253,8 @@ pub fn planConfigurationUpdate(
 /// schema need. A creation then reads its Workspace's key and whether its
 /// drawn reference is taken, which depends on the replay check: a replay
 /// draws no reference and canonicalizes no Workspace. Each new sealed
-/// import runs its insert before streaming into it (`importSealed`). The
+/// import steps its insert in process before streaming into it, in the
+/// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
 pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, faults: Faults) !ConfigureReply {

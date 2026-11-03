@@ -319,10 +319,10 @@ pub fn sealedIdentity(field: *const protocol.ContentField) Import {
 
 /// After `lookup`'s round: the id of the sealed content `field`, whose
 /// identity `value` is. A file must still hold `field.length` bytes. A new
-/// row is queued and its round run, then the file streams into its payload
-/// while hashed, so a file that changed fails before COMMIT; a row that
-/// exists still has its file verified. A new row whose insert would join
-/// one already queued (an `importBytes` row) runs that one first.
+/// row is queued, then the file streams into its payload while hashed
+/// (`contentSink`, which steps the insert in process), so a file that
+/// changed fails before COMMIT; a row that exists still has its file
+/// verified. It ends no round.
 pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *Import, faults: Faults) !u64 {
     std.debug.assert(field.state == .value);
     if (field.file) |source| {
@@ -330,12 +330,8 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
     } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
-    adoptInserted(a, value);
-    if (value.found == null and a.queued != 0) try a.run();
     const slot = try importSlot(a, value);
     const id: u64 = @intCast(slot.id);
-    // Run now, so a second import in this Access can queue its own row.
-    if (!slot.existing) try a.run();
     if (slot.existing or field.length == 0) {
         if (field.file) |source| try verifyExternalContent(io, source, field.length, &field.digest, null, faults);
         return id;

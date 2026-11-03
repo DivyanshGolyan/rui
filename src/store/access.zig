@@ -153,9 +153,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// None in a read Access, which claims no positions.
         claims: [if (mode == .read or mode == .single) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
-        /// The last `content_id` this Access took: the one row
-        /// `contentSink` opens.
-        content_id: u64 = 0,
+        /// The content ids this Access took, `[first, next)`: the rows
+        /// `contentSink` may open. Empty while `first` is 0.
+        content_ids: struct { first: u64 = 0, next: u64 = 0 } = .{},
         /// The content rows this Access queued, by identity, so a second
         /// import of an equal value reuses the row (`content.importSlot`).
         inserted: [if (mode == .read or mode == .single) 0 else max_inserted]InsertedContent = undefined,
@@ -331,7 +331,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             a.ensureOpen();
             if (a.failure) |err| return err;
             const id = try store_core.takeIdentity(a.store, column);
-            if (column == .content_id) a.content_id = id;
+            if (column == .content_id) {
+                if (a.content_ids.first == 0) a.content_ids.first = id;
+                a.content_ids.next = id + 1;
+            }
             return id;
         }
 
@@ -370,18 +373,24 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (@import("builtin").is_test) _ = a.store.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
         }
 
-        /// A sink for the payload of the content row `content_id`, which
-        /// must be the last id this Access took (`identity(.content_id)`),
-        /// with nothing queued: so its row is the one this Access inserted
-        /// and a round has run, or none. Any other id is
-        /// `ContentNotInserted`. It writes into the open transaction, so
-        /// the bytes commit with the row. `importSealed` needs it: it
-        /// streams a sealed file into the payload while hashing it, so the
-        /// file is never held in memory whole.
+        /// A sink for the payload of the content row `content_id`. It
+        /// checks exactly that the id lies in `[first, next)`, from the
+        /// first id this Access took with `identity(.content_id)` to the
+        /// last; any other, 0 included, is `ContentNotInserted`. Every such
+        /// id was handed out in this transaction, after every committed
+        /// row's, so a row with it was inserted in this transaction: by
+        /// this Access, or by its caller's own code under `.nested`. It
+        /// runs an engine pass first, so an insert queued before it has
+        /// stepped; an id with no row is `ContentWriteFailed`. It writes
+        /// into the open transaction, so the bytes commit with the row.
+        /// Streamed imports need it (`importSealed`, settlement), so a
+        /// value is never held in memory whole.
         pub fn contentSink(a: *Self, content_id: u64) Error!ContentSink {
             comptime std.debug.assert(mode != .read and mode != .single);
             if (a.failure) |err| return err;
-            if (content_id == 0 or content_id != a.content_id or a.queued != 0) return error.ContentNotInserted;
+            if (content_id == 0 or content_id < a.content_ids.first or content_id >= a.content_ids.next) return error.ContentNotInserted;
+            a.pass();
+            if (a.failure) |err| return err;
             var blob: ?*c.sqlite3_blob = null;
             if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
             return .{ .blob = blob.? };
