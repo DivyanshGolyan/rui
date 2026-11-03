@@ -496,17 +496,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
     }
 
-    /// The Message with no Session sender next to `position` at `end`: one
-    /// seek in the index of those Messages, then its content's metadata.
-    pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
-        try request.validate();
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.personMessage(&access, request));
-    }
-
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);

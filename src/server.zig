@@ -1211,7 +1211,6 @@ const Route = enum {
     conversation_content,
     activity_page,
     activity_content,
-    person_message,
     model_list,
     unsupported_control,
 
@@ -1499,16 +1498,6 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
-        .person_message => |*command| {
-            const found = host.store.personMessage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "person message", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
-            };
-            try fd.json(200, protocol.max_person_message_response_bytes, renderPersonMessage, .{&found});
-        },
         // Host memory only: never SQLite or the network.
         // Sized as written: the bound is tens of KiB, a reply mostly far less.
         .model_list => try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host}),
@@ -1531,10 +1520,6 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
     page.writeJson(out.writer) catch return error.BufferTooLarge;
-}
-
-fn renderPersonMessage(out: protocol.JsonOut, found: *const protocol.PersonMessage) error{BufferTooLarge}!void {
-    found.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
@@ -1633,8 +1618,6 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
-        else if (std.mem.eql(u8, path, "/v1/person-message"))
-            .person_message
         else if (std.mem.eql(u8, path, "/v1/model-list"))
             .model_list
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
@@ -3098,6 +3081,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
+        .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
     };
     try std.testing.expectEqual(std.meta.tags(std.meta.Tag(protocol.ActivityItem.Value)).len, values.len);
     var longest_item: protocol.ActivityItem = undefined;

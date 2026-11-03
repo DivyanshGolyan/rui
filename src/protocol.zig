@@ -5,7 +5,7 @@ const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "7";
+pub const wire_version = "8";
 /// Versions a newer and an older Host speak, for tests that refuse them.
 pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
@@ -179,7 +179,6 @@ pub const Kind = enum {
     conversation_content,
     activity_page,
     activity_content,
-    person_message,
     model_list,
 };
 
@@ -537,11 +536,19 @@ pub const ActivityPage = struct {
     // Null is a sequence boundary; a value identifies an actual public row.
     ordinal: ?u64 = null,
     direction: enum { forward, backward } = .forward,
+    /// The row kinds the page lists; the cursor may name a row of any kind.
+    kinds: Kinds = .full,
+    /// At most this many rows, from 1 to `items`.
+    limit: u8 = items,
+
+    pub const Kinds = std.EnumSet(ActivityItem.Kind);
+    pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
 
     pub fn validate(self: ActivityPage) !void {
         if (self.position > std.math.maxInt(i64) or (self.ordinal != null and
             (self.position == 0 or self.ordinal.? > std.math.maxInt(i64)))) return error.InvalidCursor;
         if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
+        if (self.kinds.count() == 0 or self.limit == 0 or self.limit > items) return error.InvalidCursor;
     }
 };
 pub const ToolPresentation = struct {
@@ -612,7 +619,10 @@ pub const ActivityItem = struct {
     /// The Host Unix second the row's owning fact committed.
     at: u64,
     value: Value,
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed };
+    /// `admission` is a Message a person or script sent; `received` one
+    /// another Session sent, which always names it as `sender`.
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message };
+    pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
         digest: [32]u8,
@@ -643,6 +653,7 @@ pub const ActivityItem = struct {
         const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
         pub const admission = message;
         pub const user = message;
+        pub const received = message;
         /// Hole: content.
         pub const assistant = .{Hole{ .json = Content }};
         /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
@@ -672,7 +683,7 @@ pub const ActivityItem = struct {
             inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal, self.at }),
         }
         switch (self.value) {
-            inline .admission, .user => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
+            inline .admission, .user, .received => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
                 message.admission,   message.key.slice(), message.turn,    message.state,
                 message.admitted_at, message.sender,      message.content,
             }),
@@ -694,41 +705,6 @@ pub const ActivityItem = struct {
     }
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
-
-/// The Message with no Session sender nearest `position` at `end`: before
-/// it backward, after it forward. Position zero starts either traversal.
-pub const ReadPersonMessage = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    end: ?u64 = null,
-    position: u64 = 0,
-    direction: @FieldType(ActivityPage, "direction") = .backward,
-
-    pub fn validate(self: ReadPersonMessage) !void {
-        try (ActivityPage{ .end = self.end, .position = self.position, .direction = self.direction }).validate();
-    }
-};
-pub const PersonMessage = struct {
-    end: u64,
-    message: ?Found = null,
-
-    /// The Message's Activity position and its content.
-    pub const Found = struct {
-        position: u64,
-        content: ActivityItem.Content,
-        pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
-        pub const max_json_bytes = shapeBytes(json_shape);
-        pub fn writeJson(self: Found, out: *std.Io.Writer) !void {
-            try writeShape(out, json_shape, .{ self.position, self.content });
-        }
-    };
-    /// Holes: end, the Message or null.
-    pub const reply_shape = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"person_message\",\"end\":\"", Hole.decimal, "\",\"message\":", Hole{ .optional_json = Found }, "}" };
-    pub const max_json_bytes = shapeBytes(reply_shape);
-    pub fn writeJson(self: *const PersonMessage, out: *std.Io.Writer) !void {
-        try writeShape(out, reply_shape, .{ self.end, self.message });
-    }
-};
 
 pub const CallActivity = struct {
     pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
@@ -1053,14 +1029,13 @@ pub const Request = union(Kind) {
     conversation_content: ConversationContent,
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
-    person_message: ReadPersonMessage,
     model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .person_message, .model_list => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
         }
     }
 
@@ -1391,8 +1366,6 @@ const Parser = struct {
             .activity_page
         else if (kind_text.eql("activity_content"))
             .activity_content
-        else if (kind_text.eql("person_message"))
-            .person_message
         else if (kind_text.eql("model_list"))
             .model_list
         else
@@ -1471,10 +1444,6 @@ const Parser = struct {
             .activity_content => {
                 out.* = .{ .activity_content = .{ .store = store } };
                 try self.parseActivityContent(&out.activity_content);
-            },
-            .person_message => {
-                out.* = .{ .person_message = .{ .store = store } };
-                try self.parsePersonMessage(&out.person_message);
             },
         }
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
@@ -1811,26 +1780,25 @@ const Parser = struct {
         var direction: Bounded(8) = .{};
         try self.readSmallString(&direction);
         out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
-        try out.validate();
-    }
-
-    fn parsePersonMessage(self: *Parser, out: *ReadPersonMessage) !void {
         try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
+        try self.expectKey("kinds");
+        try self.expectByte('[');
+        // Each kind at most once, in tag order, so one set has one spelling.
+        out.kinds = .empty;
+        var last: ?ActivityItem.Kind = null;
+        if (!try self.consumeIf(']')) while (true) {
+            var name: Bounded(16) = .{};
+            try self.readSmallString(&name);
+            const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
+            if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
+            out.kinds.insert(kind);
+            last = kind;
+            if (try self.consumeIf(']')) break;
+            try self.expectByte(',');
+        };
         try self.expectByte(',');
-        try self.expectKey("end");
-        if (try self.consumeIf('n')) {
-            for ("ull") |byte| try self.expectByte(byte);
-        } else out.end = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("direction");
-        var direction: Bounded(8) = .{};
-        try self.readSmallString(&direction);
-        out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
+        try self.expectKey("limit");
+        out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor;
         try out.validate();
     }
 
@@ -2255,6 +2223,8 @@ pub const Hole = union(enum) {
     tag: type,
     /// A `?E` for this enum `E`, as a JSON string of its tag name or `null`.
     optional_tag: type,
+    /// A `std.EnumSet(E)`, as a JSON array of its tag names in tag order.
+    tag_set: type,
     /// At most this many bytes, as a JSON string.
     string: usize,
     /// A `?[]const u8` of at most this many bytes, as a JSON string or `null`.
@@ -2275,6 +2245,11 @@ pub const Hole = union(enum) {
             .optional_id => @max("null".len, 2 + (comptime Hole.maxBytes(.decimal))),
             .tag => |T| maxTagBytes(T),
             .optional_tag => |T| @max("null".len, 2 + maxTagBytes(T)),
+            .tag_set => |T| blk: {
+                var bytes = "[]".len + std.meta.tags(T).len - 1;
+                for (std.meta.tags(T)) |tag| bytes += 2 + @tagName(tag).len;
+                break :blk bytes;
+            },
             .string => |bytes| maximumJsonStringBytes(bytes),
             .optional_string => |bytes| @max("null".len, maximumJsonStringBytes(bytes)),
             .text => |bytes| bytes,
@@ -2323,6 +2298,16 @@ pub fn writeShape(out: *std.Io.Writer, comptime shape: anytype, args: anytype) !
                 .optional_id => if (@as(?u64, argument)) |id| try out.print("\"{d}\"", .{id}) else try out.writeAll("null"),
                 .tag => |T| try out.writeAll(@tagName(@as(T, argument))),
                 .optional_tag => |T| if (@as(?T, argument)) |tag| try out.print("\"{s}\"", .{@tagName(tag)}) else try out.writeAll("null"),
+                .tag_set => |T| {
+                    try out.writeByte('[');
+                    var first = true;
+                    for (std.meta.tags(T)) |tag| if (@as(std.EnumSet(T), argument).contains(tag)) {
+                        if (!first) try out.writeByte(',');
+                        first = false;
+                        try out.print("\"{s}\"", .{@tagName(tag)});
+                    };
+                    try out.writeByte(']');
+                },
                 .string => |bytes| {
                     const value: []const u8 = argument;
                     std.debug.assert(value.len <= bytes);
@@ -2401,12 +2386,10 @@ pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ 
 pub const conversation_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\",\"stream\":true}" };
 /// Holes: Store, Session, end, before position, before ordinal.
 pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, end, position, ordinal, direction.
-pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
+/// Holes: Store, Session, end, position, ordinal, direction, kinds, limit.
+pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, end, position, direction.
-pub const person_message_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"person_message\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
 /// metadata has a shape. The variable parts are written between these.
 pub const configure_request = struct {
@@ -2446,15 +2429,13 @@ pub const max_conversation_content_request_bytes = shapeBytes(conversation_conte
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
-pub const max_person_message_request_bytes = shapeBytes(person_message_request);
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request,     host_info_request,             host_stop_request,
     read_result_request,         list_sessions_changed_request, read_action_arguments_request,
     read_action_call_id_request, conversation_content_request,  conversation_page_request,
-    activity_page_request,       activity_content_request,      person_message_request,
-    model_list_request,
+    activity_page_request,       activity_content_request,      model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2466,7 +2447,6 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
 pub const max_activity_page_response_bytes = ActivityFacts.max_json_bytes;
-pub const max_person_message_response_bytes = PersonMessage.max_json_bytes;
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":";
@@ -3077,6 +3057,33 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         } else {
             const request = try parseForTest(&parser);
             try std.testing.expect(request == .conversation_page);
+        }
+    }
+}
+
+test "an activity page names its kinds once each, in order, and a limit from 1 to 16" {
+    const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
+        .{ .body = "[\"admission\"],\"limit\":\"1\"" },
+        .{ .body = "[\"admission\",\"received\"],\"limit\":\"16\"" },
+        .{ .body = "[\"received\",\"admission\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
+        .{ .body = "[\"user\",\"user\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
+        .{ .body = "[\"unknown\"],\"limit\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "[],\"limit\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"17\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"256\"", .failure = error.InvalidCursor },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":\"s\",\"session\":\"x\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":{s}}}", .{case.body});
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const request = try parseForTest(&parser);
+            try std.testing.expect(request == .activity_page);
         }
     }
 }
