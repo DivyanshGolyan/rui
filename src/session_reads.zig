@@ -301,35 +301,42 @@ pub const Job = struct {
 };
 
 /// One step over the Messages the person sent, from the one the draft
-/// shows or from the newest: one Store row, then that Message's content
-/// staged in scratch. One the draft cannot hold as typed text (over its
-/// capacity, or with a control character) is passed over, its content read
-/// at most once, and the result says so.
+/// shows or from the newest: a one-row activity page of `admission` rows,
+/// then that Message's content staged in scratch. One the draft cannot
+/// hold as typed text (over its capacity, or with a control character) is
+/// passed over, its content read at most once, and the result says so.
 pub fn recall(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
     const step = job.recall.?;
     std.debug.assert(step.older or step.from != null);
-    var request: protocol.ReadPersonMessage = .{
+    // A person's Messages are the activity page's `admission` rows; a
+    // cursor at a shown one names its row, ordinal zero.
+    var cursor: protocol_reply.ActivityCursor = .{
         .end = if (step.from) |from| from.end else null,
         .position = if (step.from) |from| from.position else 0,
+        .ordinal = if (step.from != null) 0 else null,
         .direction = if (step.older) .backward else .forward,
+        .kinds = .initOne(.admission),
+        .limit = 1,
     };
-    try request.session.set(job.session);
     while (true) {
-        const reply = switch (try requests.personMessage(job.store, request)) {
-            .found => |reply| reply,
+        const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+            .page => |page| page,
             .failure => |failure| return requests.failRead(failure),
         };
-        const message = reply.message orelse return;
-        const at: Input.Recalled = .{ .position = message.position, .end = reply.end };
-        if (message.content.length <= Input.capacity) if (try stageRecalled(requests, job, task.io, at, message.content)) |found| {
+        if (page.facts.count == 0) return;
+        const row = page.facts.items[0];
+        const content = row.value.admission.content;
+        const at: Input.Recalled = .{ .position = row.position, .end = page.facts.end };
+        if (content.length <= Input.capacity) if (try stageRecalled(requests, job, task.io, at, content)) |found| {
             job.result.recalled = found;
             return;
         };
         job.result.recall_passed = true;
-        request.end = reply.end;
-        request.position = message.position;
+        cursor.end = page.facts.end;
+        cursor.position = row.position;
+        cursor.ordinal = 0;
     }
 }
 
@@ -625,9 +632,8 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
 /// above the input and shows live once taken.
 fn listed(item: protocol.ActivityItem, shown: ?DrawnSpan) ?protocol.ActivityItem.Message {
     return switch (item.value) {
-        .admission => |value| if (value.sender != null)
-            (if (shown != null or value.state != .applied) value else null)
-        else if (shown) |drawn|
+        .received => |value| if (shown != null or value.state != .applied) value else null,
+        .admission => |value| if (shown) |drawn|
             (if (value.state == .queued and value.admission <= drawn.after) value else null)
         else if (value.state == .excluded) value else null,
         .user => |value| if (shown) |drawn| (if (value.sender == null and value.admission > drawn.before) value else null) else null,
@@ -638,7 +644,7 @@ fn listed(item: protocol.ActivityItem, shown: ?DrawnSpan) ?protocol.ActivityItem
 test "a range lists the Messages live output showed, never queued Messages still waiting above the input" {
     const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
     const peer: protocol.NamedPeer = .{ .session = .{ .len = 0 } };
-    const Case = struct { kind: enum { admission, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, shown: ?DrawnSpan, listed: bool };
+    const Case = struct { kind: enum { admission, received, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, shown: ?DrawnSpan, listed: bool };
     // Live output showed Message 10 while it waited before the dropped
     // span, and Message 14 by its end.
     const span: DrawnSpan = .{ .before = 10, .after = 14 };
@@ -646,7 +652,7 @@ test "a range lists the Messages live output showed, never queued Messages still
         // A dropped live span: what live output showed. Another Session's
         // Admission, a person's or script's row, and the Admission of one
         // that showed while it waited and still waits at the span's end.
-        .{ .kind = .admission, .sender = true, .state = .applied, .admission = 12, .shown = span, .listed = true },
+        .{ .kind = .received, .sender = true, .state = .applied, .admission = 12, .shown = span, .listed = true },
         .{ .kind = .user, .sender = false, .state = .applied, .admission = 12, .shown = span, .listed = true },
         .{ .kind = .admission, .sender = false, .state = .queued, .admission = 14, .shown = span, .listed = true },
         // Not the row of one that showed while it waited before the span,
@@ -664,13 +670,14 @@ test "a range lists the Messages live output showed, never queued Messages still
         .{ .kind = .admission, .sender = false, .state = .queued, .admission = 10, .shown = null, .listed = false },
         .{ .kind = .admission, .sender = false, .state = .queued, .admission = 11, .shown = null, .listed = false },
         .{ .kind = .admission, .sender = false, .state = .excluded, .admission = 11, .shown = null, .listed = true },
-        .{ .kind = .admission, .sender = true, .state = .queued, .admission = 11, .shown = null, .listed = true },
+        .{ .kind = .received, .sender = true, .state = .queued, .admission = 11, .shown = null, .listed = true },
         .{ .kind = .admission, .sender = false, .state = .applied, .admission = 9, .shown = null, .listed = false },
         .{ .kind = .user, .sender = false, .state = .applied, .admission = 11, .shown = null, .listed = false },
     }) |case| {
         const message: protocol.ActivityItem.Message = .{ .admission = case.admission, .key = .{}, .turn = null, .state = case.state, .content = content, .admitted_at = 1, .sender = if (case.sender) peer else null };
         const item: protocol.ActivityItem = .{ .position = 30, .at = 1, .value = switch (case.kind) {
             .admission => .{ .admission = message },
+            .received => .{ .received = message },
             .user => .{ .user = message },
         } };
         try std.testing.expectEqual(case.listed, listed(item, case.shown) != null);
@@ -702,7 +709,7 @@ const Shown = struct {
         const before = self.drawn;
         if (drew) |admission| self.drawn = admission;
         const echoed = switch (value) {
-            .admission, .user => |echoed| echoed,
+            .admission, .received, .user => |echoed| echoed,
             else => unreachable,
         };
         self.record.add(.{ .output = self.output, .end = self.output + 1, .position = item.position, .ordinal = 0, .message = echoed, .drawn = .{ .before = before, .after = self.drawn } }, opening);
@@ -731,10 +738,10 @@ test "a dropped span lists a Message taken from the queued row once, after a new
     const x = 1;
     const y = 68;
     shown.add(.{ .admission = Shown.message(x, .applied, false) }, false, null, false);
-    for (2..4) |admission| shown.add(.{ .admission = Shown.message(admission, .queued, true) }, true, null, false);
+    for (2..4) |admission| shown.add(.{ .received = Shown.message(admission, .queued, true) }, true, null, false);
     const row = shown.count + 1;
     shown.add(.{ .user = Shown.message(x, .applied, false) }, true, null, false);
-    for (4..y) |admission| shown.add(.{ .admission = Shown.message(admission, .queued, true) }, true, null, false);
+    for (4..y) |admission| shown.add(.{ .received = Shown.message(admission, .queued, true) }, true, null, false);
     shown.add(.{ .admission = Shown.message(y, .queued, false) }, true, y, false);
     const span = shown.record.dropped.?;
     try std.testing.expect(span.low > 1 and span.low < row and row <= span.high);
@@ -897,7 +904,7 @@ const DisplayCapture = struct {
         if (self.current) |current| {
             self.messages.observe(current, self.current_shown);
             if (self.current_shown) switch (current.value) {
-                .admission, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .drawn = .{ .before = self.current_drawn, .after = self.drawn } }),
+                .admission, .received, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .drawn = .{ .before = self.current_drawn, .after = self.drawn } }),
                 else => {},
             };
         }
@@ -928,7 +935,7 @@ pub const Messages = struct {
 
     fn observe(self: *Messages, item: protocol.ActivityItem, shown: bool) void {
         switch (item.value) {
-            .admission => |message| if (shown) {
+            .admission, .received => |message| if (shown) {
                 self.shown = @max(self.shown, message.admission);
             },
             .user => |message| self.answered = @max(self.answered, message.admission),
@@ -1590,7 +1597,7 @@ fn beginningBefore(first: protocol.ActivityItem, end: u64) ?protocol_reply.Conve
 fn conversationItem(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
         .user, .assistant, .tool_result, .hosted_call => true,
-        .admission, .call, .outcome, .stop, .sent, .send_failed => false,
+        .admission, .received, .call, .outcome, .stop, .sent, .send_failed => false,
     };
 }
 

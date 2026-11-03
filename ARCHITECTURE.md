@@ -1334,7 +1334,7 @@ Once migrations keep old Stores usable across format changes, Rui should switch 
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
-The unreleased wire label is `7`: it changed when the Activity page dropped `read_through` and `beyond_unseen` and the Host dropped the `mark_read` request, which Divyansh asked to remove on 2026-11-03 with the rest of the "new since you looked" feature, and when the Host dropped the `proposal_page` and `proposal_field` requests the same day.
+The unreleased wire label is `7`: it changed when the Activity page dropped `read_through` and `beyond_unseen` and the Host dropped the `mark_read` request, which Divyansh asked to remove on 2026-11-03 with the rest of the "new since you looked" feature, when the Host dropped the `proposal_page` and `proposal_field` requests the same day, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request.
 The Store records the wire label it was created with in `store_meta` and opens only at the current one.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
 Pre-provider captures are not accepted or defaulted to Codex.
@@ -2468,7 +2468,7 @@ In a conversation End on an empty draft returns to the latest view and never lea
 Recalling sent Messages (approved 2026-10-31; keys chosen 2026-11-01): in a conversation Ctrl-P on an empty draft brings back the newest Message the person sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past the newest the draft is empty again.
 Up, Down and the wheel keep scrolling, and no history file is kept.
 As built, only Messages without a Session sender come back.
-Each step asks the Host for the one such Message before or after the shown one's Activity position, at the end its first step read, through `POST /v1/person-message`, then reads that Message's content alone; the client keeps that position and the draft, never a list or copy of Messages.
+Each step asks the Host for a one-row activity page of `admission` rows before or after the shown one's position, at the end its first step read, then reads that Message's content alone; the client keeps that position and the draft, never a list or copy of Messages.
 One the draft cannot hold as typed text (over 65,536 bytes, or holding a control character) is passed over with a notice.
 Text that begins with `/` comes back with a second one, so Enter sends it again.
 Steps are read one at a time: presses made while one is read add up and opposite ones cancel.
@@ -2747,7 +2747,7 @@ Any other waits in the row, which shows only in the latest view, whenever the Ho
 It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
-Wire version 7 dropped the Activity page's `read_through` and `beyond_unseen` fields and the `mark_read` request, after version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
+Wire version 7 dropped the Activity page's `read_through` and `beyond_unseen` fields and the `mark_read`, `proposal_page`, `proposal_field` and `person_message` requests and added the page's `kinds`, `limit` and `received` rows, after version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
 Opening adds no configuration banner or command tutorial.
 Bash bypass mode retains its safety warning.
@@ -3233,7 +3233,8 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 
 ### Public Session activity
 
-Session activity is a separate nine-kind projection, not Conversation repurposed as an inventory: Message admission, applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), another Session's Message admission (`received`, which always names its `sender`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+`received` mirrors `sent` on the receiving side; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](#store-format-and-upgrades).
 Calls retain historical rejected proposals and all three complete field references under the proposal contract above.
@@ -3271,9 +3272,11 @@ Permission preparation consumes the same normal Activity scan before showing the
 Current's active attention and history-independent query contract remain unchanged.
 This projection has fixed resident storage, not history-independent query cost.
 
-`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal` and `direction:"forward"|"backward"`.
+`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `outcome`, `stop`, `sent`, `send_failed`, `received`; and decimal-string `limit`, from 1 to 16.
+The cursor may name a row of any kind; the page lists only the asked kinds, and a kind not asked for costs no read: each row source is gated by the kinds before it reads.
+A person's Messages alone are one seek in the index of Messages without a Session sender, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
-Pages echo end/direction and return at most 16 owned metadata rows with `more`, ordered by (position, ordinal).
+Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
 Only complete Tool Result groups share positions, using one-based call ordinals; other rows use zero.
 A nonnull ordinal identifies an actual row in this Session and end.
 Continue from the last returned row with that ordinal and the same end/direction.
@@ -3288,11 +3291,6 @@ ChatGPT has no public list, so its `source` is always `table` and its models are
 For an OpenAI key the execution owner's HTTP/2 Client fetches `GET BASE/models` once as the Host starts, on a stream of its own beyond Active Capacity, so it never waits for a model request or makes one wait, and keeps the IDs (at most 512, 16 KiB together) in memory until it stops; the key never changes while it runs, so the list is never fetched again.
 While that fetch runs the source is `pending` with the table's models; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `table_fallback` with the table's models when it failed, answered with something else or listed more than that bound.
 The reply reads Host memory only, never SQLite or the network.
-
-`POST /v1/person-message` takes `kind:"person_message"`, `session`, nullable `end`, decimal-string `position` and `direction:"forward"|"backward"`, with `end` and `position` as for an activity page.
-It returns that `end` and `message`: the Message without a Session sender nearest after `position` (forward) or before it (backward), within `end`, as its admission `position` and `content` reference, or null.
-Position zero starts either traversal.
-It is one seek in the index of such Messages, whatever the history's length.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.
 `at` is the Host Unix second the row's owning fact committed: the admission for Message admission and sent Message rows, which is the same time on both rows of one Message; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last acceptance, the one at its greatest position, for a Tool Result (an Action's resolution, or the producing Operation's for a rejected call); and the fact itself for a Turn outcome, Session stop and refused send.

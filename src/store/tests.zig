@@ -1836,45 +1836,102 @@ test "a list row carries its Session's Label, times, first Message, work and pee
     try std.testing.expect(!storage.isFenced());
 }
 
-test "a person's Message next to a position is one indexed row, at a fixed end" {
+/// The position of the person's Message next to `request`'s cursor, on a
+/// one-row page of `admission` rows, or null.
+fn personStep(storage: *Store, request: protocol.ActivityPage) !?u64 {
+    const page = try store_core.activityPageForTesting(storage, request);
+    if (page.count == 0) return null;
+    try std.testing.expect(page.count == 1 and page.items[0].value == .admission);
+    return page.items[0].position;
+}
+
+test "a person's Message next to a position is a one-row page of admission rows, at a fixed end" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "person-config");
-    var request: protocol.ReadPersonMessage = .{ .direction = .backward };
+    const peer = try configureTestSession(&storage, "person-peer");
+    var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
     try request.session.set(session.slice());
-    try std.testing.expectEqual(protocol.PersonMessage{ .end = 0 }, try storage.personMessage(&request));
+    try std.testing.expectEqual(@as(?u64, null), try personStep(&storage, request));
     for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
+    // Another Session sent the middle one: it is a received row, not the
+    // person's, and every step passes over it.
+    try submitTestMessage(&storage, &tmp, "from-peer", "from-peer", session.slice(), "peer");
+    {
+        var sql: [256]u8 = undefined;
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()}, 0));
+        try store_core.touch(&storage, session.slice());
+        try store_core.touch(&storage, peer.slice());
+    }
     var positions: [3]u64 = undefined;
-    inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
-    const newest = try storage.personMessage(&request);
-    try std.testing.expectEqual(positions[2], newest.message.?.position);
-    try std.testing.expectEqual(protocol.contentDigest("three"), newest.message.?.content.digest);
-    try std.testing.expectEqual(@as(u64, 5), newest.message.?.content.length);
-    request.end = newest.end;
+    inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission WHERE sender_session_ref IS NULL ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
+    const page = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(page.more);
+    try std.testing.expectEqual(positions[2], page.items[0].position);
+    try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.digest);
+    try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.length);
+    request.end = page.end;
+    request.ordinal = 0;
     // Older from each one, then newer back: each step names its neighbour.
     for ([_]?u64{ positions[1], positions[0], null }, [_]u64{ positions[2], positions[1], positions[0] }) |expected, from| {
         request.position = from;
-        const found = try storage.personMessage(&request);
-        try std.testing.expectEqual(expected, if (found.message) |message| message.position else null);
+        try std.testing.expectEqual(expected, try personStep(&storage, request));
     }
     request.direction = .forward;
     try submitTestMessage(&storage, &tmp, "four", "four", session.slice(), "four");
     for ([_]?u64{ positions[1], positions[2], null }, positions) |expected, from| {
         request.position = from;
-        try std.testing.expectEqual(expected, if ((try storage.personMessage(&request)).message) |message| message.position else null);
+        try std.testing.expectEqual(expected, try personStep(&storage, request));
     }
     // A later Message waits beyond the end it was read at.
     request.end = null;
     request.position = positions[2];
-    try std.testing.expect((try storage.personMessage(&request)).message.?.position > positions[2]);
-    request.end = try queryU64(storage.database, "SELECT next_position FROM session");
-    try std.testing.expectError(error.InvalidCursor, storage.personMessage(&request));
-    try request.session.set("nosuch");
-    request.end = null;
-    try std.testing.expectError(error.SessionNotFound, storage.personMessage(&request));
+    try std.testing.expect((try personStep(&storage, request)).? > positions[2]);
+    // The peer's Message is the page's received row.
+    var received: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.received) };
+    try received.session.set(session.slice());
+    const peers = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(peers.count == 1 and peers.items[0].value == .received);
+    try std.testing.expectEqualStrings(peer.slice(), peers.items[0].value.received.sender.?.session.slice());
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a page lists only the kinds it asks for, and a smaller one steps fewer rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "kinds-config");
+    for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const all = try store_core.activityPageForTesting(&storage, request);
+    // Three admissions, and a User row for each the attempt took.
+    var user_rows: usize = 0;
+    for (all.items[0..all.count]) |item| user_rows += @intFromBool(item.value == .user);
+    try std.testing.expect(user_rows > 0 and all.count == 3 + user_rows and !all.more);
+    request.kinds = .initOne(.user);
+    const users = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(users.count == user_rows and !users.more);
+    for (users.items[0..users.count]) |item| try std.testing.expect(item.value == .user);
+    request.kinds = .initMany(&.{ .admission, .user });
+    request.limit = 2;
+    const two = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(two.count == 2 and two.more);
+    try std.testing.expectEqual(all.items[0].position, two.items[0].position);
+    try std.testing.expectEqual(all.items[1].position, two.items[1].position);
+    request.limit = 0;
+    try std.testing.expectError(error.InvalidCursor, store_core.activityPageForTesting(&storage, request));
+    request.limit = 1;
+    request.kinds = .empty;
+    try std.testing.expectError(error.InvalidCursor, store_core.activityPageForTesting(&storage, request));
     try std.testing.expect(!storage.isFenced());
 }
 
@@ -11699,7 +11756,7 @@ test "every activity row is dated by the fact that owns it" {
             .tool_result => 106,
             .outcome => 107,
             .stop => 108,
-            .hosted_call, .sent, .send_failed => unreachable,
+            .hosted_call, .sent, .send_failed, .received => unreachable,
         };
         try std.testing.expectEqual(expected, item.at);
         seen.insert(item.value);
