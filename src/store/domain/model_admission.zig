@@ -11,6 +11,8 @@ const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const rsql = @import("../rsql.zig");
+const store_access = @import("../access.zig");
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const historical_domain = @import("historical.zig");
@@ -97,9 +99,11 @@ pub const retry_exhausted_sql = std.fmt.comptimePrint("resolution_code IS NULL A
 /// every bind. A default Host's active Operations and its oldest due retry
 /// fit in one read, and a larger Host pages on operation_id.
 pub const retry_admission_page_rows = product_defaults.active_capacity + 1;
-pub const retry_admission_select_sql = std.fmt.comptimePrint(
-    "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
-        "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
+const retry_admission_select_text = std.fmt.comptimePrint(
+    "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms,session_ref," ++
+        "(SELECT workspace_key FROM session WHERE session_ref=model_operation.session_ref) AS workspace_key," ++
+        "(SELECT next_position FROM session WHERE session_ref=model_operation.session_ref) AS next_position " ++
+        "FROM model_operation @index(model_operation_retry_due) WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
         "AND retry_due_at_ms<=?1 AND operation_id>?2 AND " ++ configuration_domain.servedProviderSql("(SELECT provider FROM session WHERE session_ref=model_operation.session_ref)") ++
         " ORDER BY operation_id LIMIT {d}",
     .{retry_admission_page_rows},
@@ -259,36 +263,33 @@ fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, pr
     return .{ .usage_tokens = usage_tokens, .uncovered_bytes = @intCast(bytes) };
 }
 
-pub fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
-    const purpose = try model_settlement_domain.readModelOperationKind(self, binding.operation_id);
-    const statement = try store_core.cached(self, "SELECT session_ref,admission_position FROM model_operation WHERE operation_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(statement, 0, &session_ref);
-    const boundary = try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-    return turn_policy.recoversOverflow(purpose, try contextChangedSinceBase(self, session_ref.slice(), @intCast(boundary)));
-}
-
-fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64) !bool {
-    // Any changed suffix of the newest base also belongs to every older
-    // base. Older bases cannot change the answer.
-    const statement = try store_core.cached(self, "WITH base AS (SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
+/// True when the Session has no compaction base before `boundary`, or
+/// the newest one has a changed suffix before it. Any changed suffix of
+/// the newest base also belongs to every older base, so older bases
+/// cannot change the answer.
+pub const context_changed = rsql.Read(.{
+    .sql = "WITH base AS (SELECT admission_position FROM model_operation @index(model_operation_compaction_bases) " ++
         "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 " ++
         "ORDER BY admission_position DESC LIMIT 1) " ++
         "SELECT NOT EXISTS(SELECT 1 FROM base " ++
         "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
         "AND e.entry_kind IN (1,2) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
-        "AND NOT EXISTS(SELECT 1 FROM model_output_item item INDEXED BY model_output_history " ++
+        "AND NOT EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
         "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
         "WHERE item.session_ref=?1 AND suffix.session_ref=?1 AND suffix.purpose=0 " ++
-        "AND item.session_position>base.admission_position AND item.session_position<?2))");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindU64(statement, 2, boundary);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return c.sqlite3_column_int(statement, 0) == 1;
+        "AND item.session_position>base.admission_position AND item.session_position<?2)) AS changed",
+    .Args = struct { session: []const u8, boundary: u64 },
+    .Row = struct { changed: bool },
+    .cardinality = .one,
+});
+
+fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64) !bool {
+    var a = store_access.Access(.read, error{}).within(self);
+    defer a.deinit();
+    var changed: context_changed.Result = undefined;
+    a.read(context_changed, .{ .session = session_ref, .boundary = boundary }, &changed);
+    try a.run();
+    return changed.changed;
 }
 
 pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
@@ -457,85 +458,83 @@ pub fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, fault
     return .{ .permit = .{ .binding = binding } };
 }
 
-pub fn tryAdmitNextModelRetryLocked(
-    self: *Store,
-    active: ActiveOperationFilter,
-    faults: Faults,
-) !?AttemptAdmission {
-    const snapshot_ms = try store_core.readUnixMilliseconds(self.io);
-    const selection_limit = try std.math.add(usize, active.maximum_exclusions, 1);
-    const select = try store_core.cached(self, retry_admission_select_sql);
-    defer sqlite.resetCached(select);
-    try sqlite.bindI64(select, 1, snapshot_ms);
-    try sqlite.bindI64(select, 2, 0);
-    var selected: ?AttemptBinding = null;
-    var scanned: usize = 0;
-    var page_rows: usize = 0;
-    var after_operation_id: i64 = 0;
-    while (scanned < selection_limit) {
-        const result = c.sqlite3_step(select);
-        if (result == c.SQLITE_DONE) {
-            if (page_rows < retry_admission_page_rows) break;
-            if (c.sqlite3_reset(select) != c.SQLITE_OK) return error.RetrySelectionFailed;
-            try sqlite.bindI64(select, 2, after_operation_id);
-            page_rows = 0;
-            continue;
-        }
-        if (result != c.SQLITE_ROW) return error.RetrySelectionFailed;
-        const turn_id = c.sqlite3_column_int64(select, 0);
-        const operation_id = c.sqlite3_column_int64(select, 1);
-        const attempt_ordinal = c.sqlite3_column_int64(select, 2);
-        const due_at_ms = c.sqlite3_column_int64(select, 3);
-        if (turn_id <= 0 or operation_id <= 0 or attempt_ordinal <= 0 or
-            attempt_ordinal >= retry_policy.maximum_attempts or
-            due_at_ms < 0 or due_at_ms > snapshot_ms)
-        {
-            return error.CorruptStore;
-        }
-        scanned += 1;
-        page_rows += 1;
-        after_operation_id = operation_id;
-        if (active.contains(@intCast(operation_id))) continue;
-        selected = .{
-            .turn_id = @intCast(turn_id),
-            .operation_id = @intCast(operation_id),
-            .attempt_ordinal = @intCast(attempt_ordinal),
-        };
-        break;
-    }
-    // Ends the read before any transaction this transition opens.
-    if (c.sqlite3_reset(select) != c.SQLITE_OK) return error.RetrySelectionFailed;
+/// Due retries in id order after `after`, with their Session: one page.
+const due_retries = rsql.Read(.{
+    .sql = retry_admission_select_text,
+    .Args = struct { now_ms: u64, after: u64 },
+    .Row = struct { turn_id: rsql.Positive, operation_id: rsql.Positive, attempt_ordinal: rsql.Positive, retry_due_at_ms: u64, session: rsql.SessionHead },
+    .cardinality = .each,
+});
 
-    // Eligibility exists only inside this Store transition. No selected
-    // candidate or time snapshot survives rollback, capacity loss or exit.
-    // The held Store mutex excludes every other writer, so the candidate
-    // read outside the transaction is still current inside it.
-    const current = selected orelse return null;
-    try store_core.begin(self);
-    if (current.attempt_ordinal >= retry_policy.maximum_attempts) return error.CorruptStore;
-    const replacement_ordinal = current.attempt_ordinal + 1;
-    const update = try store_core.cached(
-        self,
-        "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=unixepoch(),retry_scheduled_at=NULL " ++
-            "WHERE operation_id=?1 AND turn_id=?3 AND resolution_code IS NULL " ++
-            "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5 RETURNING session_ref",
-    );
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, current.operation_id);
-    try sqlite.bindU64(update, 2, replacement_ordinal);
-    try sqlite.bindU64(update, 3, current.turn_id);
-    try sqlite.bindU64(update, 4, current.attempt_ordinal);
-    try sqlite.bindI64(update, 5, snapshot_ms);
-    if (try store_core.stepTouching(self, update) != 1) {
-        try store_core.rollback(self);
-        return null;
+/// `due_retries` as SQLite runs it.
+pub const retry_admission_select_sql = due_retries.sql;
+
+const retry_attempt = rsql.Write(.{
+    .sql = "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=@now,retry_scheduled_at=NULL " ++
+        "WHERE operation_id=?1 AND session_ref=@session(?6) AND turn_id=?3 AND resolution_code IS NULL " ++
+        "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
+    .Args = struct { operation_id: u64, replacement: u64, turn_id: u64, attempt_ordinal: u64, now_ms: u64, session: rsql.SessionHead },
+    // Its candidate round read every condition, under the single writer.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Scans one page of `due_retries` for the first retry no execution slot
+/// holds, counting what it stepped.
+const RetryChoice = struct {
+    active: ActiveOperationFilter,
+    now_ms: u64,
+    scanned: u64 = 0,
+    page_rows: u64 = 0,
+    after: u64 = 0,
+    chosen: ?due_retries.Row = null,
+    corrupt: bool = false,
+
+    pub fn visit(choice: *RetryChoice, row: *const due_retries.Row) bool {
+        if (row.attempt_ordinal.get() >= retry_policy.maximum_attempts or row.retry_due_at_ms > choice.now_ms) {
+            choice.corrupt = true;
+            return false;
+        }
+        choice.scanned += 1;
+        choice.page_rows += 1;
+        choice.after = row.operation_id.get();
+        if (choice.active.contains(row.operation_id.get())) return true;
+        choice.chosen = row.*;
+        return false;
     }
+};
+
+/// The read Access `candidate` pages through due retries in id order,
+/// outside any transaction, until it finds one `active` does not hold,
+/// after at most one more than it can exclude; each page is a round. The
+/// held Store mutex excludes every other writer, so the write Access `a`
+/// starts the replacement Attempt from what the scan read, in one round.
+pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active: ActiveOperationFilter, faults: Faults) !?AttemptAdmission {
+    const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(io)) orelse return error.IntegerOutOfRange;
+    const limit = try std.math.add(u64, active.maximum_exclusions, 1);
+    var choice: RetryChoice = .{ .active = active, .now_ms = now_ms };
+    while (choice.chosen == null and choice.scanned < limit) {
+        choice.page_rows = 0;
+        candidate.readEach(due_retries, .{ .now_ms = now_ms, .after = choice.after }, limit - choice.scanned, &choice);
+        try candidate.run();
+        if (choice.corrupt) return error.CorruptStore;
+        if (choice.page_rows < retry_admission_page_rows) break;
+    }
+    const chosen = choice.chosen orelse return null;
+    const replacement = chosen.attempt_ordinal.get() + 1;
+    a.write(retry_attempt, .{
+        .operation_id = chosen.operation_id.get(),
+        .replacement = replacement,
+        .turn_id = chosen.turn_id.get(),
+        .attempt_ordinal = chosen.attempt_ordinal.get(),
+        .now_ms = now_ms,
+        .session = chosen.session,
+    });
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
     return .{ .permit = .{ .binding = .{
-        .turn_id = current.turn_id,
-        .operation_id = current.operation_id,
-        .attempt_ordinal = replacement_ordinal,
+        .turn_id = chosen.turn_id.get(),
+        .operation_id = chosen.operation_id.get(),
+        .attempt_ordinal = replacement,
     } } };
 }
 
