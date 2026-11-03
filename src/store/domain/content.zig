@@ -227,10 +227,16 @@ pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    var a: Access(.read, error{}) = .open(&entry);
-    defer a.deinit();
-    const id = try entry.finish(Ordinary.none, contentIdOf(&a, reference, private));
+    const id = try entry.finish(Ordinary.none, readContentId(&entry, reference, private));
     return .{ .store = self, .reference = reference, .content_id = id };
+}
+
+/// `contentIdOf` in its own read Access. Noinline keeps the Access off
+/// every caller's frame, as `model_settlement.readAttemptKind` does.
+noinline fn readContentId(entry: *const store_core.Entry, reference: ContentReference, private: bool) !i64 {
+    var a: Access(.read, error{}) = .open(entry);
+    defer a.deinit();
+    return contentIdOf(&a, reference, private);
 }
 
 /// The id of the row `reference` and `private` name, in one round. A
