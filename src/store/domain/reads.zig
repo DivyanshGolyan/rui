@@ -2174,20 +2174,25 @@ pub const ToolOutcomeRow = struct {
 /// either rejected with its rejection's content and acceptance and no
 /// Action, or has an Action that is unresolved, with no result and no
 /// acceptance, or resolved, with its result's content and acceptance;
-/// with `terminal`, every call is rejected or resolved, and has its
-/// publication, its largest acceptance. For each call, as
-/// main's per-call Proposal read: its Proposal is consistent and its
-/// fields certified (`certifiedFields`). Every failure is `CorruptStore`,
-/// main's answer for each, so which one it meets first changes nothing.
+/// with `terminal`, every call is rejected or resolved. Main also
+/// required a terminal Operation's publication, its largest acceptance;
+/// every rejected or resolved call has an acceptance, so a terminal
+/// Operation with a call has one, and no count is kept for it. For each
+/// call, as main's per-call Proposal read: its Proposal is consistent and
+/// its fields certified (`certifiedFields`). Every failure is
+/// `CorruptStore`, main's answer for each, so which one it meets first
+/// changes nothing. Its counts are `u32`, so an Activity page's sixteen
+/// item reads, each holding one, fit `readItems`' frame budget: more call
+/// items than a `u32` counts is `CorruptStore`, and so is a call past the
+/// count of call items, which main also refused once the count ended.
 pub const ToolOutcomeCheck = struct {
+    operation: u64 = 0,
+    expected: u32 = 0,
+    calls: u32 = 0,
+    valid: u32 = 0,
+    terminals: u32 = 0,
     terminal: bool = false,
     failed: bool = false,
-    operation: u64 = 0,
-    expected: u64 = 0,
-    calls: u64 = 0,
-    valid: u64 = 0,
-    terminals: u64 = 0,
-    position: ?u64 = null,
 
     /// One check may judge several reads' rows, each after the other's,
     /// in Operation order; after a failure it takes no more.
@@ -2206,9 +2211,10 @@ pub const ToolOutcomeCheck = struct {
         const operation = row.scope_operation.get();
         if (operation != check.operation) {
             try check.close();
-            check.* = .{ .terminal = check.terminal, .operation = operation, .expected = row.expected };
+            check.* = .{ .terminal = check.terminal, .operation = operation, .expected = std.math.cast(u32, row.expected) orelse return error.CorruptStore };
         }
         if (row.ordinal == null) return;
+        if (check.calls == check.expected) return error.CorruptStore;
         check.calls += 1;
         _ = try certifiedFields(&try row.proposal());
         const rejected = row.rejection_code != null and row.rejection_present and row.call_acceptance != null and row.action_id == null;
@@ -2217,7 +2223,6 @@ pub const ToolOutcomeCheck = struct {
         const fields = row.length0 != null and row.length1 != null and row.length2 != null;
         if (row.item_kind == 3 and fields and (rejected or resolved or unresolved)) check.valid += 1;
         if (rejected or resolved) check.terminals += 1;
-        if (optionalPositive(row.call_acceptance orelse row.action_acceptance)) |at| check.position = @max(at, check.position orelse 0);
     }
 
     /// Judges the Operation whose rows ended.
@@ -2225,7 +2230,6 @@ pub const ToolOutcomeCheck = struct {
         if (check.operation == 0) return;
         if (check.expected == 0 or check.calls != check.expected or check.valid != check.expected or
             (check.terminal and check.terminals != check.expected)) return error.CorruptStore;
-        if (check.terminal and check.position == null) return error.CorruptStore;
         check.operation = 0;
     }
 

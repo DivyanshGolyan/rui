@@ -14043,7 +14043,7 @@ fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     defer capture.deinit();
     var a = reads_domain.ReadAccess.within(&storage);
     defer a.deinit();
-    try report_domain.renderSessionReport(&a, session.slice(), .current, .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 }, &capture);
+    try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
     return a.rounds;
 }
 

@@ -690,32 +690,21 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
     try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow.Fields }}, .{&fields});
 }
 
-/// A Session report, on one Access, whose rounds tests count. Round 1
-/// reads the saved Session, and a missing one ends the report there. The
-/// Current facts follow (`renderCurrent`); the Full profile's history then
-/// reads through unconverted statements under the same Entry.
+/// A Session report under `entry`: its saved Session and Current facts
+/// on one Access (`renderHead`), then, for the Full profile, its history
+/// through unconverted statements under the same Entry. The Access and
+/// the saved Session live in `headUnder`'s frame, which returns before
+/// any history content is read, so neither adds to the deepest chain.
 pub fn renderSessionReport(
-    a: *ReadAccess,
+    entry: *const store_core.Entry,
     session_ref: []const u8,
     profile: protocol.ReportProfile,
     execution: SessionReportExecution,
     capture: *SessionReportCapture,
 ) !void {
-    var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
-    var found: store_access.Found = undefined;
-    configuration_domain.readSaved(a, session_ref, &current, &found);
-    try a.run();
-    if (found.get()) try configuration_domain.checkSaved(&current);
-    try capture.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"");
-    try capture.append(@tagName(profile));
-    try capture.append("\",\"session\":");
-    if (!found.get()) {
-        try capture.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
-        return;
-    }
-    try renderCurrent(a, session_ref, &current, capture);
+    if (!try headUnder(entry, session_ref, profile, capture)) return;
     if (profile == .full) {
-        const self = a.store;
+        const self = entry.store;
         try capture.append(",\"full\":{\"session_revisions\":[");
         try appendSessionRevisions(self, session_ref, capture);
         try capture.append("],\"messages\":[");
@@ -745,6 +734,33 @@ pub fn renderSessionReport(
         execution.custody_occupied,
         execution.scratch_used_bytes,
     });
+}
+
+/// `renderHead` on an Access of its own under `entry`.
+noinline fn headUnder(entry: *const store_core.Entry, session_ref: []const u8, profile: protocol.ReportProfile, capture: *SessionReportCapture) !bool {
+    var a: ReadAccess = .open(entry);
+    defer a.deinit();
+    return renderHead(&a, session_ref, profile, capture);
+}
+
+/// A report's head, whose rounds tests count: round 1 reads the saved
+/// Session, and a missing one ends the report there, with its execution
+/// (false); the Current facts follow (`renderCurrent`).
+pub fn renderHead(a: *ReadAccess, session_ref: []const u8, profile: protocol.ReportProfile, capture: *SessionReportCapture) !bool {
+    var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
+    var found: store_access.Found = undefined;
+    configuration_domain.readSaved(a, session_ref, &current, &found);
+    try a.run();
+    if (found.get()) try configuration_domain.checkSaved(&current);
+    try capture.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"");
+    try capture.append(@tagName(profile));
+    try capture.append("\",\"session\":");
+    if (!found.get()) {
+        try capture.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
+        return false;
+    }
+    try renderCurrent(a, session_ref, &current, capture);
+    return true;
 }
 
 /// The active Turn's Operations that proposed calls: each resolved with

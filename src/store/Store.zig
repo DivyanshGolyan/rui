@@ -573,9 +573,7 @@ pub const Store = struct {
         {
             const entry = try enter(self, .none);
             defer entry.release();
-            var access: ReadAccess = .open(&entry);
-            defer access.deinit();
-            try entry.finishCapture(&capture, report_domain.renderSessionReport(&access, session_ref, options.profile, options.execution, &capture));
+            try entry.finishCapture(&capture, report_domain.renderSessionReport(&entry, session_ref, options.profile, options.execution, &capture));
         }
         return capture.seal();
     }
