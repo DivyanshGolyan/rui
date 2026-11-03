@@ -8020,7 +8020,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try session.set(allocated_session_1.slice());
     const received = try store_core.activityPageForTesting(&storage, .{ .session = session });
     try std.testing.expectEqual(@as(usize, 1), received.count);
-    const peer = received.items[0].value.admission.sender.?;
+    const peer = received.items[0].value.received.sender.?;
     try std.testing.expectEqualStrings(sender, peer.session.slice());
     {
         // The receiver's row names that peer as its starter; no person has
@@ -8062,7 +8062,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
         var receiver: protocol.Bounded(protocol.max_session_bytes) = .{};
         try receiver.set(allocated_session_1.slice());
         const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
-        try std.testing.expectEqualStrings("Lead", named.items[0].value.admission.sender.?.label.slice());
+        try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
     }
     try storage.revokeActionSender(action);
     try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
@@ -12073,6 +12073,42 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
         const later = try store_core.activityPageForTesting(&storage, forward);
         try std.testing.expect(later.more);
         try std.testing.expectEqual(tail, later.items[0].position);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "a one-row page of a person's Messages costs the same steps after 10 or 10,000 received ones" {
+    // Ctrl-P from the end passes over every Message another Session sent
+    // to reach the person's first one, through their own index.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "recall-config");
+        const peer = try configureTestSession(&storage, "recall-peer");
+        try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value FROM history; " ++
+                "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice(), peer.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].value == .admission and !page.more);
     }
     try std.testing.expectEqual(steps[0], steps[1]);
 }

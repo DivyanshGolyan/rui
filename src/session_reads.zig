@@ -1823,7 +1823,7 @@ const FakeHost = struct {
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
             const value = self.item(.{ .position = at }, boundary).value;
-            if (value != .admission or value.admission.state != .queued or value.admission.sender != null) continue;
+            if (value != .admission or value.admission.state != .queued) continue;
             if (facts.queued.count == 0) facts.queued.oldest_position = at;
             facts.queued.count += 1;
             facts.queued.newest_admission = value.admission.admission;
