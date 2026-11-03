@@ -11359,6 +11359,7 @@ test "public proposal structural corruption fences the activity page" {
         "DELETE FROM model_tool_call WHERE call_ordinal=0",
         "UPDATE turn SET session_ref='f0re1g'",
         "UPDATE model_tool_call SET name_content_id=(SELECT call_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=0)",
     };
     for (faults) |fault| {
         var tmp = std.testing.tmpDir(.{});
@@ -11376,7 +11377,14 @@ test "public proposal structural corruption fences the activity page" {
         try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
-        _ = try store_core.activityPageForTesting(&storage, request);
+        const healthy = try store_core.activityPageForTesting(&storage, request);
+        const call = for (healthy.items[0..healthy.count]) |item| {
+            if (item.value == .call) break item.value.call;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqual(binding.operation_id, call.operation);
+        try std.testing.expectEqual(binding.turn_id, call.turn);
+        try std.testing.expectEqual(@as(u64, 0), call.call_ordinal);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("unknown"), &call.fields[0].digest);
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
         try sqlite.exec(storage.database, fault);
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));

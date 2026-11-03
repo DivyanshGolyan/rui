@@ -1829,12 +1829,10 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
 }
 
-pub const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [3]i64 };
-
 /// The content columns of a Proposal's three fields, in ProposalField order.
 const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", "arguments_content_id" };
 
-// Every caller (Action reads, call outcomes, the report) shares one provenance check.
+// Every caller (Activity pages, Action reads, call outcomes, the report) shares one provenance check.
 // LEFT JOIN keeps missing/contradictory owners visible as corruption.
 /// The Proposal at a Session position, with each field's content row.
 pub const proposal_row = rsql.Read(.{
@@ -1884,14 +1882,12 @@ pub const proposal_row = rsql.Read(.{
 });
 
 /// The Proposal at `position`, read in a round it may share with other
-/// rows (`readProposal`), into `metadata` and `content_ids` when the
-/// caller keeps them. Each field's content must be public and match the
+/// rows (`readProposal`), into `metadata` when the caller keeps it. Each field's content must be public and match the
 /// metadata admission certified, so reference substitution is detectable
 /// without reopening payloads.
 pub const ProposalRead = struct {
     position: u64,
     metadata: ?*protocol.ProposalMetadata = null,
-    content_ids: ?*[3]i64 = null,
     count: RowCount = .{},
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
@@ -1901,14 +1897,13 @@ pub const ProposalRead = struct {
     fn keep(read: *ProposalRead, row: *const proposal_row.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         var fields: [3]protocol.ProposalFieldReference = undefined;
-        inline for (proposal_fields, 0..) |column, index| {
+        inline for (0..proposal_fields.len) |index| {
             const suffix = std.fmt.comptimePrint("{d}", .{index});
             const length: u64 = @field(row, "length" ++ suffix);
             const digest: [32]u8 = @field(row, "digest" ++ suffix);
             const certified = row.field_metadata[index * 40 ..][0..40];
             if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
                 !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
-            if (read.content_ids) |ids| ids[index] = @intCast(@field(row, column).get());
             fields[index] = .{ .length = length, .digest = digest };
         }
         if (read.metadata) |metadata| metadata.* = .{
@@ -1936,18 +1931,18 @@ pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
 }
 
 /// `readProposal` in a round of its own.
-pub fn proposal(a: anytype, session: []const u8, position: u64) !ProposalIdentity {
-    var identity: ProposalIdentity = undefined;
-    var read: ProposalRead = .{ .position = position, .metadata = &identity.metadata, .content_ids = &identity.content_ids };
+pub fn proposal(a: anytype, session: []const u8, position: u64) !protocol.ProposalMetadata {
+    var metadata: protocol.ProposalMetadata = undefined;
+    var read: ProposalRead = .{ .position = position, .metadata = &metadata };
     readProposal(a, session, &read);
     try a.run();
     try read.found();
-    return identity;
+    return metadata;
 }
 
 /// `proposal` for unconverted code (`report.zig`). Not inlined, so its
 /// Access takes no slot in the report's frame.
-pub noinline fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
+pub noinline fn proposalLocked(self: *Store, session: []const u8, position: u64) !protocol.ProposalMetadata {
     var a = ReadAccess.within(self);
     defer a.deinit();
     return proposal(&a, session, position);

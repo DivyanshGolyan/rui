@@ -2989,7 +2989,7 @@ The output summary uses one fixed 256-byte line buffer.
 A longer line receives shortening and `/details` guidance; subsequent metadata lines remain visible until the first output-tail delimiter.
 The remaining stream drains without retention.
 Tool Result streams validate even when their bytes are not displayed; label-only observation uses admission-certified metadata under the public Session activity contract.
-Fresh exact proposal and Action inspection authenticates all three complete proposal fields.
+Fresh Action inspection authenticates all three complete proposal fields.
 Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
 `/details` shows the latest Conversation page with full saved Tool Results through the same bounded history owner, without moving the older-navigation or live Activity cursor.
 Older results remain available through `/history`; oversized items retain exact raw export.
@@ -3230,7 +3230,6 @@ Acceptance decoded every field once into its own content row; a reference to oth
 The provider item ID is not a call field: it stays in the item bag, and its digest only rejects a duplicate item ID within one output; this persisted-format change follows the [Store format policy](#store-format-and-upgrades).
 Missing proposal identity is an ordinary unavailable read; contradictory provenance, missing owners or private/missing exposed fields fence rather than disappear.
 Proposal metadata grants no authorization: a later approval still binds the freshly inspected exact pending Action through the existing decision route.
-The Host once served proposals through their own `/v1/proposal-page` and `/v1/proposal-field` routes; only tests used them, and Divyansh asked to remove them on 2026-11-03 (wire `7`).
 
 ### Public Session activity
 
