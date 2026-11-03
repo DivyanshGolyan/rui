@@ -897,18 +897,24 @@ const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
+/// The resident bytes the owner accepted for a settlement batch of 64
+/// items, beyond the configure reads' 4888.
+const accepted_settlement_growth = 10240;
+
 comptime {
-    // A settlement batch of 64 items, 16528 bytes, is the larger use; the
-    // owner accepted about 10 KiB more than the configure reads' 4888.
-    if (scratch_bytes > 17 * 1024) @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes; keep it within 17 KiB", .{scratch_bytes}));
+    // The settlement batch is the larger use: 14480 bytes, 9592 beyond the
+    // configure reads. Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 4888 or scratch_bytes != 14480)
+        @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
+    if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
 
 /// The change ring, and the scratch beside it, in pages of their own,
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most about 16 KiB, a settlement
-/// batch's size, of which a configure writes about 5 KiB.
+/// resident for the Store's life: at most 14480 bytes, a settlement
+/// batch's size, of which a configure writes 4888.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {

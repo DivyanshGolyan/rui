@@ -561,7 +561,9 @@ fn parameters(comptime first: usize, comptime count: usize) []const u8 {
 }
 
 /// Args of the `u64` fields `lead`, then `width` digests `d1..`, bound
-/// by value in the order an IN list binds them.
+/// by value in the order an IN list binds them. Extern, so the digests sit
+/// back to back after the lead and a batch binds its own storage in place:
+/// `Batch.identity_digests` for a lookup, `Batch.ids` for a duplicate read.
 fn DigestArgs(comptime lead: []const [:0]const u8, comptime width: usize) type {
     @setEvalBranchQuota(20_000);
     const count = lead.len + width;
@@ -575,18 +577,18 @@ fn DigestArgs(comptime lead: []const [:0]const u8, comptime width: usize) type {
         names[lead.len + index] = std.fmt.comptimePrint("d{d}", .{index + 1});
         types[lead.len + index] = [32]u8;
     }
-    return @Struct(.auto, null, &names, &types, &@splat(.{}));
+    return @Struct(.@"extern", null, &names, &types, &@splat(.{}));
 }
 
-/// Fills Args' `width` digests with `source`'s first `count` in order,
-/// the first repeated in the slots it leaves: a repeated digest adds no
-/// row to an IN list. `source.at(i)` is the `i`th digest.
-fn bindDigests(args: anytype, comptime width: usize, source: anytype, count: usize) void {
-    @setEvalBranchQuota(20_000);
+/// `width` digests from `digests[0]`, as `S`'s Args: the first `count`
+/// are the read's, and the slots after them take the first again, since a
+/// repeated digest adds no row to an IN list. The slots past `count` are
+/// ones the batch does not use, so writing them loses nothing.
+fn digestArgs(comptime S: type, comptime width: usize, digests: *[width][32]u8, count: usize) *const S.Args {
+    comptime std.debug.assert(@sizeOf(S.Args) == width * 32 and @offsetOf(S.Args, "d1") == 0);
     std.debug.assert(count != 0 and count <= width);
-    inline for (1..width + 1) |number| {
-        @field(args, std.fmt.comptimePrint("d{d}", .{number})) = source.at(if (number <= count) number - 1 else 0).*;
-    }
+    for (digests[count..]) |*slot| slot.* = digests[0];
+    return @ptrCast(digests);
 }
 
 /// Every content row with one of `width` digests. A digest names one
@@ -639,19 +641,31 @@ const duplicate_items_wide = DuplicateItems(batch_items);
 const duplicate_calls = DuplicateCalls(narrow_width);
 const duplicate_calls_wide = DuplicateCalls(batch_items);
 
-/// The Args a batch binds, in its scratch, not a frame: bound by value
-/// when queued, so one buffer serves each read in turn (`Batch.argsOf`).
-/// Bytes, not a union: a union value would be built in the frame first.
-const digest_args_types = .{ content_batch.Args, content_batch_wide.Args, duplicate_items.Args, duplicate_items_wide.Args };
-const digest_args_bytes = blk: {
-    var most: usize = 0;
-    for (digest_args_types) |T| most = @max(most, @sizeOf(T));
-    break :blk most;
-};
-const digest_args_align = blk: {
-    var most: usize = 1;
-    for (digest_args_types) |T| most = @max(most, @alignOf(T));
-    break :blk most;
+comptime {
+    // `queueReads` binds `duplicate_items`' Args to a calls read too.
+    std.debug.assert(duplicate_items.Args == duplicate_calls.Args and duplicate_items_wide.Args == duplicate_calls_wide.Args);
+}
+
+/// The Operation and a batch's item or call id digests, laid out as the
+/// wide duplicate read's Args, whose narrow Args are a prefix of it.
+const DuplicateIds = extern struct {
+    operation_id: u64,
+    digests: [batch_items][32]u8,
+
+    comptime {
+        for (.{ duplicate_items.Args, duplicate_items_wide.Args }, .{ narrow_width, batch_items }) |Args, width| {
+            std.debug.assert(@offsetOf(Args, "operation_id") == @offsetOf(DuplicateIds, "operation_id"));
+            std.debug.assert(@offsetOf(Args, "d1") == @offsetOf(DuplicateIds, "digests"));
+            std.debug.assert(@sizeOf(Args) == @offsetOf(DuplicateIds, "digests") + width * 32);
+        }
+    }
+
+    /// The ids as `S`'s Args, padded past `count` as `digestArgs` pads.
+    fn args(ids: *DuplicateIds, comptime S: type, comptime width: usize, count: usize) *const S.Args {
+        std.debug.assert(count != 0 and count <= width);
+        for (ids.digests[count..width]) |*slot| slot.* = ids.digests[0];
+        return @ptrCast(ids);
+    }
 };
 
 const DuplicateRow = struct { digest: [32]u8 };
@@ -778,20 +792,12 @@ const max_lookups = blk: {
     break :blk most;
 };
 
-/// A content identity a batch imports, and its row: 0 until the lookup
-/// round found one or the batch inserted one.
+/// A content identity a batch imports, beside its digest in
+/// `Batch.identity_digests`, and its row: 0 until the lookup round found
+/// one or the batch inserted one.
 const Identity = struct {
-    digest: [32]u8,
     length: u64,
     row: packed struct(u64) { content_id: u63, private: bool },
-
-    fn of(value: *const content_domain.Import) Identity {
-        return .{ .digest = value.digest, .length = value.length, .row = .{ .content_id = 0, .private = value.private } };
-    }
-
-    fn names(identity: *const Identity, value: *const content_domain.Import) bool {
-        return identity.length == value.length and identity.row.private == value.private and std.mem.eql(u8, &identity.digest, &value.digest);
-    }
 };
 
 /// Matches one `content_batch` statement's rows to its batch's identities.
@@ -826,7 +832,7 @@ const DuplicateVisitor = struct {
             return false;
         }
         visitor.rows += 1;
-        for (visitor.batch.digests[0..visitor.batch.digest_count], 0..) |*candidate, index| {
+        for (visitor.batch.ids.digests[0..visitor.batch.digest_count], 0..) |*candidate, index| {
             if (!std.mem.eql(u8, candidate, &row.digest)) continue;
             if (visitor.lowest == null or index < visitor.lowest.?) visitor.lowest = @intCast(index);
             break;
@@ -849,21 +855,17 @@ pub const Batch = struct {
     stopped: ?anyerror,
     /// Whether no records follow `end` for a later batch of this kind.
     last: bool,
+    /// Each identity's digest, back to back, so a lookup binds a run of
+    /// them in place.
+    identity_digests: [batch_identities][32]u8,
     identities: [batch_identities]Identity,
     identity_count: u16,
     /// Each item's id digest, or each call's call_id digest, in order.
-    digests: [batch_items][32]u8,
+    ids: DuplicateIds,
     digest_count: u8,
     lookups: [max_lookups]LookupVisitor,
     lookup_count: u8,
     duplicates: DuplicateVisitor,
-    args: [digest_args_bytes]u8 align(digest_args_align),
-
-    /// The batch's Args buffer as `S`'s Args.
-    fn argsOf(batch: *Batch, comptime S: type) *S.Args {
-        comptime std.debug.assert(@sizeOf(S.Args) <= digest_args_bytes and @alignOf(S.Args) <= digest_args_align);
-        return @ptrCast(&batch.args);
-    }
 
     fn reset(batch: *Batch, kind: @FieldType(Batch, "kind"), start: u64) void {
         batch.kind = kind;
@@ -887,7 +889,9 @@ pub const Batch = struct {
     }
 
     fn find(batch: *Batch, value: *const content_domain.Import) ?*Identity {
-        for (batch.identities[0..batch.identity_count]) |*identity| if (identity.names(value)) return identity;
+        for (batch.identities[0..batch.identity_count], batch.identity_digests[0..batch.identity_count]) |*identity, *digest| {
+            if (identity.length == value.length and identity.row.private == value.private and std.mem.eql(u8, digest, &value.digest)) return identity;
+        }
         return null;
     }
 
@@ -895,7 +899,8 @@ pub const Batch = struct {
     fn add(batch: *Batch, value: content_domain.Import) bool {
         if (batch.find(&value) != null) return true;
         if (batch.identity_count == batch_identities) return false;
-        batch.identities[batch.identity_count] = .of(&value);
+        batch.identity_digests[batch.identity_count] = value.digest;
+        batch.identities[batch.identity_count] = .{ .length = value.length, .row = .{ .content_id = 0, .private = value.private } };
         batch.identity_count += 1;
         return true;
     }
@@ -908,13 +913,13 @@ pub const Batch = struct {
         var first: u16 = 0;
         while (first < batch.identity_count) {
             const left = batch.identity_count - first;
-            const chunk: IdentityDigests = .{ .identities = batch.identities[first..][0..@min(@as(u16, if (left > wide_lookup_above) lookup_width else narrow_width), left)] };
-            first += @intCast(chunk.identities.len);
+            const count = @min(@as(u16, if (left > wide_lookup_above) lookup_width else narrow_width), left);
+            const chunk = batch.identity_digests[first..][0..count];
             var distinct: u8 = 0;
-            for (chunk.identities, 0..) |*identity, index| {
+            for (chunk, 0..) |*digest, index| {
                 // A public and a private identity of one value share a digest.
-                const seen = for (chunk.identities[0..index]) |*earlier| {
-                    if (std.mem.eql(u8, &earlier.digest, &identity.digest)) break true;
+                const seen = for (chunk[0..index]) |*earlier| {
+                    if (std.mem.eql(u8, earlier, digest)) break true;
                 } else false;
                 if (!seen) distinct += 1;
             }
@@ -922,30 +927,26 @@ pub const Batch = struct {
             visitor.* = .{ .batch = batch, .limit = 2 * distinct };
             batch.lookup_count += 1;
             const limit = 2 * @as(u64, distinct) + 1;
-            if (chunk.identities.len <= narrow_width) {
-                const args = batch.argsOf(content_batch);
-                bindDigests(args, narrow_width, chunk, chunk.identities.len);
-                a.readEachFrom(content_batch, args, limit, visitor);
+            // Only the last run is short, so its padding lands in unused
+            // slots: wide runs start at multiples of 64 and narrow ones at
+            // multiples of 16, below `batch_identities`.
+            if (count <= narrow_width) {
+                a.readEachFrom(content_batch, digestArgs(content_batch, narrow_width, batch.identity_digests[first..][0..narrow_width], count), limit, visitor);
             } else {
-                const args = batch.argsOf(content_batch_wide);
-                bindDigests(args, lookup_width, chunk, chunk.identities.len);
-                a.readEachFrom(content_batch_wide, args, limit, visitor);
+                a.readEachFrom(content_batch_wide, digestArgs(content_batch_wide, lookup_width, batch.identity_digests[first..][0..lookup_width], count), limit, visitor);
             }
+            first += count;
         }
         if (batch.digest_count == 0) return;
-        const digests: BatchDigests = .{ .digests = batch.digests[0..batch.digest_count] };
+        batch.ids.operation_id = operation_id;
         if (batch.digest_count <= narrow_width) {
-            const args = batch.argsOf(duplicate_items);
-            args.operation_id = operation_id;
-            bindDigests(args, narrow_width, digests, batch.digest_count);
+            const args = batch.ids.args(duplicate_items, narrow_width, batch.digest_count);
             switch (batch.kind) {
                 .items => a.readEachFrom(duplicate_items, args, batch_items + 1, &batch.duplicates),
                 .calls => a.readEachFrom(duplicate_calls, args, batch_items + 1, &batch.duplicates),
             }
         } else {
-            const args = batch.argsOf(duplicate_items_wide);
-            args.operation_id = operation_id;
-            bindDigests(args, batch_items, digests, batch.digest_count);
+            const args = batch.ids.args(duplicate_items_wide, batch_items, batch.digest_count);
             switch (batch.kind) {
                 .items => a.readEachFrom(duplicate_items_wide, args, batch_items + 1, &batch.duplicates),
                 .calls => a.readEachFrom(duplicate_calls_wide, args, batch_items + 1, &batch.duplicates),
@@ -964,26 +965,8 @@ pub const Batch = struct {
     /// or the Store already holds it.
     fn duplicate(batch: *const Batch, index: u8) bool {
         if (batch.duplicates.lowest) |lowest| if (lowest == index) return true;
-        for (batch.digests[0..index]) |*earlier| if (std.mem.eql(u8, earlier, &batch.digests[index])) return true;
+        for (batch.ids.digests[0..index]) |*earlier| if (std.mem.eql(u8, earlier, &batch.ids.digests[index])) return true;
         return false;
-    }
-};
-
-/// The digests of a run of identities, for `bindDigests`.
-const IdentityDigests = struct {
-    identities: []const Identity,
-
-    fn at(source: IdentityDigests, index: usize) *const [32]u8 {
-        return &source.identities[index].digest;
-    }
-};
-
-/// A batch's item or call id digests, for `bindDigests`.
-const BatchDigests = struct {
-    digests: []const [32]u8,
-
-    fn at(source: BatchDigests, index: usize) *const [32]u8 {
-        return &source.digests[index];
     }
 };
 
@@ -1035,7 +1018,7 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                 return;
             }
             if (record.tag == .item) {
-                batch.digests[batch.digest_count] = record.id_digest;
+                batch.ids.digests[batch.digest_count] = record.id_digest;
                 batch.digest_count += 1;
             }
             unit_start = reader.offset;
@@ -1094,7 +1077,7 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                         } else |_| {}
                     }
                 } else |_| {}
-                batch.digests[batch.digest_count] = call_id_record.content_digest;
+                batch.ids.digests[batch.digest_count] = call_id_record.content_digest;
                 batch.digest_count += 1;
                 name = null;
                 call_id = null;
@@ -1337,7 +1320,7 @@ fn Settlement(comptime A: type) type {
                     .position = s.first_item_position + s.imported_items,
                     .kind = @backingInt(record.kind),
                     .attempt_ordinal = s.binding.attempt_ordinal,
-                    .id_digest = batch.digests[index],
+                    .id_digest = batch.ids.digests[index],
                     .omits_reasoning_text = record.omit_reasoning_text,
                     .phase = @backingInt(record.phase),
                     .extras_content_id = neutral.bag,
