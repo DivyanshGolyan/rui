@@ -8,6 +8,7 @@ const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
+const store_access = @import("../access.zig");
 const turn_domain = @import("turn.zig");
 const ContentReference = content_domain.ContentReference;
 const Faults = store_core.Faults;
@@ -189,10 +190,10 @@ const bash_input = rsql.Read(.{
 /// from it. `out` is valid only when this returns without error.
 pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
     var row: bash_input.Row = .{ .position = null, .workspace = &out.workspace, .session = &out.session, .sender_handle = &out.sender_handle, .timeout_ms = undefined };
-    var found = false;
+    var found: store_access.Found = undefined;
     a.readInto(bash_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &row, &found);
     try a.run();
-    if (!found) return error.StaleActionAttemptBinding;
+    if (!found.get()) return error.StaleActionAttemptBinding;
     const position = (row.position orelse return error.CorruptStore).get();
     var proposal: reads_domain.proposal_row.Result = undefined;
     reads_domain.readProposal(a, out.session.slice(), position, &proposal);

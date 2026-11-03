@@ -103,16 +103,16 @@ pub const ContentReader = struct {
     }
 };
 
-const lookup_content = rsql.Read(.{
+pub const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
-    .Args = struct { digest: *const [32]u8, length: u64, private: bool },
+    .Args = struct { digest: [32]u8, length: u64, private: bool },
     .Row = struct { content_id: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_content = rsql.Write(.{
     .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
-    .Args = struct { content_id: u64, digest: *const [32]u8, length: u64, private: bool },
+    .Args = struct { content_id: u64, digest: [32]u8, length: u64, private: bool },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -144,31 +144,31 @@ pub const empty_content: Import = blk: {
 };
 
 /// Queues the read that finds `value`'s row; `importSlot` follows its round.
-/// `value` must outlive the round, which reads its digest in place.
+/// `value` must outlive the round, which defines its `found`.
 pub fn lookup(a: anytype, value: *Import) void {
-    a.read(lookup_content, .{ .digest = &value.digest, .length = value.length, .private = value.private }, &value.found);
+    a.read(lookup_content, .{ .digest = value.digest, .length = value.length, .private = value.private }, &value.found);
 }
 
-/// Two values' rows in one statement, for a round that needs both: a
-/// round queues `lookup_content` once.
+/// Two values' rows in one statement, for a round that needs both, where
+/// two `lookup`s would run two.
 const lookup_pair = rsql.Read(.{
     .sql = "SELECT (SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3) AS first," ++
         "(SELECT content_id FROM content WHERE digest=?4 AND byte_length=?5 AND private=?6) AS second",
-    .Args = struct { first_digest: *const [32]u8, first_length: u64, first_private: bool, second_digest: *const [32]u8, second_length: u64, second_private: bool },
+    .Args = struct { first_digest: [32]u8, first_length: u64, first_private: bool, second_digest: [32]u8, second_length: u64, second_private: bool },
     .Row = struct { first: ?rsql.Positive, second: ?rsql.Positive },
     .cardinality = .one,
 });
 
 pub const Pair = lookup_pair.Result;
 
-/// `lookup` of two values at once; `foundPair` follows its round. Both
-/// values and `rows` must outlive the round.
+/// `lookup` of two values at once; `foundPair` follows its round. `rows`
+/// must outlive the round.
 pub fn lookupPair(a: anytype, first: *const Import, second: *const Import, rows: *Pair) void {
     a.read(lookup_pair, .{
-        .first_digest = &first.digest,
+        .first_digest = first.digest,
         .first_length = first.length,
         .first_private = first.private,
-        .second_digest = &second.digest,
+        .second_digest = second.digest,
         .second_length = second.length,
         .second_private = second.private,
     }, rows);
@@ -193,15 +193,27 @@ fn adoptInserted(a: anytype, value: *Import) void {
 /// After `lookup`'s round: the found row, the row this Access already
 /// queued for an equal identity through any value, or a new row queued
 /// with a Host identity and a zeroed payload of the right length, which
-/// the Access records. `value` must outlive the round that writes it.
+/// the Access records.
 pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
     adoptInserted(a, value);
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try a.identity(.content_id);
-    a.write(insert_content, .{ .content_id = id, .digest = &value.digest, .length = value.length, .private = value.private });
+    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
     a.recordInserted(&value.digest, value.length, value.private, id);
     value.found = .{ .content_id = .of(id) };
     return .{ .id = @intCast(id), .existing = false };
+}
+
+/// Queues a new row for `value`'s identity with a Host identity and a
+/// zeroed payload, and returns its id. It records nothing on the Access:
+/// it is for a caller that keeps its own table of the identities it
+/// imports, as model settlement's batches do, where `importSlot` records
+/// each row in the Access's `max_inserted` table for an entry point's few
+/// values. Its `found` is not read.
+pub fn insertRow(a: anytype, value: *const Import) !u64 {
+    const id = try a.identity(.content_id);
+    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
+    return id;
 }
 
 /// After `lookup`'s round: the id of `bytes`, whose identity `value` is,
@@ -212,40 +224,6 @@ pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
     const slot = try importSlot(a, value);
     if (!slot.existing) a.writeContent(@intCast(slot.id), bytes);
     return @intCast(slot.id);
-}
-
-/// `importSlot` for unconverted code, inside its transaction.
-pub fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var value: Import = .{ .digest = digest.*, .length = length, .private = private };
-    lookup(&a, &value);
-    try a.run();
-    const slot = try importSlot(&a, &value);
-    try a.apply();
-    return slot;
-}
-
-/// `importBytes` for unconverted code, inside its transaction.
-pub fn importBytesContent(self: *Store, bytes: []const u8, private: bool, fail_import: bool) !i64 {
-    if (fail_import) return error.InjectedContentImportFailure;
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var value: Import = .ofBytes(bytes, private);
-    lookup(&a, &value);
-    try a.run();
-    const id = try importBytes(&a, &value, bytes);
-    try a.apply();
-    return @intCast(id);
-}
-
-pub fn writeCheckedBytes(_: *Store, blob: ?*c.sqlite3_blob, hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8, written: *u64, length: u64) !void {
-    if (bytes.len > length - written.*) return error.OutputSourceChanged;
-    hash.update(bytes);
-    if (blob) |value| {
-        if (c.sqlite3_blob_write(value, bytes.ptr, @intCast(bytes.len), @intCast(written.*)) != c.SQLITE_OK) return error.ContentWriteFailed;
-    }
-    written.* += bytes.len;
 }
 
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
@@ -308,10 +286,6 @@ fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8)
     }
 }
 
-pub fn importEmptyContent(self: *Store) !i64 {
-    return importBytesContent(self, "", false, false);
-}
-
 /// The identity of sealed caller content, as `lookup` finds it.
 pub fn sealedIdentity(field: *const protocol.ContentField) Import {
     return .{ .digest = field.digest, .length = field.length, .private = false };
@@ -319,10 +293,10 @@ pub fn sealedIdentity(field: *const protocol.ContentField) Import {
 
 /// After `lookup`'s round: the id of the sealed content `field`, whose
 /// identity `value` is. A file must still hold `field.length` bytes. A new
-/// row is queued and its round run, then the file streams into its payload
-/// while hashed, so a file that changed fails before COMMIT; a row that
-/// exists still has its file verified. A new row whose insert would join
-/// one already queued (an `importBytes` row) runs that one first.
+/// row is queued, then the file streams into its payload while hashed
+/// (`contentSink`, which steps the insert in process), so a file that
+/// changed fails before COMMIT; a row that exists still has its file
+/// verified. It ends no round.
 pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *Import, faults: Faults) !u64 {
     std.debug.assert(field.state == .value);
     if (field.file) |source| {
@@ -330,12 +304,8 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
     } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
-    adoptInserted(a, value);
-    if (value.found == null and a.queued != 0) try a.run();
     const slot = try importSlot(a, value);
     const id: u64 = @intCast(slot.id);
-    // Run now, so a second import in this Access can queue its own row.
-    if (!slot.existing) try a.run();
     if (slot.existing or field.length == 0) {
         if (field.file) |source| try verifyExternalContent(io, source, field.length, &field.digest, null, faults);
         return id;
@@ -369,7 +339,7 @@ pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
     const statement = try store_core.cachedTyped(self, lookup_content);
     defer sqlite.resetCached(statement);
-    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, &.{});
+    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = reference.digest, .length = reference.length, .private = private }, 0);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
     var row: lookup_content.Row = undefined;
     try sqlite.decodeRow(lookup_content.Row, statement, &row);

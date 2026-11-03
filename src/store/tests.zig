@@ -317,9 +317,15 @@ fn busyStatements(database: *c.sqlite3) usize {
 /// Imports `bytes` as public content in a transaction of its own, as
 /// identities are taken only inside one.
 fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
-    try store_core.begin(storage);
-    _ = try content_domain.importBytesContent(storage, bytes, false, false);
-    try store_core.commit(storage);
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{}) = .open(&entry);
+    defer a.deinit();
+    var value: content_domain.Import = .ofBytes(bytes, false);
+    content_domain.lookup(&a, &value);
+    try a.run();
+    _ = try content_domain.importBytes(&a, &value, bytes);
+    try a.commit();
 }
 
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
@@ -1187,7 +1193,7 @@ const TestingRound = struct {
     });
     const insert_content = rsql.Write(.{
         .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),0)",
-        .Args = struct { content_id: u64, digest: *const [32]u8, length: u64 },
+        .Args = struct { content_id: u64, digest: [32]u8, length: u64 },
         .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
     });
     const date_session = rsql.Write(.{
@@ -1214,7 +1220,7 @@ const TestingRound = struct {
         const first = try positions.take(2);
         const content_id = try a.identity(.content_id);
         const digest = protocol.contentDigest(text);
-        a.write(insert_content, .{ .content_id = content_id, .digest = &digest, .length = text.len });
+        a.write(insert_content, .{ .content_id = content_id, .digest = digest, .length = text.len });
         a.writeContent(content_id, text);
         a.write(date_session, .{ .session = loaded.head, .revision = revision });
         try a.commit();
@@ -1222,7 +1228,7 @@ const TestingRound = struct {
     }
 };
 
-test "a content sink opens only the row its Access last took, once its insert ran" {
+test "a content sink opens only a content id its Access itself took, stepping its queued insert" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1236,17 +1242,177 @@ test "a content sink opens only the row its Access last took, once its insert ra
     defer entry.release();
     var a: store_access.Access(.write, error{}) = .open(&entry);
     defer a.deinit();
+    // Opens the transaction, so the next id is taken in it, before this
+    // Access takes any.
+    _ = try a.identity(.turn_id);
+    const before = try store_core.takeIdentity(&storage, .content_id);
+    // Distinct identities, since content is unique by identity.
+    const digests = [3][32]u8{ protocol.contentDigest("sink0"), protocol.contentDigest("sink1"), protocol.contentDigest("sink2") };
+    a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
+    const first = try a.identity(.content_id);
+    a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
+    // Taken by other code between this Access's own ids, as `.nested`
+    // callers may: inside the range of the ids it took, but not its own.
+    const between = try store_core.takeIdentity(&storage, .content_id);
+    const never = try a.identity(.content_id);
+    const last = try a.identity(.content_id);
+    a.write(TestingRound.insert_content, .{ .content_id = last, .digest = digests[2], .length = 4 });
+    try std.testing.expectEqual(first + 3, last);
+    // Refused: 0, a committed row, one taken in this transaction before
+    // this Access's first, one other code took between its own, and one
+    // past its last. A check of the range from its first id to its last
+    // accepted `between`.
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(0));
     try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-    const id = try a.identity(.content_id);
-    const digest = protocol.contentDigest("sink");
-    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 4 });
-    try std.testing.expectError(error.ContentNotInserted, a.contentSink(id));
-    try a.run();
-    try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-    const sink = try a.contentSink(id);
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(before));
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(between));
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1));
+    // The old rule took only the last id, with nothing queued: here the
+    // first id opens while inserts are queued, and the pass steps them.
+    const sink = try a.contentSink(first);
     try sink.write("sink", 0);
     sink.close();
+    try std.testing.expectEqual(0, a.queued);
+    const again = try a.contentSink(last);
+    again.close();
+    // Taken but never inserted: there is no row to open.
+    try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never));
     try a.abandon(.{});
+}
+
+test "a round queues one statement any number of times, an engine pass before each rebinding" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    // Before engine passes the second queuing was StatementQueuedTwice.
+    var digests: [9][32]u8 = undefined;
+    var ids: [9]u64 = undefined;
+    for (&digests, &ids, 0..) |*digest, *id, index| {
+        digest.* = protocol.contentDigest(&.{@intCast(index)});
+        id.* = try a.identity(.content_id);
+        a.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = digest.*, .length = index + 1 });
+    }
+    try a.run();
+    try std.testing.expectEqual(1, a.rounds);
+    try std.testing.expectEqual(9, a.passes);
+    // Each binding stepped before the next replaced it: nine rows, in order.
+    for (ids, 0..) |id, index| {
+        var lengths: [64]u8 = undefined;
+        const sql = try std.fmt.bufPrintSentinel(&lengths, "SELECT byte_length FROM content WHERE content_id={d}", .{id}, 0);
+        try std.testing.expectEqual(index + 1, try queryU64(storage.database, sql));
+    }
+    try a.abandon(.{});
+}
+
+test "a full queue takes an engine pass and the round still counts once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    // Before engine passes the ninth entry was RoundFull.
+    const digest = protocol.contentDigest("ninefold");
+    const id = try a.identity(.content_id);
+    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 8 });
+    for (0..8) |index| a.writeContent(id, "ninefold"[index..][0..1]);
+    try a.run();
+    try std.testing.expectEqual(1, a.rounds);
+    try std.testing.expectEqual(2, a.passes);
+    try a.abandon(.{});
+}
+
+test "a guard that fails in an engine pass fails the next run, and nothing after it steps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "pass-guard");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    var loaded: TestingRound.head.Result = undefined;
+    a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
+    try a.run();
+    const before = try querySessionU64(storage.database, "SELECT created_at FROM session WHERE session_ref=?1", session.slice());
+    // Revision 99 matches no row, so the guard fails when the pass steps it.
+    a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 99 });
+    a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
+    try std.testing.expectEqual(2, a.passes);
+    try std.testing.expectError(error.TestingGuard, a.run());
+    try std.testing.expectEqual(before, try querySessionU64(storage.database, "SELECT created_at FROM session WHERE session_ref=?1", session.slice()));
+    try a.abandon(.{});
+}
+
+test "a queued read's destination holds poison until the pass that steps it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "poison");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.read, error{}) = .open(&entry);
+    defer a.deinit();
+    const poisoned = struct {
+        fn all(bytes: []const u8) bool {
+            for (bytes) |byte| if (byte != store_access.poison_byte) return false;
+            return true;
+        }
+    }.all;
+    var first: TestingRound.head.Result = undefined;
+    var second: TestingRound.head.Result = undefined;
+    @memset(std.mem.asBytes(&first), 0);
+    @memset(std.mem.asBytes(&second), 0);
+    a.read(TestingRound.head, .{ .session_ref = session.slice() }, &first);
+    try std.testing.expect(poisoned(std.mem.asBytes(&first)));
+    // Queuing it again steps the first: defined before `run`, as a network
+    // engine would not have it.
+    a.read(TestingRound.head, .{ .session_ref = session.slice() }, &second);
+    try std.testing.expect(!poisoned(std.mem.asBytes(&first)));
+    try std.testing.expectEqualSlices(u8, session.slice(), &first.head.ref);
+    try std.testing.expect(poisoned(std.mem.asBytes(&second)));
+    try a.run();
+    try std.testing.expectEqualSlices(u8, session.slice(), &second.head.ref);
+}
+
+test "a queued readInto's Found is pending until the pass that steps it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "found-pending");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.read, error{}) = .open(&entry);
+    defer a.deinit();
+    var current: configuration_domain.CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
+    var missing_current: configuration_domain.CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
+    // A bool here held 0xAA, which reads as true: found before any step.
+    var found: store_access.Found = .missing;
+    var missing: store_access.Found = .found;
+    configuration_domain.readSaved(&a, session.slice(), &current, &found);
+    try std.testing.expectEqual(store_access.Found.pending, found);
+    // Queuing it again steps the first, which defines it before `run`.
+    configuration_domain.readSaved(&a, "AAAAAA", &missing_current, &missing);
+    try std.testing.expectEqual(store_access.Found.found, found);
+    try std.testing.expectEqual(store_access.Found.pending, missing);
+    try a.run();
+    try std.testing.expect(found.get());
+    try std.testing.expect(!missing.get());
 }
 
 test "abandoning an Access that has ended runs nothing" {
@@ -1262,7 +1428,7 @@ test "abandoning an Access that has ended runs nothing" {
         defer a.deinit();
         const id = try a.identity(.content_id);
         const digest = protocol.contentDigest("ended");
-        a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 5 });
+        a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 5 });
         if (committed) try a.commit() else {
             try a.run();
             try a.abandon(.{});
@@ -3347,12 +3513,17 @@ test "claiming Session positions stops at the largest position, and fails when i
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        try std.testing.expectEqual(last - 2, try turn_domain.claimSessionPositions(&storage, session.slice(), 2));
-        try std.testing.expectError(error.SessionPositionExhausted, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
-        try std.testing.expectEqual(last, try turn_domain.claimSessionPositions(&storage, session.slice(), 0));
-        try std.testing.expectError(error.SessionPositionExhausted, turn_domain.claimSessionPositions(&storage, session.slice(), last + 1));
-        try store_core.execute(&storage, "COMMIT");
+        var a: store_access.Access(.write, error{}) = .open(&entry);
+        defer a.deinit();
+        var loaded: TestingRound.head.Result = undefined;
+        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
+        try a.run();
+        const positions = try a.positions(loaded.head);
+        try std.testing.expectEqual(last - 2, try positions.take(2));
+        try std.testing.expectError(error.SessionPositionExhausted, positions.take(1));
+        try std.testing.expectEqual(last, try positions.take(0));
+        try std.testing.expectError(error.SessionPositionExhausted, positions.take(last + 1));
+        try a.commit();
     }
     try std.testing.expectEqual(last, try queryU64(storage.database, "SELECT next_position FROM session"));
 
@@ -3361,9 +3532,14 @@ test "claiming Session positions stops at the largest position, and fails when i
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        try std.testing.expectError(error.CorruptStore, turn_domain.claimSessionPositions(&storage, session.slice(), 1));
-        try store_core.execute(&storage, "ROLLBACK");
+        var a: store_access.Access(.write, error{}) = .open(&entry);
+        defer a.deinit();
+        var loaded: TestingRound.head.Result = undefined;
+        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
+        try a.run();
+        _ = try (try a.positions(loaded.head)).take(1);
+        try std.testing.expectError(error.CorruptStore, a.commit());
+        try a.abandon(.{});
     }
 }
 
@@ -5209,6 +5385,230 @@ test "duplicate trustworthy call identity rolls back every imported consequence"
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
+}
+
+/// `count` message items, each its own id and text unless `same_text`,
+/// whose item `repeat_at` (if any) repeats item 0's id; the last answers.
+fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, comptime count: usize, same_text: bool, repeat_at: ?usize) !void {
+    var buffers: [count][128]u8 = undefined;
+    var items: [count][]const u8 = undefined;
+    var answer_buffer: [32]u8 = undefined;
+    var answer: []const u8 = "";
+    for (&buffers, &items, 0..) |*buffer, *item, index| {
+        const id = if (repeat_at == index) 0 else index;
+        const text = if (same_text) 0 else index;
+        item.* = try std.fmt.bufPrint(buffer, "{{\"type\":\"message\",\"id\":\"m{d}\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"t{d}\"}}]}}", .{ id, text });
+        answer = try std.fmt.bufPrint(&answer_buffer, "t{d}", .{text});
+    }
+    try settleItemsForTesting(storage, tmp, binding, &items, answer);
+}
+
+test "an item id repeated in a later batch or the same batch fails the settlement" {
+    inline for (.{ 17, 1 }) |repeat_at| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "repeat-item-config");
+        try submitTestMessage(&storage, &tmp, "repeat-item-input", "repeat-item-key", session.slice(), "repeat");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // Item 17 is in the second batch: a check over one batch's ids
+        // alone passes it, and only the read of the saved items finds it.
+        try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 18, false, repeat_at));
+        try std.testing.expect(!storage.isFenced());
+        try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+        try settleMessagesForTesting(&storage, &tmp, binding, 18, false, null);
+        try std.testing.expectEqual(18, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+        try expectDenseSessionPositions(&storage, session.slice());
+    }
+}
+
+test "a full item batch followed by calls keeps every queued row's bound bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "full-batch-calls-config");
+    try submitTestMessage(&storage, &tmp, "full-batch-calls-input", "full-batch-calls-key", session.slice(), "full");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Sixteen function_call items fill the first item batch and no usage
+    // record follows, so the next item batch is empty and the call batch
+    // is collected before any round steps the last item's queued row.
+    var item_ids: [16][16]u8 = undefined;
+    var call_ids: [16][16]u8 = undefined;
+    var calls: [16]TestingCall = undefined;
+    for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
+        call.* = .{
+            .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
+            .name = "bash",
+            .encoded_call_id = id,
+            .decoded_call_id = id,
+            .encoded_arguments = "{\\\"description\\\":\\\"Run it\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run it\",\"cmd\":\"true\",\"timeout_ms\":null}",
+        };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
+    const digest = protocol.contentDigest("item-15");
+    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=15 AND item_id_digest=?1");
+    defer sqlite.resetCached(statement);
+    try sqlite.bindBlob(statement, 1, &digest);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+    try std.testing.expectEqual(1, c.sqlite3_column_int64(statement, 0));
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
+    try expectDenseSessionPositions(&storage, session.slice());
+}
+
+test "a success settlement keeps main's answers for a missing Session or revision row" {
+    inline for (.{
+        .{ "DELETE FROM session_revision", error.StaleAttemptBinding, false },
+        .{ "DELETE FROM session", error.CorruptStore, true },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "missing-row-config");
+        try submitTestMessage(&storage, &tmp, "missing-row-input", "missing-row-key", session.slice(), "missing");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.database, case[0]);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        // A missing revision row is a stale binding, as on main; a missing
+        // Session row fences, as main's session facts read did, where an
+        // inner join reported a stale binding that does not fence.
+        try std.testing.expectError(case[1], settleMessagesForTesting(&storage, &tmp, binding, 1, false, null));
+        try std.testing.expectEqual(case[2], storage.isFenced());
+    }
+}
+
+test "a success settlement whose pending Messages read fails reports main's SessionStopReadFailed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "stop-read-config");
+    try submitTestMessage(&storage, &tmp, "stop-read-input", "stop-read-key", session.slice(), "first");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // A pending Message makes the count read the stop cutoff.
+    try submitTestMessage(&storage, &tmp, "stop-read-second", "stop-read-second-key", session.slice(), "second");
+    var insert: [160]u8 = undefined;
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&insert, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES('stop-read-stop','{s}',NULL,0,1)", .{session.slice()}, 0));
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try failAtStepForTesting(storage.database, "session_stop");
+    // Round 1 reads it with the Attempt; a step failure there was
+    // `OperationReadFailed` before each read kept main's name.
+    try std.testing.expectError(error.SessionStopReadFailed, settleMessagesForTesting(&storage, &tmp, binding, 1, false, null));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "sixteen calls with distinct unknown names fit one call batch's identities" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "unknown-calls-config");
+    try submitTestMessage(&storage, &tmp, "unknown-calls-input", "unknown-calls-key", session.slice(), "unknown");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Each call imports four identities: its name, call_id, arguments and
+    // rejection text, 64 in all, which a 48-identity batch split in two.
+    var item_ids: [16][16]u8 = undefined;
+    var call_ids: [16][16]u8 = undefined;
+    var names: [16][16]u8 = undefined;
+    var arguments: [16][32]u8 = undefined;
+    var calls: [16]TestingCall = undefined;
+    for (&calls, &item_ids, &call_ids, &names, &arguments, 0..) |*call, *item_id, *call_id, *name, *argument, index| {
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
+        const text = try std.fmt.bufPrint(argument, "{{}}{d}", .{index});
+        call.* = .{
+            .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
+            .name = try std.fmt.bufPrint(name, "tool_{d}", .{index}),
+            .encoded_call_id = id,
+            .decoded_call_id = id,
+            .encoded_arguments = text,
+            .decoded_arguments = text,
+        };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "unknown-calls", &calls);
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'"));
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT name_content_id) FROM model_tool_call"));
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call"));
+    try expectDenseSessionPositions(&storage, session.slice());
+}
+
+test "equal texts in many batches share one row, and entries keep item order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "same-text-config");
+    try submitTestMessage(&storage, &tmp, "same-text-input", "same-text-key", session.slice(), "same");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // A later batch's lookup runs after the earlier batch's inserts.
+    try settleMessagesForTesting(&storage, &tmp, binding, 40, true, null);
+    try std.testing.expectEqual(1, try queryU64(storage.database, "SELECT count(DISTINCT message_content_id) FROM model_output_item"));
+    try std.testing.expectEqual(40, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"));
+    try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i " ++
+        "ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal WHERE e.session_position<>i.session_position"));
+    try expectDenseSessionPositions(&storage, session.slice());
+}
+
+test "an item with more content than a batch holds settles through its own lookups" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "wide-item-config");
+    try submitTestMessage(&storage, &tmp, "wide-item-input", "wide-item-key", session.slice(), "wide");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // 60 distinct summary texts: more identities than one batch's 48.
+    var reasoning_buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&reasoning_buffer);
+    try writer.writeAll("{\"type\":\"reasoning\",\"id\":\"wide\",\"summary\":[");
+    for (0..60) |index| try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"summary {d}\"}}", .{ if (index == 0) "" else ",", index });
+    try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
+    const items = [_][]const u8{ writer.buffered(), "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}" };
+    try settleItemsForTesting(&storage, &tmp, binding, &items, "done");
+    try std.testing.expectEqual(60, try queryU64(storage.database, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3"));
+    try std.testing.expectEqual(2, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+    try expectDenseSessionPositions(&storage, session.slice());
+}
+
+test "a call id repeated in a later call batch fails the settlement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "repeat-call-config");
+    try submitTestMessage(&storage, &tmp, "repeat-call-input", "repeat-call-key", session.slice(), "repeat");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var item_ids: [17][16]u8 = undefined;
+    var call_ids: [17][16]u8 = undefined;
+    var calls: [17]TestingCall = undefined;
+    for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{if (index == 16) 0 else index});
+        call.* = .{
+            .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
+            .name = "bash",
+            .encoded_call_id = id,
+            .decoded_call_id = id,
+            .encoded_arguments = "{\\\"description\\\":\\\"Run it\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run it\",\"cmd\":\"true\",\"timeout_ms\":null}",
+        };
+    }
+    try std.testing.expectError(error.InvalidProviderEnvelope, settleCallsForTesting(&storage, &tmp, binding, "repeat-call", &calls));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
 }
 
 test "valid and rejected call populations grow independently" {

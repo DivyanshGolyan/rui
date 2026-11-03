@@ -394,28 +394,72 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
     return @intCast(value);
 }
 
+/// The longest fixed value a statement binds by value: an `[n]u8` Args
+/// field, such as a 32-byte digest or a call's 120-byte field
+/// certificate, and a `protocol.Bounded` text.
+pub const max_copied_bytes = 256;
+
+/// SQLITE_TRANSIENT, the destructor -1: SQLite copies a value bound with
+/// it before the bind returns, so the caller's bytes may change at once.
+/// Read through an extern union, since -1 is no aligned function address
+/// and `@ptrFromInt` refuses it on targets that align functions.
+var transient: extern union { bits: usize, destructor: c.sqlite3_destructor_type } = .{ .bits = std.math.maxInt(usize) };
+
 /// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
-/// the text uses @now. Integers are copied into the statement. Text and
-/// blobs are read in place when the round steps the statement, so nothing
-/// is allocated: a `[]const u8` or `*const [n]u8` argument is the caller's
-/// memory, which outlives the round, and the n-th SessionHead binds
-/// `session_refs[n]`, a reference the Access keeps until commit.
-pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64, session_refs: []const change_ring.Id) !void {
+/// the text uses @now. Integers, `[n]u8` arrays, `protocol.Bounded` texts
+/// and a SessionHead's reference are copied into the statement when it
+/// is bound: SQLite holds the copy, in its own heap, until the statement
+/// is rebound or reset, so a caller may reuse their memory at once. Only
+/// a `[]const u8` text and an `rsql.Bytes` blob are read in place when a
+/// pass steps the statement, so their bytes must not change before then
+/// (`Access` checks this in Debug and test builds). Enum tag names are
+/// static.
+pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64) !void {
     const info = @typeInfo(S.Args).@"struct";
-    comptime var head = 0;
     inline for (info.field_names, info.field_types, 1..) |name, Field, index| {
-        if (Field == rsql.SessionHead) {
-            try bindText(statement, index, &session_refs[head]);
-            head += 1;
-        } else try bindValue(statement, index, Field, @field(args, name));
+        try bindValue(statement, index, Field, @field(args, name));
     }
     if (S.uses_now) try bindI64(statement, info.field_names.len + 1, now);
+}
+
+/// Whether binding a `T` reads the caller's bytes in place when its pass
+/// steps it, rather than copying them when it is bound.
+pub fn borrows(comptime T: type) bool {
+    if (T == []const u8 or T == rsql.Bytes) return true;
+    return switch (@typeInfo(T)) {
+        .optional => |optional| borrows(optional.child),
+        else => false,
+    };
+}
+
+/// The bytes a borrowed argument binds in place (`borrows`), or null.
+pub fn borrowed(comptime T: type, value: T) ?[]const u8 {
+    if (T == []const u8) return value;
+    if (T == rsql.Bytes) return value.bytes;
+    return switch (@typeInfo(T)) {
+        .optional => |optional| if (value) |present| borrowed(optional.child, present) else null,
+        else => null,
+    };
+}
+
+fn bindCopied(statement: *c.sqlite3_stmt, index: c_int, bytes: []const u8, comptime text: bool) !void {
+    const result = if (text)
+        c.sqlite3_bind_text64(statement, index, bytes.ptr, bytes.len, transient.destructor, c.SQLITE_UTF8)
+    else
+        c.sqlite3_bind_blob64(statement, index, bytes.ptr, bytes.len, transient.destructor);
+    if (result != c.SQLITE_OK) return error.BindFailed;
 }
 
 fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: T) !void {
     // An empty slice may carry any address; "" is a real one, so it binds '' and not NULL.
     if (T == []const u8) return bindText(statement, index, if (value.len == 0) "" else value);
     if (T == rsql.Positive) return bindU64(statement, index, value.get());
+    if (T == rsql.Bytes) return bindBlob(statement, index, value.bytes);
+    if (T == rsql.SessionHead) return bindCopied(statement, index, &value.ref, true);
+    if (comptime isBounded(T)) {
+        comptime std.debug.assert(@typeInfo(@FieldType(T, "bytes")).array.len <= max_copied_bytes);
+        return bindCopied(statement, index, if (value.len == 0) "" else value.slice(), true);
+    }
     switch (@typeInfo(T)) {
         .optional => |optional| if (value) |present| try bindValue(statement, index, optional.child, present) else {
             if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
@@ -424,11 +468,11 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
         .int => try bindU64(statement, index, value),
         // Tag names are static.
         .@"enum" => try bindText(statement, index, @tagName(value)),
-        .pointer => |pointer| {
-            comptime std.debug.assert(pointer.size == .one and @typeInfo(pointer.child).array.child == u8);
-            try bindBlob(statement, index, value);
+        .array => |array| {
+            if (array.child != u8 or array.len > max_copied_bytes) @compileError("rsql: an Args array is [n]u8 of at most max_copied_bytes, bound by value");
+            try bindCopied(statement, index, &value, false);
         },
-        .array => @compileError("rsql: an Args array would die with the call that queued it; bind a *const " ++ @typeName(T)),
+        .pointer => @compileError("rsql: " ++ @typeName(T) ++ " would be read when its pass runs, after its owner may change it; bind a [n]u8 by value"),
         else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
     }
 }

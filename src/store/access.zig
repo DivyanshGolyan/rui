@@ -4,8 +4,18 @@
 //! writes BEGIN, COMMIT, a row-count check or a position claim itself.
 //!
 //! The engine is the Store's SQLite connection. A statement is bound when
-//! queued and stepped when its round runs, so a destination is defined only
-//! after `run`, as it will be on a network engine.
+//! queued: fixed values are copied then, and only texts and blobs are read
+//! in place when it steps (`sqlite.bindArgs`, `Borrowed`). A round may
+//! queue one statement any number of times: SQLite steps what is queued,
+//! in order (an engine pass), before it rebinds a statement already
+//! queued, when the queue's 8 slots are full, when `contentSink` opens a
+//! row, before the commit round's compare-and-sets, and at `run`. A pass
+//! is in-process work inside the round, never a round trip, so a
+//! destination is defined only after `run`, as it will be on a network
+//! engine, where a repeated statement is one more Bind/Execute in the same
+//! pipeline. Until the pass that steps it, a `readInto`'s `Found` is
+//! `.pending` and panics when asked, and Debug and test builds poison a
+//! `read`'s destination (`Access.read` says what that catches).
 
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
@@ -52,8 +62,6 @@ pub const Failure = error{
     IdentityOutsideTransaction,
     IdentityReadFailed,
     TooManyPositionClaims,
-    RoundFull,
-    StatementQueuedTwice,
     ContentNotInserted,
 };
 
@@ -67,7 +75,8 @@ pub const Positions = struct {
     /// Claims `count` consecutive positions and returns the first.
     pub fn take(self: *Positions, count: u64) error{SessionPositionExhausted}!u64 {
         const first = self.head.next_position.get() + self.taken;
-        if (first > std.math.maxInt(i64) - count) return error.SessionPositionExhausted;
+        // `first` is at most maxInt(i64), so this never wraps, for any count.
+        if (count > std.math.maxInt(i64) - first) return error.SessionPositionExhausted;
         self.taken += count;
         return first;
     }
@@ -113,10 +122,108 @@ pub const ContentSink = struct {
     }
 };
 
+/// The byte Debug and test builds fill a `read` destination with until the
+/// pass that steps it (`Access.read` says what that catches).
+pub const poison_byte = 0xAA;
+
+/// Whether a queued `readInto` found its row. It is `.pending` from the
+/// queuing until the pass that steps the read, in every build, and `get`
+/// panics on `.pending`, so a body that asks before then stops.
+pub const Found = enum(u8) {
+    pending,
+    found,
+    missing,
+
+    pub fn get(found: Found) bool {
+        return switch (found) {
+            .found => true,
+            .missing => false,
+            .pending => @panic("a readInto result was read before the pass that steps it"),
+        };
+    }
+};
+const poisons = @import("builtin").mode == .debug or @import("builtin").is_test;
+
+/// The most arguments one statement reads in place (`sqlite.borrows`).
+const max_borrowed = 4;
+
+/// What a queued statement reads in place when its pass steps it: its
+/// `[]const u8` texts and `rsql.Bytes` blobs (`sqlite.bindArgs`), or a
+/// queued payload's bytes. Debug and test builds keep those slices and a
+/// checksum of their bytes, taken when the statement is queued, and check
+/// it just before its pass steps it: bytes that changed in between panic.
+/// It checks that the bytes are equal, not that their owner still holds
+/// them; an owner that frees and refills them with equal bytes passes.
+/// Other builds keep nothing.
+const Borrowed = if (poisons) struct {
+    slices: [max_borrowed][]const u8 = undefined,
+    count: u8 = 0,
+    sum: u64 = 0,
+
+    fn of(comptime Args: type, args: *const Args) Borrowed {
+        const info = @typeInfo(Args).@"struct";
+        const fields = comptime count: {
+            var count = 0;
+            for (info.field_types) |Field| count += @intFromBool(sqlite.borrows(Field));
+            break :count count;
+        };
+        if (fields > max_borrowed) @compileError(std.fmt.comptimePrint("rsql: a statement reads at most {d} arguments in place", .{max_borrowed}));
+        var result: Borrowed = .{};
+        inline for (info.field_names, info.field_types) |name, Field| {
+            if (comptime !sqlite.borrows(Field)) continue;
+            if (sqlite.borrowed(Field, @field(args, name))) |bytes| {
+                result.slices[result.count] = bytes;
+                result.count += 1;
+            }
+        }
+        result.sum = checksum(result.slices[0..result.count]);
+        return result;
+    }
+
+    fn ofBytes(bytes: []const u8) Borrowed {
+        var result: Borrowed = .{ .count = 1 };
+        result.slices[0] = bytes;
+        result.sum = checksum(result.slices[0..1]);
+        return result;
+    }
+
+    fn check(borrowed: *const Borrowed) void {
+        if (checksum(borrowed.slices[0..borrowed.count]) != borrowed.sum)
+            @panic("bytes a queued statement reads in place changed before the pass that steps it");
+    }
+
+    fn checksum(slices: []const []const u8) u64 {
+        var hash = std.hash.Wyhash.init(0);
+        for (slices) |bytes| {
+            hash.update(std.mem.asBytes(&bytes.len));
+            hash.update(bytes);
+        }
+        return hash.final();
+    }
+} else struct {
+    fn of(comptime Args: type, _: *const Args) Borrowed {
+        return .{};
+    }
+
+    fn ofBytes(_: []const u8) Borrowed {
+        return .{};
+    }
+
+    fn check(_: *const Borrowed) void {}
+};
+
+/// A count only tests read: logical rounds and engine passes.
+const TestCount = if (@import("builtin").is_test) u32 else u0;
+
+fn bump(count: *TestCount) void {
+    if (TestCount != u0) count.* += 1;
+}
+
 pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     return struct {
         const Self = @This();
         pub const Error = Guards || Failure;
+        /// The statements one engine pass steps at most.
         const max_queued = 8;
 
         store: *Store,
@@ -127,14 +234,21 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The first failure; every later call does nothing and every round
         /// reports it.
         failure: ?Error = null,
+        /// The statement whose step recorded `failure`, if one did.
+        failed_statement: ?*c.sqlite3_stmt = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
+        /// Logical rounds (`run` and `commit`), each one round trip on a
+        /// network engine, and the engine passes inside them.
+        rounds: TestCount = 0,
+        passes: TestCount = 0,
         /// None in a read Access, which claims no positions.
         claims: [if (mode == .read or mode == .single) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
-        /// The last `content_id` this Access took: the one row
-        /// `contentSink` opens.
-        content_id: u64 = 0,
+        /// The last `max_taken` content ids this Access took, the rows
+        /// `contentSink` may open; 0 marks a free entry.
+        taken: [if (mode == .read or mode == .single) 0 else max_taken]u64 = @splat(0),
+        taken_count: u64 = 0,
         /// The content rows this Access queued, by identity, so a second
         /// import of an equal value reuses the row (`content.importSlot`).
         inserted: [if (mode == .read or mode == .single) 0 else max_inserted]InsertedContent = undefined,
@@ -143,6 +257,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The most content rows one Access inserts: a creating Message's
         /// instructions, output schema, empty default and text.
         const max_inserted = 4;
+        /// How many of its latest content ids an Access can open a sink
+        /// on. Every caller opens one right after taking its id.
+        const max_taken = max_inserted;
 
         /// No transition takes positions in more Sessions than the change
         /// ring tracks; touching more only degrades the ring's record.
@@ -158,7 +275,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 /// A read's result.
                 destination: *anyopaque,
                 /// A `readInto` read's row, and whether it found one.
-                into: struct { row: *anyopaque, found: *bool },
+                into: struct { row: *anyopaque, found: *Found },
                 /// An `.each` read's visitor, and how many rows it may step.
                 each: struct { visitor: *anyopaque, limit: u64 },
                 payload: struct { content_id: u64, bytes: []const u8 },
@@ -166,9 +283,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 counted: u64,
                 none: void,
             },
-            /// The references a write's @session markers bind, in its
-            /// Args' order, read in place when the round runs.
-            session_refs: [max_sessions]change_ring.Id = undefined,
+            /// What it reads in place when its pass steps it, in Debug and
+            /// test builds.
+            borrowed: Borrowed = .{},
         };
 
         /// An Access under `entry`'s lock.
@@ -191,47 +308,80 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Queues a read; `destination` is defined once the round runs.
+        /// Debug and test builds fill it with `poison_byte` until the pass
+        /// that steps it. Poison makes a `.one` row's integers read as
+        /// 0xAA.. and an `.at_most` list's length so large that slicing it
+        /// traps in safe builds. It traps nothing else: a poisoned `bool`
+        /// or optional tag reads as true or present, a poisoned enum
+        /// reads as an invalid tag Zig does not check on load, and a
+        /// `.optional` result is not covered. `readInto`'s `Found` is the
+        /// covered form.
         pub fn read(a: *Self, comptime S: type, args: S.Args, destination: *S.Result) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality != .each);
             // An `.optional` result is a copy of the decoded Row.
             if (comptime S.cardinality == .optional and (@sizeOf(S.Row) > 1024 or rsql.fillsInPlace(S.Row)))
                 @compileError("rsql: a Row over 1 KiB, or one that points into the caller's memory, is read with readInto: " ++ S.sql);
-            a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, &.{});
+            if (a.queueStatement(S, &args, runRead(S), .{ .destination = destination })) poison(destination);
         }
 
         /// Queues an `.optional` read that decodes into `row` in place, so
         /// a Row over 1 KiB is never copied, and a Row's pointer fields
         /// (`rsql.fillsInPlace`) fill what they point to; `found` says
         /// whether there was one. A missing row leaves `row` as it was.
-        /// Both are defined once the round runs. Two reads need it:
-        /// `saved_session`, whose 4.6 KB Row `configure` fills in the
-        /// caller's Session, and `bash_input`, whose Row points into the
-        /// caller's `BashExecutionInput`, so neither is copied.
-        pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *bool) void {
+        /// Both are defined once the round runs. `found` is `.pending`
+        /// until the pass that steps the read, in every build, and its
+        /// `get` panics then; `row` is not poisoned, because a missing row
+        /// must keep its bytes. Two reads need it: `saved_session`, whose
+        /// 4.6 KB Row `configure` fills in the caller's Session, and
+        /// `bash_input`, whose Row points into the caller's
+        /// `BashExecutionInput`, so neither is copied.
+        pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *Found) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
-            a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, &.{});
+            found.* = .pending;
+            _ = a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } });
         }
 
         /// Queues an `.each` read whose round hands each row in turn to
         /// `visitor.visit(*const S.Row) bool`, until it returns false, the
         /// rows end, or `limit` rows were stepped. `visitor` must outlive
-        /// the round.
+        /// the round. Nothing is poisoned: the visitor holds the read's
+        /// results, and what they mean before the pass is its own.
         pub fn readEach(a: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
-            a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } }, &.{});
+            _ = a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } });
         }
 
-        /// Ends the round: runs every queued statement in order.
+        /// Ends the round: runs every queued statement in order, and
+        /// reports the first failure of this round's passes.
         pub fn run(a: *Self) Error!void {
+            bump(&a.rounds);
+            a.pass();
+            if (a.failure) |err| return err;
+        }
+
+        /// An engine pass: steps every queued statement in order, then
+        /// empties the queue. A failure stops it, and the round that
+        /// contains it reports it.
+        fn pass(a: *Self) void {
+            bump(&a.passes);
             for (a.queue[0..a.queued]) |*entry| {
                 if (a.failure != null) break;
+                entry.borrowed.check();
                 entry.run(a, entry) catch |err| {
                     a.failure = err;
+                    a.failed_statement = entry.statement;
                 };
                 if (entry.statement) |statement| sqlite.resetCached(statement);
             }
             a.resetQueued();
-            if (a.failure) |err| return err;
+        }
+
+        /// Whether `S`'s step recorded this Access's failure: how a caller
+        /// maps a round's `StatementFailed` to the name main gave the
+        /// statement that failed.
+        pub fn failedOn(a: *const Self, comptime S: type) bool {
+            const statement = a.failed_statement orelse return false;
+            return a.store.statements.find(S.sql.ptr) == statement;
         }
 
         /// Records that this Access changes `head`'s Session, and returns
@@ -264,13 +414,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         fn queueWrite(a: *Self, comptime S: type, args: *const S.Args, target: @FieldType(Queued, "target")) void {
             comptime std.debug.assert(S.kind == .write and mode != .read and S.session_fields.len <= max_sessions);
-            var refs: [S.session_fields.len]change_ring.Id = undefined;
-            inline for (S.session_fields, &refs) |field, *ref| {
-                const head: rsql.SessionHead = @field(args, field);
-                a.touch(head);
-                ref.* = head.ref;
-            }
-            a.queueStatement(S, args, runWrite(S), target, &refs);
+            inline for (S.session_fields) |field| a.touch(@field(args, field));
+            _ = a.queueStatement(S, args, runWrite(S), target);
         }
 
         /// The id of the content row this Access queued for (`digest`,
@@ -296,7 +441,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             a.ensureOpen();
             if (a.failure) |err| return err;
             const id = try store_core.takeIdentity(a.store, column);
-            if (column == .content_id) a.content_id = id;
+            if (column == .content_id) {
+                a.taken[a.taken_count % max_taken] = id;
+                a.taken_count += 1;
+            }
             return id;
         }
 
@@ -307,6 +455,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             comptime std.debug.assert(mode != .read and mode != .single);
             if (a.reserve()) |slot| {
                 slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
+                slot.borrowed = .ofBytes(bytes);
                 a.queued += 1;
             }
         }
@@ -335,18 +484,23 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (@import("builtin").is_test) _ = a.store.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
         }
 
-        /// A sink for the payload of the content row `content_id`, which
-        /// must be the last id this Access took (`identity(.content_id)`),
-        /// with nothing queued: so its row is the one this Access inserted
-        /// and a round has run, or none. Any other id is
-        /// `ContentNotInserted`. It writes into the open transaction, so
-        /// the bytes commit with the row. `importSealed` needs it: it
-        /// streams a sealed file into the payload while hashing it, so the
-        /// file is never held in memory whole.
+        /// A sink for the payload of the content row `content_id`. It
+        /// checks exactly that the id is one of the last `max_taken` this
+        /// Access took with `identity(.content_id)`; any other, 0 and ids
+        /// other code took in the same transaction included, is
+        /// `ContentNotInserted`. It does not check that this Access
+        /// queued a row with that id. It runs an engine pass first, so an
+        /// insert queued before it has stepped; an id with no row is
+        /// `ContentWriteFailed`. It writes into the open transaction, so
+        /// the bytes commit with the row. Streamed imports need it
+        /// (`importSealed`, settlement), so a value is never held in
+        /// memory whole.
         pub fn contentSink(a: *Self, content_id: u64) Error!ContentSink {
             comptime std.debug.assert(mode != .read and mode != .single);
             if (a.failure) |err| return err;
-            if (content_id == 0 or content_id != a.content_id or a.queued != 0) return error.ContentNotInserted;
+            if (content_id == 0 or std.mem.findScalar(u64, &a.taken, content_id) == null) return error.ContentNotInserted;
+            a.pass();
+            if (a.failure) |err| return err;
             var blob: ?*c.sqlite3_blob = null;
             if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
             return .{ .blob = blob.? };
@@ -358,10 +512,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// itself.
         pub fn commit(a: *Self) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
+            bump(&a.rounds);
             if (mode == .single) {
                 // A second statement would not commit with the first.
                 if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");
-                try a.run();
+                a.pass();
+                if (a.failure) |err| return err;
                 a.ended = true;
                 return;
             }
@@ -376,6 +532,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `commit` without COMMIT: the caller's transaction stays open.
         pub fn apply(a: *Self) Error!void {
             comptime std.debug.assert(mode == .nested);
+            bump(&a.rounds);
             try a.finishWrites();
         }
 
@@ -414,15 +571,20 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (mode == .write and a.opened and !a.ended) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
+        /// The queued writes, then one compare-and-set per claiming
+        /// Session, in the round that commits. The compare-and-sets are
+        /// bound only once the writes stepped without a failure.
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
-            try a.run();
+            a.pass();
+            if (a.failure) |err| return err;
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
-                a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} }, &.{claim.head.ref});
-                try a.run();
+                _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
+            a.pass();
             a.claimed = 0;
+            if (a.failure) |err| return err;
         }
 
         /// Opens the transaction of a write Access before its first
@@ -444,40 +606,52 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
         }
 
-        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target"), session_refs: []const change_ring.Id) void {
+        /// Binds and queues `S`, after an engine pass when `S` is already
+        /// queued or the queue is full. True when it queued.
+        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target")) bool {
             a.ensureOpen();
-            if (a.failure != null) return;
+            if (a.failure != null) return false;
             const statement = store_core.cachedTyped(a.store, S) catch |err| {
                 a.failure = err;
-                return;
+                return false;
             };
+            // Binding a queued statement would replace the arguments it
+            // has not stepped with yet.
             for (a.queue[0..a.queued]) |entry| if (entry.statement == statement) {
-                a.failure = error.StatementQueuedTwice;
-                return;
+                a.pass();
+                break;
             };
             const now = if (S.uses_now) store_core.transactionSecond(a.store) catch |err| {
                 a.failure = err;
-                return;
+                return false;
             } else 0;
-            const slot = a.reserve() orelse return;
+            const slot = a.reserve() orelse return false;
             slot.* = .{ .statement = statement, .run = runner, .target = target };
-            @memcpy(slot.session_refs[0..session_refs.len], session_refs);
-            sqlite.bindArgs(statement, S, args, now, slot.session_refs[0..session_refs.len]) catch |err| {
+            sqlite.bindArgs(statement, S, args, now) catch |err| {
                 sqlite.resetCached(statement);
                 a.failure = err;
-                return;
+                return false;
             };
+            slot.borrowed = .of(S.Args, args);
             a.queued += 1;
+            return true;
         }
 
-        /// The next queue slot, or null after recording `RoundFull`.
+        /// The next queue slot, after an engine pass when the queue is
+        /// full; null once a failure is recorded.
         fn reserve(a: *Self) ?*Queued {
+            if (a.failure == null and a.queued == a.queue.len) a.pass();
             if (a.failure != null) return null;
-            if (a.queued == a.queue.len) {
-                a.failure = error.RoundFull;
-                return null;
-            }
             return &a.queue[a.queued];
+        }
+
+        /// Fills a queued read's destination with `poison_byte` in Debug
+        /// and test builds, so a body that reads it before the pass that
+        /// steps it reads poison. A pass that runs before `run` defines it
+        /// early; only a network engine catches a body that reads it
+        /// between that pass and `run`.
+        fn poison(destination: anytype) void {
+            if (poisons) @memset(std.mem.asBytes(destination), poison_byte);
         }
 
         fn resetQueued(a: *Self) void {
@@ -528,8 +702,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 fn run(_: *Self, entry: *const Queued) Error!void {
                     const statement = entry.statement.?;
                     const into = entry.target.into;
-                    into.found.* = try nextRow(statement);
-                    if (!into.found.*) return;
+                    if (!try nextRow(statement)) {
+                        into.found.* = .missing;
+                        return;
+                    }
+                    into.found.* = .found;
                     try sqlite.decodeRow(S.Row, statement, @ptrCast(@alignCast(into.row)));
                     if (!S.single_row and try nextRow(statement)) return error.CorruptStore;
                 }
