@@ -3466,6 +3466,12 @@ test "a stale Action settlement leaves the Store byte-identical" {
         pub fn writeContent(self: *@This(), content_id: u64, bytes: []const u8) void {
             self.inner.writeContent(content_id, bytes);
         }
+        pub fn insertedContent(self: *const @This(), digest: *const [32]u8, length: u64, private: bool) ?u64 {
+            return self.inner.insertedContent(digest, length, private);
+        }
+        pub fn recordInserted(self: *@This(), digest: *const [32]u8, length: u64, private: bool, content_id: u64) void {
+            self.inner.recordInserted(digest, length, private, content_id);
+        }
         pub fn commit(self: *@This()) Inner.Error!void {
             var sql: [160]u8 = undefined;
             const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,bash_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{self.action_id}, 0) catch unreachable;
@@ -10013,6 +10019,67 @@ test "a failed Turn's activity outcome references the provider's report" {
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(words), &outcome.content.?.digest);
         }
     }
+}
+
+test "a refresh claim whose UPDATE changes no row answers false and does not fence, as on main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "claim-race-config");
+    try submitTestMessage(&storage, &tmp, "claim-race-input", "claim-race-message", session.slice(), "work");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Claims between the read round and the write, so the guarded UPDATE finds no row.
+    const Interposed = struct {
+        const Inner = store_access.Access(.write, store_core.Ordinary.attempt_binding || error{AuthRefreshUnclaimed});
+        inner: *Inner,
+
+        pub fn read(self: *@This(), comptime S: type, args: S.Args, destination: *S.Result) void {
+            self.inner.read(S, args, destination);
+        }
+        pub fn run(self: *@This()) Inner.Error!void {
+            return self.inner.run();
+        }
+        pub fn write(self: *@This(), comptime S: type, args: S.Args) void {
+            self.inner.write(S, args);
+        }
+        pub fn abandon(self: *@This(), faults: store_core.Faults) Inner.Error!void {
+            return self.inner.abandon(faults);
+        }
+        pub fn commit(self: *@This()) Inner.Error!void {
+            sqlite.exec(self.inner.store.database, "UPDATE model_operation SET auth_refresh_claimed=1") catch unreachable;
+            return self.inner.commit();
+        }
+    };
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: Interposed.Inner = .open(&entry);
+        defer access.deinit();
+        var interposed: Interposed = .{ .inner = &access };
+        try std.testing.expect(!try entry.finishTransaction(store_core.Ordinary.attempt_binding, .{}, access.end(.{}, model_settlement_domain.claimModelAuthRefresh(&interposed, binding))));
+    }
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE auth_refresh_claimed=1"));
+}
+
+test "a failure whose report equals its new diagnostic saves one content row for both" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "same-words-config");
+    try submitTestMessage(&storage, &tmp, "same-words-input", "same-words-message", session.slice(), "work");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const words = "provider_rejected: the same words twice";
+    const before = try queryU64(storage.database, "SELECT count(*) FROM content");
+    try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_rejected", .diagnostic = words, .request_id = .{}, .report = words } }, .ordinary, .{});
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(before + 1, try queryU64(storage.database, "SELECT count(*) FROM content"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation o JOIN turn t ON t.operation_id=o.operation_id " ++
+        "WHERE o.resolution_content_id IS NOT NULL AND o.resolution_content_id=t.outcome_content_id"));
 }
 
 test "retryable stream rejections retain only the settling Attempt diagnostic through reopen" {

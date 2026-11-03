@@ -672,7 +672,11 @@ pub const Store = struct {
     ) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, model_admission_domain.tryAdmitNextModelRetryLocked(self, active, faults));
+        var candidate: Access(.read, error{}) = .open(&entry);
+        defer candidate.deinit();
+        var access: Access(.write, error{RetryNoLongerDue}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, model_admission_domain.tryAdmitNextModelRetry(&candidate, &access, self.io, active, faults)));
     }
 
     /// Opens the view in `out`, where it stays until it closes: a view
@@ -701,7 +705,9 @@ pub const Store = struct {
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.none, model_settlement_domain.operationSupersededByControlLocked(self, binding));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, model_settlement_domain.operationSupersededByControl(&access, binding));
     }
 
     pub fn withDispatchHandoff(
@@ -725,7 +731,9 @@ pub const Store = struct {
     pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.attempt_binding, .{}, model_settlement_domain.claimModelAuthRefreshLocked(self, binding));
+        var access: Access(.write, Ordinary.attempt_binding || error{AuthRefreshUnclaimed}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.attempt_binding, .{}, access.end(.{}, model_settlement_domain.claimModelAuthRefresh(&access, binding)));
     }
 
     pub fn settleModelAttemptFailure(
@@ -746,7 +754,9 @@ pub const Store = struct {
         std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.attempt_binding, faults, model_settlement_domain.settleModelAttemptFailureLocked(self, binding, failure, disposition, faults));
+        var access: Access(.write, Ordinary.attempt_binding) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.attempt_binding, faults, access.end(faults, model_settlement_domain.settleModelAttemptFailure(&access, self.io, binding, failure, disposition, faults)));
     }
 
     pub fn recoverOneExhaustedModelAttempt(
@@ -755,7 +765,11 @@ pub const Store = struct {
     ) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, .{}, model_settlement_domain.recoverOneExhaustedModelAttemptLocked(self, active));
+        var candidate: Access(.read, error{}) = .open(&entry);
+        defer candidate.deinit();
+        var access: Access(.write, error{SelectionChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_settlement_domain.recoverOneExhaustedModelAttempt(&candidate, &access, active)));
     }
 
     pub fn settleModelSuccess(
@@ -1131,22 +1145,6 @@ fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
         c.SQLITE_DONE => null,
         c.SQLITE_ROW => @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
         else => error.SessionReadFailed,
-    };
-}
-
-/// Runs a write whose `RETURNING session_ref` names each changed row's
-/// Session, touching each. Returns the rows changed.
-pub fn stepTouching(self: *Store, statement: *c.sqlite3_stmt) !usize {
-    var count: usize = 0;
-    while (true) switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {
-            var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-            try sqlite.readText(statement, 0, &session);
-            try touch(self, session.slice());
-            count += 1;
-        },
-        c.SQLITE_DONE => return count,
-        else => return error.StatementFailed,
     };
 }
 

@@ -329,18 +329,11 @@ pub const ConfigurationReads = struct {
     empty: content_domain.Import = content_domain.empty_content,
     /// The rows `lookupPair` found, when round 1 needed two lookups.
     pair: ?content_domain.Pair = null,
-    /// The output schema names the instructions' content row, so it
-    /// imports through their value (`content_domain.sameIdentity`).
-    schema_shares_instructions: bool = false,
 
     /// The value the instructions import through: the requested content,
     /// or the empty default a creation imports.
     fn instructionsValue(reads: *ConfigurationReads, configuration: *const protocol.Configuration) *content_domain.Import {
         return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
-    }
-
-    fn outputSchemaValue(reads: *ConfigurationReads, configuration: *const protocol.Configuration) *content_domain.Import {
-        return if (reads.schema_shares_instructions) reads.instructionsValue(configuration) else &reads.output_schema;
     }
 };
 
@@ -507,10 +500,7 @@ pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *con
         reads.output_schema = content_domain.sealedIdentity(&configuration.output_schema);
         break :requested &reads.output_schema;
     } else null;
-    if (instructions != null and output_schema != null and content_domain.sameIdentity(instructions.?, output_schema.?)) {
-        reads.schema_shares_instructions = true;
-        content_domain.lookup(a, instructions.?);
-    } else if (instructions != null and output_schema != null) {
+    if (instructions != null and output_schema != null) {
         reads.pair = .{ .first = null, .second = null };
         content_domain.lookupPair(a, instructions.?, output_schema.?, &reads.pair.?);
     } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
@@ -601,7 +591,7 @@ pub fn applyConfiguration(
     switch (content_actions.output_schema) {
         .preserve => {},
         .import_requested => {
-            command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, reads.outputSchemaValue(configuration), faults);
+            command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
             next.output_schema_id = @intCast(command_output_schema_id.?);
         },
         .clear => next.output_schema_id = null,

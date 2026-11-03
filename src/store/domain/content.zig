@@ -161,14 +161,6 @@ const lookup_pair = rsql.Read(.{
 
 pub const Pair = lookup_pair.Result;
 
-/// Whether `first` and `second` name one content row. Two imports of one
-/// round share a value when they do, so the first one's insert is the
-/// second one's row (`importSlot`), and a lookup made before the round
-/// never goes stale.
-pub fn sameIdentity(first: *const Import, second: *const Import) bool {
-    return first.length == second.length and first.private == second.private and std.mem.eql(u8, &first.digest, &second.digest);
-}
-
 /// `lookup` of two values at once; `foundPair` follows its round. Both
 /// values and `rows` must outlive the round.
 pub fn lookupPair(a: anytype, first: *const Import, second: *const Import, rows: *Pair) void {
@@ -190,15 +182,24 @@ pub fn foundPair(rows: *const Pair, first: *Import, second: *Import) void {
 
 const ContentSlot = struct { id: i64, existing: bool };
 
-/// After `lookup`'s round: the found row, or a new row queued with a Host
-/// identity and a zeroed payload of the right length. `value` must outlive
-/// the round that writes it.
+/// Sets `value.found` to the row this Access already queued for its
+/// identity, if any: a lookup made before that insert reads none.
+fn adoptInserted(a: anytype, value: *Import) void {
+    if (value.found == null) if (a.insertedContent(&value.digest, value.length, value.private)) |id| {
+        value.found = .{ .content_id = .of(id) };
+    };
+}
+
+/// After `lookup`'s round: the found row, the row this Access already
+/// queued for an equal identity through any value, or a new row queued
+/// with a Host identity and a zeroed payload of the right length, which
+/// the Access records. `value` must outlive the round that writes it.
 pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
+    adoptInserted(a, value);
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try a.identity(.content_id);
     a.write(insert_content, .{ .content_id = id, .digest = &value.digest, .length = value.length, .private = value.private });
-    // The row now exists for this Access, so a second import of the same
-    // value reuses it and inserts nothing.
+    a.recordInserted(&value.digest, value.length, value.private, id);
     value.found = .{ .content_id = .of(id) };
     return .{ .id = @intCast(id), .existing = false };
 }
@@ -329,6 +330,7 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
     } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
+    adoptInserted(a, value);
     if (value.found == null and a.queued != 0) try a.run();
     const slot = try importSlot(a, value);
     const id: u64 = @intCast(slot.id);
