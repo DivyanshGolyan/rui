@@ -14152,9 +14152,10 @@ fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []cons
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
     {
-        var a = reads_domain.ReadAccess.within(storage);
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
-        defer storage.read_blob.close();
         try capture.append("{\"head\":0");
         try report_domain.renderFull(&a, session, &capture);
         try capture.append("}");
@@ -14186,7 +14187,8 @@ test "a Full list takes a statement per 256 rows, and lists each row once in ord
         while (try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE kind=3") < rows) {
             var key: [32]u8 = undefined;
             var stop = try completeSessionStop(try std.fmt.bufPrint(&key, "chunked-stop-{d:0>3}", .{try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE kind=3")}), session.slice());
-            _ = storage.stopSession(&stop, .{});
+            // An idle Session accepts each stop.
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
         }
         _ = testingRuns(&storage, report_domain.full_stops);
         const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
@@ -14216,7 +14218,7 @@ test "a Full list keeps the rows whose content it shows whole for after their ch
     // Each Message's text is longer than one content window. Two chunks'
     // kept rows take two statements, the second finding no row after its
     // last; one more row takes a third.
-    const pending = report_domain.Messages.pending;
+    const pending = report_domain.Messages.kept_rows;
     var text: [2100]u8 = undefined;
     var count: usize = 0;
     for ([_]usize{ 2 * pending, 2 * pending + 1 }, [_]i64{ 2, 3 }) |rows, statements| {
@@ -14299,6 +14301,58 @@ test "Full history refuses content whose bytes no longer match their digest" {
     }
 }
 
+test "Full history reads a payload's declared bytes: a short one fails, a longer one shows its prefix, as on main" {
+    // `content`'s CHECK keeps payload and byte_length equal; the test
+    // turns it off to store a payload of the wrong length.
+    for ([_][]const u8{ "", "short", "longer" }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "payload-config");
+        try submitTestMessage(&storage, &tmp, "payload-message", "payload-message", session.slice(), "payload");
+        const id = "(SELECT content_id FROM message_admission WHERE command_key='payload-message')";
+        if (std.mem.eql(u8, case, "short")) {
+            try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('pay' AS BLOB) WHERE content_id=" ++ id ++ "; PRAGMA ignore_check_constraints=OFF");
+            try std.testing.expectError(error.ContentReadFailed, testingFullHistory(&storage, &tmp, session.slice(), null));
+            continue;
+        }
+        if (std.mem.eql(u8, case, "longer")) try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('payload and more' AS BLOB) WHERE content_id=" ++ id ++ "; PRAGMA ignore_check_constraints=OFF");
+        const full = try testingFullHistory(&storage, &tmp, session.slice(), null);
+        defer std.testing.allocator.free(full);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+        defer parsed.deinit();
+        const message = parsed.value.object.get("full").?.object.get("messages").?.array.items[0];
+        try std.testing.expectEqualStrings("payload", message.object.get("content").?.object.get("text").?.string);
+    }
+}
+
+test "Full history answers a later row's failure before a kept row's content, where main read the content first" {
+    // The first Message shows its content whole, so its chunk keeps it;
+    // the second is listed ahead of an earlier admission, which its row
+    // check refuses in the pass, before the first's short payload is read.
+    for ([_]bool{ false, true }) |later_fails| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "double-fault-config");
+        try submitTestMessage(&storage, &tmp, "double-fault-0", "double-fault-0", session.slice(), "first");
+        try submitTestMessage(&storage, &tmp, "double-fault-1", "double-fault-1", session.slice(), "second");
+        try submitTestMessage(&storage, &tmp, "double-fault-2", "double-fault-2", session.slice(), "third");
+        try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('fi' AS BLOB) " ++
+            "WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='double-fault-0'); PRAGMA ignore_check_constraints=OFF");
+        if (later_fails) {
+            // The third is listed between the first and the second.
+            try sqlite.exec(storage.database, "UPDATE message_admission SET admission_position=(SELECT admission_position FROM message_admission WHERE command_key='double-fault-0') " ++
+                "WHERE command_key='double-fault-2'; UPDATE message_admission SET admission_position=admission_position+10 WHERE command_key='double-fault-1'");
+            try std.testing.expectError(error.CorruptStore, testingFullHistory(&storage, &tmp, session.slice(), null));
+        } else try std.testing.expectError(error.ContentReadFailed, testingFullHistory(&storage, &tmp, session.slice(), null));
+    }
+}
+
 test "Full history's step faults keep main's names, and its content and stop reads take their list's" {
     // Main read the Messages' stops in a statement of their own
     // (SessionStopReadFailed) and every content's metadata apart
@@ -14337,16 +14391,26 @@ test "Full history takes a round per chunk" {
     try answerTestTurn(&storage, &tmp, session.slice(), "history-rounds", &answer);
     var rounds: u32 = 0;
     std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), &rounds));
-    // Each list is one chunk: the revision and the Message keep their
-    // content for after their round, and find no row after it.
-    try std.testing.expectEqual(@as(u32, 11), rounds);
+    // Every list fits one chunk, so the rounds are the reads' depth: one
+    // for the revisions, whose one revision's empty instructions read no
+    // content, then one per run of `renderFull`: Messages; Conversation,
+    // Turns and Operations; calls; Actions; decisions, stops,
+    // interruptions and results. A run's lists share a round because
+    // every list but its last renders all its rows in the pass; the
+    // Message's and the answer's content windows are `readRaw` rounds,
+    // which `rounds` does not count.
+    try std.testing.expectEqual(@as(u32, 1 + 5), rounds);
 }
 
-test "Full revisions show each content whole where it first occurs, across ownership windows" {
-    // `mixed`: new, older and repeated content, past one window. `same`:
-    // one older content, so after the first revision a window's rows all
-    // render in the pass, and a chunk ends only where its window does.
-    for ([_]bool{ false, true }, [_]usize{ report_domain.owner_window + 6, 2 * report_domain.owner_window + 2 }, [_]i64{ 2, 3 }) |same, revisions, windows| {
+test "Full revisions show each content whole where it first occurs" {
+    // `mixed`: new, older and repeated content, an output schema that is
+    // none, the instructions or other content. `same`: one older content
+    // throughout. `overflow`: `mixed` past `ContentOwners.capacity`
+    // values, so the later revisions take their owners from
+    // `full_revisions_owned`.
+    const Shape = enum { mixed, same, overflow };
+    const capacity = report_domain.ContentOwners.capacity;
+    for ([_]Shape{ .mixed, .same, .overflow }, [_]usize{ 70, 130, capacity * 2 }) |shape, revisions| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -14356,9 +14420,13 @@ test "Full revisions show each content whole where it first occurs, across owner
         // Session's.
         const other = try configureTestSessionAsk(&storage, "owners-other");
         const session = try configureTestSessionAsk(&storage, "owners-session");
-        var texts: [256][32]u8 = undefined;
-        var lengths: [256]usize = undefined;
-        for (0..10) |index| {
+        const texts = try std.testing.allocator.alloc([32]u8, 4 * capacity);
+        defer std.testing.allocator.free(texts);
+        const lengths = try std.testing.allocator.alloc(usize, 4 * capacity);
+        defer std.testing.allocator.free(lengths);
+        // Text 0 is the first revision's empty instructions.
+        lengths[0] = 0;
+        for (1..11) |index| {
             lengths[index] = (try std.fmt.bufPrint(&texts[index], "{{\"title\":\"old {d}\"}}", .{index})).len;
             var key: [48]u8 = undefined;
             var reconfigure: protocol.ConfigureCommand = .{};
@@ -14367,27 +14435,30 @@ test "Full revisions show each content whole where it first occurs, across owner
             reconfigure.configuration.instructions = try testingBytesContent(&tmp, try std.fmt.bufPrint(&key, "owners-other-i-{d}", .{index}), texts[index][0..lengths[index]]);
             try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
         }
-        // Each revision's text, as an index into `texts` (`null`: none);
-        // the first revision's instructions are empty.
-        var instructions: [256]?usize = undefined;
-        var output_schema: [256]?usize = undefined;
-        var fresh: usize = 10;
+        // Each revision's text, as an index into `texts` (`null`: none).
+        const instructions = try std.testing.allocator.alloc(?usize, revisions + 1);
+        defer std.testing.allocator.free(instructions);
+        const output_schema = try std.testing.allocator.alloc(?usize, revisions + 1);
+        defer std.testing.allocator.free(output_schema);
+        instructions[1] = 0;
+        output_schema[1] = null;
+        var fresh: usize = 11;
         for (2..revisions + 1) |revision| {
-            instructions[revision] = if (same) 0 else switch (revision % 5) {
+            instructions[revision] = if (shape == .same) 1 else switch (revision % 5) {
                 // Older content, out of id order.
-                0 => (revision * 7) % 10,
+                0 => 1 + (revision * 7) % 10,
                 // An earlier revision's instructions.
-                1 => instructions[revision - 3] orelse 0,
+                1 => instructions[revision - 3],
                 else => blk: {
                     lengths[fresh] = (try std.fmt.bufPrint(&texts[fresh], "{{\"title\":\"fresh {d}\"}}", .{revision})).len;
                     fresh += 1;
                     break :blk fresh - 1;
                 },
             };
-            output_schema[revision] = if (same) null else switch (revision % 3) {
+            output_schema[revision] = if (shape == .same) null else switch (revision % 3) {
                 0 => null,
                 1 => instructions[revision],
-                else => (revision * 3) % 10,
+                else => 1 + (revision * 3) % 10,
             };
             var key: [48]u8 = undefined;
             var reconfigure: protocol.ConfigureCommand = .{};
@@ -14400,35 +14471,40 @@ test "Full revisions show each content whole where it first occurs, across owner
             } else reconfigure.configuration.output_schema.state = .explicit_null;
             try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
         }
-        _ = testingRuns(&storage, report_domain.revision_owners);
-        const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
+        if (shape == .overflow) try std.testing.expect(fresh > capacity);
+        _ = testingRuns(&storage, report_domain.full_revisions_owned);
+        const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .full);
         defer std.testing.allocator.free(full);
-        // One ownership read per window of revisions.
-        try std.testing.expectEqual(windows, testingRuns(&storage, report_domain.revision_owners));
+        // Owners come from the read with owner columns only once the map
+        // is full.
+        try std.testing.expectEqual(shape == .overflow, testingRuns(&storage, report_domain.full_revisions_owned) > 0);
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
         defer parsed.deinit();
         const listed = parsed.value.object.get("full").?.object.get("session_revisions").?.array.items;
         try std.testing.expectEqual(revisions, listed.len);
-        // Each text's first occurrence, as `revision*2+field`.
-        var owners: [256]?u64 = @splat(null);
-        for (listed[1..], 2..) |row, revision| {
+        // Each text's first occurrence, found by walking the revisions.
+        const owners = try std.testing.allocator.alloc(?report_domain.ContentOwner, 4 * capacity);
+        defer std.testing.allocator.free(owners);
+        @memset(owners, null);
+        for (listed, 1..) |row, revision| {
             try std.testing.expectEqualStrings(try std.fmt.allocPrint(parsed.arena.allocator(), "{d}", .{revision}), row.object.get("revision").?.string);
-            for ([_]?usize{ instructions[revision], output_schema[revision] }, [_][]const u8{ "instructions", "output_schema" }, 0..) |text, field, order| {
-                const shown = row.object.get(field).?;
+            for ([_]?usize{ instructions[revision], output_schema[revision] }, [_]configuration_domain.RevisionContentField{ .instructions, .output_schema }) |text, field| {
+                const shown = row.object.get(@tagName(field)).?;
                 const index = text orelse {
                     try std.testing.expect(shown == .null);
                     continue;
                 };
+                const here: report_domain.ContentOwner = .{ .revision = revision, .field = field };
                 const owner = owners[index] orelse blk: {
-                    owners[index] = revision * 2 + order;
-                    break :blk revision * 2 + order;
+                    owners[index] = here;
+                    break :blk here;
                 };
-                if (owner == revision * 2 + order) {
+                if (owner.revision == here.revision and owner.field == here.field) {
                     try std.testing.expectEqualStrings(texts[index][0..lengths[index]], shown.object.get("text").?.string);
                 } else {
                     const reference = shown.object.get("owner").?.object;
-                    try std.testing.expectEqualStrings(try std.fmt.allocPrint(parsed.arena.allocator(), "{d}", .{owner / 2}), reference.get("revision").?.string);
-                    try std.testing.expectEqualStrings(if (owner % 2 == 0) "instructions" else "output_schema", reference.get("field").?.string);
+                    try std.testing.expectEqualStrings(try std.fmt.allocPrint(parsed.arena.allocator(), "{d}", .{owner.revision}), reference.get("revision").?.string);
+                    try std.testing.expectEqualStrings(@tagName(owner.field), reference.get("field").?.string);
                 }
             }
         }

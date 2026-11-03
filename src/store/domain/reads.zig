@@ -615,33 +615,36 @@ pub const missing_assistant_entry = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Whether a Conversation entry `e` is public: its content is, and its
-/// message or assistant provenance agrees with it, over `public_entry_joins`.
-pub const public_entry_consistent = "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
-    "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
-    "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
-    "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
-    "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
-    "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ ")))";
-
-/// The rows `public_entry_consistent` reads for an entry `e`. LEFT JOIN
-/// retains damage instead of hiding dependencies.
-pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
-    "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
-    "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
-    "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
-    "LEFT JOIN content c ON c.content_id=e.content_id";
+/// A read of Conversation entries `e`: `SELECT columns`, then a
+/// `consistent` column, `FROM conversation_entry e` with the rows that
+/// make an entry public, then `rest` (its WHERE and order). An entry is
+/// consistent when `also` holds (an SQL condition and `OR`, or empty), or
+/// when it is public: its content is, and its message or assistant
+/// provenance agrees with it. Its joins are LEFT JOINs, which keep damage
+/// instead of hiding a missing row, under the aliases t, m, o, item and c,
+/// which `columns` and `rest` may also read.
+pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, comptime rest: []const u8) []const u8 {
+    return "SELECT " ++ columns ++ ",CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+        "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
+        "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
+        "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
+        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent " ++
+        "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+        "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+        "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+        "LEFT JOIN content c ON c.content_id=e.content_id " ++ rest;
+}
 
 /// An ordinary entry at a position, with the provenance that makes it
 /// public. One indexed ordinary identity owns provenance for pages,
 /// cursors and bytes.
 const public_entry = rsql.Read(.{
-    .sql = "SELECT e.content_id,CASE WHEN " ++ public_entry_consistent ++ " THEN 1 ELSE 0 END AS consistent," ++
-        "CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at " ++
-        "FROM conversation_entry e " ++ public_entry_joins ++ " " ++
-        "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)",
+    .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { content_id: rsql.Positive, consistent: bool, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive },
+    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
 

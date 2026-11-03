@@ -1573,33 +1573,16 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
 }
 
 /// The Full profile's history, after the Current facts, on the report's
-/// Access: each list in keyset chunks of `chunk_rows` rows (revisions in
-/// windows of `owner_window`), in output order. Rows render as their
-/// chunk's pass steps them, so a round keeps no row but those whose
-/// inline content streams after it.
+/// Access, in output order: the revisions (`renderRevisions`), then the
+/// other lists in runs (`renderRun`).
 pub fn renderFull(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
     try capture.append(",\"full\":{\"session_revisions\":[");
     try renderRevisions(a, session_ref, capture);
-    try capture.append("],\"messages\":[");
-    try renderChunks(a, Messages, session_ref, capture);
-    try capture.append("],\"conversation\":[");
-    try renderChunks(a, Conversation, session_ref, capture);
-    try capture.append("],\"turns\":[");
-    try renderChunks(a, Turns, session_ref, capture);
-    try capture.append("],\"model_operations\":[");
-    try renderChunks(a, Operations, session_ref, capture);
-    try capture.append("],\"tool_calls\":[");
-    try renderChunks(a, Calls, session_ref, capture);
-    try capture.append("],\"actions\":[");
-    try renderChunks(a, Actions, session_ref, capture);
-    try capture.append("],\"permission_decisions\":[");
-    try renderChunks(a, Decisions, session_ref, capture);
-    try capture.append("],\"session_stops\":[");
-    try renderChunks(a, Stops, session_ref, capture);
-    try capture.append("],\"model_interruptions\":[");
-    try renderChunks(a, Interruptions, session_ref, capture);
-    try capture.append("],\"tool_results\":[");
-    try renderChunks(a, Results, session_ref, capture);
+    try renderRun(a, .{Messages}, session_ref, capture);
+    try renderRun(a, .{ Conversation, Turns, Operations }, session_ref, capture);
+    try renderRun(a, .{Calls}, session_ref, capture);
+    try renderRun(a, .{Actions}, session_ref, capture);
+    try renderRun(a, .{ Decisions, Stops, Interruptions, Results }, session_ref, capture);
     try capture.append("]}");
 }
 
@@ -1608,7 +1591,274 @@ pub fn renderFull(a: *ReadAccess, session_ref: []const u8, capture: *SessionRepo
 /// inline content takes one statement, and each further `chunk_rows`
 /// rows take one more.
 const chunk_rows = 256;
-const chunk_limit = " LIMIT 257";
+const chunk_limit = std.fmt.comptimePrint(" LIMIT {d}", .{chunk_rows + 1});
+
+/// The hooks a list without them declares: no state, no check, and no
+/// first read.
+const NoState = struct {};
+fn noCheck(_: *NoState, _: anytype) error{}!void {}
+const NoFirst = struct {};
+fn noQueueFirst(_: *ReadAccess, _: []const u8, _: *NoFirst) void {}
+fn noCheckFirst(_: *const NoFirst) error{}!void {}
+fn streamsNever(_: anytype) bool {
+    return false;
+}
+
+/// Where a list stands in its run (`renderRun`), as the lists after it in
+/// the same pass need to know.
+const ListStatus = struct {
+    previous: ?*const ListStatus,
+    /// Every row rendered, in an earlier round.
+    done: bool = false,
+    /// This round read the list.
+    queued: bool = false,
+    /// This round's chunk saw a row past it, kept a row for after the
+    /// round, or failed.
+    more: bool = false,
+    kept: bool = false,
+    failed: bool = false,
+
+    /// Whether every row of the list is rendered once this round's pass
+    /// reaches the list after it: done before, or read in this round
+    /// after every list before it finished, with no row past its chunk
+    /// and none kept.
+    fn finished(list: *const ListStatus) bool {
+        if (list.done) return true;
+        return list.queued and list.previousFinished() and !list.more and !list.kept and !list.failed;
+    }
+
+    fn previousFinished(list: *const ListStatus) bool {
+        return if (list.previous) |previous| previous.finished() else true;
+    }
+};
+
+/// A run's headers, which each list opens in order before its first row,
+/// or after its round when it has none.
+const Headers = struct {
+    capture: *SessionReportCapture,
+    texts: []const []const u8,
+    opened: usize = 0,
+
+    fn open(headers: *Headers, list: usize) !void {
+        while (headers.opened <= list) : (headers.opened += 1) try headers.capture.append(headers.texts[headers.opened]);
+    }
+};
+
+/// One round's chunk of a Full list (`renderRun`). `L` declares, all
+/// required:
+/// - `S`, its statement, whose Args are the Session and the key after
+///   which a chunk starts, 0 before the first;
+/// - `after(session, row)`, the Args of the chunk after `row`;
+/// - `failed`, the name main gave its statement's failed step;
+/// - `header`, the text that opens the list;
+/// - `kept_rows`, how many rows a chunk keeps for after its round: the
+///   first row that shows content whole (`streams(row)`) and every row
+///   after it in the chunk, since rows render in order;
+/// - `render(a, capture, row)`, which streams the row's inline content;
+/// - `State` and `check(state, row)`, run for every row in order;
+/// - `First`, `queueFirst` and `checkFirst`: a read the list's first
+///   round queues before it, judged before any of its rows' failures.
+/// `NoState`, `noCheck`, `NoFirst`, `noQueueFirst`, `noCheckFirst` and
+/// `streamsNever` are the hooks of a list that has none.
+fn Chunk(comptime L: type) type {
+    return struct {
+        const Row = L.S.Row;
+        const Failure = @typeInfo(@typeInfo(@TypeOf(L.render)).@"fn".return_type.?).error_union.error_set ||
+            @typeInfo(@typeInfo(@TypeOf(L.check)).@"fn".return_type.?).error_union.error_set ||
+            SessionReportCapture.AppendError;
+
+        a: *ReadAccess,
+        capture: *SessionReportCapture,
+        headers: *Headers,
+        list: usize,
+        first: *bool,
+        state: *L.State,
+        status: *ListStatus,
+        after: L.S.Args,
+        rows: u16 = 0,
+        /// Whether every list before it in the run finished, judged at
+        /// the chunk's first row.
+        ready: ?bool = null,
+        kept: [L.kept_rows]Row = undefined,
+        count: u8 = 0,
+        failure: ?Failure = null,
+
+        /// Takes `row` once every list before it finished, unless the
+        /// chunk is full, of rows or of kept rows: then `row` is the next
+        /// chunk's first, and the chunk stops. Before every list before
+        /// it finished, it stops at its first row and takes nothing.
+        pub fn visit(chunk: *@This(), row: *const Row) bool {
+            const ready = chunk.ready orelse chunk.status.previousFinished();
+            chunk.ready = ready;
+            if (!ready) return false;
+            if (chunk.rows == chunk_rows or (L.kept_rows != 0 and chunk.count == L.kept_rows)) {
+                chunk.status.more = true;
+                return false;
+            }
+            chunk.rows += 1;
+            chunk.after = L.after(chunk.after.session, row);
+            chunk.take(row) catch |err| {
+                chunk.failure = err;
+                chunk.status.failed = true;
+                return false;
+            };
+            return true;
+        }
+
+        /// Renders `row` in the pass, unless it or a row before it in
+        /// this chunk shows content whole: then keeps it, in order.
+        fn take(chunk: *@This(), row: *const Row) Failure!void {
+            try L.check(chunk.state, row);
+            if (L.kept_rows == 0 or (chunk.count == 0 and !L.streams(row))) return chunk.render(row);
+            chunk.kept[chunk.count] = row.*;
+            chunk.count += 1;
+            chunk.status.kept = true;
+        }
+
+        fn render(chunk: *@This(), row: *const Row) Failure!void {
+            try chunk.headers.open(chunk.list);
+            if (!chunk.first.*) try chunk.capture.append(",");
+            chunk.first.* = false;
+            try L.render(chunk.a, chunk.capture, row);
+        }
+    };
+}
+
+/// A list's place in its run across rounds.
+fn ListRun(comptime L: type) type {
+    return struct {
+        state: L.State = .{},
+        first: bool = true,
+        after: L.S.Args,
+        status: ListStatus,
+        /// The chunk read this round, and the first read with it.
+        chunk: Chunk(L) = undefined,
+        first_read: L.First = undefined,
+        first_queued: bool = false,
+        /// Whether `checkFirst` passed, in the round that rendered the
+        /// list's first rows.
+        begun: bool = false,
+    };
+}
+
+fn RunState(comptime Ls: anytype) type {
+    var types: [Ls.len]type = undefined;
+    for (Ls, 0..) |L, i| types[i] = ListRun(L);
+    const list = types;
+    return @Tuple(&list);
+}
+
+/// What a failed round of run `Ls` can answer (`runFailure`).
+fn RunError(comptime Ls: anytype) type {
+    var set = @typeInfo(@typeInfo(@TypeOf(ReadAccess.run)).@"fn".return_type.?).error_union.error_set;
+    for (Ls) |L| set = set || @TypeOf(L.failed) || Chunk(L).Failure ||
+        @typeInfo(@typeInfo(@TypeOf(L.checkFirst)).@"fn".return_type.?).error_union.error_set;
+    return set;
+}
+
+/// Renders lists `Ls` in order, each in keyset chunks, a round per chunk.
+/// A list's chunk renders its rows as the pass steps them, so the next
+/// list's rows can render in the same pass only once it finished: every
+/// list but the last keeps no rows (`kept_rows` 0), and each round reads
+/// the first list not done and the first chunk of each list after it.
+/// A list reached before the lists ahead of it finished takes one row
+/// and nothing from it, and is read again; that happens only after a
+/// list of more than `chunk_rows` rows. After the round, each finished
+/// list's kept rows render with their content. A failed step answers the
+/// name of the list whose statement failed; a step failure of a list
+/// read ahead answers before the content of the lists before it.
+/// Not inlined, so each run's kept rows take only their own chain.
+noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []const u8, capture: *SessionReportCapture) !void {
+    comptime for (0..Ls.len - 1) |i| std.debug.assert(Ls[i].kept_rows == 0);
+    const texts = comptime blk: {
+        var list: [Ls.len][]const u8 = undefined;
+        for (Ls, 0..) |L, i| list[i] = L.header;
+        const result = list;
+        break :blk result;
+    };
+    var headers: Headers = .{ .capture = capture, .texts = &texts };
+    var lists: RunState(Ls) = undefined;
+    inline for (0..Ls.len) |i| lists[i] = .{
+        .after = .{ .session = session_ref },
+        .status = .{ .previous = if (i == 0) null else &lists[i - 1].status },
+    };
+    var current: usize = 0;
+    while (current < Ls.len) {
+        inline for (Ls, 0..) |L, i| if (i >= current) {
+            const list = &lists[i];
+            list.status.queued = true;
+            list.status.more = false;
+            list.status.kept = false;
+            list.status.failed = false;
+            if (!list.begun and !list.first_queued) {
+                L.queueFirst(a, session_ref, &list.first_read);
+                list.first_queued = true;
+            }
+            list.chunk = .{ .a = a, .capture = capture, .headers = &headers, .list = i, .first = &list.first, .state = &list.state, .status = &list.status, .after = list.after };
+            a.readEach(L.S, list.after, chunk_rows + 1, &list.chunk);
+        };
+        a.run() catch |err| return runFailure(a, Ls, &lists, current, err);
+        var stop = false;
+        inline for (Ls, 0..) |L, i| if (i >= current and !stop) {
+            const list = &lists[i];
+            if (!list.status.previousFinished()) {
+                // Read ahead of a list not finished: read again, first
+                // read included.
+                stop = true;
+                if (!list.begun) list.first_queued = false;
+            } else {
+                if (!list.begun) {
+                    try L.checkFirst(&list.first_read);
+                    list.begun = true;
+                }
+                if (list.chunk.failure) |err| return err;
+                try headers.open(i);
+                for (list.chunk.kept[0..list.chunk.count]) |*row| try list.chunk.render(row);
+                list.after = list.chunk.after;
+                if (list.status.more) {
+                    stop = true;
+                    current = i;
+                } else {
+                    list.status.done = true;
+                    current = i + 1;
+                }
+            }
+        };
+    }
+}
+
+/// The answer to a failed round of a run: the lists before the one whose
+/// statement failed answer their first read's check and their rows'
+/// failures first, as main reached them first; the failed list answers
+/// its rows' failure, else its name. A list before it that kept rows, or
+/// that the failed list was read ahead of, would have read more before
+/// main reached the failure: the failed list's name answers there.
+fn runFailure(a: *const ReadAccess, comptime Ls: anytype, lists: *RunState(Ls), current: usize, err: RunError(Ls)) RunError(Ls) {
+    if (err != error.StatementFailed) return err;
+    var failed: ?usize = null;
+    inline for (Ls, 0..) |L, i| if (failed == null and i >= current) {
+        if (a.failedOn(L.S) or failedOnFirst(a, L)) failed = i;
+    };
+    const index = failed orelse return err;
+    inline for (Ls, 0..) |L, i| if (i >= current and i <= index) {
+        const list = &lists[i];
+        if (i == index) return list.chunk.failure orelse L.failed;
+        if (!list.begun) L.checkFirst(&list.first_read) catch |check| return check;
+        if (list.chunk.failure) |row| return row;
+        if (list.chunk.count != 0 or list.status.more) return nameOf(Ls, index);
+    };
+    unreachable;
+}
+
+fn nameOf(comptime Ls: anytype, index: usize) RunError(Ls) {
+    inline for (Ls, 0..) |L, i| if (i == index) return L.failed;
+    unreachable;
+}
+
+/// Whether list `L`'s first read recorded the round's failure.
+fn failedOnFirst(a: *const ReadAccess, comptime L: type) bool {
+    return if (L.First == NoFirst) false else a.failedOn(L.FirstRead);
+}
 
 /// A content value a Full row shows whole, with the metadata its row
 /// joined; `streamInline` reads it.
@@ -1621,216 +1871,160 @@ fn optionalValue(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8) error{Corrup
     return .{ .id = content_id.get(), .length = length orelse return error.CorruptStore, .digest = digest orelse return error.CorruptStore };
 }
 
-/// Shows `value` whole: its metadata, then its text, read through `a` in
-/// windows of main's 2048 bytes, each a round of its own on a network
-/// engine. Reaching the last byte checks the digest, as main's content
-/// reader did. Not inlined, so its window sits only on the chains that
-/// stream.
-noinline fn streamInline(a: *ReadAccess, capture: *SessionReportCapture, value: InlineValue) !void {
+/// Shows `value` whole: its metadata, then its text, which
+/// `content.streamVerified` reads and checks.
+fn streamInline(a: *ReadAccess, capture: *SessionReportCapture, value: InlineValue) !void {
     try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{value.length});
     try capture.append(&std.fmt.bytesToHex(value.digest, .lower));
     try capture.append("\",\"text\":\"");
-    var copy: content_domain.HashedWindow(2048) = .{ .hash = protocol.contentHasher() };
-    var offset: u64 = 0;
-    while (offset < value.length) {
-        const bytes = copy.window[0..@intCast(@min(copy.window.len, value.length - offset))];
-        try a.readRaw(value.id, offset, bytes);
-        copy.hash.update(bytes);
-        offset += bytes.len;
-        if (offset == value.length and !std.mem.eql(u8, &copy.hash.finalResult(), &value.digest)) return error.CorruptStore;
-        try capture.appendJsonStringBytes(bytes);
-    }
+    const Sink = struct {
+        capture: *SessionReportCapture,
+        pub fn write(sink: @This(), bytes: []const u8) !void {
+            try sink.capture.appendJsonStringBytes(bytes);
+        }
+    };
+    try content_domain.streamVerified(a, value.id, .{ .length = value.length, .digest = value.digest }, Sink{ .capture = capture });
     try capture.append("\"}");
 }
 
-/// A Full list read in chunks (`renderChunks`). `L` declares:
-/// - `S`, its statement, whose Args are the Session and the key after
-///   which a chunk starts, 0 before the first;
-/// - `after(session, row)`, the Args of the chunk after `row`;
-/// - `failed`, the name main gave its statement's failed step;
-/// - `pending`, how many rows with inline content a chunk keeps for after
-///   its round, and `streams(row)`, whether a row has any (a list with
-///   none has `pending` 0);
-/// - `render(a, capture, row)`, which streams the row's inline content.
-/// Optionally `State`, which `check(state, row)` updates for every row in
-/// order, and `First` with `queueFirst`/`checkFirst`, a read the first
-/// chunk's round queues before the list and judges before any row's
-/// failure. These are found by `@hasDecl`, which sees only `pub` ones.
-fn Chunk(comptime L: type) type {
-    return struct {
-        const Row = L.S.Row;
-        const State = if (@hasDecl(L, "State")) L.State else void;
-        const Failure = @typeInfo(@typeInfo(@TypeOf(L.render)).@"fn".return_type.?).error_union.error_set ||
-            if (@hasDecl(L, "check")) @typeInfo(@typeInfo(@TypeOf(L.check)).@"fn".return_type.?).error_union.error_set else error{};
+/// Where a revision's content value first occurs in its Session: the
+/// revision, and the field within it, instructions before output schema.
+pub const ContentOwner = struct {
+    revision: u64,
+    field: RevisionContentField,
 
-        a: *ReadAccess,
-        capture: *SessionReportCapture,
-        first: *bool,
-        state: *State,
-        after: L.S.Args,
-        rows: u16 = 0,
-        more: bool = false,
-        kept: [L.pending]Row = undefined,
-        count: u8 = 0,
-        failure: ?Failure = null,
-
-        /// Takes `row`, unless the chunk is full, of rows or of kept rows:
-        /// then `row` is the next chunk's first, and the chunk stops.
-        pub fn visit(chunk: *@This(), row: *const Row) bool {
-            if (chunk.rows == chunk_rows or (L.pending != 0 and chunk.count == L.pending)) {
-                chunk.more = true;
-                return false;
-            }
-            chunk.rows += 1;
-            chunk.after = L.after(chunk.after.session, row);
-            chunk.take(row) catch |err| {
-                chunk.failure = err;
-                return false;
-            };
-            return true;
-        }
-
-        /// Renders `row` in the pass, unless it or a row before it in
-        /// this chunk has inline content: then keeps it, in order.
-        fn take(chunk: *@This(), row: *const Row) Failure!void {
-            if (@hasDecl(L, "check")) try L.check(chunk.state, row);
-            if (L.pending == 0 or (chunk.count == 0 and !L.streams(row))) return chunk.render(row);
-            chunk.kept[chunk.count] = row.*;
-            chunk.count += 1;
-        }
-
-        fn render(chunk: *@This(), row: *const Row) Failure!void {
-            if (!chunk.first.*) try chunk.capture.append(",");
-            chunk.first.* = false;
-            try L.render(chunk.a, chunk.capture, row);
-        }
-    };
-}
-
-/// Renders list `L` (`Chunk`): a round per chunk, each a keyset read
-/// after the last row the chunk before it took, and after each round the
-/// rows it kept, with their inline content. Main's order of failures
-/// holds but one way: when a kept row's content fails and a later row of
-/// its chunk failed its step, the step's name answers. Not inlined, so
-/// each list's kept rows take only their own chain.
-noinline fn renderChunks(a: *ReadAccess, comptime L: type, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    var state: Chunk(L).State = if (@hasDecl(L, "State")) .{} else {};
-    var first = true;
-    var after: L.S.Args = .{ .session = session_ref };
-    var first_chunk = true;
-    while (true) {
-        var chunk: Chunk(L) = .{ .a = a, .capture = capture, .first = &first, .state = &state, .after = after };
-        var first_read: if (@hasDecl(L, "queueFirst")) L.First else void = undefined;
-        if (@hasDecl(L, "queueFirst")) if (first_chunk) L.queueFirst(a, session_ref, &first_read);
-        a.readEach(L.S, after, chunk_rows + 1, &chunk);
-        const ran = store_access.runAs(a, L.failed);
-        // Main judged this read before any row, and a failed round
-        // stepped no row after it.
-        if (@hasDecl(L, "queueFirst")) if (first_chunk) if (ran) |_| try L.checkFirst(&first_read) else |_| {};
-        if (chunk.failure) |err| return err;
-        try ran;
-        for (chunk.kept[0..chunk.count]) |*row| try chunk.render(row);
-        if (!chunk.more) return;
-        after = chunk.after;
-        first_chunk = false;
+    /// One integer that orders owners as they occur.
+    fn slot(owner: ContentOwner) u64 {
+        return owner.revision * 2 + @as(u64, @intCast(@backingInt(owner.field)));
     }
-}
 
-/// How many revisions an ownership window holds (`OwnerWindow`).
-pub const owner_window = 64;
-
-/// The owners of the contents of the Session's next `owner_window`
-/// revisions after ?2, by `revision`. A content's owner is its first
-/// occurrence in the Session's revisions, instructions before output
-/// schema within one, as `revision*2+field`: the least such value over
-/// every revision of the Session, which is the first up to the row's,
-/// since the row holds the content itself. Each run groups the Session's
-/// revisions once, where a per-row lookup would read every earlier
-/// revision for content none of them holds.
-pub const revision_owners = rsql.Read(.{
-    .sql = "WITH occurrence AS (SELECT instructions_content_id AS content_id,revision*2 AS owner FROM session_revision WHERE session_ref=?1 UNION ALL " ++
-        "SELECT output_schema_content_id AS content_id,revision*2+1 AS owner FROM session_revision WHERE session_ref=?1 AND output_schema_content_id IS NOT NULL)," ++
-        "first_occurrence AS (SELECT content_id,min(owner) AS owner FROM occurrence GROUP BY content_id) " ++
-        "SELECT r.revision,instructions.owner AS instructions_owner,output_schema.owner AS output_schema_owner FROM session_revision r " ++
-        "LEFT JOIN first_occurrence instructions ON instructions.content_id=r.instructions_content_id " ++
-        "LEFT JOIN first_occurrence output_schema ON output_schema.content_id=r.output_schema_content_id " ++
-        "WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY r.revision LIMIT " ++ std.fmt.comptimePrint("{d}", .{owner_window}),
-    .compound = true,
-    .Args = struct { session: []const u8, after: u64 = 0 },
-    .Row = struct {
-        revision: rsql.Positive,
-        instructions_owner: rsql.Positive,
-        output_schema_owner: ?rsql.Positive,
-    },
-    .cardinality = .each,
-});
-
-/// The Session's revisions, by `revision`, with each content's metadata.
-const full_revisions = rsql.Read(.{
-    .sql = "SELECT r.revision,r.command_key,r.workspace,r.provider,r.model,r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++
-        "r.tools_mask,r.permission_mode,r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length," ++
-        "instructions.digest AS instructions_digest," ++
-        "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest " ++
-        "FROM session_revision r LEFT JOIN content instructions ON instructions.content_id=r.instructions_content_id " ++
-        "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id " ++
-        "WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY r.revision LIMIT " ++ std.fmt.comptimePrint("{d}", .{owner_window + 1}),
-    .Args = struct { session: []const u8, after: u64 = 0 },
-    .Row = struct {
-        revision: rsql.Positive,
-        command_key: protocol.Bounded(128),
-        workspace: protocol.Bounded(protocol.max_workspace_bytes),
-        provider: protocol.Provider,
-        model: protocol.Bounded(protocol.max_model_bytes),
-        compaction_trigger: ?rsql.Positive,
-        output_reservation: ?u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
-        label: ?protocol.Bounded(protocol.max_label_bytes),
-        tools_mask: u8,
-        permission_mode: u8,
-        instructions_id: rsql.Positive,
-        instructions_length: u64,
-        instructions_digest: [32]u8,
-        output_schema_id: ?rsql.Positive,
-        output_schema_length: ?u64,
-        output_schema_digest: ?[32]u8,
-    },
-    .cardinality = .each,
-});
-
-/// The owners `revision_owners` read for the revisions a window covers,
-/// in order.
-const OwnerWindow = struct {
-    owners: [owner_window]Owners = undefined,
-    count: u8 = 0,
-
-    const Owners = struct { revision: u64, instructions: u64, output_schema: ?u64 };
-
-    pub fn visit(window: *OwnerWindow, row: *const revision_owners.Row) bool {
-        window.owners[window.count] = .{
-            .revision = row.revision.get(),
-            .instructions = row.instructions_owner.get(),
-            .output_schema = if (row.output_schema_owner) |owner| owner.get() else null,
-        };
-        window.count += 1;
-        return true;
+    fn ofSlot(value: u64) ContentOwner {
+        return .{ .revision = value / 2, .field = if (value % 2 == 0) .instructions else .output_schema };
     }
 };
+
+/// The owner of each content value the revisions listed so far hold, by
+/// content id, in the Store's scratch (`Store.reportOwners`), so no frame
+/// holds it. Revisions list in order, so a value not found here occurs
+/// first in the row that holds it, while every earlier value was added:
+/// until `capacity` values are, after which `renderRevisions` reads the
+/// rest through `full_revisions_owned`.
+pub const ContentOwners = struct {
+    pub const capacity = 1024;
+
+    count: u16,
+    /// Sorted, with `slots` beside them.
+    ids: [capacity]u64,
+    slots: [capacity]u64,
+
+    fn index(owners: *const ContentOwners, id: u64) usize {
+        var low: usize = 0;
+        var high: usize = owners.count;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (owners.ids[middle] < id) low = middle + 1 else high = middle;
+        }
+        return low;
+    }
+
+    fn find(owners: *const ContentOwners, id: u64) ?ContentOwner {
+        const at = owners.index(id);
+        if (at < owners.count and owners.ids[at] == id) return .ofSlot(owners.slots[at]);
+        return null;
+    }
+
+    fn full(owners: *const ContentOwners) bool {
+        return owners.count == capacity;
+    }
+
+    fn add(owners: *ContentOwners, id: u64, owner: ContentOwner) void {
+        std.debug.assert(!owners.full());
+        const at = owners.index(id);
+        const count: usize = owners.count;
+        std.mem.copyBackwards(u64, owners.ids[at + 1 .. count + 1], owners.ids[at..count]);
+        std.mem.copyBackwards(u64, owners.slots[at + 1 .. count + 1], owners.slots[at..count]);
+        owners.ids[at] = id;
+        owners.slots[at] = owner.slot();
+        owners.count += 1;
+    }
+};
+
+/// A revision row, as both revisions reads return it. `newest` is the
+/// Session's last revision, so a chunk that stops after a row knows
+/// whether another follows without reading it.
+const RevisionRow = struct {
+    revision: rsql.Positive,
+    newest: rsql.Positive,
+    command_key: protocol.Bounded(128),
+    workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    provider: protocol.Provider,
+    model: protocol.Bounded(protocol.max_model_bytes),
+    compaction_trigger: ?rsql.Positive,
+    output_reservation: ?u64,
+    reasoning_effort: ?protocol.ReasoningEffort,
+    label: ?protocol.Bounded(protocol.max_label_bytes),
+    tools_mask: u8,
+    permission_mode: u8,
+    instructions_id: rsql.Positive,
+    instructions_length: u64,
+    instructions_digest: [32]u8,
+    output_schema_id: ?rsql.Positive,
+    output_schema_length: ?u64,
+    output_schema_digest: ?[32]u8,
+    /// `full_revisions_owned` only: each value's `ContentOwner.slot`.
+    instructions_owner: ?rsql.Positive,
+    output_schema_owner: ?rsql.Positive,
+};
+
+fn revisionsSql(comptime owners: []const u8) []const u8 {
+    return "SELECT r.revision,(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
+        "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.tools_mask,r.permission_mode," ++
+        "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
+        "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
+        owners ++ " FROM session_revision r LEFT JOIN content instructions ON instructions.content_id=r.instructions_content_id " ++
+        "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id " ++
+        "WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY r.revision" ++ chunk_limit;
+}
+
+/// The Session's revisions after ?2, by `revision`, with each content's
+/// metadata; `ContentOwners` names the owners.
+pub const full_revisions = rsql.Read(.{
+    .sql = revisionsSql("NULL AS instructions_owner,NULL AS output_schema_owner"),
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = RevisionRow,
+    .cardinality = .each,
+});
+
+/// `full_revisions` with each value's owner, for the revisions after
+/// `ContentOwners` filled: a scan of the Session's revisions from its
+/// first, by primary key, that stops at the value's first occurrence.
+pub const full_revisions_owned = rsql.Read(.{
+    .sql = revisionsSql(ownerSql("r.instructions_content_id") ++ " AS instructions_owner," ++
+        "CASE WHEN r.output_schema_content_id IS NULL THEN NULL ELSE " ++ ownerSql("r.output_schema_content_id") ++ " END AS output_schema_owner"),
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = RevisionRow,
+    .cardinality = .each,
+});
+
+fn ownerSql(comptime content: []const u8) []const u8 {
+    return "(SELECT p.revision*2+CASE WHEN p.instructions_content_id=" ++ content ++ " THEN 0 ELSE 1 END FROM session_revision p " ++
+        "WHERE p.session_ref=?1 AND p.revision<=r.revision AND (p.instructions_content_id=" ++ content ++ " OR p.output_schema_content_id=" ++
+        content ++ ") ORDER BY p.revision LIMIT 1)";
+}
 
 /// A revision's content, as its row shows it: whole where the revision
 /// owns it, else a reference to its owner.
 const RevisionContent = struct {
     value: InlineValue,
-    owner_revision: u64,
-    owner_field: RevisionContentField,
+    owner: ContentOwner,
     owned: bool,
 
-    fn of(value: InlineValue, owner: u64, revision: u64, field: RevisionContentField) RevisionContent {
-        const owner_field: RevisionContentField = if (owner % 2 == 0) .instructions else .output_schema;
-        return .{ .value = value, .owner_revision = owner / 2, .owner_field = owner_field, .owned = owner / 2 == revision and owner_field == field };
+    fn of(value: InlineValue, owner: ContentOwner, here: ContentOwner) RevisionContent {
+        return .{ .value = value, .owner = owner, .owned = owner.slot() == here.slot() };
     }
 
     /// Inline, so streaming adds no frame between the revisions' and
-    /// `streamInline`'s.
+    /// `content.streamVerified`'s.
     inline fn render(content: *const RevisionContent, a: *ReadAccess, capture: *SessionReportCapture) !void {
         if (content.owned) return streamInline(a, capture, content.value);
         try content.renderReference(capture);
@@ -1838,7 +2032,7 @@ const RevisionContent = struct {
 
     /// Not inlined: its formatting takes no frame on the streaming chain.
     noinline fn renderReference(content: *const RevisionContent, capture: *SessionReportCapture) !void {
-        try capture.appendOwnedContentReference(.{ .length = content.value.length, .digest = content.value.digest }, @intCast(content.owner_revision), content.owner_field);
+        try capture.appendOwnedContentReference(.{ .length = content.value.length, .digest = content.value.digest }, @intCast(content.owner.revision), content.owner.field);
     }
 };
 
@@ -1855,67 +2049,106 @@ const RevisionTail = struct {
         try capture.append("}");
     }
 
+    /// Whether the tail reads content: an owned value of at least a byte.
     fn streams(tail: *const RevisionTail) bool {
-        return tail.instructions.owned or (tail.output_schema != null and tail.output_schema.?.owned);
+        const instructions = tail.instructions.owned and tail.instructions.value.length != 0;
+        const output_schema = if (tail.output_schema) |content| content.owned and content.value.length != 0 else false;
+        return instructions or output_schema;
     }
 };
 
 /// Renders the revisions as their chunks step: each row's settings, then
-/// its contents, which wait for the round's end when the row owns one, so
-/// the chunk stops at the row after it, which its next chunk starts with.
-/// A row holds a workspace of up to 4 KiB, so only that tail is kept. A
-/// chunk also stops at a row past its ownership window.
+/// its contents, which wait for the round's end when the row reads one
+/// (`RevisionTail.streams`), so the chunk stops after that row and its
+/// next starts after it. A row holds a workspace of up to 4 KiB, so only
+/// that tail is kept. A chunk also stops at a row whose content
+/// `ContentOwners` cannot place once it is full, so the next reads
+/// `full_revisions_owned`.
 const RevisionChunk = struct {
     a: *ReadAccess,
     capture: *SessionReportCapture,
-    window: *const OwnerWindow,
-    /// The window's next owners.
-    next: u8,
+    owners: *ContentOwners,
+    /// Whether this chunk reads `full_revisions_owned`.
+    owned_read: bool,
     first: bool,
     after: u64,
+    rows: u16 = 0,
     more: bool = false,
+    /// Set when a row needs `full_revisions_owned`.
+    needs_owned_read: bool = false,
     tail: ?RevisionTail = null,
     failure: ?Failure = null,
-    decoded: full_revisions.Row = undefined,
+    decoded: RevisionRow = undefined,
 
     const Failure = SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore } ||
         @typeInfo(@typeInfo(@TypeOf(RevisionTail.render)).@"fn".return_type.?).error_union.error_set;
 
-    /// Takes `row`, unless the chunk keeps a tail or its window has no
-    /// owners left: then `row` is the next chunk's first, and the chunk
-    /// stops.
-    pub fn visit(chunk: *RevisionChunk, row: *const full_revisions.Row) bool {
-        if (chunk.tail != null or chunk.next == chunk.window.count) {
+    pub fn visit(chunk: *RevisionChunk, row: *const RevisionRow) bool {
+        if (chunk.rows == chunk_rows) {
             chunk.more = true;
             return false;
         }
-        const owners = &chunk.window.owners[chunk.next];
-        // Both reads list the Session's revisions after the same one, in
-        // one snapshot.
-        std.debug.assert(owners.revision == row.revision.get());
-        chunk.next += 1;
-        chunk.after = row.revision.get();
-        chunk.take(row, owners) catch |err| {
+        const tail = chunk.take(row) catch |err| {
             chunk.failure = err;
             return false;
+        } orelse {
+            chunk.more = true;
+            chunk.needs_owned_read = true;
+            return false;
         };
-        return true;
-    }
-
-    /// Renders `row`, keeping a tail that streams; a tail of references
-    /// renders in the pass.
-    fn take(chunk: *RevisionChunk, row: *const full_revisions.Row, owners: *const OwnerWindow.Owners) Failure!void {
-        const tail = try chunk.renderSettings(row, owners);
-        if (!tail.streams()) return tail.render(chunk.a, chunk.capture);
+        chunk.rows += 1;
+        chunk.after = row.revision.get();
+        if (!tail.streams()) {
+            tail.render(chunk.a, chunk.capture) catch |err| {
+                chunk.failure = err;
+                return false;
+            };
+            return true;
+        }
         chunk.tail = tail;
+        chunk.more = row.revision.get() < row.newest.get();
+        return false;
     }
 
-    fn renderSettings(chunk: *RevisionChunk, row: *const full_revisions.Row, owners: *const OwnerWindow.Owners) (SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore })!RevisionTail {
+    /// Renders `row`'s settings and returns its tail, or null, rendering
+    /// nothing, when an owner is not known without `full_revisions_owned`.
+    fn take(chunk: *RevisionChunk, row: *const RevisionRow) Failure!?RevisionTail {
+        const revision = row.revision.get();
+        const instructions_here: ContentOwner = .{ .revision = revision, .field = .instructions };
+        const output_schema_here: ContentOwner = .{ .revision = revision, .field = .output_schema };
+        const instructions_owner = (try chunk.ownerOf(row.instructions_id.get(), instructions_here, row.instructions_owner)) orelse return null;
+        const output_schema_owner = if (row.output_schema_id) |id| (try chunk.ownerOf(id.get(), output_schema_here, row.output_schema_owner)) orelse return null else null;
+        try chunk.renderSettings(row);
+        const instructions: InlineValue = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
+        const output_schema = try optionalValue(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
+        return .{
+            .instructions = .of(instructions, instructions_owner, instructions_here),
+            .output_schema = if (output_schema) |value| .of(value, output_schema_owner.?, output_schema_here) else null,
+        };
+    }
+
+    /// The owner of content `id` at `here`: from `ContentOwners`, or
+    /// `here` while it holds every earlier value (and is then added), or
+    /// from the row's own `owner` column on `full_revisions_owned`. Null
+    /// when only that read can tell. A column that names no occurrence up
+    /// to `here` is `CorruptStore`.
+    fn ownerOf(chunk: *RevisionChunk, id: u64, here: ContentOwner, column: ?rsql.Positive) error{CorruptStore}!?ContentOwner {
+        if (chunk.owners.find(id)) |owner| return owner;
+        if (!chunk.owners.full()) {
+            chunk.owners.add(id, here);
+            return here;
+        }
+        if (!chunk.owned_read) return null;
+        const slot = (column orelse return error.CorruptStore).get();
+        if (slot > here.slot()) return error.CorruptStore;
+        return .ofSlot(slot);
+    }
+
+    fn renderSettings(chunk: *RevisionChunk, row: *const RevisionRow) (SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore })!void {
         const capture = chunk.capture;
         if (!chunk.first) try capture.append(",");
         chunk.first = false;
-        const revision = row.revision.get();
-        try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{revision});
+        try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{row.revision.get()});
         try capture.appendJsonString(row.command_key.slice());
         try capture.append(",\"workspace\":");
         try capture.appendJsonString(row.workspace.slice());
@@ -1938,33 +2171,24 @@ const RevisionChunk = struct {
         try capture.appendTools(row.tools_mask);
         try capture.append(",\"permission_mode\":");
         try capture.appendPermissionMode(row.permission_mode);
-        const instructions: InlineValue = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
-        const output_schema = try optionalValue(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
-        return .{
-            .instructions = .of(instructions, owners.instructions, revision, .instructions),
-            // The row itself holds its output schema, so it has an owner.
-            .output_schema = if (output_schema) |value| .of(value, owners.output_schema.?, revision, .output_schema) else null,
-        };
     }
 };
 
 /// The revisions list (`RevisionChunk`), whose step failure is main's
-/// `SessionReadFailed`. A chunk that starts where its ownership window
-/// ends queues the next window's read before it, in its round. Not
-/// inlined: its chunk holds a decoded row.
+/// `SessionReadFailed`: `full_revisions` while `ContentOwners` holds
+/// every value listed, then `full_revisions_owned`. Not inlined: its
+/// chunk holds a decoded row.
 noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
+    const owners = a.store.reportOwners();
+    owners.count = 0;
     var first = true;
     var after: u64 = 0;
-    var window: OwnerWindow = .{};
-    var next: u8 = 0;
+    var owned_read = false;
     while (true) {
-        if (next == window.count) {
-            window = .{};
-            next = 0;
-            a.readEach(revision_owners, .{ .session = session_ref, .after = after }, owner_window, &window);
-        }
-        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .window = &window, .next = next, .first = first, .after = after };
-        a.readEach(full_revisions, .{ .session = session_ref, .after = after }, owner_window + 1, &chunk);
+        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .owners = owners, .owned_read = owned_read, .first = first, .after = after };
+        if (owned_read) {
+            a.readEach(full_revisions_owned, .{ .session = session_ref, .after = after }, chunk_rows + 1, &chunk);
+        } else a.readEach(full_revisions, .{ .session = session_ref, .after = after }, chunk_rows + 1, &chunk);
         const ran = store_access.runAs(a, error.SessionReadFailed);
         if (chunk.failure) |err| return err;
         try ran;
@@ -1972,7 +2196,7 @@ noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *S
         if (!chunk.more) return;
         first = chunk.first;
         after = chunk.after;
-        next = chunk.next;
+        owned_read = owned_read or chunk.needs_owned_read;
     }
 }
 
@@ -2028,8 +2252,10 @@ const unpositioned_message = rsql.Read(.{
 pub const Messages = struct {
     const S = full_messages;
     const failed = error.MessageReadFailed;
-    pub const pending = 4;
+    const header = "],\"messages\":[";
+    pub const kept_rows = 4;
     pub const First = unpositioned_message.Result;
+    const FirstRead = unpositioned_message;
     /// The last admission listed: main listed Messages by admission, so
     /// positions must order them the same way.
     pub const State = struct { admission: u64 = 0 };
@@ -2107,12 +2333,14 @@ fn checkOutcome(code: anytype, content_id: ?rsql.Positive) error{CorruptStore}!v
 
 /// The Session's Conversation entries, by `entry_ordinal`, each with its
 /// content's metadata and, for a message or assistant entry, whether it
-/// is public (`reads.public_entry_consistent`), which main read per row.
+/// is public (`reads.publicEntryRead`), which main read per row.
 const full_conversation = rsql.Read(.{
-    .sql = "SELECT e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id," ++
-        "c.byte_length AS content_length,c.digest AS content_digest,CASE WHEN e.entry_kind=2 OR " ++ reads_domain.public_entry_consistent ++
-        " THEN 1 ELSE 0 END AS consistent FROM conversation_entry e " ++ reads_domain.public_entry_joins ++
-        " WHERE e.session_ref=?1 AND e.entry_ordinal>?2 ORDER BY e.entry_ordinal" ++ chunk_limit,
+    .sql = reads_domain.publicEntryRead(
+        "e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id," ++
+            "c.byte_length AS content_length,c.digest AS content_digest",
+        "e.entry_kind=2 OR ",
+        "WHERE e.session_ref=?1 AND e.entry_ordinal>?2 ORDER BY e.entry_ordinal" ++ chunk_limit,
+    ),
     .Args = struct { session: []const u8, after: u64 = 0 },
     .Row = struct {
         entry_ordinal: rsql.Positive,
@@ -2132,8 +2360,13 @@ const full_conversation = rsql.Read(.{
 const Conversation = struct {
     const S = full_conversation;
     const failed = error.ConversationReadFailed;
-    const pending = 0;
+    const header = "],\"conversation\":[";
+    const State = NoState;
+    const check = noCheck;
+    const streams = streamsNever;
+    pub const kept_rows = 0;
     pub const First = reads_domain.missing_assistant_entry.Result;
+    const FirstRead = reads_domain.missing_assistant_entry;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .after = row.entry_ordinal.get() };
@@ -2200,7 +2433,14 @@ const full_turns = rsql.Read(.{
 const Turns = struct {
     const S = full_turns;
     const failed = error.TurnReadFailed;
-    const pending = 0;
+    const header = "],\"turns\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    const streams = streamsNever;
+    pub const kept_rows = 0;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .after = row.turn_id.get() };
@@ -2252,7 +2492,13 @@ const full_operations = rsql.Read(.{
 const Operations = struct {
     const S = full_operations;
     const failed = error.OperationReadFailed;
-    const pending = 4;
+    const header = "],\"model_operations\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    pub const kept_rows = 4;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .after = row.operation_id.get() };
@@ -2333,7 +2579,13 @@ const full_calls = rsql.Read(.{
 const Calls = struct {
     const S = full_calls;
     const failed = error.CallReadFailed;
-    const pending = 8;
+    const header = "],\"tool_calls\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    pub const kept_rows = 8;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .operation = row.operation_id.get(), .ordinal = row.call_ordinal + 1 };
@@ -2386,7 +2638,13 @@ const full_actions = rsql.Read(.{
 const Actions = struct {
     const S = full_actions;
     const failed = error.ActionReadFailed;
-    const pending = 4;
+    const header = "],\"actions\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    pub const kept_rows = 4;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .after = row.action_id.get() };
@@ -2434,7 +2692,14 @@ const full_decisions = rsql.Read(.{
 const Decisions = struct {
     const S = full_decisions;
     const failed = error.PermissionReadFailed;
-    const pending = 0;
+    const header = "],\"permission_decisions\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    const streams = streamsNever;
+    pub const kept_rows = 0;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .after = row.command_seq.get() };
@@ -2475,7 +2740,14 @@ pub const full_stops = rsql.Read(.{
 const Stops = struct {
     const S = full_stops;
     const failed = error.SessionStopReadFailed;
-    const pending = 0;
+    const header = "],\"session_stops\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    const streams = streamsNever;
+    pub const kept_rows = 0;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .after = row.command_seq.get() };
@@ -2515,7 +2787,14 @@ const full_interruptions = rsql.Read(.{
 const Interruptions = struct {
     const S = full_interruptions;
     const failed = error.InterruptionReadFailed;
-    const pending = 0;
+    const header = "],\"model_interruptions\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    const streams = streamsNever;
+    pub const kept_rows = 0;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .after = row.command_seq.get() };
@@ -2567,7 +2846,13 @@ const full_results = rsql.Read(.{
 const Results = struct {
     const S = full_results;
     const failed = error.CallReadFailed;
-    const pending = 8;
+    const header = "],\"tool_results\":[";
+    const State = NoState;
+    const check = noCheck;
+    const First = NoFirst;
+    const queueFirst = noQueueFirst;
+    const checkFirst = noCheckFirst;
+    pub const kept_rows = 8;
 
     fn after(session: []const u8, row: *const S.Row) S.Args {
         return .{ .session = session, .operation = row.operation_id.get(), .acceptance = row.acceptance_position.get(), .ordinal = row.call_ordinal + 1 };
