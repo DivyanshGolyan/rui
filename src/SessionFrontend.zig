@@ -3417,7 +3417,7 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
     }
 }
 
-test "choice readiness: keys pumped by a held redraw act on nothing, and the Enter after its delivery decides the option shown" {
+test "choice readiness: keys pumped by a redraw of the same choice act on the choice shown, and the Enter after a move waits for a frame showing it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -3428,20 +3428,21 @@ test "choice readiness: keys pumped by a held redraw act on nothing, and the Ent
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.?.highlight);
     try std.testing.expect(held.screen.offered() != null);
-    // Left and Enter arrive while a redraw is held: that frame is not yet
-    // delivered, so neither moves nor decides anything.
+    // Left and Enter arrive while a redraw that still shows Deny is held:
+    // Left acts on the Deny the delivered frame showed, and spends the
+    // offer, so the Enter after it decides nothing.
     try held.hold("\x1b[D\r");
     _ = try self.draw();
     try std.testing.expect(held.pumps != 0);
     try std.testing.expect(self.submission.view() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-    try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.?.highlight);
+    try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, held.screen.consent.?.highlight);
     try std.testing.expectEqualStrings("! Not ready; nothing authorized.", self.notice.?);
-    // A delivered frame still shows Deny; then Enter decides it.
+    // A delivered frame shows Allow once; then Enter decides it.
     try held.settle();
     try std.testing.expect(held.screen.offered() != null);
     try sendKeys(self, "\r");
-    try std.testing.expectEqual(protocol.PermissionDecision.deny, self.submission.intent.?.decision.decision);
+    try std.testing.expectEqual(protocol.PermissionDecision.allow_once, self.submission.intent.?.decision.decision);
 }
 
 test "choice readiness: a slash command typed beside the Action keeps the draft, so a second Enter decides nothing" {
