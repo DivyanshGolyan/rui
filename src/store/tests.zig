@@ -336,6 +336,14 @@ fn testingContentReference(storage: *Store, content_id: u64) !ContentReference {
     return .{ .length = row.byte_length, .digest = row.digest };
 }
 
+/// Records that the running entry point changed `session`, as an Access's
+/// `@session` tie does, for a test that writes its rows by hand.
+fn touchForTesting(storage: *Store, session: []const u8) !void {
+    var sql: [128]u8 = undefined;
+    const workspace = try queryU64(storage.database, try std.mem.printSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{session}, 0));
+    if (storage.touched.needsEntry(session)) storage.touched.add(.{ .session = session[0..change_ring.id_bytes].*, .workspace = workspace });
+}
+
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
     const statement = try sqlite.prepare(database, sql);
     defer _ = c.sqlite3_finalize(statement);
@@ -1475,14 +1483,14 @@ test "the touch oracle names a sender whose sent Message changed without its tou
         defer entry.release();
         try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='oracle-message'", .{sender.slice()}, 0));
         try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
-        try store_core.touch(&storage, recipient.slice());
-        try store_core.touch(&storage, sender.slice());
+        try touchForTesting(&storage, recipient.slice());
+        try touchForTesting(&storage, sender.slice());
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.touch(&storage, recipient.slice());
+        try touchForTesting(&storage, recipient.slice());
         // A column only the recipient reads.
         try sqlite.exec(storage.database, "UPDATE message_admission SET turn_id=NULL WHERE command_key='oracle-message'");
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
@@ -1490,7 +1498,7 @@ test "the touch oracle names a sender whose sent Message changed without its tou
         // and skips the sender.
         try sqlite.exec(storage.database, "UPDATE message_admission SET admitted_at=admitted_at+1 WHERE command_key='oracle-message'");
         try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
-        try store_core.touch(&storage, sender.slice());
+        try touchForTesting(&storage, sender.slice());
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
 }
@@ -1663,7 +1671,7 @@ test "the touch oracle names a Session whose rows changed without a touch" {
         var sql: [96]u8 = undefined;
         try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE session SET label='forgot' WHERE session_ref='{s}'", .{session}, 0));
         try std.testing.expectEqualStrings(session, &store_core.untouchedForTesting(&storage).?);
-        try store_core.touch(&storage, session);
+        try touchForTesting(&storage, session);
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
     // The touched write is recorded under the generation it advanced to.
@@ -14433,4 +14441,126 @@ test "Full revisions show each content whole where it first occurs, across owner
             }
         }
     }
+}
+
+/// The statements and VM steps the Store's statements ran since the last
+/// call, without the test-only touch oracle's.
+fn statementWorkSince(database: *c.sqlite3) [2]i64 {
+    var work: [2]i64 = .{ 0, 0 };
+    var statement = c.sqlite3_next_stmt(database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(database, each)) {
+        const runs = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 1);
+        const steps = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+        if (std.mem.indexOf(u8, std.mem.span(c.sqlite3_sql(each)), "touched_oracle") != null) continue;
+        work[0] += runs;
+        work[1] += steps;
+    }
+    return work;
+}
+
+/// A Store holding one admitted Attempt, its Message's content and a seal.
+const TestingAttempt = struct {
+    binding: AttemptBinding,
+    content: ContentReference,
+    const seal: historical_domain.PrefixSeal = .{ .anchor = null, .admission_position = 1, .span_length = 0, .digest = @splat(0) };
+
+    fn admit(storage: *Store, tmp: *std.testing.TmpDir) !TestingAttempt {
+        const session = try configureTestSession(storage, "attempt-config");
+        try submitTestMessage(storage, tmp, "attempt-input", "attempt-message", session.slice(), "work");
+        return .{
+            .binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding,
+            .content = (try storage.observeCommand("attempt-message")).message.?.content,
+        };
+    }
+
+    fn handoff(_: void) !void {}
+};
+
+test "Attempt checks, prefix seals and content lookups do no more work than main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    // Main's statements and VM steps at 72db6de9, each on its warm second
+    // call: opening a view, its Attempt check, recording a seal, the
+    // Operation's kind, a dispatch handoff and a content lookup.
+    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
+    for (0..2) |call| {
+        var work: [main_work.len][2]i64 = undefined;
+        _ = statementWorkSince(storage.database);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(attempt.binding, &view);
+        work[0] = statementWorkSince(storage.database);
+        try view.checkAttempt();
+        work[1] = statementWorkSince(storage.database);
+        try view.recordPrefixSeal(&TestingAttempt.seal);
+        work[2] = statementWorkSince(storage.database);
+        view.close();
+        _ = try storage.modelOperationKind(attempt.binding);
+        work[3] = statementWorkSince(storage.database);
+        try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
+        work[4] = statementWorkSince(storage.database);
+        _ = try storage.openContent(attempt.content);
+        work[5] = statementWorkSince(storage.database);
+        if (call == 0) continue;
+        for (work, main_work) |measured, main| {
+            try std.testing.expect(measured[0] <= main[0]);
+            try std.testing.expect(measured[1] <= main[1]);
+        }
+    }
+}
+
+test "a prefix seal is recorded only while its Attempt is current" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    try view.recordPrefixSeal(&TestingAttempt.seal);
+    try std.testing.expectEqualDeep(TestingAttempt.seal, (try storage.prefixSealForTesting(attempt.binding)).?);
+    try storage.settleModelAttemptFailure(attempt.binding, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+    var later = TestingAttempt.seal;
+    later.span_length = 1;
+    try std.testing.expectError(error.StaleAttemptBinding, view.recordPrefixSeal(&later));
+    try std.testing.expectEqualDeep(TestingAttempt.seal, (try storage.prefixSealForTesting(attempt.binding)).?);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "an Attempt check reads no Session, and a prefix seal's Session read answers OperationReadFailed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    // Main touched the Session in each check, so a faulted session row
+    // answered SessionReadFailed there; only the seal's write reads it now.
+    try failAtStepForTesting(storage.database, "session");
+    try view.checkAttempt();
+    try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(attempt.binding));
+    try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectError(error.OperationReadFailed, view.recordPrefixSeal(&TestingAttempt.seal));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a content lookup's failed step answers CorruptStore, as on main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    try failAtStepForTesting(storage.database, "content");
+    try std.testing.expectError(error.CorruptStore, storage.openContent(attempt.content));
+    try std.testing.expect(storage.isFenced());
 }

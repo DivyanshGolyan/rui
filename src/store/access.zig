@@ -616,8 +616,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Records the change of `head`'s Session for the change ring. A
-        /// fifth Session makes the record "everything", as `Store.touch`
-        /// does; it never fails.
+        /// fifth Session makes the record "everything"
+        /// (`change_ring.Touched.needsEntry`); it never fails.
         fn touch(a: *Self, head: rsql.SessionHead) void {
             const touched = &a.store.touched;
             if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });

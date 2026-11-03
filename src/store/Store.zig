@@ -731,15 +731,12 @@ pub const Store = struct {
     /// Opens the view in `out`, where it stays until it closes: a view
     /// borrows its own buffers, so it never moves.
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) !void {
-        try model_settlement_domain.checkAttempt(self, binding);
+        _ = try model_settlement_domain.checkAttempt(self, binding);
         out.* = .{ .store = self, .binding = binding };
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
-        return entry.finish(Ordinary.none, model_settlement_domain.readModelOperationKind(self, binding.operation_id));
+        return model_settlement_domain.checkAttempt(self, binding);
     }
 
     pub fn isFenced(self: *const Store) bool {
@@ -767,7 +764,7 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.validateCurrentAttempt(self, binding));
+        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.readAttemptKind(&entry, binding));
         // As for Actions, dispatch failures belong to the caller.
         try handoff(context);
     }
@@ -1130,15 +1127,6 @@ fn lockAdmin(self: *Store) void {
     self.mutex.lockUncancelable(self.io);
 }
 
-/// Records that this entry point changes `session_ref`'s rows, with its
-/// Workspace's key, read here inside the entry point: a failed read
-/// fails it, and fences, like any other. The Session's row must exist.
-pub fn touch(self: *Store, session_ref: []const u8) !void {
-    if (!self.touched.needsEntry(session_ref)) return;
-    const workspace = try readSessionWorkspaceKey(self, session_ref) orelse return error.CorruptStore;
-    self.touched.add(.{ .session = session_ref[0..change_ring.id_bytes].*, .workspace = workspace });
-}
-
 /// Opens an entry point's write transaction. Every entry point begins
 /// here; only opening the Store, in `schema.bootstrap`, issues a BEGIN of
 /// its own, before any entry point can run.
@@ -1183,24 +1171,9 @@ pub fn workspaceDigest(workspace: []const u8) [32]u8 {
     return digest;
 }
 
-const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";
-
-/// The key of `session_ref`'s Workspace, or null when no such Session
-/// exists.
-fn readSessionWorkspaceKey(self: *Store, session_ref: []const u8) !?u64 {
-    const statement = try cached(self, session_workspace_key_sql);
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    return switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => null,
-        c.SQLITE_ROW => @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
-        else => error.SessionReadFailed,
-    };
-}
-
 /// Test builds: a Session whose rows this entry point changed but did
 /// not touch. The oracle is a temporary trigger on each table that
-/// carries a Session, so a writer that skips `touch` fails whichever
+/// carries a Session, so a writer that skips its touch fails whichever
 /// test drives it.
 pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
     if (!@import("builtin").is_test) @compileError("test-only check");

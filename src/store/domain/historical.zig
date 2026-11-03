@@ -17,8 +17,6 @@ const store_access = @import("../access.zig");
 pub const ReadAccess = reads_domain.ReadAccess;
 const content_metadata = content_domain.content_metadata;
 const store_schema = @import("../schema.zig");
-const sqlite = @import("../sqlite.zig");
-const c = sqlite.c;
 const AttemptBinding = store_core.AttemptBinding;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReader = content_domain.ContentReader;
@@ -211,7 +209,7 @@ pub const HistoricalView = struct {
     /// history below the admission boundary, and the handoff checks again.
     pub fn checkAttempt(self: *HistoricalView) !void {
         std.debug.assert(self.active);
-        return model_settlement_domain.checkAttempt(self.store, self.binding);
+        _ = try model_settlement_domain.checkAttempt(self.store, self.binding);
     }
 
     /// Fills `out`; on error its bytes mean nothing.
@@ -549,20 +547,25 @@ pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
 fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finishTransaction(Ordinary.attempt_binding, .{}, recordPrefixSealLocked(self, binding, seal));
+    var a: store_access.Access(.write, error{}) = .open(&entry);
+    defer a.deinit();
+    return entry.finishTransaction(Ordinary.attempt_binding, .{}, a.end(.{}, sealOn(&a, binding, seal)));
 }
 
-fn recordPrefixSealLocked(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    try store_core.begin(self);
-    _ = try model_settlement_domain.validateCurrentAttempt(self, binding);
-    const update = try store_core.cached(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, binding.operation_id);
-    const bytes = seal.encode();
-    try sqlite.bindBlob(update, 2, &bytes);
-    try sqlite.expectDone(update);
-    if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
-    try store_core.commit(self);
+/// Records an Operation's Session's prefix seal.
+const record_prefix_seal = rsql.Write(.{
+    .sql = "UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead, seal: [prefix_seal.encoded_bytes]u8 },
+    // The Session was read in this transaction under the single writer.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Round 1 reads the Attempt and its Session; the seal is written only
+/// while the binding is current.
+fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+    const session = try model_settlement_domain.currentAttemptSession(a, binding);
+    a.write(record_prefix_seal, .{ .session = session, .seal = seal.encode() });
+    try a.commit();
 }
 
 fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {

@@ -7,7 +7,6 @@ const tool_catalog = @import("../../tools.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
-const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const rsql = @import("../rsql.zig");
@@ -127,63 +126,58 @@ pub const ValidatedOutput = struct {
     request_id: protocol.Bounded(256),
 };
 
-pub fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
+/// The purpose of the Attempt `binding` names, in an Entry of its own,
+/// while the binding is current (`attemptKind`).
+pub fn checkAttempt(self: *Store, binding: AttemptBinding) !ModelOperationKind {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    _ = try entry.finish(Ordinary.attempt_binding, validateCurrentAttempt(self, binding));
+    return entry.finish(Ordinary.attempt_binding, readAttemptKind(&entry, binding));
 }
 
-pub fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKind {
-    const statement = try store_core.cached(self, "SELECT purpose FROM model_operation WHERE operation_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, operation_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return switch (c.sqlite3_column_int(statement, 0)) {
-        0 => .assistant_response,
-        1 => .compaction,
-        else => error.CorruptStore,
-    };
+/// `attemptKind` in a read Access of its own under `entry`. Noinline, so
+/// the Access is not on the frame of what runs after the check under the
+/// same Entry: a dispatch handoff.
+pub noinline fn readAttemptKind(entry: *const store_core.Entry, binding: AttemptBinding) !ModelOperationKind {
+    var a: store_access.Access(.read, error{}) = .open(entry);
+    defer a.deinit();
+    return attemptKind(&a, binding);
 }
 
-/// Checks that `binding` names its Operation's current Attempt, touching
-/// and returning the Operation's Session.
-pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !change_ring.Id {
-    const statement = try store_core.cached(
-        self,
-        "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key,session_ref " ++
-            "FROM model_operation WHERE operation_id=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return error.StaleAttemptBinding;
-    if (step != c.SQLITE_ROW) return error.OperationReadFailed;
-    // Every write that settles this Attempt changes its Session.
-    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(statement, 4, &session);
-    try store_core.touch(self, session.slice());
-    if (session.len != change_ring.id_bytes) return error.CorruptStore;
-    try attemptStanding(.{
-        .turn_id = c.sqlite3_column_int64(statement, 0),
-        .attempt_ordinal = c.sqlite3_column_int64(statement, 1),
-        .resolved = c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL,
-        .interrupted = c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL,
-    }, binding);
-    return session.slice()[0..change_ring.id_bytes].*;
-}
+/// The columns of an Operation `o` that decide whether a binding is
+/// current (`attemptStanding`).
+const standing_columns = "o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved,o.interrupted_by_command_key IS NOT NULL AS interrupted";
 
-/// The stored facts that decide whether a binding is still current.
-const AttemptFacts = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool };
+/// What decides whether a binding is current, and the Operation's purpose.
+const attempt_standing = rsql.Read(.{
+    .sql = "SELECT " ++ standing_columns ++ ",o.purpose AS compaction FROM model_operation o WHERE o.operation_id=?1",
+    .Args = struct { operation_id: u64 },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool, compaction: bool },
+    .cardinality = .optional,
+});
+
+/// The purpose of the Operation `binding` names, in one round, while
+/// `attemptStanding` finds the binding current; a missing Operation is
+/// `StaleAttemptBinding`. A failed step is `OperationReadFailed`, main's
+/// name for its Attempt read.
+fn attemptKind(a: anytype, binding: AttemptBinding) !ModelOperationKind {
+    var found: attempt_standing.Result = undefined;
+    a.read(attempt_standing, .{ .operation_id = binding.operation_id }, &found);
+    try runOperationRead(a);
+    const row = found orelse return error.StaleAttemptBinding;
+    try attemptStanding(row, binding);
+    return if (row.compaction) .compaction else .assistant_response;
+}
 
 /// Whether `binding` names the Attempt whose Turn and ordinal these are.
 fn namesAttempt(turn_id: i64, attempt_ordinal: i64, binding: AttemptBinding) bool {
     return turn_id == binding.turn_id and attempt_ordinal == binding.attempt_ordinal;
 }
 
-/// The one rule for a binding: current while it names its Operation's
-/// unresolved Attempt; otherwise `SupersededByControl` when a control
-/// interrupted that Attempt, else `StaleAttemptBinding`.
-fn attemptStanding(facts: AttemptFacts, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!void {
+/// The one rule for a binding, over a row of `standing_columns`: current
+/// while it names its Operation's unresolved Attempt; otherwise
+/// `SupersededByControl` when a control interrupted that Attempt, else
+/// `StaleAttemptBinding`.
+fn attemptStanding(facts: anytype, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!void {
     if (!namesAttempt(facts.turn_id, facts.attempt_ordinal, binding)) return error.StaleAttemptBinding;
     if (!facts.resolved) return;
     if (facts.interrupted) return error.SupersededByControl;
@@ -196,8 +190,7 @@ fn attemptStanding(facts: AttemptFacts, binding: AttemptBinding) error{ StaleAtt
 /// Operation; otherwise `turn_open` is false and unread. A missing Session
 /// row fails to decode, `CorruptStore`, as main's session facts read was.
 const attempt_facts = rsql.Read(.{
-    .sql = "SELECT o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved," ++
-        "o.interrupted_by_command_key IS NOT NULL AS interrupted,o.purpose AS compaction,o.admission_position," ++
+    .sql = "SELECT " ++ standing_columns ++ ",o.purpose AS compaction,o.admission_position," ++
         "coalesce(o.retry_due_at_ms,0)<>0 AS retry_waiting,o.auth_refresh_claimed AS refresh_claimed," ++
         rsql.session_head_columns ++ "," ++
         "CASE WHEN ?2 THEN EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
@@ -223,8 +216,31 @@ const attempt_facts = rsql.Read(.{
 /// `binding` current; a missing Operation is `StaleAttemptBinding`.
 fn currentAttempt(facts: *const attempt_facts.Result, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!*const attempt_facts.Row {
     const row = &(facts.* orelse return error.StaleAttemptBinding);
-    try attemptStanding(.{ .turn_id = row.turn_id, .attempt_ordinal = row.attempt_ordinal, .resolved = row.resolved, .interrupted = row.interrupted }, binding);
+    try attemptStanding(row, binding);
     return row;
+}
+
+/// What decides whether a binding is current, and the Operation's Session.
+/// A missing Session row fails to decode, `CorruptStore`.
+const attempt_session = rsql.Read(.{
+    .sql = "SELECT " ++ standing_columns ++ "," ++ rsql.session_head_columns ++ " " ++
+        "FROM model_operation o LEFT JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
+    .Args = struct { operation_id: u64 },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool, session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+
+/// The Session of the Attempt `binding` names, read in one round, while
+/// the binding is current: what a write for the Attempt ties to with
+/// `@session`. A missing Operation is `StaleAttemptBinding`, and a failed
+/// step `OperationReadFailed`.
+pub fn currentAttemptSession(a: anytype, binding: AttemptBinding) !rsql.SessionHead {
+    var found: attempt_session.Result = undefined;
+    a.read(attempt_session, .{ .operation_id = binding.operation_id }, &found);
+    try runOperationRead(a);
+    const row = found orelse return error.StaleAttemptBinding;
+    try attemptStanding(row, binding);
+    return row.session;
 }
 
 const superseding_control = rsql.Read(.{
