@@ -966,7 +966,7 @@ pub const SessionRow = struct {
         try writeShape(out, json_shape, .{
             self.reference.slice(),                           self.workspace.slice(),
             self.provider,                                    self.model.slice(),
-            self.toolsJson(),                                 self.permission_mode,
+            tools(self.bash, self.web_search),                self.permission_mode,
             if (self.label) |*label| label.slice() else null, self.created_at,
             self.revision,                                    self.end,
             self.first_message,                               &self.work,
@@ -974,9 +974,10 @@ pub const SessionRow = struct {
         });
     }
 
-    fn toolsJson(self: *const SessionRow) []const u8 {
-        if (self.bash) return if (self.web_search) "[\"bash\",\"web_search\"]" else "[\"bash\"]";
-        return if (self.web_search) "[\"web_search\"]" else "[]";
+    /// The `tools` field's text for a row's two tool settings.
+    pub fn tools(bash: bool, web_search: bool) []const u8 {
+        if (bash) return if (web_search) "[\"bash\",\"web_search\"]" else "[\"bash\"]";
+        return if (web_search) "[\"web_search\"]" else "[]";
     }
 };
 

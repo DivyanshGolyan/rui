@@ -1070,19 +1070,23 @@ pub fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
     return @intCast(count);
 }
 
+/// The Session's latest stop's admission cutoff, stepped once.
+pub const stop_cutoff = rsql.Read(.{
+    .sql = session_stop_cutoff_sql,
+    .Args = struct { session: []const u8 },
+    .Row = struct { admission_cutoff: u64 },
+    .cardinality = .each,
+});
+
+/// `stop_cutoff` for unconverted code (`countPendingMessages`, the
+/// report's selected Message), in a round of its own; 0 without a stop.
 pub fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
-    const statement = try store_core.cached(self, session_stop_cutoff_sql);
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    return switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => 0,
-        c.SQLITE_ROW => blk: {
-            const cutoff = c.sqlite3_column_int64(statement, 0);
-            if (cutoff < 0) return error.CorruptStore;
-            break :blk @intCast(cutoff);
-        },
-        else => error.SessionStopReadFailed,
-    };
+    var a = store_access.Access(.read, error{}).within(self);
+    defer a.deinit();
+    var cutoff: reads_domain.First(stop_cutoff.Row) = .{};
+    a.readEach(stop_cutoff, .{ .session = session_ref }, 1, &cutoff);
+    try store_access.runAs(&a, error.SessionStopReadFailed);
+    return if (cutoff.row) |row| row.admission_cutoff else 0;
 }
 
 const insert_command = rsql.Write(.{
@@ -1206,7 +1210,7 @@ pub fn observeCommand(a: anytype, key: []const u8) !CommandObservation {
             const queue = try messageQueue(&row);
             observation.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue };
             switch (queue.state) {
-                .queued, .processing => observation.message.?.progress = try readMessageProgress(a.store, command.target.slice(), row.created_at.get(), queue.state),
+                .queued, .processing => observation.message.?.progress = try readMessageProgress(a, command.target.slice(), row.created_at.get(), queue.state),
                 else => {},
             }
         },
@@ -1262,9 +1266,12 @@ fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
 }
 
 /// A pending Message's progress is its Session's work: its own active
-/// Turn, or the work ahead of it in the queue.
-fn readMessageProgress(self: *Store, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !MessageProgress {
-    const work = (try report_domain.readWorkLocked(self, session_ref, created_at, try store_core.readUnixMilliseconds(self.io))).work;
+/// Turn, or the work ahead of it in the queue. Its rounds follow the
+/// observation's, whose row says whether the Message is pending.
+fn readMessageProgress(a: *report_domain.ReadAccess, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !MessageProgress {
+    var read: report_domain.WorkRead = .{ .session = session_ref };
+    try report_domain.readWorks(a, (&read)[0..1]);
+    const work = try read.work(created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
     if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
     return .{ .status = work.state.progress() orelse return error.CorruptStore, .action_id = work.first_action };
 }

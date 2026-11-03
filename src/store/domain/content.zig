@@ -344,11 +344,6 @@ pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
     return metadataOf(&try readContentRow(self, content_id));
 }
 
-/// `readContentMetadata` of content a public route exposes.
-pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-    return publicMetadata(&try readContentRow(self, content_id));
-}
-
 /// A failed step is `CorruptStore`, main's answer for it. An id below 1
 /// is `CorruptStore` without a read, where main read it and found no row
 /// unless one had that id. Not inlined, so its Access takes no slot in its
