@@ -835,7 +835,7 @@ pub fn serve(
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
         descriptorTransport(served),
-        served.chatgpt() != null,
+        served.leaseWorker() != null,
         os.tag,
     );
     if (descriptor_observation.soft_limit) |limit| {
@@ -873,7 +873,7 @@ pub fn serve(
         intake_capacity,
         3,
         descriptorTransport(served),
-        served.chatgpt() != null,
+        served.leaseWorker() != null,
         os.tag,
     );
     var descriptor_limit_buffer: [32]u8 = undefined;
@@ -989,11 +989,7 @@ pub fn serve(
     if (served.any()) {
         for (served.table.values) |entry| if (entry) |value| {
             try provider.validateEndpoint(value.endpoint);
-            switch (value.credential) {
-                .none => {},
-                .chatgpt_device => |selected| try model_adapter.validateAuthenticationEndpoint(value.endpoint, served.ca_file, selected),
-                .key_file => |key| try model_adapter.validateKeyEndpoint(value.endpoint, served.ca_file, key.fixture),
-            }
+            try value.credential.validate(value.endpoint, served.ca_file);
         };
         try provider.checkLibraries();
     }
