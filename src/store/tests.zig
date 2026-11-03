@@ -13759,11 +13759,18 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
 /// The rendered text of the one statement `report_domain.report_failures`
 /// names `failed` whose text holds `fragment`.
 fn reportStatementForTesting(comptime failed: anyerror, comptime fragment: []const u8) [:0]const u8 {
-    @setEvalBranchQuota(100_000);
+    return namedStatementForTesting(report_domain.report_failures, failed, fragment);
+}
+
+/// The rendered text of the one statement the failure table `named`
+/// holds whose text holds `fragment`, among those it names `failed` when
+/// that is not null.
+fn namedStatementForTesting(comptime named: anytype, comptime failed: ?anyerror, comptime fragment: []const u8) [:0]const u8 {
+    @setEvalBranchQuota(200_000);
     comptime var found: ?[:0]const u8 = null;
-    inline for (report_domain.report_failures) |pair| {
-        if (comptime pair[1] == failed and std.mem.indexOf(u8, pair[0].sql, fragment) != null) {
-            if (found != null) @compileError("two statements hold " ++ fragment);
+    inline for (named) |pair| {
+        if (comptime (failed == null or pair[1] == failed.?) and std.mem.indexOf(u8, pair[0].sql, fragment) != null) {
+            if (found != null and !std.mem.eql(u8, found.?, pair[0].sql)) @compileError("two statements hold " ++ fragment);
             found = pair[0].sql;
         }
     }
@@ -13948,6 +13955,128 @@ test "a Current report's step faults answer the name of the earliest round that 
         if (comptime @TypeOf(case[2]) == @TypeOf(null)) {
             std.testing.allocator.free(try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
         } else try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    }
+}
+
+/// Fails the statement whose text is `sql` while `route` reads `session`,
+/// and expects `expected`.
+fn expectRouteStepFailure(storage: *Store, tmp: *std.testing.TmpDir, route: enum { report, inspection, activity }, session: []const u8, sql: [:0]const u8, expected: anyerror) !void {
+    var fault: TestingStatementFault = .{ .sql = sql };
+    fault.arm(storage.database);
+    defer fault.disarm(storage.database);
+    const result: anyerror!void = switch (route) {
+        .report => if (testingSessionReport(storage, tmp, session, 1024 * 1024)) |report| std.testing.allocator.free(report) else |err| err,
+        .inspection => if (storage.inspectSessionForTesting(session)) |_| {} else |err| err,
+        .activity => blk: {
+            var request: protocol.ActivityPage = .{ .direction = .backward };
+            try request.session.set(session);
+            break :blk if (store_core.activityPageForTesting(storage, request)) |_| {} else |err| err;
+        },
+    };
+    try std.testing.expectError(expected, result);
+    try std.testing.expect(fault.failed > 0);
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a Proposal check folded into the tool outcome rule answers the rule's CallReadFailed" {
+    // Main checked each call's Proposal in a statement of its own, whose
+    // failed step went through as StatementFailed; the rule's read now
+    // checks it, on an Activity page (`operation_outcome`) and in the
+    // Current report (`active_tool_calls`), and answers that read's name.
+    inline for (.{
+        .{ .activity, namedStatementForTesting(reads_domain.read_failures, null, "SELECT DISTINCT ?1 AS operation_id") },
+        .{ .report, namedStatementForTesting(report_domain.session_count_failures, null, "SELECT DISTINCT operation.operation_id") },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "proposal-fold");
+        try expectRouteStepFailure(&storage, &tmp, case[0], session.slice(), case[1], error.CallReadFailed);
+    }
+}
+
+test "a Current report's presentation reads answer their list's name" {
+    // Main read each listed call's line and fields apart and named their
+    // failed steps CorruptStore; they are the list's own columns now. The
+    // Turn proposes an asked-for call, whose Action waits, and a call of
+    // an unknown tool, which is rejected.
+    inline for (.{
+        .{ namedStatementForTesting(report_domain.current_failures, null, "a.resolution_code IS NULL ORDER BY a.action_id"), error.ActionReadFailed },
+        .{ namedStatementForTesting(report_domain.current_failures, null, "CROSS JOIN content rejection"), error.CallReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "presentation-fold");
+        try submitTestMessage(&storage, &tmp, "presentation-fold-input", "presentation-fold-message", session.slice(), "call");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "presentation-fold-asked", .name = "bash", .encoded_call_id = "presentation-fold-asked", .decoded_call_id = "presentation-fold-asked", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+            .{ .item_id = "presentation-fold-unknown", .name = "unknown", .encoded_call_id = "presentation-fold-unknown", .decoded_call_id = "presentation-fold-unknown", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTesting(&storage, &tmp, binding, "presentation-fold-output", &calls);
+        try expectRouteStepFailure(&storage, &tmp, .report, session.slice(), case[0], case[1]);
+    }
+}
+
+test "admission's context read answers CorruptStore, as admission names it" {
+    // Main checked whether the context changed in a statement of its own,
+    // whose failed step went through as StatementFailed, and named the
+    // estimate's CorruptStore; `admission_context` reads both. The second
+    // Message follows a Turn with usage under a trigger, so admission
+    // weighs the context, and the report estimates it.
+    for ([_]bool{ false, true }) |report| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "context-fold");
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("context-fold-trigger");
+        try patch.session.set(session.slice());
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("1000");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "context-fold-one", "context-fold-one", session.slice(), "one");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
+        try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
+        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT") };
+        fault.arm(storage.database);
+        defer fault.disarm(storage.database);
+        if (report)
+            try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
+        else
+            try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "Session inspection's count reads answer main's names" {
+    // Inspection reads the Current report's counts and the rule in the
+    // same rounds, under main's names.
+    inline for (.{
+        .{ "SELECT operation.operation_id FROM", error.CallReadFailed },
+        .{ "SELECT DISTINCT operation.operation_id", error.CallReadFailed },
+        .{ "count(*) AS actions", error.ActionReadFailed },
+        .{ "count(*) AS rejected", error.CallReadFailed },
+        .{ "count(*) AS pending", error.MessageAdmissionReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "inspection-names");
+        // A queued Message, so the pending count steps.
+        try submitTestMessage(&storage, &tmp, "inspection-names-queued", "inspection-names-queued", session.slice(), "later");
+        try expectRouteStepFailure(&storage, &tmp, .inspection, session.slice(), namedStatementForTesting(report_domain.session_count_failures, null, case[0]), case[1]);
     }
 }
 

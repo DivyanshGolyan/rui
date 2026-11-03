@@ -1029,7 +1029,7 @@ const actionable_permissions = rsql.Read(.{
 /// `CorruptStore`, main's answer for content metadata. A presentation's
 /// reads, which main named apart, are its list's own columns now, so
 /// they take its list's name.
-const current_failures = .{
+pub const current_failures = .{
     .{ selected_active, error.TurnReadFailed },
     .{ selected_queued, error.MessageAdmissionReadFailed },
     .{ recent_messages, error.TurnReadFailed },

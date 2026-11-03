@@ -114,7 +114,7 @@ pub fn visitRow(visitor: anytype, row: anytype) bool {
 /// many rows' reads answers as main did for the one that failed; any
 /// other is `CorruptStore`. A Proposal's keeps `StatementFailed`, as
 /// main's `proposal` let it through.
-const read_failures = .{
+pub const read_failures = .{
     .{ missing_assistant_entry, error.ConversationReadFailed },
     .{ public_page, error.ConversationReadFailed },
     .{ activity_forward, error.ActivityReadFailed },
