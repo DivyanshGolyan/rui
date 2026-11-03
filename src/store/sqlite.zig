@@ -5,6 +5,7 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const tool_catalog = @import("../tools.zig");
 const rsql = @import("rsql.zig");
+const store_schema = @import("schema.zig");
 const change_ring = @import("../change_ring.zig");
 pub const c = @import("sqlite");
 
@@ -42,12 +43,6 @@ pub fn pragmaInt(database: *c.sqlite3, sql: [:0]const u8) !u32 {
     const value = c.sqlite3_column_int64(statement, 0);
     if (value < 0 or value > std.math.maxInt(u32)) return error.CorruptStore;
     return @intCast(value);
-}
-
-/// SQLite binds the text without copying it, so it borrows the caller's
-/// Label, never a by-value copy that ends with this call.
-pub fn bindOptionalLabel(statement: *c.sqlite3_stmt, index: c_int, label: *const ?protocol.Bounded(protocol.max_label_bytes)) !void {
-    if (label.*) |*value| try bindText(statement, index, value.slice()) else try bindNullableI64(statement, index, null);
 }
 
 pub fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bounded(protocol.max_label_bytes) {
@@ -181,22 +176,15 @@ pub fn dbConfig(database: *c.sqlite3, operation: c_int, value: c_int) !void {
     }
 }
 
-/// The tests' touch oracle: each table that carries a Session, the columns
-/// naming the Sessions a new or removed row changes, then those an updated
-/// row changes. An admission's sender, position, content and time are
-/// written once, so an update changes only its recipient.
-pub const touch_oracle_owners = .{
-    .{ "session", .{"session_ref"}, .{"session_ref"} },
-    .{ "session_revision", .{"session_ref"}, .{"session_ref"} },
-    .{ "message_admission", .{ "session_ref", "sender_session_ref" }, .{"session_ref"} },
-    .{ "sent_rejection", .{"sender_session_ref"}, .{"sender_session_ref"} },
-    .{ "turn", .{"session_ref"}, .{"session_ref"} },
-    .{ "session_stop", .{"session_ref"}, .{"session_ref"} },
-    .{ "model_operation", .{"session_ref"}, .{"session_ref"} },
-    .{ "action_operation", .{"session_ref"}, .{"session_ref"} },
-    .{ "conversation_entry", .{"session_ref"}, .{"session_ref"} },
-    .{ "model_output_item", .{"session_ref"}, .{"session_ref"} },
-    .{ "model_tool_call", .{"session_ref"}, .{"session_ref"} },
+/// The tests' touch oracle watches each table that carries a Session.
+/// An inserted or deleted row changes every Session it names
+/// (`schema.sessionColumns`); an updated row changes its first Session,
+/// and its second too when the update sets a column that Session reads
+/// (`schema.readByBoth`).
+pub const touch_oracle_tables = .{
+    "session",            "session_revision",  "message_admission", "sent_rejection",
+    "turn",               "session_stop",      "model_operation",   "action_operation",
+    "conversation_entry", "model_output_item", "model_tool_call",
 };
 
 /// Test builds: a temporary trigger on each table that carries a Session
@@ -206,18 +194,20 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
     try setLimit(database, c.SQLITE_LIMIT_TRIGGER_DEPTH, 1);
     try exec(database, "CREATE TEMP TABLE touched_oracle(session_ref TEXT)");
-    inline for (touch_oracle_owners) |owner| {
+    inline for (touch_oracle_tables) |table| {
+        const sessions = comptime store_schema.sessionColumns(table);
         inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {
-            const body = comptime blk: {
+            const columns = comptime if (std.mem.eql(u8, event, "UPDATE")) sessions[0..1] else sessions;
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ table, event, event, table, comptime oracleBody(event, columns) }));
+        }
+        const both = comptime store_schema.readByBoth(table);
+        if (both.len != 0) {
+            const names = comptime blk: {
                 var text: []const u8 = "";
-                const columns = if (std.mem.eql(u8, event, "UPDATE")) owner[2] else owner[1];
-                for (columns) |column| {
-                    if (!std.mem.eql(u8, event, "DELETE")) text = text ++ "INSERT INTO touched_oracle VALUES(NEW." ++ column ++ ");";
-                    if (!std.mem.eql(u8, event, "INSERT")) text = text ++ "INSERT INTO touched_oracle VALUES(OLD." ++ column ++ ");";
-                }
+                for (both, 0..) |name, index| text = text ++ (if (index == 0) "" else ",") ++ name;
                 break :blk text;
             };
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ owner[0], event, event, owner[0], body }));
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, names, table, comptime oracleBody("UPDATE", sessions[1..]) }));
         }
     }
     // How far a person read is no Session list row's fact, so recording it
@@ -232,6 +222,16 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
     const names = c.sqlite3_column_text(statement, 0) orelse return error.SqliteExecFailed;
     var sql: [2048]u8 = undefined;
     try exec(database, try std.fmt.bufPrintSentinel(&sql, "CREATE TEMP TRIGGER touched_session_UPDATE AFTER UPDATE OF {s} ON main.session BEGIN INSERT INTO touched_oracle VALUES(NEW.session_ref);INSERT INTO touched_oracle VALUES(OLD.session_ref); END", .{std.mem.span(names)}, 0));
+}
+
+/// A trigger body that notes each of `columns`' Sessions, new and old.
+fn oracleBody(comptime event: []const u8, comptime columns: []const []const u8) []const u8 {
+    var text: []const u8 = "";
+    for (columns) |column| {
+        if (!std.mem.eql(u8, event, "DELETE")) text = text ++ "INSERT INTO touched_oracle VALUES(NEW." ++ column ++ ");";
+        if (!std.mem.eql(u8, event, "INSERT")) text = text ++ "INSERT INTO touched_oracle VALUES(OLD." ++ column ++ ");";
+    }
+    return text;
 }
 
 pub fn setLimit(database: *c.sqlite3, category: c_int, value: c_int) !void {
@@ -398,12 +398,16 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
 /// the text uses @now. Integers are copied into the statement. Text and
 /// blobs are read in place when the round steps the statement, so nothing
 /// is allocated: a `[]const u8` or `*const [n]u8` argument is the caller's
-/// memory, which outlives the round, and a SessionHead binds `session_ref`,
-/// the reference the Access keeps until commit.
-pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64, session_ref: ?*const change_ring.Id) !void {
+/// memory, which outlives the round, and the n-th SessionHead binds
+/// `session_refs[n]`, a reference the Access keeps until commit.
+pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64, session_refs: []const change_ring.Id) !void {
     const info = @typeInfo(S.Args).@"struct";
+    comptime var head = 0;
     inline for (info.field_names, info.field_types, 1..) |name, Field, index| {
-        if (Field == rsql.SessionHead) try bindText(statement, index, session_ref.?) else try bindValue(statement, index, Field, @field(args, name));
+        if (Field == rsql.SessionHead) {
+            try bindText(statement, index, &session_refs[head]);
+            head += 1;
+        } else try bindValue(statement, index, Field, @field(args, name));
     }
     if (S.uses_now) try bindI64(statement, info.field_names.len + 1, now);
 }
@@ -429,45 +433,76 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
     }
 }
 
-/// The current row as `Row`. Every value that breaks its type is
+/// Fills `row` from the current row, field by field in place, so a Row
+/// over 1 KiB is never copied. A pointer field fills what it points to
+/// (`rsql.fillsInPlace`). Every value that breaks its type is
 /// `CorruptStore`, here and nowhere else.
-pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt) error{CorruptStore}!Row {
-    var row: Row = undefined;
+pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt, row: *Row) error{CorruptStore}!void {
     comptime var column: c_int = 0;
     const info = @typeInfo(Row).@"struct";
     inline for (info.field_names, info.field_types) |name, Field| {
-        @field(row, name) = decodeValue(Field, statement, column) catch return error.CorruptStore;
+        decodeValue(Field, statement, column, &@field(row, name)) catch return error.CorruptStore;
         column += if (Field == rsql.SessionHead) 3 else 1;
     }
-    return row;
 }
 
-fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int) !T {
+/// Whether `T` is a `protocol.Bounded`: text up to its capacity.
+fn isBounded(comptime T: type) bool {
+    if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
+    const bytes = @typeInfo(@FieldType(T, "bytes"));
+    return bytes == .array and T == protocol.Bounded(bytes.array.len);
+}
+
+fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out: *T) !void {
     if (T == rsql.SessionHead) {
         const ref = try columnText(statement, column);
         if (ref.len != @sizeOf(@FieldType(rsql.SessionHead, "ref"))) return error.CorruptStore;
-        return .{
+        out.* = .{
             .ref = ref[0..@sizeOf(@FieldType(rsql.SessionHead, "ref"))].*,
             .workspace_key = .of(try readPositive(statement, column + 1)),
             .next_position = .of(try readPositive(statement, column + 2)),
         };
+        return;
     }
-    if (T == rsql.Positive) return .of(try readPositive(statement, column));
+    if (T == rsql.Positive) {
+        out.* = .of(try readPositive(statement, column));
+        return;
+    }
+    // Text goes straight into the Row's own bytes.
+    if (comptime isBounded(T)) return out.set(try columnText(statement, column));
     switch (@typeInfo(T)) {
-        .optional => |optional| {
-            if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
-            return try decodeValue(optional.child, statement, column);
+        .pointer => |pointer| {
+            comptime std.debug.assert(pointer.size == .one);
+            try decodeValue(pointer.child, statement, column, out.*);
         },
-        .bool => return switch (try readCount(statement, column)) {
+        .optional => |optional| {
+            if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) {
+                out.* = null;
+            } else if (comptime isBounded(optional.child)) {
+                // Naming only `len` leaves the bytes unwritten until `set` fills them.
+                out.* = optional.child{ .len = 0 };
+                try decodeValue(optional.child, statement, column, &out.*.?);
+            } else {
+                var present: optional.child = undefined;
+                try decodeValue(optional.child, statement, column, &present);
+                out.* = present;
+            }
+        },
+        .bool => out.* = switch (try readCount(statement, column)) {
             0 => false,
             1 => true,
-            else => error.CorruptStore,
+            else => return error.CorruptStore,
         },
-        .int => return std.math.cast(T, try readCount(statement, column)) orelse error.CorruptStore,
-        .@"enum" => return std.meta.stringToEnum(T, try columnText(statement, column)) orelse error.CorruptStore,
-        .array => {
-            comptime std.debug.assert(T == [32]u8);
-            return readDigest(statement, column);
+        .int => out.* = std.math.cast(T, try readCount(statement, column)) orelse return error.CorruptStore,
+        .@"enum" => out.* = std.meta.stringToEnum(T, try columnText(statement, column)) orelse return error.CorruptStore,
+        // A blob of exactly the array's length, such as a digest.
+        .array => |array| {
+            comptime std.debug.assert(array.child == u8);
+            // The type first: reading the bytes may convert the value.
+            if (c.sqlite3_column_type(statement, column) != c.SQLITE_BLOB) return error.CorruptStore;
+            const bytes = columnBytes(statement, column);
+            if (bytes.len != array.len) return error.CorruptStore;
+            @memcpy(out, bytes);
         },
         else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
     }

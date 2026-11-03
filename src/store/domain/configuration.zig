@@ -12,6 +12,8 @@ const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const sqlite = @import("../sqlite.zig");
+const rsql = @import("../rsql.zig");
+const Access = @import("../access.zig").Access;
 const c = sqlite.c;
 const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
@@ -68,6 +70,8 @@ pub const default_tools_mask: u8 = blk: {
     break :blk mask;
 };
 
+/// A Session's saved configuration. Its fields name, in order, the columns
+/// `saved_session` reads, so a read decodes into it in place.
 pub const CurrentConfiguration = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     provider: protocol.Provider = undefined,
@@ -84,6 +88,8 @@ pub const CurrentConfiguration = struct {
     label: ?protocol.Bounded(protocol.max_label_bytes) = null,
     /// Read only: the Store dates a Session when it inserts it.
     created_at: u64 = 0,
+    /// Read only: the change ring's key for the Session's Workspace.
+    workspace_key: u64 = 0,
 };
 
 /// The Session columns turn work, settlement and page cursors read, without
@@ -112,11 +118,19 @@ pub const ConfigurationContentAction = enum(u2) {
     clear,
 };
 
+/// A created Session has no output schema by default, so the schema's
+/// plan never imports empty content.
+pub const OutputSchemaAction = enum(u2) {
+    preserve,
+    import_requested,
+    clear,
+};
+
 pub const ConfigurationUpdatePlan = union(enum) {
     rejected: protocol.ConfigurationRejection,
     update: struct {
         instructions: ConfigurationContentAction,
-        output_schema: ConfigurationContentAction,
+        output_schema: OutputSchemaAction,
     },
 };
 
@@ -234,19 +248,29 @@ pub fn planConfigurationUpdate(
     } };
 }
 
-pub fn configureLocked(
-    self: *Store,
-    request: *const protocol.ConfigureCommand,
-    faults: Faults,
-) !ConfigureReply {
-    try store_core.begin(self);
-
+/// Round 1 reads the command's saved answer, the Session's saved
+/// configuration and the content lookups its instructions and output
+/// schema need. A creation then reads its Workspace's key and whether its
+/// drawn reference is taken, which depends on the replay check: a replay
+/// draws no reference and canonicalizes no Workspace. Each new sealed
+/// import runs its insert before streaming into it (`importSealed`). The
+/// decision is `applyConfiguration`; the write round saves the Session,
+/// the command and its revision, then commits.
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;
     const creating = request.session.len == 0;
     const digest = request.semanticDigest();
-    switch (try command_domain.classifyReplay(self, protocol.ConfigurationRejection, .configure, command.key.slice(), command.session.slice(), &digest)) {
+    var saved: command_domain.saved_command.Result = undefined;
+    command_domain.lookupCommand(a, command.key.slice(), &saved);
+    const reads = a.store.configurationReads();
+    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    prepareConfiguration(a, command.session.slice(), &command.configuration, reads);
+    try a.run();
+
+    if (saved != null) try a.abandon(.{});
+    switch (try command_domain.classify(protocol.ConfigurationRejection, &saved, .configure, command.session.slice(), &digest)) {
         .fresh => {},
         .conflict => return .conflict,
         .accepted => |existing| return .{ .accepted = .{
@@ -258,51 +282,247 @@ pub fn configureLocked(
         .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
     }
 
-    if (command.require_model and !try servesProvider(self, &command.configuration, command.session.slice())) {
-        return try saveConfigurationRejection(self, command, &digest, .model_capability_unavailable, faults);
+    if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found) reads.next.provider else null)) {
+        return saveConfigurationRejection(a, command, &digest, .model_capability_unavailable, faults);
     }
-    const applied = switch (try applyConfiguration(self, command.session.slice(), &command.configuration, faults)) {
-        .rejected => |code| return saveConfigurationRejection(self, command, &digest, code, faults),
+    const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, faults, reads)) {
+        .rejected => |code| return saveConfigurationRejection(a, command, &digest, code, faults),
         .accepted => |value| value,
     };
-    try insertConfiguredCommand(
-        self,
-        &applied,
-        command.key.slice(),
-        .configure,
-        &digest,
-        applied.instructions_id,
-        applied.output_schema_id,
-        .{ .accepted = true, .revision = applied.revision, .created = creating },
-    );
+    const answer: StoredAnswer = .{ .accepted = true, .revision = applied.revision, .created = creating };
+    try queueConfiguredCommand(a, &applied, command.key.slice(), .configure, &digest, applied.instructions_id, applied.output_schema_id, &answer);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
 }
 
 /// Settings `applyConfiguration` wrote to a Session, whose revision row
-/// `insertConfiguredCommand` records with the command.
+/// `queueConfiguredCommand` records with the command.
 pub const Applied = struct {
     session: protocol.Bounded(protocol.max_session_bytes),
+    head: rsql.SessionHead,
     revision: u64,
-    instructions_id: ?i64,
-    output_schema_id: ?i64,
+    instructions_id: ?u64,
+    output_schema_id: ?u64,
     instructions_updated: bool,
 };
 
-/// Applies settings within the caller's transaction. Creation and its
-/// first Message can share this owner without an intermediate commit.
-/// An empty `session` creates one; the answer names the Session either way.
-/// The caller records an accepted answer with `insertConfiguredCommand`.
+pub const Application = union(enum) {
+    accepted: Applied,
+    rejected: protocol.ConfigurationRejection,
+};
+
+/// What `prepareConfiguration` reads in a round, and where the round
+/// leaves it; its owner keeps it until the transaction ends. Declared with
+/// a literal that names `next`'s big fields' lengths, so their bytes stay
+/// unwritten.
+pub const ConfigurationReads = struct {
+    /// The Session's saved configuration, which the plan then updates in
+    /// place: one 4.6 KB value, not a copy of it.
+    next: CurrentConfiguration,
+    found: bool = false,
+    reference: [protocol.session_id_bytes]u8 = undefined,
+    workspace_digest: [32]u8 = undefined,
+    creation: creation_facts.Result = undefined,
+    instructions: content_domain.Import = undefined,
+    output_schema: content_domain.Import = undefined,
+    empty: content_domain.Import = content_domain.empty_content,
+    /// The rows `lookupPair` found, when round 1 needed two lookups.
+    pair: ?content_domain.Pair = null,
+
+    /// The value the instructions import through: the requested content,
+    /// or the empty default a creation imports.
+    fn instructionsValue(reads: *ConfigurationReads, configuration: *const protocol.Configuration) *content_domain.Import {
+        return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
+    }
+};
+
+/// A Session's saved configuration, decoded into a CurrentConfiguration in
+/// place; `checkSaved` holds it to its types.
+const saved_session = rsql.Read(.{
+    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id,tools_mask,permission_mode," ++
+        "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
+        "reasoning_effort,label,created_at,workspace_key FROM session WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = CurrentConfiguration,
+    .cardinality = .optional,
+});
+
+/// Where a new Session would go: the key of another Session's same
+/// Workspace, when there is one, and whether its new reference is taken.
+const creation_facts = rsql.Read(.{
+    .sql = "SELECT (SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1) AS workspace_key," ++
+        "EXISTS(SELECT 1 FROM session WHERE session_ref=?3) AS taken",
+    .Args = struct { digest: *const [32]u8, workspace: []const u8, session: []const u8 },
+    .Row = struct { workspace_key: ?rsql.Positive, taken: bool },
+    .cardinality = .one,
+});
+
+/// A new Session starts at revision 1 and position 1. A Workspace's key is
+/// the `created_seq` of its first Session.
+const insert_session = rsql.Write(.{
+    .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position," ++
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16)",
+    .Args = struct {
+        session: rsql.SessionHead,
+        workspace: []const u8,
+        model: []const u8,
+        instructions_id: ?u64,
+        tools_mask: u8,
+        permission_mode: u8,
+        output_schema_id: ?u64,
+        provider: protocol.Provider,
+        compaction_trigger: ?u64,
+        output_reservation: ?u64,
+        reasoning_effort: ?protocol.ReasoningEffort,
+        label: ?[]const u8,
+        codec: []const u8,
+        digest: *const [32]u8,
+        created_seq: u64,
+        workspace_key: u64,
+    },
+    // Its round read the reference free, under the single writer.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Queues inserting the created Session `head` with the settings `next`.
+/// `configure` calls it, and a test drives it with references the schema
+/// refuses.
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64) void {
+    a.write(insert_session, .{
+        .session = head,
+        .workspace = next.workspace.slice(),
+        .model = next.model.slice(),
+        .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
+        .tools_mask = next.tools_mask,
+        .permission_mode = next.permission_mode,
+        .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
+        .provider = next.provider,
+        .compaction_trigger = next.compaction_trigger,
+        .output_reservation = next.output_reservation,
+        .reasoning_effort = next.reasoning_effort,
+        .label = if (next.label) |*label| label.slice() else null,
+        .codec = @tagName(next.provider.codec()),
+        .digest = workspace_digest,
+        .created_seq = created_seq,
+        .workspace_key = head.workspace_key.get(),
+    });
+}
+
+const update_session = rsql.Write(.{
+    .sql = "UPDATE session SET model=?2,instructions_content_id=?3,tools_mask=?4,permission_mode=?5,output_schema_content_id=?6,revision=?7,provider=?8," ++
+        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12 WHERE session_ref=@session(?1)",
+    .Args = struct {
+        session: rsql.SessionHead,
+        model: []const u8,
+        instructions_id: ?u64,
+        tools_mask: u8,
+        permission_mode: u8,
+        output_schema_id: ?u64,
+        revision: u64,
+        provider: protocol.Provider,
+        compaction_trigger: ?u64,
+        output_reservation: ?u64,
+        reasoning_effort: ?protocol.ReasoningEffort,
+        label: ?[]const u8,
+    },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
+});
+
+/// The UPDATE a configure of an existing Session runs once it has touched
+/// that Session, which a test faults.
+pub const update_session_sql = update_session.sql;
+
+/// The one writer of session_revision: it copies the Session row as
+/// written under `command_key`, which an earlier write of the round saved.
+const insert_revision = rsql.Write(.{
+    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask," ++
+        "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tools_mask,permission_mode,output_schema_content_id,provider," ++
+        "compaction_trigger,output_reservation,reasoning_effort,label FROM session WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Queues reading `session_ref`'s saved configuration into `current` in
+/// place; `found` says whether it exists. A missing one leaves `current`
+/// as the caller declared it, which `configure` declares with
+/// `CurrentConfiguration`'s field defaults: the settings a creation
+/// starts from.
+/// `checkSaved` follows the round.
+pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfiguration, found: *bool) void {
+    a.readInto(saved_session, .{ .session = session_ref }, current, found);
+}
+
+/// Refuses a saved configuration that breaks what its columns may hold.
+pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void {
+    const instructions = current.instructions_id orelse return error.CorruptStore;
+    if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.tools_mask > tool_catalog.all_tools_mask or
+        current.permission_mode > 1 or current.revision == 0 or current.next_position == 0 or current.compaction_trigger == @as(?u64, 0) or
+        current.created_at == 0 or current.workspace_key == 0) return error.CorruptStore;
+    if (current.label) |*label| if (!protocol.validLabel(label.slice())) return error.CorruptStore;
+}
+
+/// `readSaved` and `checkSaved` for unconverted code: whether the Session
+/// exists, writing every field of `current` when it does.
+pub fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfiguration) !bool {
+    var a = Access(.read, error{}).within(self);
+    defer a.deinit();
+    var found = false;
+    readSaved(&a, session_ref, current, &found);
+    try a.run();
+    if (found) try checkSaved(current);
+    return found;
+}
+
+/// A fresh Session reference: 32 symbols divide 256 exactly, so six
+/// independent five-bit draws give 30 bits, without modulo bias or a weak
+/// PRNG.
+fn newReference(io: std.Io, reference: *[protocol.session_id_bytes]u8) !void {
+    try std.Io.randomSecure(io, reference);
+    for (reference) |*byte| byte.* = protocol.session_alphabet[byte.* & 31];
+}
+
+/// Queues what applying `configuration` to `session` reads (an empty
+/// `session` creates one) into `reads`: one content lookup, or one pair of
+/// them when both the instructions and an output schema need one and name
+/// different rows. When they name one row, the schema shares the
+/// instructions' value, so the first import's insert is the second's row.
+pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *const protocol.Configuration, reads: *ConfigurationReads) void {
+    const creating = session.len == 0;
+    if (!creating) readSaved(a, session, &reads.next, &reads.found);
+    const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
+        reads.instructions = content_domain.sealedIdentity(&configuration.instructions);
+        break :requested &reads.instructions;
+    } else if (creating) &reads.empty else null;
+    const output_schema: ?*content_domain.Import = if (configuration.output_schema.state == .value) requested: {
+        reads.output_schema = content_domain.sealedIdentity(&configuration.output_schema);
+        break :requested &reads.output_schema;
+    } else null;
+    if (instructions != null and output_schema != null) {
+        reads.pair = .{ .first = null, .second = null };
+        content_domain.lookupPair(a, instructions.?, output_schema.?, &reads.pair.?);
+    } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
+}
+
+fn readCreation(a: anytype, reads: *ConfigurationReads) void {
+    a.read(creation_facts, .{ .digest = &reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
+}
+
+/// After `prepareConfiguration`'s round: decides the configuration, and
+/// queues its content and the Session's insert or update. Creation and its
+/// first Message can share this owner without an intermediate commit. The
+/// answer names the Session either way; the caller records an accepted
+/// one with `queueConfiguredCommand`.
 pub fn applyConfiguration(
-    self: *Store,
+    a: anytype,
+    io: std.Io,
     session: []const u8,
     configuration: *const protocol.Configuration,
     faults: Faults,
-) !union(enum) {
-    accepted: Applied,
-    rejected: protocol.ConfigurationRejection,
-} {
+    reads: *ConfigurationReads,
+) !Application {
     const creating = session.len == 0;
     if (!creating and !protocol.validSessionId(session)) {
         return .{ .rejected = .invalid_session_reference };
@@ -317,87 +537,106 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_model };
     }
     if (configuration.output_schema.state == .value and
-        !try model_settlement_domain.validateJsonFile(self.io, configuration.output_schema.file orelse return error.MissingContentCustody))
+        !try model_settlement_domain.validateJsonFile(io, configuration.output_schema.file orelse return error.MissingContentCustody))
     {
         return .{ .rejected = .invalid_output_schema };
     }
 
-    // The current configuration is read into `next`, which the plan
-    // then updates in place: one 4.6 KB value, not a copy of it.
-    var next: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
-    const found = try readSession(self, session, &next);
-    if (!creating and !found) {
+    if (reads.pair) |*rows| content_domain.foundPair(rows, reads.instructionsValue(configuration), &reads.output_schema);
+    const next = &reads.next;
+    if (!creating and !reads.found) {
         return .{ .rejected = .unknown_session };
     }
-    const current_configuration: ?*const CurrentConfiguration = if (found) &next else null;
+    if (reads.found) try checkSaved(next);
+    const current_configuration: ?*const CurrentConfiguration = if (reads.found) next else null;
     if (configurationBeforeWorkspace(current_configuration, configuration)) |rejection| {
         return .{ .rejected = rejection };
     }
 
-    // A created Session's canonical workspace lands in `next` itself;
-    // an existing one's is only compared, in sameWorkspace's own frame.
+    // An existing Session's Workspace is only compared, in sameWorkspace's
+    // own frame; a created one's was canonicalized into `next`.
     const workspace_matches: ?bool = if (configuration.workspace.state == .value) matches: {
-        const supplied = configuration.workspace.value.slice();
-        if (found) {
-            break :matches sameWorkspace(self.io, supplied, next.workspace.slice()) catch {
+        if (reads.found) {
+            break :matches sameWorkspace(io, configuration.workspace.value.slice(), next.workspace.slice()) catch {
                 return .{ .rejected = .invalid_workspace };
             };
         }
-        validateWorkspace(self.io, supplied, &next.workspace) catch {
-            return .{ .rejected = .invalid_workspace };
-        };
+        validateWorkspace(io, configuration.workspace.value.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };
+        reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
         break :matches true;
     } else null;
 
-    const created = !found;
+    const created = !reads.found;
     const content_actions = switch (planConfigurationUpdate(
         current_configuration,
         configuration,
         workspace_matches,
-        &next,
+        next,
     )) {
         .rejected => |rejection| return .{ .rejected = rejection },
         .update => |actions| actions,
     };
 
-    var command_instructions_id: ?i64 = null;
+    var command_instructions_id: ?u64 = null;
     switch (content_actions.instructions) {
         .preserve => {},
         .import_requested => {
-            command_instructions_id = try content_domain.importContent(self, &configuration.instructions, faults);
-            next.instructions_id = command_instructions_id;
+            command_instructions_id = try content_domain.importSealed(a, io, &configuration.instructions, &reads.instructions, faults);
+            next.instructions_id = @intCast(command_instructions_id.?);
         },
-        .default_empty => next.instructions_id = try content_domain.importEmptyContent(self),
+        .default_empty => next.instructions_id = @intCast(try content_domain.importBytes(a, &reads.empty, "")),
         .clear => next.instructions_id = null,
     }
-    var command_output_schema_id: ?i64 = null;
+    var command_output_schema_id: ?u64 = null;
     switch (content_actions.output_schema) {
         .preserve => {},
         .import_requested => {
-            command_output_schema_id = try content_domain.importContent(self, &configuration.output_schema, faults);
-            next.output_schema_id = command_output_schema_id;
+            command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
+            next.output_schema_id = @intCast(command_output_schema_id.?);
         },
-        .default_empty => next.output_schema_id = try content_domain.importEmptyContent(self),
         .clear => next.output_schema_id = null,
     }
     var target: protocol.Bounded(protocol.max_session_bytes) = .{};
+    var head: rsql.SessionHead = undefined;
     if (created) {
-        const created_seq = try store_core.takeIdentity(self, .created_seq);
-        while (true) {
-            var random: [protocol.session_id_bytes]u8 = undefined;
-            try std.Io.randomSecure(self.io, &random);
-            // 32 symbols divide 256 exactly: six independent five-bit
-            // draws give 30 bits, without modulo bias or a weak PRNG.
-            for (&random) |*byte| byte.* = protocol.session_alphabet[byte.* & 31];
-            try target.set(&random);
-            if (try insertSession(self, target.slice(), &next, created_seq)) break;
+        std.debug.assert(next.revision == 1);
+        const created_seq = try a.identity(.created_seq);
+        // Each drawn reference is checked free in a round of its own, after
+        // the replay check, so a replay draws none; a taken one draws again.
+        reads.creation.taken = true;
+        while (reads.creation.taken) {
+            try newReference(io, &reads.reference);
+            readCreation(a, reads);
+            try a.run();
         }
+        head = .{
+            .ref = reads.reference,
+            .workspace_key = if (reads.creation.workspace_key) |key| key else .of(created_seq),
+            .next_position = .of(1),
+        };
+        insertSession(a, head, next, &reads.workspace_digest, created_seq);
+        try target.set(&reads.reference);
     } else {
+        head = .{ .ref = session[0..protocol.session_id_bytes].*, .workspace_key = .of(next.workspace_key), .next_position = .of(next.next_position) };
+        a.write(update_session, .{
+            .session = head,
+            .model = next.model.slice(),
+            .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
+            .tools_mask = next.tools_mask,
+            .permission_mode = next.permission_mode,
+            .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
+            .revision = next.revision,
+            .provider = next.provider,
+            .compaction_trigger = next.compaction_trigger,
+            .output_reservation = next.output_reservation,
+            .reasoning_effort = next.reasoning_effort,
+            .label = if (next.label) |*label| label.slice() else null,
+        });
         try target.set(session);
-        try updateSession(self, target.slice(), &next);
     }
     return .{ .accepted = .{
         .session = target,
+        .head = head,
         .revision = next.revision,
         .instructions_id = command_instructions_id,
         .output_schema_id = command_output_schema_id,
@@ -406,7 +645,7 @@ pub fn applyConfiguration(
 }
 
 fn saveConfigurationRejection(
-    self: *Store,
+    a: anytype,
     command: *const protocol.ConfigureCommand,
     digest: *const [32]u8,
     code: protocol.ConfigurationRejection,
@@ -414,69 +653,21 @@ fn saveConfigurationRejection(
 ) !ConfigureReply {
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
-    try command_domain.insertCommand(
-        self,
-        command.key.slice(),
-        .configure,
-        command.session.slice(),
-        digest,
-        null,
-        null,
-        answer,
-    );
+    try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), digest, null, null, &answer);
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
     return .{ .rejected = .{ .replayed = false, .code = code } };
 }
 
 /// Whether the Host serves the provider of the Session `configuration`
-/// sets or `session_ref` already has. An unknown provider or Session
-/// counts as served, so its own rejection answers.
-pub fn servesProvider(self: *Store, configuration: ?*const protocol.Configuration, session_ref: []const u8) !bool {
-    var all_served = true;
-    inline for (@typeInfo(protocol.Provider).@"enum".field_names) |name| all_served = all_served and @field(self.served, name) != .unserved;
-    if (all_served) return true;
+/// sets or the Session already has (`saved`). An unknown provider or
+/// Session counts as served, so its own rejection answers.
+pub fn servesProviderOf(served: anytype, configuration: ?*const protocol.Configuration, saved: ?protocol.Provider) bool {
     const provider = if (configuration != null and configuration.?.provider.state == .value)
         std.meta.stringToEnum(protocol.Provider, configuration.?.provider.value.slice()) orelse return true
-    else provider: {
-        const statement = try store_core.cached(self, "SELECT provider FROM session WHERE session_ref=?1");
-        defer sqlite.resetCached(statement);
-        try sqlite.bindText(statement, 1, session_ref);
-        switch (c.sqlite3_step(statement)) {
-            c.SQLITE_DONE => return true,
-            c.SQLITE_ROW => break :provider try sqlite.readProvider(statement, 0),
-            else => return error.SessionReadFailed,
-        }
-    };
-    return protocol.routeOf(self.served, provider) != .unserved;
-}
-
-/// Answers whether the Session exists and, when it does, writes every
-/// field of `current`. A missing one leaves `current` as the caller
-/// declared it: `.{}`, the defaults a creation starts from.
-pub fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfiguration) !bool {
-    const statement = try store_core.cached(self, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,created_at FROM session WHERE session_ref=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    const step_result = c.sqlite3_step(statement);
-    if (step_result == c.SQLITE_DONE) return false;
-    if (step_result != c.SQLITE_ROW) return error.SessionReadFailed;
-    try sqlite.readText(statement, 0, &current.workspace);
-    try sqlite.readText(statement, 1, &current.model);
-    current.instructions_id = (sqlite.readNullablePositiveI64(statement, 2) catch return error.CorruptStore) orelse
-        return error.CorruptStore;
-    current.tools_mask = try sqlite.readToolsMask(statement, 3);
-    current.permission_mode = try sqlite.readPermissionMode(statement, 4);
-    current.output_schema_id = sqlite.readNullablePositiveI64(statement, 5) catch return error.CorruptStore;
-    current.revision = try sqlite.readPositiveU64(statement, 6);
-    current.next_position = try sqlite.readPositiveU64(statement, 7);
-    current.provider = try sqlite.readProvider(statement, 8);
-    current.compaction_trigger = try sqlite.readNullableTokens(statement, 9, false);
-    current.output_reservation = try sqlite.readNullableTokens(statement, 10, true);
-    current.reasoning_effort = try sqlite.readNullableEffort(statement, 11);
-    current.label = try sqlite.readNullableLabel(statement, 12);
-    current.created_at = @intCast(try sqlite.readNullablePositiveI64(statement, 13) orelse return error.CorruptStore);
-    return true;
+    else
+        saved orelse return true;
+    return protocol.routeOf(served, provider) != .unserved;
 }
 
 /// The Session facts turn work binds to, without the workspace or label
@@ -503,61 +694,20 @@ pub fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*prot
     return facts;
 }
 
-/// A new Session starts at position 1. A Workspace's key is the
-/// `created_seq` of its first Session. A taken reference inserts nothing
-/// and returns false, so the caller retries with the same `created_seq`.
-pub fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration, created_seq: u64) !bool {
-    const statement = try store_core.cached(self, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key) " ++
-        "SELECT ?1,?2,?3,?4,?5,?6,?7,?8,1,?10,?11,?12,?13,?14,?15,?16,unixepoch(),?9,coalesce((SELECT workspace_key FROM session WHERE workspace_digest=?16 AND workspace=?2 LIMIT 1),?9) " ++
-        "WHERE true ON CONFLICT(session_ref) DO NOTHING");
-    defer sqlite.resetCached(statement);
-    try bindSettings(statement, session_ref, current);
-    try sqlite.bindU64(statement, 9, created_seq);
-    try sqlite.bindText(statement, 15, @tagName(current.provider.codec()));
-    var digest: [32]u8 = undefined;
-    try store_core.bindWorkspace(statement, 16, 2, current.workspace.slice(), &digest);
-    try sqlite.expectDone(statement);
-    if (c.sqlite3_changes(self.database) != 1) return false;
-    try store_core.touch(self, session_ref);
-    return true;
-}
-
-fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-    try store_core.touch(self, session_ref);
-    const statement = try store_core.cached(self, "UPDATE session SET model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13,label=?14 WHERE session_ref=?1");
-    defer sqlite.resetCached(statement);
-    try bindSettings(statement, session_ref, current);
-    try sqlite.expectDone(statement);
-    if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
-}
-
-/// Inserts the command row that carries `applied`, then the Session's
-/// revision row, which references it: the one writer of session_revision.
-pub fn insertConfiguredCommand(
-    self: *Store,
+/// Queues saving the command that carries `applied`, then the Session's
+/// revision row, which references it. Every argument outlives the round.
+pub fn queueConfiguredCommand(
+    a: anytype,
     applied: *const Applied,
     key: []const u8,
     kind: protocol.CommandKind,
     digest: *const [32]u8,
-    primary_content_id: ?i64,
-    secondary_content_id: ?i64,
-    answer: StoredAnswer,
+    primary_content_id: ?u64,
+    secondary_content_id: ?u64,
+    answer: *const StoredAnswer,
 ) !void {
-    try command_domain.insertCommand(self, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
-    try insertRevision(self, applied.session.slice(), key, applied.instructions_updated);
-}
-
-/// Records the Session's settings as written under `command_key`, which
-/// must already exist: the revision row copies the Session row.
-fn insertRevision(self: *Store, session_ref: []const u8, command_key: []const u8, instructions_updated: bool) !void {
-    const statement = try store_core.cached(self, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) " ++
-        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label FROM session WHERE session_ref=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindText(statement, 2, command_key);
-    try sqlite.bindI64(statement, 3, @as(i64, if (instructions_updated) 1 else 0));
-    try sqlite.expectDone(statement);
-    if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
+    try command_domain.queueCommand(a, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
+    a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated });
 }
 
 /// Whether `supplied` canonicalizes to `existing`. Its canonical path
@@ -580,22 +730,4 @@ fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *protocol.Bo
     const length = try directory.realPath(io, &destination.bytes);
     if (!std.unicode.utf8ValidateSlice(destination.bytes[0..length])) return error.InvalidUtf8;
     destination.len = length;
-}
-
-/// Binds every session column a configuration sets except the Workspace
-/// (?2), which only creation writes, and ?9, which creation binds to its
-/// `created_seq`.
-fn bindSettings(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-    try sqlite.bindText(statement, 1, session_ref);
-    try sqlite.bindText(statement, 3, current.model.slice());
-    try sqlite.bindNullableI64(statement, 4, current.instructions_id);
-    try sqlite.bindI64(statement, 5, current.tools_mask);
-    try sqlite.bindI64(statement, 6, current.permission_mode);
-    try sqlite.bindNullableI64(statement, 7, current.output_schema_id);
-    try sqlite.bindU64(statement, 8, current.revision);
-    try sqlite.bindText(statement, 10, @tagName(current.provider));
-    try sqlite.bindNullableU64(statement, 11, current.compaction_trigger);
-    try sqlite.bindNullableU64(statement, 12, current.output_reservation);
-    try sqlite.bindNullableEffort(statement, 13, current.reasoning_effort);
-    try sqlite.bindOptionalLabel(statement, 14, &current.label);
 }
