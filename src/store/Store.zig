@@ -581,7 +581,11 @@ pub const Store = struct {
     pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, model_admission_domain.admitNextModelAttemptLocked(self, kind, faults));
+        var candidate: Access(.read, error{}) = .open(&entry);
+        defer candidate.deinit();
+        var access: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed }) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, model_admission_domain.admitNextModelAttempt(&candidate, &access, kind, faults)));
     }
 
     pub fn admitNextActionAttempt(
