@@ -835,7 +835,7 @@ pub fn serve(
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
         descriptorTransport(served),
-        served.leaseWorker() != null,
+        served.leasedSignIn() != null,
         os.tag,
     );
     if (descriptor_observation.soft_limit) |limit| {
@@ -873,7 +873,7 @@ pub fn serve(
         intake_capacity,
         3,
         descriptorTransport(served),
-        served.leaseWorker() != null,
+        served.leasedSignIn() != null,
         os.tag,
     );
     var descriptor_limit_buffer: [32]u8 = undefined;

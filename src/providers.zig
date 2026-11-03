@@ -9,7 +9,6 @@ const h2 = @import("h2");
 const api_key = @import("api_key.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
-const failure_class = @import("failure_class.zig");
 const provider_transport = @import("provider.zig");
 const turn_states = @import("turn_states.zig");
 
@@ -110,8 +109,9 @@ pub const Credential = union(enum) {
         /// The Operation may spend its one forced refresh of the lease
         /// generation the transfer presented.
         refresh_once: u64,
-        /// The answer settles under this code, which names its remedy.
-        code: []const u8,
+        /// The answer saves `failure_class.api_key_rejected`: only a new
+        /// key resolves it.
+        key_rejected,
     };
 
     /// Whether a request waits for the sign-in worker's lease before it
@@ -148,7 +148,7 @@ pub const Credential = union(enum) {
         return switch (self) {
             .none => .settle,
             .chatgpt_device => .{ .refresh_once = lease.?.record.generation },
-            .key_file => .{ .code = failure_class.api_key_rejected },
+            .key_file => .key_rejected,
         };
     }
 
@@ -307,7 +307,7 @@ pub const Providers = struct {
 
     /// The one leased sign-in whose leases and refreshes this Host's
     /// sign-in worker serves, if any.
-    pub fn leaseWorker(self: *const Providers) ?Authentication {
+    pub fn leasedSignIn(self: *const Providers) ?Authentication {
         for (self.table.values) |served| if (served) |value| switch (value.credential) {
             .chatgpt_device => |authentication| return authentication,
             else => {},
@@ -440,7 +440,7 @@ test "each sign-in source says whether it waits for a lease and what a 401 means
     try std.testing.expect(signed_in.leased() and !keyed.leased() and !Credential.leased(.none));
     // A sign-in may refresh the generation it presented; a key names its remedy.
     try std.testing.expectEqual(Credential.Rejection{ .refresh_once = 7 }, signed_in.rejection(&lease));
-    try std.testing.expectEqualStrings(failure_class.api_key_rejected, keyed.rejection(null).code);
+    try std.testing.expectEqual(Credential.Rejection.key_rejected, keyed.rejection(null));
     try std.testing.expectEqual(Credential.Rejection.settle, Credential.rejection(.none, null));
     // Each refuses an endpoint it may not go to.
     try signed_in.validate("http://127.0.0.1:9/responses", null);
@@ -462,10 +462,10 @@ test "a Host's routes name each provider it serves and its credential" {
     providers.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .none });
     try std.testing.expect(providers.any() and providers.serves(.codex));
     try std.testing.expectEqual(protocol.Route.endpoint, providers.routes().codex);
-    try std.testing.expectEqual(@as(?Authentication, null), providers.leaseWorker());
+    try std.testing.expectEqual(@as(?Authentication, null), providers.leasedSignIn());
     providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
     try std.testing.expectEqual(protocol.Route.chatgpt_device, providers.routes().codex);
-    try std.testing.expectEqualStrings("/c", providers.leaseWorker().?.path);
+    try std.testing.expectEqualStrings("/c", providers.leasedSignIn().?.path);
 }
 
 test "a sign-in's routing owner is its account and FedRAMP binding, which a refresh keeps" {

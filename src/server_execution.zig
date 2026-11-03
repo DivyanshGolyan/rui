@@ -74,7 +74,7 @@ const ProviderSlot = struct {
     /// The code a failure saves: a rejected credential may name its remedy.
     fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
         if (execution.rejectsCredential(failure)) switch (self.rejection) {
-            .code => |code| return code,
+            .key_rejected => return failure_class.api_key_rejected,
             .settle, .refresh_once => {},
         };
         return failure.codeText(buffer);
@@ -419,7 +419,7 @@ pub fn executionMain(host: *Host) void {
     };
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
-    const auth_worker: ?*AuthWorker = if (host.providers.leaseWorker()) |authentication| worker: {
+    const auth_worker: ?*AuthWorker = if (host.providers.leasedSignIn()) |authentication| worker: {
         workspace.auth_worker = .{ .io = host.io, .authentication = authentication };
         break :worker &workspace.auth_worker;
     } else null;
@@ -1870,7 +1870,7 @@ fn completeTransfer(
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
                 if (execution.rejectsCredential(failure)) switch (active.rejection) {
                     .refresh_once => |generation| if (beginForcedRefresh(host, slot, &answered, generation)) return,
-                    .settle, .code => {},
+                    .settle, .key_rejected => {},
                 };
                 if (diagnostic) |detail| {
                     answered.reject(code, detail, workspace.provider_failure.report.slice(), disposition);
