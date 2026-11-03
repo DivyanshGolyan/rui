@@ -475,7 +475,7 @@ const ExhaustedChoice = struct {
 
 /// Resolves one exhausted Attempt no slot holds and closes its Turn. The
 /// read Access `candidate` scans outside any transaction, so a pass that
-/// finds none costs one statement; the scan stops at the first Attempt
+/// finds none runs only the scan; the scan stops at the first Attempt
 /// `active` does not hold, after at most one more than it can exclude.
 /// The held Store mutex excludes every other writer, so the write Access
 /// `a` writes from what the scan read, in one round.
