@@ -27,7 +27,7 @@ pub const ConversationPage = struct {
         content: CommandObservation.ContentReference,
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null, // Host wall-clock second; User items only.
-        sender: ?protocol.Peer = null, // A User item's peer sender.
+        sender: ?protocol.NamedPeer = null, // A User item's peer sender.
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -47,7 +47,7 @@ pub const ConversationPage = struct {
             content: ?struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) } = null,
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
-            sender: ?JsonPeer = null, // User items only.
+            sender: ?JsonNamedPeer = null, // User items only.
         };
         const Rows = struct {
             values: [protocol.public_conversation_page_items]Row = undefined,
@@ -217,9 +217,9 @@ pub const ActivityPage = struct {
         if (bytes.len > protocol.max_activity_page_response_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
-        const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonPeer, content: Ref };
-        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonPeer, code: JsonString(protocol.max_code_bytes) };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
+        const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
+        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
         const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
@@ -1719,6 +1719,18 @@ pub const JsonPeer = struct {
     }
 };
 
+pub const JsonNamedPeer = struct {
+    session: JsonString(protocol.max_session_bytes),
+    label: ?JsonString(protocol.max_label_bytes) = null,
+
+    fn peer(self: *const JsonNamedPeer) !protocol.NamedPeer {
+        if (!protocol.validSessionId(self.session.slice())) return error.InvalidResponse;
+        const label = if (self.label) |label| label.value else protocol.Bounded(protocol.max_label_bytes){};
+        if (self.label != null and !protocol.validLabel(label.slice())) return error.InvalidResponse;
+        return .{ .session = self.session.value, .label = label };
+    }
+};
+
 /// A Session's work state as every reader writes it (`protocol.WorkStateJson`):
 /// `kind`, `since`, and exactly the facts that kind owns.
 pub const JsonWorkState = struct {
@@ -1943,7 +1955,7 @@ test "an activity page's queued Messages are none or a span at its boundary" {
 test "an activity row carries its time, and a Message's rows carry its admission time" {
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
-    var peer: protocol.Peer = .{ .session = .{} };
+    var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("k7m2qx");
     const sent: protocol.ActivityItem.Sent = .{ .admission = 2, .target = peer, .content = content, .admitted_at = 1792925000 };
     for ([_]struct { value: protocol.ActivityItem.Value, at: u64, failure: ?anyerror = null }{
@@ -1963,6 +1975,20 @@ test "an activity row carries its time, and a Message's rows carry its admission
         if (case.failure) |failure| {
             try std.testing.expectError(failure, ActivityPage.parse(writer.buffered(), .{}));
         } else try std.testing.expectEqual(case.at, (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].at);
+    }
+    // A peer's label crosses with it, and an unnamed peer stays unnamed.
+    for ([_][]const u8{ "Review the WAL", "" }) |label| {
+        var named = sent;
+        try named.target.label.set(label);
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 1792925000, .value = .{ .sent = named } };
+        try facts.work.workspace.set("/w");
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        const target = (try ActivityPage.parse(writer.buffered(), .{})).facts.items[0].value.sent.target;
+        try std.testing.expectEqualStrings(label, target.label.slice());
+        try std.testing.expectEqualStrings(if (label.len == 0) "k7m2qx" else label, target.name());
     }
     // A row without its time is refused.
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };

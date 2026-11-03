@@ -1872,7 +1872,7 @@ def fatal_reporting_cases(state):
             before = {path: path.read_bytes() for path in records.glob("*.json")}
             os.write(master, b"accepted A\n")
             human.read_terminal(master, "ACCEPTED-A", composer=True)
-            human.terminal_step(master, "/status", "Session: ", composer=True)
+            human.terminal_step(master, "/status", " Status · ", composer=True)
             os.write(master, b"uncertain B\n")
             human.read_terminal(master, "Not confirmed")
             first, second = [json.loads(body) for body, _ in proxy.exchanges]
@@ -1979,7 +1979,7 @@ def decision_reporting_cases(state):
                     caller.send_signal(signal.SIGINT)
                 else:
                     human.read_terminal(master, f"SETTLED-{name}", composer=True)
-                    status = human.terminal_step(master, "/status", "Session: ", composer=True)
+                    status = human.terminal_step(master, "/status", " Status · ", composer=True)
                     assert "Original reserved request:" not in status, status
                     os.write(master, b"\x1b[")
                 output, errors = human.terminal_exit(caller, master, timeout=6)
@@ -2145,7 +2145,7 @@ def detach_reporting_cases(state, library):
                         human.pick_deny(master, read_ready)
                     os.write(master, human.ALLOW)
                 human.read_terminal(master, f"SETTLED-{name}", composer=True)
-                status = human.terminal_step(master, "/status", "Session: ", composer=True)
+                status = human.terminal_step(master, "/status", " Status · ", composer=True)
                 assert "Original reserved request:" not in status, status
                 before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
                 records = [path for path in before if json.loads(before[path]).get("session") == session]
@@ -2243,7 +2243,7 @@ def startup_reporting_cases(state, library):
             human.read_terminal(master, "› ")
             os.write(master, b"seed accepted original\n")
             human.read_terminal(master, "SEED-ACCEPTED", composer=True)
-            assert "Original reserved request:" not in human.terminal_step(master, "/status", "Session: ", composer=True)
+            assert "Original reserved request:" not in human.terminal_step(master, "/status", " Status · ", composer=True)
             human.return_to_live(master)
             if kind in ("allow_once", "deny"):
                 os.write(master, b"propose exact Action\n")
@@ -2406,11 +2406,11 @@ def visible_stream_handoff_cases(state, library):
                     # explicit failure that still names exact recovery.
                     assert caller.returncode == 1 and b"error: TerminalCleanupFailed" in errors, (phase, tail, errors)
                     assert b"Use rui request read-result " in errors and b"Resume: rui session resume --store " in errors, errors
-                    assert f"Session: {session}".encode() not in tail, "interrupted pending command ran"
+                    assert f" Status · {session}".encode() not in tail, "interrupted pending command ran"
                 else:
                     arm.unlink()
                     # Long pages open at their top; the exact Action's inspection starts there.
-                    expected = "Bash arguments: " if phase == "permission" else f"Session: {session}"
+                    expected = "Bash arguments: " if phase == "permission" else f" Status · {session}"
                     page = human.read_terminal(master, expected)
                     shown = human.current_screen(master)
                     assert expected in shown or expected in page, (phase, shown)
@@ -2834,15 +2834,15 @@ def host_diagnostic_cases(state, library):
                     # file before provider launch, so its correct charge is 0.
                     assert int(resources["scratch_used_bytes"]) == leftovers[0].stat().st_size == 0, resources
                     assert not endpoint.requests, endpoint.requests
-                    stopped = subprocess.run([str(fixture.RUI), "host", "stop", "--store", str(store), "--instance", instance],
+                    stopped = subprocess.run([str(fixture.RUI), "host", "pause", "--store", str(store), "--instance", instance],
                         capture_output=True, text=True, timeout=8)
                     (root / "host-stop.stdout").write_text(stopped.stdout)
                     (root / "host-stop.stderr").write_text(stopped.stderr)
                     assert stopped.returncode == 0, stopped
                     stop_reply = json.loads(stopped.stdout)
                     assert {key: stop_reply[key] for key in ("type", "status", "instance", "retirement")} == {
-                        "type": "host_stop", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
-                    assert "stop affects all work in this Store" in stopped.stderr, stopped
+                        "type": "host_pause", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
+                    assert "pause interrupts all work in this Store" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
                     # A stop acknowledgement is not cleanup completion: the
                     # injected unlink refusal remains active during shutdown.

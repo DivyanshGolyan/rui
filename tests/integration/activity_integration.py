@@ -272,6 +272,11 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=True)
                 sender["prefix"] = "6"
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
+            # A sender carries its Session's label when it has one.
+            for label, ok in (("Review", True), ("", False), ("a\nb", False)):
+                wire = copy.deepcopy(valid)
+                wire["items"][0]["value"]["admission"]["sender"] = {"session": "k7m2qx", "label": label}
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
             for session in ("rui/1a2b3c4d-0000-4000-8000-000000000001", "reviewer", "K7m2qx", "k7m2qi", "k7\x00qx"):
                 wire = copy.deepcopy(valid)
                 wire["items"][0]["value"]["admission"]["sender"] = {"session": session}

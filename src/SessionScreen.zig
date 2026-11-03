@@ -54,6 +54,9 @@ pub const Shown = union(enum) {
     newer_end,
 };
 
+/// A delivered frame's choice, offered to the next input.
+pub const Offer = struct { frame: u64, scope: u64, decision: ConsentPolicy.Decision };
+
 /// What a frame encoded: its Action rows and the option Enter would decide.
 pub const Ticket = struct {
     frame: u64,
@@ -121,12 +124,12 @@ action_view: ?struct { io: std.Io, file: std.Io.File } = null,
 // The exact adopted Action awaiting its decision, with its highlighted option
 // and input row. Only this owner changes it.
 consent: ?ConsentPolicy.Pending = null,
-// The frame whose choice Enter may confirm: delivered, then input serviced
-// empty with no key since. Only promptCompleted sets it, and only
-// spendOffer, the entry of every input, clears it. It stands for a decision
-// only while that frame is the latest and nothing changed since: any later
-// frame or change retires it, so it needs no other clearing.
-offer: ?u64 = null,
+// The choice Enter may confirm: a frame delivered, then input serviced empty
+// with no key since. Only promptCompleted sets it. spendOffer, the entry of
+// every input, clears it, and so does render at a frame showing another
+// decision or none. It stands for its decision while the scope is unchanged,
+// so a redraw that changes nothing about the choice (the clock) keeps it.
+offer: ?Offer = null,
 // Counts inputs, so a ticket knows whether any arrived after its frame.
 inputs: u64 = 0,
 // Advances whenever view, layout, Action or the shown choice is
@@ -144,8 +147,9 @@ frames: u64 = 0,
 message_return: ViewKind = .live,
 // The rows of the shown document the latest frame drew.
 drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
-// The latest frame drew the command list, which Esc then closes first.
-listed: bool = false,
+// The command list the latest frame built for the draft: the one value the
+// list's keys act on (`slash_commands.Shown`).
+commands: ?slash_commands.Shown = null,
 height: u16 = 1,
 colour: bool,
 
@@ -281,7 +285,7 @@ pub fn interruptConsent(self: *Self) void {
 
 /// The entry of every input: returns the offer it may use and spends it, so
 /// the next key counts only after a later frame is offered.
-pub fn spendOffer(self: *Self) ?u64 {
+pub fn spendOffer(self: *Self) ?Offer {
     defer {
         self.offer = null;
         self.inputs +%= 1;
@@ -320,12 +324,18 @@ fn joinShown(self: *Self, conversation: Conversation) Shown {
     };
 }
 
-/// The decision an offer of `frame` stands for: the choice that frame
-/// showed, while it is the latest frame and nothing changed since it.
-fn standing(self: *const Self, frame: ?u64) ?ConsentPolicy.Decision {
-    const ticket = self.ticket orelse return null;
-    if ((frame orelse return null) != ticket.frame or ticket.scope != self.scope) return null;
+/// The decision a frame's choice shows, while nothing changed since it.
+fn showing(self: *const Self, ticket: Ticket) ?ConsentPolicy.Decision {
+    if (ticket.scope != self.scope) return null;
     return .{ .action = ticket.action orelse return null, .choice = ticket.shown orelse return null };
+}
+
+/// The decision an offer stands for: the choice its frame showed, while
+/// nothing changed since. Every later frame showed that same decision, or
+/// render retired the offer.
+fn standing(self: *const Self, offer: ?Offer) ?ConsentPolicy.Decision {
+    const made = offer orelse return null;
+    return if (made.scope == self.scope) made.decision else null;
 }
 
 /// The decision Enter would confirm now, if it were the next input.
@@ -338,7 +348,8 @@ pub fn offered(self: *const Self) ?ConsentPolicy.Decision {
 /// see whether it may be.
 pub fn awaitsOffer(self: *const Self) bool {
     const ticket = self.ticket orelse return false;
-    return ticket.delivered and ticket.inputs == self.inputs and self.offer != ticket.frame and self.standing(ticket.frame) != null;
+    const offered_frame = if (self.offer) |made| made.frame == ticket.frame else false;
+    return ticket.delivered and ticket.inputs == self.inputs and !offered_frame and self.showing(ticket) != null;
 }
 
 /// The one place an offer is made: the latest frame, once input after its
@@ -346,7 +357,8 @@ pub fn awaitsOffer(self: *const Self) bool {
 /// draw. Returns whether this made the offer.
 pub fn promptCompleted(self: *Self, service: ConsentPolicy.Service, decoder_pending: bool, blocked: bool) bool {
     if (!self.awaitsOffer() or service != .empty or decoder_pending or blocked) return false;
-    self.offer = self.ticket.?.frame;
+    const ticket = self.ticket.?;
+    self.offer = .{ .frame = ticket.frame, .scope = ticket.scope, .decision = self.showing(ticket).? };
     return true;
 }
 
@@ -359,10 +371,10 @@ pub const DecisionBlock = enum { not_ready, reading, command, layout };
 pub const ChoiceOutcome = union(enum) { picked, decision: ConsentPolicy.Decision, blocked: DecisionBlock };
 
 /// An arrow or Enter at the choice, with the offer `spendOffer` returned for
-/// this key. It acts only when that offer is the latest frame, unchanged
-/// since, and the decision it showed is the Action's current one. A live
+/// this key. It acts only when that offer still stands and the decision it
+/// showed is the Action's current one. A live
 /// probe of geometry and command comes first.
-pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize, command_blocked: bool) ChoiceOutcome {
+pub fn choose(self: *Self, key: ChoiceKey, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ChoiceOutcome {
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
         self.invalidateLayout();
         return .{ .blocked = .layout };
@@ -391,10 +403,11 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?u64, size: std.posix.winsize,
 }
 
 /// Enter in the draft beside an Action, with the offer `spendOffer` returned
-/// for this key: the denial the draft is sent with, when that offer is the
-/// latest frame, unchanged since, and it showed this draft as the reason.
+/// for this key: the denial the draft is sent with, when that offer still
+/// stands and it showed this draft as the reason; any input since, a typed
+/// key included, spent it.
 /// A probe: nothing changes until `decide`.
-pub fn reasonOffered(self: *const Self, offer: ?u64, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
+pub fn reasonOffered(self: *const Self, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
     const shown = self.standing(offer) orelse return null;
     if (self.liveApproval(command_blocked) != .reason) return null;
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) return null;
@@ -514,6 +527,27 @@ pub fn browse(self: *Self, down: bool, page: bool) bool {
     if (self.view != .transcript or !down) return false;
     // Untrimmed transcript ends where live output continues.
     return (end and self.ends_apart) or (!self.ends_apart and document.atBottom(self.textLayout(), self.height));
+}
+
+/// Scrolls the inspection page so line `line` begins in view, as little as
+/// it takes.
+pub fn revealLine(self: *Self, line: usize) void {
+    std.debug.assert(self.view == .inspection);
+    const document = &self.browsing;
+    const start = lineStart(document, line) orelse return;
+    const layout = self.textLayout();
+    const first = document.first(layout, self.height);
+    if (start < first.offset or (start == first.offset and first.row != 0)) {
+        document.top = .{ .offset = start };
+    } else if (document.measure(layout, first, self.height).next.order(.{ .offset = start }) != .gt) {
+        document.top = document.up(layout, .{ .offset = start }, self.height -| 1);
+    }
+}
+
+fn lineStart(document: *const Document, line: usize) ?usize {
+    var offset: usize = 0;
+    for (0..line) |_| offset = document.nextLine(offset) orelse return null;
+    return offset;
 }
 
 /// The transcript shows its first retained row, so older text is wanted.
@@ -776,8 +810,8 @@ pub const Footer = struct {
     command: bool = false,
     status: []const u8 = "",
     notice: []const u8 = "",
-    /// The commands the draft's command word starts, listed above the input.
-    commands: ?slash_commands.Matches = null,
+    /// The list above the input for the draft, with its highlighted row.
+    commands: ?slash_commands.Shown = null,
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
     queued: ?Queued = null,
@@ -791,24 +825,26 @@ pub const Footer = struct {
 /// wrote, which it writes again when the facts change.
 pub const SessionLine = struct { facts: session_line.Facts, shown: *session_line.Shown };
 
-/// One row per command, its usage aligned and its description quiet. When
-/// more match than rows fit, the last row counts the rest, unless it is
-/// the only row: then it shows the first command.
-fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, commands: slash_commands.Matches, overflow: *[32]u8) void {
-    var matches = commands;
-    const total = matches.count;
-    const rows: usize = if (total <= layout.list_height) total else if (layout.list_height >= 2) layout.list_height - 1 else layout.list_height;
-    for (0..rows) |index| {
-        const name = matches.next().?;
-        const usage = slash_commands.usage.get(name);
-        _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index)), .height = 1 }).print(&.{
-            .{ .text = usage, .style = self.style(.user) },
-            .{ .text = slash_commands.padding[usage.len..] },
-            .{ .text = slash_commands.table.get(name).description.?, .style = self.style(.quiet) },
-        }, .{ .wrap = .none });
+/// One row per entry, its text aligned and its description quiet, the
+/// highlighted one reversed as the Action's choice is. When more match
+/// than rows fit, the last row counts the rest, unless it is the only row;
+/// the rows follow the highlight.
+fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, shown: *const slash_commands.Shown, overflow: *[32]u8) void {
+    const list = &shown.list;
+    const highlight = shown.highlight;
+    const total = list.count;
+    const rows = slash_commands.named(total, layout.list_height);
+    const first = list.firstShown(highlight, layout.list_height);
+    const column = list.descriptionColumn();
+    for (list.shown()[first..][0..rows], first..) |entry, index| {
+        var text = self.style(.user);
+        text.reverse = index == highlight;
+        const cells = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index - first)), .height = 1 });
+        _ = cells.printSegment(.{ .text = entry.shown, .style = text }, .{ .wrap = .none });
+        if (entry.description.len != 0 and column < cells.width) _ = cells.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = entry.description, .style = self.style(.quiet) }, .{ .wrap = .none });
     }
     if (rows == total or rows == layout.list_height) return;
-    const text = std.fmt.bufPrint(overflow, "+{d} more · type to narrow", .{total - rows}) catch unreachable;
+    const text = std.fmt.bufPrint(overflow, slash_commands.more, .{total - rows}) catch unreachable;
     _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(rows)), .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
 }
 
@@ -875,7 +911,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .draft_anchor = if (selector) 0 else self.draft_anchor,
         .status = status,
         .notice = footer.notice,
-        .command_rows = if (selector) 0 else if (footer.commands) |commands| commands.count else 0,
+        .command_rows = if (selector) 0 else if (footer.commands) |commands| commands.rows() else 0,
         .calls = calls[0..if (selected) 0 else live.count],
         .total_calls = live.total,
         .live = footer.live != null,
@@ -891,7 +927,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     if (!selector) self.draft_anchor = layout.draft_lines[0].start;
     self.browsing_height = layout.browsing_height;
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
-    self.listed = layout.list_height != 0;
+    self.commands = footer.commands;
+    if (self.commands) |*commands| commands.drew(layout.list_height != 0);
     _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
     _ = document.draw(window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
     if (layout.document_offset != 0) {
@@ -927,7 +964,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var rule_label: [64]u8 = undefined;
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, &rule_label);
     var overflow: [32]u8 = undefined;
-    if (layout.list_height != 0) self.drawCommands(window, &layout, footer.commands.?, &overflow);
+    if (layout.list_height != 0) self.drawCommands(window, &layout, &self.commands.?, &overflow);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -955,6 +992,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         says_deny = self.selected.approval == .reason and text.len != 0;
     }
     if (selector) window.hideCursor() else window.showCursor(layout.caret_column, layout.caret_row);
+    // Every frame: links can reach the grid from any document.
+    try self.boundLinks();
     // Finish consuming every borrowed cell before output can pump input and
     // change the browsing document. The frame shares the cell memory budget.
     // Any failure is fatal; never drop a frame and continue accepting consent.
@@ -977,9 +1016,44 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .next = layout.action_seen,
         .conversation = conversation,
     };
+    // A frame that shows another decision, or none, retires the offer for
+    // good, so a choice hidden and shown again needs a new one.
+    if (self.offer) |made| if (!std.meta.eql(self.showing(self.ticket.?), made.decision)) {
+        self.offer = null;
+    };
     try out.writeAll(frame.written());
     try out.flush();
     return .{ .frame = self.frames };
+}
+
+/// The shown grid copies each linked cell's address into an arena that
+/// keeps every cell's largest copy until the grid is replaced. A frame links
+/// at most `frame_link_bytes` of addresses, and a grid whose copies reach
+/// `grid_link_bytes` is replaced and the next frame redrawn whole, so links
+/// stay within the cell memory budget at any geometry.
+const frame_link_bytes = 128 * 1024;
+const grid_link_bytes = 512 * 1024;
+
+fn boundLinks(self: *Self) !void {
+    var linked: usize = 0;
+    var kept: usize = 0;
+    for (self.vx.screen.buf, self.vx.screen_last.buf) |*cell, last| {
+        kept += last.uri.capacity;
+        if (cell.link.uri.len == 0) continue;
+        if (linked + cell.link.uri.len > frame_link_bytes) cell.link = .{} else linked += cell.link.uri.len;
+    }
+    if (kept < grid_link_bytes) return;
+    const allocator = self.memory.allocator();
+    const width = self.vx.screen_last.width;
+    const height = self.vx.screen_last.height;
+    // As on resize: retire the old grid before charging its replacement.
+    const empty = try vaxis.AllocatingScreen.init(allocator, 0, 0);
+    self.vx.screen_last.deinit(allocator);
+    self.vx.screen_last = empty;
+    const replacement = try vaxis.AllocatingScreen.init(allocator, width, height);
+    self.vx.screen_last.deinit(allocator);
+    self.vx.screen_last = replacement;
+    self.vx.queueRefresh();
 }
 
 /// The input row while an Action waits: Allow once and Deny with the
@@ -1545,13 +1619,13 @@ test "a command list of one row shows a command, not only how many match" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const calls: View.Live = .{};
-    const footer: Footer = .{ .commands = slash_commands.Matches.of("/").? };
+    const footer: Footer = .{ .commands = .{ .list = slash_commands.conversation.suggest("/", .{}).?, .revision = 0 } };
     var buffer: [256]u8 = undefined;
     for ([_]u16{ 6, 9, 24 }) |rows| {
         errdefer std.debug.print("rows={d}\n", .{rows});
         _ = try screen.render(&out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, footer, &calls);
-        try std.testing.expect(screen.listed);
-        try std.testing.expect(screenHas(screen, slash_commands.usage.get(.configure), &buffer));
+        try std.testing.expectEqual(.drawn, screen.commands.?.seen);
+        try std.testing.expect(screenHas(screen, slash_commands.conversation.usage.get(.configure), &buffer));
     }
 }
 
@@ -1918,13 +1992,9 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     // A ┄ the user typed is body text, not a block's summary.
     try screen.append("\n› " ++ View.Mark.body ++ "typed ┄ 3" ++ View.Mark.reset ++ "\n");
-    // The middle block is a peer Message's line, which ends in `…`.
     for (0..3) |block| {
         var line: [64]u8 = undefined;
-        try screen.append(if (block == 1)
-            "\n" ++ View.Mark.summary ++ "← 9f8e7d · preview 1…" ++ View.Mark.sidenote ++ "08:00" ++ View.Mark.reset ++ "\n"
-        else
-            try std.fmt.bufPrint(&line, "\n› " ++ View.Mark.body ++ "preview {d}\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n", .{block}));
+        try screen.append(try std.fmt.bufPrint(&line, "\n› " ++ View.Mark.body ++ "preview {d}\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n", .{block}));
         for (0..12) |row| try screen.append(try std.fmt.bufPrint(&line, "answer {d} row {d}\n", .{ block, row }));
     }
     _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
@@ -2338,6 +2408,61 @@ test "a decision prompt is offered only after its own delivered frame" {
     try std.testing.expect(press(screen, .enter, size, false) != .decision);
 }
 
+test "a redraw that leaves the choice unchanged keeps its offer; one that hides the choice retires it" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(io, &environ, false);
+    defer screen.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    var fixture = try ActionFixture.init(4);
+    defer fixture.deinit();
+    var buffer: [256]u8 = undefined;
+    var held: HeldWriter = .init(screen, &buffer);
+    try screen.adopt(io, fixture.file, 0xa, true);
+    for (0..2) |_| {
+        _ = screen.select(false);
+        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    }
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    // A key read while a redraw showing the same choice is written acts on
+    // the choice the delivered frame showed.
+    const pending = try screen.render(&held.writer, size, "", 0, .{}, &.{});
+    const decided = press(screen, .enter, size, false);
+    try std.testing.expect(decided == .decision);
+    try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .allow_once }, decided.decision);
+    _ = screen.presented(pending);
+    try screen.adopt(io, fixture.file, 0xb, true);
+    for (0..2) |_| {
+        _ = screen.select(false);
+        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    }
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    // A clock tick redraws the screen, issued and delivered, before the key
+    // is read: the key still picks the choice it was shown.
+    for (0..2) |_| {
+        _ = screen.select(false);
+        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    }
+    try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xb, .choice = .allow_once }, screen.offered().?);
+    try std.testing.expect(press(screen, .{ .pick = .deny }, size, false) == .picked);
+    // A redraw that shows no decision, such as a command holding the
+    // choice, retires the offer even once the choice is shown again.
+    _ = screen.select(false);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    _ = screen.select(true);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{ .command = true }, &.{}));
+    try std.testing.expect(screen.offered() == null);
+    _ = screen.select(false);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    try std.testing.expect(screen.offered() == null);
+    try std.testing.expect(screen.promptCompleted(.empty, false, false));
+    try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xb, .choice = .deny }, screen.offered().?);
+}
+
 test "an offer is spent by any input after its frame, even one that arrives while the frame is written" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
@@ -2377,7 +2502,7 @@ fn deliver(screen: *Self, held: *HeldWriter, size: std.posix.winsize) !void {
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
 }
 
-test "an offer stands only for its own frame: no Enter decides on a later frame until that frame is offered" {
+test "a change to the screen retires the offer: no Enter decides on a later frame until that frame is offered" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -2391,7 +2516,7 @@ test "an offer stands only for its own frame: no Enter decides on a later frame 
     defer fixture.deinit();
     var buffer: [256]u8 = undefined;
     var held: HeldWriter = .init(screen, &buffer);
-    const Change = enum { resize, width, readopted, successor, held_write, redraw };
+    const Change = enum { resize, width, readopted, successor };
     for (std.enums.values(Change)) |change| {
         errdefer std.debug.print("change={s}\n", .{@tagName(change)});
         screen.withdrawAction();
@@ -2421,16 +2546,6 @@ test "an offer stands only for its own frame: no Enter decides on a later frame 
                 try screen.adopt(io, fixture.file, if (change == .successor) 0xb else 0xa, true);
                 try deliver(screen, &held, now);
             },
-            .held_write => {
-                // A frame that shows the same choice is issued; an Enter read
-                // while its bytes are written finds it not yet delivered.
-                const pending = try screen.render(&held.writer, now, "", 0, .{}, &.{});
-                try expectBlocked(.not_ready, press(screen, .enter, now, false));
-                _ = screen.presented(pending);
-                try std.testing.expect(screen.consent != null);
-                continue;
-            },
-            .redraw => {},
         }
         // Whatever changed, the next delivered frame shows the choice again,
         // yet no empty service has offered it.
@@ -2448,4 +2563,35 @@ test "an offer stands only for its own frame: no Enter decides on a later frame 
         screen.releaseAction();
         try deliver(screen, &held, size);
     }
+}
+
+test "links stay within the cell memory budget at every frame and over many frames" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const TerminalText = @import("TerminalText.zig");
+    const uri = "https://" ++ @as([TerminalText.max_link_bytes - "https://".len]u8, @splat('a'));
+    for (0..40) |_| try screen.append(TerminalText.link_open ++ uri ++ TerminalText.link_end ++ @as([79]u8, @splat('x')) ++ TerminalText.link_close ++ "\n");
+    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    var linked: usize = 0;
+    for (screen.vx.screen.buf) |cell| linked += @intFromBool(cell.link.uri.len != 0);
+    try std.testing.expectEqual(frame_link_bytes / uri.len, linked);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), TerminalText.link_open ++ uri ++ TerminalText.link_end) != null);
+    // Copies an earlier frame left in the shown grid reach its bound: the
+    // grid is replaced and the next frame draws every cell again.
+    const arena = screen.vx.screen_last.arena.allocator();
+    for (screen.vx.screen_last.buf[0 .. grid_link_bytes / uri.len]) |*cell| try cell.uri.ensureTotalCapacity(arena, uri.len);
+    out.clearRetainingCapacity();
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    var kept: usize = 0;
+    for (screen.vx.screen_last.buf) |cell| kept += cell.uri.capacity;
+    try std.testing.expect(kept < grid_link_bytes);
+    // Unchanged, the frame would write nothing; redrawn, it writes every row.
+    try std.testing.expect(out.written().len > 20 * 79);
 }

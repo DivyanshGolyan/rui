@@ -131,7 +131,7 @@ pub const PublicConversationItem = struct {
     content: ContentReference,
     presentation: ?protocol.ToolPresentation = null,
     admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
-    sender: ?protocol.Peer = null, // A User item's sending peer Session.
+    sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
 };
 
 pub const PublicConversationPage = struct {
@@ -318,7 +318,7 @@ pub fn publicConversationPageLocked(self: *Store, request: *const protocol.Conve
             3 => .assistant,
             4 => .tool_result,
             else => unreachable,
-        }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .sender = if (resolved.sender) |sender| .{ .session = sender } else null, .presentation = if (resolved.tool_operation) |operation| try toolPresentationLocked(self, operation, @intCast(ordinal - 1), @intCast(position)) else null };
+        }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .sender = if (resolved.sender) |sender| try peerNamed(self, sender) else null, .presentation = if (resolved.tool_operation) |operation| try toolPresentationLocked(self, operation, @intCast(ordinal - 1), @intCast(position)) else null };
         page.count += 1;
     }
     const upper = if (request.before_position == 0) end else @min(end, request.before_position - @intFromBool(request.before_ordinal == 0));
@@ -787,16 +787,33 @@ fn activityMessageLocked(self: *Store, session: []const u8, end: u64, admission:
     var message: protocol.ActivityItem.Message = .{ .admission = admission, .key = .{}, .turn = null, .state = if (applied) .applied else if (c.sqlite3_column_int(statement, 4) == 1) .excluded else .queued, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = @intCast(try sqlite.readNullablePositiveI64(statement, 6) orelse return error.CorruptStore) };
     try sqlite.readText(statement, 0, &message.key);
     if (applied) message.turn = @intCast(try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
-    message.sender = try readPeer(self, statement, 7);
+    message.sender = if (try readPeer(statement, 7)) |sender| try peerNamed(self, sender.session) else null;
     return .{ .message = message, .content_id = content_id };
 }
 
-pub fn readPeer(self: *Store, statement: *c.sqlite3_stmt, column: c_int) !?protocol.Peer {
-    _ = self;
+pub fn readPeer(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Peer {
     if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
     var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
     try sqlite.readText(statement, column, &sender);
     return .{ .session = sender };
+}
+
+/// A peer Session with its label as the Store holds it now, so a rename
+/// shows on every row that names it. One indexed lookup per peer row.
+pub fn peerNamed(self: *Store, session: protocol.Bounded(protocol.max_session_bytes)) !protocol.NamedPeer {
+    const statement = try store_core.cached(self, "SELECT label FROM session WHERE session_ref=?1");
+    defer sqlite.resetCached(statement);
+    try sqlite.bindText(statement, 1, session.slice());
+    var peer: protocol.NamedPeer = .{ .session = session };
+    switch (c.sqlite3_step(statement)) {
+        // A failed send can name a Session this Store never held.
+        c.SQLITE_DONE => {},
+        c.SQLITE_ROW => if (try sqlite.readNullableLabel(statement, 0)) |label| {
+            peer.label = label;
+        },
+        else => return error.SessionReadFailed,
+    }
+    return peer;
 }
 
 const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 = null };
@@ -865,7 +882,7 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
             const metadata = try content_domain.readPublicContentMetadata(self, content_id);
             result.item.value = .{ .sent = .{
                 .admission = @intCast(admission),
-                .target = .{ .session = target },
+                .target = try peerNamed(self, target),
                 .content = .{ .length = metadata.length, .digest = metadata.digest },
                 .admitted_at = @intCast(try sqlite.readNullablePositiveI64(select, 2) orelse return error.CorruptStore),
             } };
@@ -883,7 +900,7 @@ fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64
             try sqlite.readText(select, 0, &failed.key);
             var target: protocol.Bounded(protocol.max_session_bytes) = .{};
             try sqlite.readText(select, 1, &target);
-            failed.target = .{ .session = target };
+            failed.target = try peerNamed(self, target);
             try sqlite.readText(select, 2, &failed.code);
             result.item.value = .{ .send_failed = failed };
             result.item.at = @intCast(try sqlite.readNullablePositiveI64(select, 4) orelse return error.CorruptStore);

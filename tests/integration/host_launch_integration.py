@@ -480,7 +480,7 @@ def startup_limits(root, env):
                             borrowers.pop().close()
                         assert status(store, env)["status"] == "ready"
                     stopped = subprocess.run(
-                        [RUI, "host", "stop", "--store", store, "--instance", instance(reported, DEFAULT_ACTIVE_CAPACITY)],
+                        [RUI, "host", "pause", "--store", store, "--instance", instance(reported, DEFAULT_ACTIVE_CAPACITY)],
                         env=env, text=True, capture_output=True, timeout=5,
                     )
                     assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped
@@ -492,7 +492,7 @@ def startup_limits(root, env):
             print(f"detached startup {name}: {reported}", flush=True)
         finally:
             dispose_all(
-                lambda: subprocess.run([RUI, "host", "stop", "--store", store], env=env, capture_output=True, timeout=5),
+                lambda: subprocess.run([RUI, "host", "pause", "--store", store], env=env, capture_output=True, timeout=5),
                 lambda: wait_for_processes(store, 0),
             )
 
@@ -676,7 +676,7 @@ def main():
             assert differing.returncode == 0, differing.stderr
             assert instance(json.loads(differing.stdout), 3) == before, differing
             assert ("rui: the running Host keeps active capacity 3; --active-capacity 7 applies only to a new Host. "
-                    f"Changing it means stopping this Host and all its work: rui host stop --store $'{held_store.resolve()}'\n"
+                    f"Changing it means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}'\n"
                     ) in differing.stderr, differing.stderr
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
@@ -915,7 +915,7 @@ def main():
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert listed.returncode == 0 and json.loads(listed.stdout)["sessions"] == [], listed
             assert_configure_defaults(root, bare_store, bare_env)
-            stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
+            stopped = subprocess.run([RUI, "host", "pause", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped
         finally:

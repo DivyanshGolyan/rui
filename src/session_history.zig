@@ -23,19 +23,13 @@ pub const Prepared = struct {
         for (0..self.page.count) |reverse| {
             const index = self.page.count - 1 - reverse;
             const item = self.page.items[index];
+            if (item.sender) |sender| {
+                try View.peerLine(sink, .inbound, sender, item.admitted_at.?, &compact);
+                continue;
+            }
             if (item.content.bytes > item_bytes) {
-                compact = false;
                 var buffer: [192]u8 = undefined;
-                if (item.sender) |sender| {
-                    // Its first line is not staged, so the line shows `…`
-                    // alone and Ctrl-O opens it.
-                    var line: View.PeerLine(@TypeOf(sink)) = undefined;
-                    try line.init(sink, .inbound, sender, item.content.bytes);
-                    line.received = item.content.bytes;
-                    line.phase = .more;
-                    if (try line.finish(item.admitted_at.?)) try View.noteCollapsed(sink, collapsed(item));
-                    continue;
-                }
+                compact = false;
                 if (item.kind == .user) {
                     // Its line count is unknown without reading it.
                     try View.userPrefix(sink, colour, item.admitted_at.?);
@@ -83,13 +77,7 @@ pub const Prepared = struct {
                     try escaped.finish();
                     try indented.finish();
                 },
-                .user => if (item.sender) |sender| {
-                    var line: View.PeerLine(@TypeOf(sink)) = undefined;
-                    try line.init(sink, .inbound, sender, item.content.bytes);
-                    try staged.read(&line);
-                    if (try line.finish(item.admitted_at.?)) try View.noteCollapsed(sink, collapsed(item));
-                    continue;
-                } else {
+                .user => {
                     try View.userPrefix(sink, colour, item.admitted_at.?);
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
                     try body.init(sink, item.content.bytes, mode == .details);
@@ -156,14 +144,14 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
     var staging: Staging = .{ .io = io, .file = scratch };
     for (page.items[0..page.count], 0..) |item, index| {
         prepared.offsets[index] = staging.offset;
-        // A Hosted Call has no content to read.
-        if (item.content.bytes > item_bytes or item.kind == .hosted_call) continue;
+        // A Hosted Call has no content to read, and a peer's Message shows none.
+        if (item.content.bytes > item_bytes or item.kind == .hosted_call or item.sender != null) continue;
         try source.read(item, index, &staging);
     }
     // Received-byte integrity does not prove that staging preserved those bytes.
     var window: [protocol.content_window_bytes]u8 = undefined;
     for (page.items[0..page.count], prepared.offsets[0..page.count]) |item, start| {
-        if (item.content.bytes > item_bytes) continue;
+        if (item.content.bytes > item_bytes or item.sender != null) continue;
         var hash = protocol.contentHasher();
         var offset: u64 = 0;
         while (offset < item.content.bytes) {
@@ -208,18 +196,17 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
             self.notes += 1;
         }
     };
-    // A User item is a collapsed user block with nothing else known, and a
-    // peer's a line ending in `…`; Ctrl-O opens either. Others keep their
-    // notice.
+    // A User item is a collapsed user block with nothing else known, which
+    // Ctrl-O opens; a peer's is its line alone. Others keep their notice.
     var prepared: Prepared = .{ .page = .{ .end = 4, .count = 3, .more = false } };
-    var sender: protocol.Peer = .{ .session = .{} };
+    var sender: protocol.NamedPeer = .{ .session = .{} };
     try sender.session.set("k7m2qx");
     prepared.page.items[0] = .{ .position = 4, .ordinal = 0, .kind = .user, .content = .{ .bytes = 8200, .digest = @splat(0) }, .admitted_at = 1_800_000_000, .sender = sender };
     prepared.page.items[1] = .{ .position = 3, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = 8193, .digest = @splat(0) } };
     prepared.page.items[2] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 9000, .digest = @splat(0) }, .admitted_at = 1_800_000_000 };
     var sink: Sink = .{};
     try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, .details, false);
-    try std.testing.expectEqualSlices(u64, &.{ 2, 4 }, sink.positions[0..sink.notes]);
+    try std.testing.expectEqualSlices(u64, &.{2}, sink.positions[0..sink.notes]);
     // Independent UTF-8 byte-to-hex oracle for Store controls and directional text.
     const identity = " --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw";
     var time: [5]u8 = undefined;
@@ -227,7 +214,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     const clock = View.clock(1_800_000_000, &time).?;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n› \x1b[8m{s}\x1b[0m\x1b[2;8m┄\x1b[0m\n  \x1b[2;8mRaw export: rui session read-conversation{s} --position 2 --ordinal 0\x1b[0m\n" ++
         "\nRui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n" ++
-        "\n\x1b[2;8m← k7m2qx · …\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
+        "\n\x1b[2;8m← Received message from k7m2qx\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
 }
 
 test "history body limit preserves contextual tool outcomes" {

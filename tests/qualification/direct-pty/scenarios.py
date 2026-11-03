@@ -235,9 +235,10 @@ def navigation(fixture, row):
     chunks(tty, row["chunks"])
     tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
     if row.get("status"):
-        tty.marker(f"Session: {fixture.session}")
-        tty.marker("Work:")
-        tty.marker("Permission:")
+        tty.marker(" Status · ")
+        tty.marker(f" · {fixture.session}")
+        tty.marker(" Work")
+        tty.marker("Permissions     ")
     else:
         history(row["first_history"], True)
         for step in row.get("middle", []):

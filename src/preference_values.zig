@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_capability = @import("model_capability.zig");
 const protocol = @import("protocol.zig");
 
 /// Values own their bytes; callers may retain this value after closing the file.
@@ -8,6 +9,9 @@ pub const Values = struct {
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     /// Desktop notifications while the terminal is out of focus.
     notifications: bool = true,
+    /// The effort new Sessions start at when their model offers it; null
+    /// leaves each model at its own default.
+    reasoning_effort: ?model_capability.ReasoningEffort = null,
 };
 
 pub fn directoryPath(home: []const u8, buffer: []u8) ![]const u8 {

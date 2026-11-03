@@ -273,8 +273,14 @@ func answerSSE(name, answer string, retained, discarded int) ([]byte, [][]byte) 
 	}
 	fmt.Fprintf(&out, "data: %s\n\n", marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "response-" + name, "status": "completed", "model": "model-a", "output": items}}))
 	out.WriteString("data: [DONE]\n\n")
-	delete(reason, "created_by")
-	return out.Bytes(), [][]byte{marshal(reason), marshal(message)}
+	// Replay renders each item from Rui's neutral form: type first, then the
+	// fields Rui interprets, then the provider's remaining fields in the order
+	// they arrived (sorted here, as marshal sends them). created_by is dropped.
+	replayReason := `{"type":"reasoning","encrypted_content":` + string(marshal(reason["encrypted_content"])) +
+		`,"id":` + string(marshal(reason["id"])) + `,"status":"completed","summary":[]}`
+	replayMessage := `{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + string(marshal(answer)) +
+		`,"annotations":[]}],"id":` + string(marshal(message["id"])) + `,"status":"completed"}`
+	return out.Bytes(), [][]byte{[]byte(replayReason), []byte(replayMessage)}
 }
 func bashSSE(name, cmd string, timeoutMs *int) []byte {
 	timeout := "null"

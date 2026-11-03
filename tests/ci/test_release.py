@@ -34,6 +34,9 @@ def git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
+# Fake builds from this minor version know host pause; earlier ones, host stop.
+PAUSE_SINCE = 41
+
 class PlanTest(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
@@ -188,8 +191,9 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         if path.exists() and reported is None:
             return hashlib.sha256(path.read_bytes()).hexdigest()
         stage = self.root / "stage" / version / name
+        minor = version.split(".")[1]
         (stage / "bin").mkdir(parents=True)
-        (stage / "bin/rui").write_text(fake_rui.script(f"rui {reported or version} (abc123)", version.split(".")[1], version))
+        (stage / "bin/rui").write_text(fake_rui.script(f"rui {reported or version} (abc123)", minor, version, pause=int(minor) >= PAUSE_SINCE))
         (stage / "bin/rui").chmod(0o755)
         (stage / "THIRD_PARTY_NOTICES.md").write_text("notices")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -322,10 +326,10 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         cases = {
             "ready after an update": (None, "40", [
                 f"Updated Rui from 0.40.0 to 0.40.1. {KEPT}",
-                f"{HOST} is still running an earlier build. When its work finishes, run: rui host stop"]),
+                f"{HOST} is still running an earlier build. When its work finishes, run: rui host pause"]),
             "ready at a first install": ("first", "40", [
                 "Installed Rui 0.40.1 at ~/.local/bin/rui.",
-                f"{HOST} is already running another Rui build. When its work finishes, run: rui host stop", NEXT]),
+                f"{HOST} is already running another Rui build. When its work finishes, run: rui host pause", NEXT]),
             "no build here can reach it": (None, "36", [
                 f"Updated Rui from 0.40.0 to 0.40.1. {KEPT}",
                 f"{HOST} is still running an older build, and this version cannot stop it. Stop it with the "
@@ -352,6 +356,16 @@ cp "{self.served}/${{url##*/download/}}" "$output"
             f"{HOST} is still running Rui 0.37.5, and this version cannot stop it. When its work finishes, "
             f"run: {previous} host stop"])
         self.assertEqual(result.stderr, "")
+
+    def test_an_unreachable_host_is_paused_with_its_own_builds_word(self):
+        # Builds from 0.41 call the Host shutdown host pause; the report asks the old build.
+        self.report(self.install("0.41.0"))
+        previous = self.command()
+        fake_rui.saved_work(self.home, 41)
+        result = self.install("0.42.0", TEST_HOST="41")
+        self.assertEqual(self.report(result)[-1],
+                         f"{HOST} is still running Rui 0.41.0, and this version cannot stop it. When its work finishes, "
+                         f"run: {previous} host pause")
 
     def test_report_never_fails_a_published_install(self):
         self.report(self.install("0.40.0"))
