@@ -16,7 +16,8 @@ pub const Dialect = enum { sqlite };
 
 /// A reserved word is a name, and refused, everywhere except the keyword
 /// places in `keywords`; text never names `rowid`. The schema's names,
-/// checks and predicates and every statement are held to this.
+/// checks and predicates, every typed statement and opening's sweep are
+/// held to this.
 pub const reserved_names_checked = true;
 
 /// Words reserved in at least one engine (SQLite 3.53, Postgres 17, MySQL 8.4).
