@@ -578,7 +578,9 @@ pub const Store = struct {
             self.admitModelAttempt(.tool_continuation, faults);
     }
 
-    pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
+    /// stay off the frame of a caller that goes on to dispatch the Attempt.
+    pub noinline fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         var reader: Access(.read, error{}) = .open(&entry);
