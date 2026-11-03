@@ -305,8 +305,6 @@ const FailureContent = struct {
     diagnostic: ?content_domain.Import,
     report: ?content_domain.Import,
     pair: content_domain.Pair = undefined,
-    /// Whether `importDiagnostic` queued a new row.
-    diagnostic_inserted: bool = false,
 
     fn of(failure: *const ModelFailure) FailureContent {
         const report = failure.report();
@@ -332,19 +330,13 @@ const FailureContent = struct {
 
     fn importDiagnostic(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
         const value = if (content.diagnostic) |*value| value else return null;
-        content.diagnostic_inserted = value.found == null;
         return try content_domain.importBytes(a, value, failure.diagnostic().?);
     }
 
     /// The report's row. One equal to the diagnostic is the diagnostic's
-    /// (`content.importSlot`). A round queues `insert_content` once, so
-    /// when the diagnostic's row is new and the report's is a different
-    /// new row, the queued round runs first: one more round trip, only
-    /// then.
+    /// (`content.importSlot`).
     fn importReport(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
         const value = if (content.report) |*value| value else return null;
-        if (value.found == null and content.diagnostic_inserted and
-            a.insertedContent(&value.digest, value.length, value.private) == null) try a.run();
         return try content_domain.importBytes(a, value, failure.report());
     }
 };
@@ -353,8 +345,7 @@ const FailureContent = struct {
 /// up the failure's diagnostic and report. A context overflow reads in
 /// round 2 whether compaction can recover it, which needs the Attempt's
 /// position. The write round resolves the Attempt or schedules its retry,
-/// and closes its Turn or records its continuation, then commits; a new
-/// diagnostic and a new report add one round between (`importReport`).
+/// and closes its Turn or records its continuation, then commits.
 pub fn settleModelAttemptFailure(
     a: anytype,
     io: std.Io,

@@ -149,8 +149,8 @@ pub fn lookup(a: anytype, value: *Import) void {
     a.read(lookup_content, .{ .digest = &value.digest, .length = value.length, .private = value.private }, &value.found);
 }
 
-/// Two values' rows in one statement, for a round that needs both: a
-/// round queues `lookup_content` once.
+/// Two values' rows in one statement, for a round that needs both, where
+/// two `lookup`s would run two.
 const lookup_pair = rsql.Read(.{
     .sql = "SELECT (SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3) AS first," ++
         "(SELECT content_id FROM content WHERE digest=?4 AND byte_length=?5 AND private=?6) AS second",

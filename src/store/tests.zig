@@ -1249,6 +1249,114 @@ test "a content sink opens only the row its Access last took, once its insert ra
     try a.abandon(.{});
 }
 
+test "a round queues one statement any number of times, an engine pass before each rebinding" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    // Before engine passes the second queuing was StatementQueuedTwice.
+    var digests: [9][32]u8 = undefined;
+    var ids: [9]u64 = undefined;
+    for (&digests, &ids, 0..) |*digest, *id, index| {
+        digest.* = protocol.contentDigest(&.{@intCast(index)});
+        id.* = try a.identity(.content_id);
+        a.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = digest, .length = index + 1 });
+    }
+    try a.run();
+    try std.testing.expectEqual(1, a.rounds);
+    try std.testing.expectEqual(9, a.passes);
+    // Each binding stepped before the next replaced it: nine rows, in order.
+    for (ids, 0..) |id, index| {
+        var lengths: [64]u8 = undefined;
+        const sql = try std.fmt.bufPrintSentinel(&lengths, "SELECT byte_length FROM content WHERE content_id={d}", .{id}, 0);
+        try std.testing.expectEqual(index + 1, try queryU64(storage.database, sql));
+    }
+    try a.abandon(.{});
+}
+
+test "a full queue takes an engine pass and the round still counts once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    // Before engine passes the ninth entry was RoundFull.
+    const digest = protocol.contentDigest("ninefold");
+    const id = try a.identity(.content_id);
+    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 8 });
+    for (0..8) |index| a.writeContent(id, "ninefold"[index..][0..1]);
+    try a.run();
+    try std.testing.expectEqual(1, a.rounds);
+    try std.testing.expectEqual(2, a.passes);
+    try a.abandon(.{});
+}
+
+test "a guard that fails in an engine pass fails the next run, and nothing after it steps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "pass-guard");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    var loaded: TestingRound.head.Result = undefined;
+    a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
+    try a.run();
+    const before = try querySessionU64(storage.database, "SELECT created_at FROM session WHERE session_ref=?1", session.slice());
+    // Revision 99 matches no row, so the guard fails when the pass steps it.
+    a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 99 });
+    a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
+    try std.testing.expectEqual(2, a.passes);
+    try std.testing.expectError(error.TestingGuard, a.run());
+    try std.testing.expectEqual(before, try querySessionU64(storage.database, "SELECT created_at FROM session WHERE session_ref=?1", session.slice()));
+    try a.abandon(.{});
+}
+
+test "a queued read's destination holds poison until the pass that steps it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "poison");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.read, error{}) = .open(&entry);
+    defer a.deinit();
+    const poisoned = struct {
+        fn all(bytes: []const u8) bool {
+            for (bytes) |byte| if (byte != store_access.poison_byte) return false;
+            return true;
+        }
+    }.all;
+    var first: TestingRound.head.Result = undefined;
+    var second: TestingRound.head.Result = undefined;
+    @memset(std.mem.asBytes(&first), 0);
+    @memset(std.mem.asBytes(&second), 0);
+    a.read(TestingRound.head, .{ .session_ref = session.slice() }, &first);
+    try std.testing.expect(poisoned(std.mem.asBytes(&first)));
+    // Queuing it again steps the first: defined before `run`, as a network
+    // engine would not have it.
+    a.read(TestingRound.head, .{ .session_ref = session.slice() }, &second);
+    try std.testing.expect(!poisoned(std.mem.asBytes(&first)));
+    try std.testing.expectEqualSlices(u8, session.slice(), &first.head.ref);
+    try std.testing.expect(poisoned(std.mem.asBytes(&second)));
+    try a.run();
+    try std.testing.expectEqualSlices(u8, session.slice(), &second.head.ref);
+}
+
 test "abandoning an Access that has ended runs nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

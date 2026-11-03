@@ -4,8 +4,14 @@
 //! writes BEGIN, COMMIT, a row-count check or a position claim itself.
 //!
 //! The engine is the Store's SQLite connection. A statement is bound when
-//! queued and stepped when its round runs, so a destination is defined only
-//! after `run`, as it will be on a network engine.
+//! queued. A round may queue one statement any number of times: SQLite
+//! steps what is queued, in order (an engine pass), before it rebinds a
+//! statement already queued or when the queue's 8 slots are full, and at
+//! `run`. A pass is in-process work inside the round, never a round trip,
+//! so a destination is defined only after `run`, as it will be on a
+//! network engine, where a repeated statement is one more Bind/Execute in
+//! the same pipeline. Debug and test builds poison what `read` and
+//! `readInto` will define (`poison`) until the pass that steps it.
 
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
@@ -52,8 +58,6 @@ pub const Failure = error{
     IdentityOutsideTransaction,
     IdentityReadFailed,
     TooManyPositionClaims,
-    RoundFull,
-    StatementQueuedTwice,
     ContentNotInserted,
 };
 
@@ -113,10 +117,23 @@ pub const ContentSink = struct {
     }
 };
 
+/// The byte Debug and test builds fill a queued read's destination with
+/// until the pass that steps it.
+pub const poison_byte = 0xAA;
+const poisons = @import("builtin").mode == .debug or @import("builtin").is_test;
+
+/// A count only tests read: logical rounds and engine passes.
+const TestCount = if (@import("builtin").is_test) u32 else u0;
+
+fn bump(count: *TestCount) void {
+    if (TestCount != u0) count.* += 1;
+}
+
 pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     return struct {
         const Self = @This();
         pub const Error = Guards || Failure;
+        /// The statements one engine pass steps at most.
         const max_queued = 8;
 
         store: *Store,
@@ -129,6 +146,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         failure: ?Error = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
+        /// Logical rounds (`run` and `commit`), each one round trip on a
+        /// network engine, and the engine passes inside them.
+        rounds: TestCount = 0,
+        passes: TestCount = 0,
         /// None in a read Access, which claims no positions.
         claims: [if (mode == .read or mode == .single) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
@@ -191,38 +212,53 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Queues a read; `destination` is defined once the round runs.
+        /// Debug and test builds fill it with `poison_byte` until the pass
+        /// that steps it.
         pub fn read(a: *Self, comptime S: type, args: S.Args, destination: *S.Result) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality != .each);
             // An `.optional` result is a copy of the decoded Row.
             if (comptime S.cardinality == .optional and (@sizeOf(S.Row) > 1024 or rsql.fillsInPlace(S.Row)))
                 @compileError("rsql: a Row over 1 KiB, or one that points into the caller's memory, is read with readInto: " ++ S.sql);
-            a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, &.{});
+            if (a.queueStatement(S, &args, runRead(S), .{ .destination = destination }, &.{})) poison(destination);
         }
 
         /// Queues an `.optional` read that decodes into `row` in place, so
         /// a Row over 1 KiB is never copied, and a Row's pointer fields
         /// (`rsql.fillsInPlace`) fill what they point to; `found` says
         /// whether there was one. A missing row leaves `row` as it was.
-        /// Both are defined once the round runs. Two reads need it:
+        /// Both are defined once the round runs. Debug and test builds
+        /// fill `found`, not `row`, with `poison_byte` until the pass that
+        /// steps it, because `row` must keep its bytes. Two reads need it:
         /// `saved_session`, whose 4.6 KB Row `configure` fills in the
         /// caller's Session, and `bash_input`, whose Row points into the
         /// caller's `BashExecutionInput`, so neither is copied.
         pub fn readInto(a: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *bool) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .optional);
-            a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, &.{});
+            if (a.queueStatement(S, &args, runInto(S), .{ .into = .{ .row = row, .found = found } }, &.{})) poison(found);
         }
 
         /// Queues an `.each` read whose round hands each row in turn to
         /// `visitor.visit(*const S.Row) bool`, until it returns false, the
         /// rows end, or `limit` rows were stepped. `visitor` must outlive
-        /// the round.
+        /// the round. Nothing is poisoned: the visitor holds its inputs.
         pub fn readEach(a: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
-            a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } }, &.{});
+            _ = a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } }, &.{});
         }
 
-        /// Ends the round: runs every queued statement in order.
+        /// Ends the round: runs every queued statement in order, and
+        /// reports the first failure of this round's passes.
         pub fn run(a: *Self) Error!void {
+            bump(&a.rounds);
+            a.pass();
+            if (a.failure) |err| return err;
+        }
+
+        /// An engine pass: steps every queued statement in order, then
+        /// empties the queue. A failure stops it, and the round that
+        /// contains it reports it.
+        fn pass(a: *Self) void {
+            bump(&a.passes);
             for (a.queue[0..a.queued]) |*entry| {
                 if (a.failure != null) break;
                 entry.run(a, entry) catch |err| {
@@ -231,7 +267,6 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 if (entry.statement) |statement| sqlite.resetCached(statement);
             }
             a.resetQueued();
-            if (a.failure) |err| return err;
         }
 
         /// Records that this Access changes `head`'s Session, and returns
@@ -270,7 +305,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.touch(head);
                 ref.* = head.ref;
             }
-            a.queueStatement(S, args, runWrite(S), target, &refs);
+            _ = a.queueStatement(S, args, runWrite(S), target, &refs);
         }
 
         /// The id of the content row this Access queued for (`digest`,
@@ -358,10 +393,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// itself.
         pub fn commit(a: *Self) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
+            bump(&a.rounds);
             if (mode == .single) {
                 // A second statement would not commit with the first.
                 if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");
-                try a.run();
+                a.pass();
+                if (a.failure) |err| return err;
                 a.ended = true;
                 return;
             }
@@ -376,6 +413,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `commit` without COMMIT: the caller's transaction stays open.
         pub fn apply(a: *Self) Error!void {
             comptime std.debug.assert(mode == .nested);
+            bump(&a.rounds);
             try a.finishWrites();
         }
 
@@ -414,15 +452,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (mode == .write and a.opened and !a.ended) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
+        /// The queued writes, then one compare-and-set per claiming
+        /// Session, in the round that commits.
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
-            try a.run();
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
-                a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} }, &.{claim.head.ref});
-                try a.run();
+                _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} }, &.{claim.head.ref});
             };
+            a.pass();
             a.claimed = 0;
+            if (a.failure) |err| return err;
         }
 
         /// Opens the transaction of a write Access before its first
@@ -444,40 +484,52 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
         }
 
-        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target"), session_refs: []const change_ring.Id) void {
+        /// Binds and queues `S`, after an engine pass when `S` is already
+        /// queued or the queue is full. True when it queued.
+        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target"), session_refs: []const change_ring.Id) bool {
             a.ensureOpen();
-            if (a.failure != null) return;
+            if (a.failure != null) return false;
             const statement = store_core.cachedTyped(a.store, S) catch |err| {
                 a.failure = err;
-                return;
+                return false;
             };
+            // Binding a queued statement would replace the arguments it
+            // has not stepped with yet.
             for (a.queue[0..a.queued]) |entry| if (entry.statement == statement) {
-                a.failure = error.StatementQueuedTwice;
-                return;
+                a.pass();
+                break;
             };
             const now = if (S.uses_now) store_core.transactionSecond(a.store) catch |err| {
                 a.failure = err;
-                return;
+                return false;
             } else 0;
-            const slot = a.reserve() orelse return;
+            const slot = a.reserve() orelse return false;
             slot.* = .{ .statement = statement, .run = runner, .target = target };
             @memcpy(slot.session_refs[0..session_refs.len], session_refs);
             sqlite.bindArgs(statement, S, args, now, slot.session_refs[0..session_refs.len]) catch |err| {
                 sqlite.resetCached(statement);
                 a.failure = err;
-                return;
+                return false;
             };
             a.queued += 1;
+            return true;
         }
 
-        /// The next queue slot, or null after recording `RoundFull`.
+        /// The next queue slot, after an engine pass when the queue is
+        /// full; null once a failure is recorded.
         fn reserve(a: *Self) ?*Queued {
+            if (a.failure == null and a.queued == a.queue.len) a.pass();
             if (a.failure != null) return null;
-            if (a.queued == a.queue.len) {
-                a.failure = error.RoundFull;
-                return null;
-            }
             return &a.queue[a.queued];
+        }
+
+        /// Fills a queued read's destination with `poison_byte` in Debug
+        /// and test builds, so a body that reads it before the pass that
+        /// steps it reads poison. A pass that runs before `run` defines it
+        /// early; only a network engine catches a body that reads it
+        /// between that pass and `run`.
+        fn poison(destination: anytype) void {
+            if (poisons) @memset(std.mem.asBytes(destination), poison_byte);
         }
 
         fn resetQueued(a: *Self) void {
