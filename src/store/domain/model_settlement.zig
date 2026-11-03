@@ -255,7 +255,7 @@ const claim_auth_refresh = rsql.Write(.{
 
 /// The error a failed step of an Operation read reports, as on main.
 fn runOperationRead(a: anytype) !void {
-    a.run() catch |err| return if (err == error.StatementFailed) error.OperationReadFailed else err;
+    try store_access.runAs(a, error.OperationReadFailed);
 }
 
 /// Round 1 reads the Attempt; the claim is written only when the round
@@ -496,7 +496,7 @@ const ExhaustedChoice = struct {
 pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: ActiveOperationFilter) !bool {
     var choice: ExhaustedChoice = .{ .active = active };
     candidate.readEach(exhausted_attempts, .{}, try std.math.add(u64, active.maximum_exclusions, 1), &choice);
-    candidate.run() catch |err| return if (err == error.StatementFailed) error.RetryRecoveryFailed else err;
+    try store_access.runAs(candidate, error.RetryRecoveryFailed);
     const chosen = choice.chosen orelse return false;
     if (!chosen.turn_open) return error.SelectionChanged;
     a.write(resolve_exhausted, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });

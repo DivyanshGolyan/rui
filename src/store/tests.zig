@@ -65,7 +65,6 @@ const StatementCache = sqlite.StatementCache;
 const TestingAnswerPart = store_testing.TestingAnswerPart;
 const TurnOutcome = turn_domain.TurnOutcome;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
-const activity_sequence_guard_sql = reads_domain.activity_sequence_guard_sql;
 const answerTestTurn = store_testing.answerTestTurn;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
@@ -74,7 +73,6 @@ const configureTestSession = store_testing.configureTestSession;
 const empty_active_context = action_domain.empty_active_context;
 const next_action_attempt_sql = action_domain.next_action_attempt_sql;
 const pending_message_count_sql = command_domain.pending_message_count_sql;
-const queued_sql = reads_domain.queued_sql;
 const retry_admission_page_rows = model_admission_domain.retry_admission_page_rows;
 const retry_admission_select_sql = model_admission_domain.retry_admission_select_sql;
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
@@ -10827,7 +10825,7 @@ test "activity revalidation takes the same steps however long a Session's histor
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
-        const guard = try sqlite.prepare(storage.database, activity_sequence_guard_sql);
+        const guard = try sqlite.prepare(storage.database, reads_domain.activity_sequence_guard.sql);
         defer _ = c.sqlite3_finalize(guard);
         try sqlite.bindText(guard, 1, "h1st0r");
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(guard));
@@ -11501,6 +11499,102 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
 }
 
+test "a page's rows share their rounds, so a full page takes as many as one row" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "rounds-config");
+    try submitTestMessage(&storage, &tmp, "rounds-input", "message", session.slice(), "run tools");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Seventeen calls in one group: every page below is full.
+    var calls: [17]TestingCall = undefined;
+    var names: [17][16]u8 = undefined;
+    for (&calls, &names, 0..) |*call, *name, index| {
+        const id = try std.fmt.bufPrint(name, "rounds-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "rounds-output", &calls);
+    var proposals: protocol.ProposalPage = .{};
+    try proposals.session.set(session.slice());
+    var conversation: protocol.ConversationPage = .{};
+    try conversation.session.set(session.slice());
+    var activity: protocol.ActivityPage = .{};
+    try activity.session.set(session.slice());
+    const full = try pageRounds(&storage, &proposals, &conversation, &activity);
+    try std.testing.expectEqual(@as(usize, 16), full.proposals);
+    try std.testing.expectEqual(@as(usize, 16), full.conversation);
+    try std.testing.expectEqual(@as(usize, 16), full.activity);
+    // Smaller pages of the same kinds: the first Proposal; the first Tool
+    // Result and the User entry before it; the rows through the first call.
+    proposals.end = full.first_call;
+    conversation = .{ .session = conversation.session, .end = full.end, .before_position = full.results, .before_ordinal = 2 };
+    activity.end = full.first_call;
+    const small = try pageRounds(&storage, &proposals, &conversation, &activity);
+    try std.testing.expectEqual(@as(usize, 1), small.proposals);
+    try std.testing.expectEqual(@as(usize, 2), small.conversation);
+    try std.testing.expect(small.activity < 16);
+    try std.testing.expectEqual(small.rounds, full.rounds);
+}
+
+const PageRounds = struct { rounds: [3]u32, proposals: usize, conversation: usize, activity: usize, first_call: u64, results: u64, end: u64 };
+
+/// The rounds each page read takes, with its row counts and the positions
+/// its caller bounds smaller pages with.
+fn pageRounds(storage: *Store, proposals: *const protocol.ProposalPage, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
+    var result: PageRounds = undefined;
+    var proposal_page: reads_domain.ProposalPage = undefined;
+    var public_page: reads_domain.PublicConversationPage = undefined;
+    var activity_page: protocol.ActivityFacts = undefined;
+    {
+        var a = reads_domain.ReadAccess.within(storage);
+        defer a.deinit();
+        try reads_domain.proposalPage(&a, proposals, &proposal_page);
+        result.rounds[0] = a.rounds;
+    }
+    {
+        var a = reads_domain.ReadAccess.within(storage);
+        defer a.deinit();
+        try reads_domain.publicConversationPage(&a, conversation, &public_page);
+        result.rounds[1] = a.rounds;
+    }
+    {
+        var a = reads_domain.ReadAccess.within(storage);
+        defer a.deinit();
+        try reads_domain.activityPage(&a, activity, &activity_page);
+        result.rounds[2] = a.rounds;
+    }
+    result.proposals = proposal_page.count;
+    result.conversation = public_page.count;
+    result.activity = activity_page.count;
+    result.first_call = proposal_page.items[0].position;
+    result.results = public_page.items[0].position;
+    result.end = public_page.end;
+    return result;
+}
+
+test "the tool-group scan answers a missing Proposal as main did, before its outcome" {
+    // The scan reads a call's Proposal and outcome in one round; main read
+    // the Proposal first, so neither row answers ContentNotFound.
+    try std.testing.expectError(error.ContentNotFound, historical_domain.scannedCall(&.{ .position = 7 }, null, 1, 0));
+}
+
+test "the touch oracle leaves unwatched exactly the columns the schema marks unlisted" {
+    comptime var unlisted: []const []const u8 = &.{};
+    inline for (store_schema.tables) |table| inline for (table.columns) |column| if (!column.listed) {
+        unlisted = unlisted ++ .{table.name ++ "." ++ column.name};
+    };
+    try std.testing.expectEqual(unlisted.len, sqlite.touch_oracle_unwatched.len);
+    for (unlisted) |name| {
+        const found = for (sqlite.touch_oracle_unwatched) |unwatched| {
+            if (std.mem.eql(u8, unwatched, name)) break true;
+        } else false;
+        if (!found) std.debug.print("unlisted but watched: {s}\n", .{name});
+        try std.testing.expect(found);
+    }
+}
+
 test "read-through only advances, within the Session's committed positions, touches no list, and pages carry it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11648,10 +11742,15 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
-        const statement = try store_core.cached(&storage, queued_sql);
+        const statement = try store_core.cachedTyped(&storage, reads_domain.queued);
         for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
             _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
-            try std.testing.expectEqual(protocol.Queued{ .count = 1, .oldest_position = 2 * newest, .newest_admission = newest, .newest_position = 2 * newest }, try reads_domain.readQueuedLocked(&storage, "qu3u3d", end));
+            var access = reads_domain.ReadAccess.within(&storage);
+            defer access.deinit();
+            var waiting: reads_domain.QueuedMessages = .{};
+            access.readEach(reads_domain.queued, .{ .session = "qu3u3d", .position = end }, std.math.maxInt(u64), &waiting);
+            try access.run();
+            try std.testing.expectEqual(protocol.Queued{ .count = 1, .oldest_position = 2 * newest, .newest_admission = newest, .newest_position = 2 * newest }, waiting.queued);
             probe.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
         }
     }
@@ -11877,8 +11976,9 @@ test "persisted tool label corruption fences every publication route" {
         .{ .sql = "'Read' || char(10) || 'files'" },
         .{ .sql = "char(160)" },
         .{ .sql = "'Read' || char(8232) || 'files'" },
-        // Bounded text rejects malformed UTF-8 before semantic validation.
-        .{ .sql = "CAST(X'80' AS TEXT)", .failure = error.InvalidUtf8 },
+        // The typed row's Bounded text rejects malformed UTF-8 before
+        // semantic validation; a typed decode failure is CorruptStore.
+        .{ .sql = "CAST(X'80' AS TEXT)" },
     };
     for (invalid) |description| {
         for ([_]enum { current, full, live_activity, settled_activity, conversation }{ .current, .full, .live_activity, .settled_activity, .conversation }) |route| {
@@ -12038,7 +12138,7 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
         // The history rows bypass the Host's ids.
         try store_core.reloadIdentitiesForTesting(&storage);
-        const tail = (try turn_domain.sessionNextPosition(&storage, session.slice())).?;
+        const tail = (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position;
         try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         var identities: [20][24]u8 = undefined;
@@ -12139,6 +12239,41 @@ test "live tool activity survives completed Turns and split result pages" {
     try std.testing.expectEqual(@as(usize, 0), frozen.count);
     try std.testing.expectEqual(@as(u64, 2), frozen.call_activity.total);
     try std.testing.expectEqual(next.operation_id, frozen.call_activity.entries[0].operation);
+}
+
+test "live tool activity counts calls past the sixteenth Operation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "ops-config");
+    try submitTestMessage(&storage, &tmp, "ops-input", "input", session.slice(), "propose");
+    // One call per Operation, so the count spans more Operations than a
+    // read bounded by the page's 16 rows would reach.
+    var first: u64 = 0;
+    for (0..32) |index| {
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (index == 0) first = binding.operation_id;
+        var identity: [24]u8 = undefined;
+        const id = try std.fmt.bufPrint(&identity, "ops-{d}", .{index});
+        var prefix: [24]u8 = undefined;
+        const calls = [_]TestingCall{.{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" }};
+        try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "ops-calls-{d}", .{index}), &calls);
+    }
+    var stop = try completeSessionStop("ops-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const page = try store_core.activityPageForTesting(&storage, request);
+    // The page shows the first Operations' items; activity counts the
+    // calls whose groups are published after its last item.
+    var sql: [128]u8 = undefined;
+    const after = try queryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT count(*) FROM model_tool_call WHERE acceptance_position>{d}", .{page.items[page.count - 1].position}, 0));
+    try std.testing.expect(after > 16);
+    try std.testing.expectEqual(after, page.call_activity.total);
+    try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
+    try std.testing.expect(page.call_activity.entries[0].operation > first);
 }
 
 test "compaction overflow admits a new Operation without losing applied input" {

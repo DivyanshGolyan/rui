@@ -120,10 +120,7 @@ pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field:
     a.read(action_call_position, .{ .action_id = action_id, .session = session_ref }, &found);
     try a.run();
     const position = (found orelse return error.ActionNotFound).position.get();
-    var proposal: reads_domain.proposal_row.Result = undefined;
-    reads_domain.readProposal(a, session_ref, position, &proposal);
-    try a.run();
-    const reference = (try reads_domain.proposalIdentity(proposal, position)).metadata.fields[@backingInt(field)];
+    const reference = (try reads_domain.proposal(a, session_ref, position)).metadata.fields[@backingInt(field)];
     return .{ .length = reference.length, .digest = reference.digest };
 }
 
@@ -195,10 +192,7 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
     try a.run();
     if (!found.get()) return error.StaleActionAttemptBinding;
     const position = (row.position orelse return error.CorruptStore).get();
-    var proposal: reads_domain.proposal_row.Result = undefined;
-    reads_domain.readProposal(a, out.session.slice(), position, &proposal);
-    try a.run();
-    const reference = (try reads_domain.proposalIdentity(proposal, position)).metadata.fields[@backingInt(protocol.ProposalField.arguments)];
+    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).metadata.fields[@backingInt(protocol.ProposalField.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
     out.timeout_ms = row.timeout_ms.get();
 }

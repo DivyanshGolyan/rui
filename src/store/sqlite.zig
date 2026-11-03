@@ -161,6 +161,17 @@ pub fn resetCached(statement: *c.sqlite3_stmt) void {
     }
 }
 
+/// Resets a cached statement that was bound but not stepped since its
+/// last `resetCached`, such as one queued after a failed step. Its plan
+/// read no bound value: SQLite re-prepares with bound values only inside a
+/// step, and the `resetCached` after that step would have panicked. So an
+/// expiry it carries came from a schema change, which its next step
+/// re-prepares for, and the check does not apply.
+pub fn resetUnstepped(statement: *c.sqlite3_stmt) void {
+    _ = c.sqlite3_reset(statement);
+    _ = c.sqlite3_clear_bindings(statement);
+}
+
 pub fn exec(database: *c.sqlite3, sql: [:0]const u8) !void {
     if (c.sqlite3_exec(database, sql, null, null, null) != c.SQLITE_OK) return error.SqliteExecFailed;
 }
@@ -187,6 +198,14 @@ pub const touch_oracle_tables = .{
     "conversation_entry", "model_output_item", "model_tool_call",
 };
 
+/// The columns, as `table.column`, whose update the oracle does not
+/// watch. It is written here by hand, not read from
+/// `schema.Column.listed`, which `rsql.Write.touches` reads: a column
+/// marked unlisted by mistake is still watched, so a write of it that
+/// skips its touch fails the test that drives it. A Store test holds this
+/// list equal to the schema's unlisted columns.
+pub const touch_oracle_unwatched = [_][]const u8{"session.read_through"};
+
 /// Test builds: a temporary trigger on each table that carries a Session
 /// notes every Session whose rows change, for `untouchedForTesting`.
 /// It precedes every cached statement, so none re-prepares.
@@ -198,30 +217,30 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
         const sessions = comptime store_schema.sessionColumns(table);
         inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {
             const columns = comptime if (std.mem.eql(u8, event, "UPDATE")) sessions[0..1] else sessions;
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ table, event, event, table, comptime oracleBody(event, columns) }));
+            const watched = comptime if (std.mem.eql(u8, event, "UPDATE")) " OF " ++ watchedColumns(table, store_schema.columnsOf(table)) else "";
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s}{s} ON main.{s} BEGIN {s} END", .{ table, event, event, watched, table, comptime oracleBody(event, columns) }));
         }
         const both = comptime store_schema.readByBoth(table);
         if (both.len != 0) {
-            const names = comptime blk: {
-                var text: []const u8 = "";
-                for (both, 0..) |name, index| text = text ++ (if (index == 0) "" else ",") ++ name;
-                break :blk text;
-            };
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, names, table, comptime oracleBody("UPDATE", sessions[1..]) }));
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, comptime watchedColumns(table, both), table, comptime oracleBody("UPDATE", sessions[1..]) }));
         }
     }
-    // How far a person read is no Session list row's fact, so recording it
-    // needs no touch: the Session's update trigger watches every other
-    // column, read from the schema so a new column is watched too.
-    try exec(database, "DROP TRIGGER temp.touched_session_UPDATE");
-    const columns = "SELECT group_concat(name,',') FROM pragma_table_info('session') WHERE name<>'read_through'";
-    var statement: ?*c.sqlite3_stmt = null;
-    if (c.sqlite3_prepare_v2(database, columns, -1, &statement, null) != c.SQLITE_OK) return error.SqliteExecFailed;
-    defer _ = c.sqlite3_finalize(statement);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SqliteExecFailed;
-    const names = c.sqlite3_column_text(statement, 0) orelse return error.SqliteExecFailed;
-    var sql: [2048]u8 = undefined;
-    try exec(database, try std.fmt.bufPrintSentinel(&sql, "CREATE TEMP TRIGGER touched_session_UPDATE AFTER UPDATE OF {s} ON main.session BEGIN INSERT INTO touched_oracle VALUES(NEW.session_ref);INSERT INTO touched_oracle VALUES(OLD.session_ref); END", .{std.mem.span(names)}, 0));
+}
+
+/// `columns` of `table` without `touch_oracle_unwatched`, joined by
+/// commas: an `UPDATE OF` list, which must name at least one column.
+fn watchedColumns(comptime table: []const u8, comptime columns: []const []const u8) []const u8 {
+    comptime {
+        var text: []const u8 = "";
+        for (columns) |column| {
+            const unwatched = for (touch_oracle_unwatched) |name| {
+                if (std.mem.eql(u8, name, table ++ "." ++ column)) break true;
+            } else false;
+            if (!unwatched) text = text ++ (if (text.len == 0) "" else ",") ++ column;
+        }
+        if (text.len == 0) @compileError("touch oracle: an update of " ++ table ++ " would watch no column");
+        return text;
+    }
 }
 
 /// A trigger body that notes each of `columns`' Sessions, new and old.
@@ -324,12 +343,6 @@ pub fn maxEnumTagBytes(comptime Enum: type) usize {
     return maximum;
 }
 
-/// A positive id column, or null for SQL NULL.
-pub fn optionalColumnId(statement: *c.sqlite3_stmt, column: c_int) ?i64 {
-    if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
-    return c.sqlite3_column_int64(statement, column);
-}
-
 pub fn readDigest(statement: *c.sqlite3_stmt, index: c_int) ![32]u8 {
     if (c.sqlite3_column_bytes(statement, index) != 32) return error.CorruptStore;
     const pointer = c.sqlite3_column_blob(statement, index) orelse return error.CorruptStore;
@@ -407,13 +420,13 @@ var transient: extern union { bits: usize, destructor: c.sqlite3_destructor_type
 
 /// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
 /// the text uses @now. Integers, `[n]u8` arrays, `protocol.Bounded` texts
-/// and a SessionHead's reference are copied into the statement when it
-/// is bound: SQLite holds the copy, in its own heap, until the statement
-/// is rebound or reset, so a caller may reuse their memory at once. Only
-/// a `[]const u8` text and an `rsql.Bytes` blob are read in place when a
-/// pass steps the statement, so their bytes must not change before then
-/// (`Access` checks this in Debug and test builds). Enum tag names are
-/// static.
+/// and a SessionHead's or SessionRef's reference are copied into the
+/// statement when it is bound: SQLite holds the copy, in its own heap,
+/// until the statement is rebound or reset, so a caller may reuse their
+/// memory at once. Only a `[]const u8` text and an `rsql.Bytes` blob are
+/// read in place when a pass steps the statement, so their bytes must not
+/// change before then (`Access` checks this in Debug and test builds).
+/// Enum tag names are static.
 pub fn bindArgs(statement: *c.sqlite3_stmt, comptime S: type, args: *const S.Args, now: i64) !void {
     const info = @typeInfo(S.Args).@"struct";
     inline for (info.field_names, info.field_types, 1..) |name, Field, index| {
@@ -456,6 +469,7 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
     if (T == rsql.Positive) return bindU64(statement, index, value.get());
     if (T == rsql.Bytes) return bindBlob(statement, index, value.bytes);
     if (T == rsql.SessionHead) return bindCopied(statement, index, &value.ref, true);
+    if (T == rsql.SessionRef) return bindCopied(statement, index, &value.ref, true);
     if (comptime isBounded(T)) {
         comptime std.debug.assert(@typeInfo(@FieldType(T, "bytes")).array.len <= max_copied_bytes);
         return bindCopied(statement, index, if (value.len == 0) "" else value.slice(), true);

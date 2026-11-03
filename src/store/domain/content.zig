@@ -319,21 +319,48 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
 
 pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
-pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-    const statement = try store_core.cached(self, "SELECT byte_length,digest,private FROM content WHERE content_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindI64(statement, 1, content_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const length = c.sqlite3_column_int64(statement, 0);
-    if (length < 0) return error.CorruptStore;
-    return .{ .length = @intCast(length), .digest = try sqlite.readDigest(statement, 1), .private = c.sqlite3_column_int(statement, 2) != 0 };
+/// A content row's metadata. Every id a reader holds names a row, so a
+/// missing one is `CorruptStore`.
+pub const content_metadata = rsql.Read(.{
+    .sql = "SELECT byte_length,digest,private FROM content WHERE content_id=?1",
+    .Args = struct { content_id: u64 },
+    .Row = struct { byte_length: u64, digest: [32]u8, private: bool },
+    .cardinality = .one,
+});
+
+pub fn metadataOf(row: *const content_metadata.Row) ContentMetadata {
+    return .{ .length = row.byte_length, .digest = row.digest, .private = row.private };
 }
 
 // Every public metadata/byte route validates the exposed content itself.
+pub fn publicMetadata(row: *const content_metadata.Row) error{CorruptStore}!ContentMetadata {
+    if (row.private) return error.CorruptStore;
+    return metadataOf(row);
+}
+
+/// `content_metadata` for unconverted code, in a round of its own
+/// (`readContentRow`).
+pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
+    return metadataOf(&try readContentRow(self, content_id));
+}
+
+/// `readContentMetadata` of content a public route exposes.
 pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-    const metadata = try readContentMetadata(self, content_id);
-    if (metadata.private) return error.CorruptStore;
-    return metadata;
+    return publicMetadata(&try readContentRow(self, content_id));
+}
+
+/// A failed step is `CorruptStore`, main's answer for it. An id below 1
+/// is `CorruptStore` without a read, where main read it and found no row
+/// unless one had that id. Not inlined, so its Access takes no slot in its
+/// callers' frames.
+noinline fn readContentRow(self: *Store, content_id: i64) !content_metadata.Row {
+    if (content_id <= 0) return error.CorruptStore;
+    var a = Access(.read, error{}).within(self);
+    defer a.deinit();
+    var row: content_metadata.Row = undefined;
+    a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &row);
+    try store_access.runAs(&a, error.CorruptStore);
+    return row;
 }
 
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {

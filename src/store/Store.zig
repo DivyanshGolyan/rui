@@ -19,6 +19,7 @@ const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const rsql = @import("rsql.zig");
 const Access = @import("access.zig").Access;
+const ReadAccess = reads_domain.ReadAccess;
 const store_schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
@@ -115,7 +116,8 @@ pub const Store = struct {
     /// current revision, leaving that revision and its frozen inputs intact.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        return historical_domain.readPrefixSealLocked(self, binding);
+        var access = historical_domain.ReadAccess.within(self);
+        return historical_domain.prefixSealOf(&access, binding);
     }
 
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
@@ -441,7 +443,7 @@ pub const Store = struct {
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{}) = .open(&entry);
+        var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, command_domain.observeCommand(&access, key));
     }
@@ -449,7 +451,7 @@ pub const Store = struct {
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{}) = .open(&entry);
+        var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.result, command_domain.commandResult(&access, key));
     }
@@ -457,7 +459,9 @@ pub const Store = struct {
     pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.none, reads_domain.inspectSessionLocked(self, session_ref, out));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
     }
 
     // Reverse chronological, with call order breaking ties at a completed
@@ -467,7 +471,9 @@ pub const Store = struct {
     pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.publicConversationPageLocked(self, request, out));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out));
     }
 
     // Resolve the public identity again, rather than accepting a global digest:
@@ -475,14 +481,18 @@ pub const Store = struct {
     pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContentLocked(self, request));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContent(&access, request));
     }
 
     pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.activityPageLocked(self, request, out));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
     }
 
     /// Records that a person has seen the Session's conversation through
@@ -493,7 +503,7 @@ pub const Store = struct {
     pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.read_through, reads_domain.markReadLocked(self, request));
+        return entry.finish(Ordinary.read_through, reads_domain.markRead(&entry, request));
     }
 
     /// The Message with no Session sender next to `position` at `end`: one
@@ -502,28 +512,36 @@ pub const Store = struct {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.personMessageLocked(self, request));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.personMessage(&access, request));
     }
 
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.content, reads_domain.openActivityContentLocked(self, request));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
     }
 
     pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.page, reads_domain.proposalPageLocked(self, request, out));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.proposalPage(&access, request, out));
     }
 
     pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.content, reads_domain.openProposalFieldLocked(self, request));
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.content, reads_domain.openProposalField(&access, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -585,7 +603,7 @@ pub const Store = struct {
         const entry = try enter(self, .none);
         defer entry.release();
         if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
-        var access: Access(.read, error{}) = .open(&entry);
+        var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.action, action_domain.actionContent(&access, session_ref, action_id, field));
     }
@@ -601,7 +619,7 @@ pub const Store = struct {
     pub noinline fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
-        var reader: Access(.read, error{}) = .open(&entry);
+        var reader: ReadAccess = .open(&entry);
         defer reader.deinit();
         var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed }) = .open(&entry);
         defer writer.deinit();
@@ -616,7 +634,7 @@ pub const Store = struct {
         if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
         const entry = try enter(self, .none);
         defer entry.release();
-        var candidate: Access(.read, error{}) = .open(&entry);
+        var candidate: ReadAccess = .open(&entry);
         defer candidate.deinit();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
@@ -627,7 +645,7 @@ pub const Store = struct {
     pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{}) = .open(&entry);
+        var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.action_attempt, action_domain.readBashExecutionInput(&access, binding, out));
     }
@@ -643,7 +661,7 @@ pub const Store = struct {
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{}) = .open(&entry);
+        var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, action_domain.actionSupersededByStop(&access, binding));
     }
@@ -656,7 +674,7 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{}) = .open(&entry);
+        var access: ReadAccess = .open(&entry);
         defer access.deinit();
         try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
         // Launch failures are effect outcomes, not canonical faults; the
@@ -682,7 +700,7 @@ pub const Store = struct {
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
-        var candidate: Access(.read, error{}) = .open(&entry);
+        var candidate: ReadAccess = .open(&entry);
         defer candidate.deinit();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
@@ -696,7 +714,7 @@ pub const Store = struct {
     ) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
-        var candidate: Access(.read, error{}) = .open(&entry);
+        var candidate: ReadAccess = .open(&entry);
         defer candidate.deinit();
         var access: Access(.write, error{RetryNoLongerDue}) = .open(&entry);
         defer access.deinit();
@@ -729,7 +747,7 @@ pub const Store = struct {
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
         const entry = try enter(self, .none);
         defer entry.release();
-        var access: Access(.read, error{}) = .open(&entry);
+        var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, model_settlement_domain.operationSupersededByControl(&access, binding));
     }
@@ -789,7 +807,7 @@ pub const Store = struct {
     ) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
-        var candidate: Access(.read, error{}) = .open(&entry);
+        var candidate: ReadAccess = .open(&entry);
         defer candidate.deinit();
         var access: Access(.write, error{SelectionChanged}) = .open(&entry);
         defer access.deinit();

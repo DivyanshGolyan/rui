@@ -12,6 +12,7 @@ const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
+const store_access = @import("../access.zig");
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const c = sqlite.c;
@@ -1293,7 +1294,7 @@ pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
     var result: message_result.Result = null;
     a.read(message_result, .{ .key = key }, &result);
     // The Host's fence names this read, as on main.
-    a.run() catch |err| return if (err == error.StatementFailed) error.ResultReadFailed else err;
+    try store_access.runAs(a, error.ResultReadFailed);
     const row = result orelse return error.ResultNotFound;
     const outcome = row.outcome_code orelse return if (row.stopped) error.ResultFailed else error.ResultNotReady;
     switch (try TurnOutcome.decode(outcome.slice(), if (row.outcome_content_id) |id| @intCast(id.get()) else null)) {

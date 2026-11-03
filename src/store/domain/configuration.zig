@@ -673,30 +673,6 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const protocol.Configu
     return protocol.routeOf(served, provider) != .unserved;
 }
 
-/// The Session facts turn work binds to, without the workspace or label
-/// a whole configuration carries, and optionally its workspace.
-pub fn readSessionFacts(self: *Store, session_ref: []const u8, workspace: ?*protocol.Bounded(protocol.max_workspace_bytes)) !?SessionFacts {
-    const statement = try store_core.cached(self, "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace FROM session WHERE session_ref=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    const step_result = c.sqlite3_step(statement);
-    if (step_result == c.SQLITE_DONE) return null;
-    if (step_result != c.SQLITE_ROW) return error.SessionReadFailed;
-    var facts: SessionFacts = .{
-        .permission_mode = try sqlite.readPermissionMode(statement, 1),
-        .revision = try sqlite.readPositiveU64(statement, 2),
-        .next_position = try sqlite.readPositiveU64(statement, 3),
-        .compaction_trigger = try sqlite.readNullableTokens(statement, 4, false),
-        .output_reservation = try sqlite.readNullableTokens(statement, 5, true),
-        .reasoning_effort = try sqlite.readNullableEffort(statement, 6),
-        .created_at = @intCast(try sqlite.readNullablePositiveI64(statement, 7) orelse return error.CorruptStore),
-        .provider = try sqlite.readProvider(statement, 8),
-    };
-    try sqlite.readText(statement, 0, &facts.model);
-    if (workspace) |destination| try sqlite.readText(statement, 9, destination);
-    return facts;
-}
-
 /// Queues saving the command that carries `applied`, then the Session's
 /// revision row, which references it. Every argument outlives the round.
 pub fn queueConfiguredCommand(

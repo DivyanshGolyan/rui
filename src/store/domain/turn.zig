@@ -137,17 +137,3 @@ pub fn queueStopCompletion(a: anytype, ready: stopped_turn.Result, turn_id: u64)
 pub fn queueContinuation(a: anytype, turn_id: u64, session: rsql.SessionHead) void {
     a.write(record_continuation, .{ .turn_id = turn_id, .session = session });
 }
-
-/// The Session's next position, or null when it does not exist: what page
-/// cursors and existence checks need, without its 4.6 KB configuration.
-pub fn sessionNextPosition(self: *Store, session_ref: []const u8) !?u64 {
-    const statement = try store_core.cached(self, "SELECT next_position FROM session WHERE session_ref=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    const step_result = c.sqlite3_step(statement);
-    if (step_result == c.SQLITE_DONE) return null;
-    if (step_result != c.SQLITE_ROW) return error.SessionReadFailed;
-    const next_position = c.sqlite3_column_int64(statement, 0);
-    if (next_position <= 0) return error.CorruptStore;
-    return @intCast(next_position);
-}

@@ -104,13 +104,22 @@ pub const Column = struct {
     /// two (`sessionColumns`). Every other table's one Session reads all
     /// of its columns, and leaves this `.recipient`.
     read_by: ReadBy = .recipient,
+    /// Whether a Session list row shows this column. Only
+    /// `rsql.Write.touches` reads it: an UPDATE that assigns only columns
+    /// no list shows makes the Access that queues it touch no Session. The
+    /// test touch oracle keeps its own list of the columns it does not
+    /// watch (`sqlite.touch_oracle_unwatched`), and a Store test holds the
+    /// two equal.
+    listed: bool = true,
 };
 
 /// The Sessions whose pages read a column of a table that names two
 /// Sessions: `.recipient`, only its `session_ref`'s; `.both`, its
 /// `sender_session_ref`'s too. A change to a `.both` column changes the
-/// sender's facts, so its writer touches the sender (`rsql.sessionError`)
-/// and the touch oracle records the sender (`sqlite.createTouchOracleForTesting`).
+/// sender's facts, so its writer names the sender (`rsql.sessionError`)
+/// and touches it unless `rsql.Write.touches` is false, and the touch
+/// oracle records the sender unless the column is one it does not watch
+/// (`sqlite.touch_oracle_unwatched`).
 pub const ReadBy = enum { recipient, both };
 
 /// Checked when its row is written, on every engine: writers insert a
@@ -207,7 +216,8 @@ pub const tables = [_]Table{
             .{ .name = "next_position", .type = .int, .check = "next_position>0" },
             // The position a person has seen the conversation through; null
             // until one has.
-            .{ .name = "read_through", .type = .int, .nullable = true, .check = "read_through IS NULL OR (read_through>0 AND read_through<next_position)" },
+            // How far a person read: no list row shows it.
+            .{ .name = "read_through", .type = .int, .nullable = true, .check = "read_through IS NULL OR (read_through>0 AND read_through<next_position)", .listed = false },
             // Creation order: list cursors and the Workspace key, allocated
             // by the Host in the creating transaction.
             .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
@@ -690,6 +700,18 @@ pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
     }
 }
 
+/// Whether a Session list row shows `table`'s column `column` (`Column.listed`).
+pub fn isListed(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return each.listed;
+            @compileError("schema: no column " ++ column ++ " in " ++ table);
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
 /// The columns of `table` that name a Session: `session_ref`, then
 /// `sender_session_ref`, those it has.
 pub fn sessionColumns(comptime table: []const u8) []const []const u8 {
@@ -749,13 +771,17 @@ pub fn keys(comptime table: []const u8) []const []const []const u8 {
     }
 }
 
+/// The branches rendering every object takes, which whichever statement
+/// first asks `hasIndex` spends. The test build needed between 5_000 and
+/// 6_250 per object (measured); this is twice the passing bound. A quota
+/// only raises the evaluation's limit, so a statement whose own quota is
+/// larger adds this to it (`rsql.renderStatement`).
+pub const objects_quota = 12_500 * (tables.len + indexes.len);
+
 /// Whether the schema has an index named `name`.
 pub fn hasIndex(comptime name: []const u8) bool {
     comptime {
-        // Whichever statement asks first renders every object. The test
-        // build needed between 5_000 and 6_250 per object (measured); this
-        // is twice the passing bound.
-        @setEvalBranchQuota(12_500 * (tables.len + indexes.len));
+        @setEvalBranchQuota(objects_quota);
         for (objects(.sqlite)) |object| if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
         return false;
     }

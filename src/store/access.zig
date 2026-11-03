@@ -397,7 +397,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Queues a write, touching each Session its @session markers
-        /// name. A failed guard fails the round that runs it.
+        /// name, unless it is an UPDATE that assigns only columns no list
+        /// row shows (`rsql.Write.touches` false). A failed guard fails the
+        /// round that runs it.
         pub fn write(a: *Self, comptime S: type, args: S.Args) void {
             if (S.expect == .counted) @compileError("rsql: a .counted write states its rows through writeCount: " ++ S.sql);
             a.queueWrite(S, &args, .{ .none = {} });
@@ -414,7 +416,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         fn queueWrite(a: *Self, comptime S: type, args: *const S.Args, target: @FieldType(Queued, "target")) void {
             comptime std.debug.assert(S.kind == .write and mode != .read and S.session_fields.len <= max_sessions);
-            inline for (S.session_fields) |field| a.touch(@field(args, field));
+            if (S.touches) inline for (S.session_fields) |field| a.touch(@field(args, field));
             _ = a.queueStatement(S, args, runWrite(S), target);
         }
 
@@ -654,8 +656,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (poisons) @memset(std.mem.asBytes(destination), poison_byte);
         }
 
+        /// Empties the queue. A pass reset each statement it stepped, and
+        /// checked it (`sqlite.resetCached`), as it stepped; what is left
+        /// was never stepped since its bind (`sqlite.resetUnstepped`).
         fn resetQueued(a: *Self) void {
-            for (a.queue[0..a.queued]) |entry| if (entry.statement) |statement| sqlite.resetCached(statement);
+            for (a.queue[0..a.queued]) |entry| if (entry.statement) |statement| sqlite.resetUnstepped(statement);
             a.queued = 0;
         }
 
@@ -757,6 +762,36 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (c.sqlite3_blob_write(blob, payload.bytes.ptr, @intCast(payload.bytes.len), 0) != c.SQLITE_OK) return error.ContentWriteFailed;
         }
     };
+}
+
+/// Ends `a`'s round with `run`, answering a failed step with `failed`:
+/// how a converted read keeps the name main gave the statements of a
+/// round, when they shared one.
+pub fn runAs(a: anytype, comptime failed: anytype) (RunError(@TypeOf(a.*)) || @TypeOf(failed))!void {
+    return runNamed(a, .{}, failed);
+}
+
+/// Ends `a`'s round with `run`, answering a failed step with the name main
+/// gave the statement that failed: the error of the first pair in `named`
+/// whose statement it was (`failedOn`), or `otherwise`.
+pub fn runNamed(a: anytype, comptime named: anytype, comptime otherwise: anytype) (RunError(@TypeOf(a.*)) || NamedErrors(named) || @TypeOf(otherwise))!void {
+    a.run() catch |err| {
+        if (err != error.StatementFailed) return err;
+        inline for (named) |pair| if (a.failedOn(pair[0])) return pair[1];
+        return otherwise;
+    };
+}
+
+/// The errors `A.run` returns.
+fn RunError(comptime A: type) type {
+    return @typeInfo(@typeInfo(@TypeOf(A.run)).@"fn".return_type.?).error_union.error_set;
+}
+
+/// The errors `runNamed`'s pairs name.
+fn NamedErrors(comptime named: anytype) type {
+    comptime var set: type = error{};
+    inline for (named) |pair| set = set || @TypeOf(pair[1]);
+    return set;
 }
 
 /// Steps `statement`: true at a row, false at its end.
