@@ -1730,7 +1730,9 @@ fn launchPreparedRequest(
             finishCustodyNow(host, slot);
             return;
         },
-        .none, .chatgpt_device => {},
+        .none => {},
+        // A sign-in's request always launches with its lease.
+        .chatgpt_device => unreachable,
     }
     // Every request echoes its Turn's routing value, whatever its provider:
     // one that never sends the codec's routing header has none to echo.

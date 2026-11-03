@@ -26,7 +26,9 @@ pub const PerProvider = struct {
     /// Each table takes `per_table` of `entries`, which the caller maps
     /// zeroed and unmaps after `deinit`.
     pub fn init(entries: []TurnStates.Entry) PerProvider {
-        const per_table = entries.len / std.enums.values(protocol.Provider).len;
+        const providers = std.enums.values(protocol.Provider).len;
+        std.debug.assert(entries.len % providers == 0);
+        const per_table = entries.len / providers;
         var self: PerProvider = .{};
         for (&self.tables.values, 0..) |*table, index| table.* = .{ .entries = entries[index * per_table ..][0..per_table] };
         return self;
@@ -139,7 +141,8 @@ test "a routing value replays one Turn's first value and never another Turn's" {
     var states: TurnStates = .{ .entries = &storage };
     defer states.deinit();
     const account: TurnStates.Owner = @splat(1);
-    // The same owner again, as after a credential refresh.
+    // The same owner's next launch, as after a credential refresh (a refresh
+    // keeps the owner: see providers.zig), keeps the epoch and the first value.
     const refreshed = account;
     const launch = states.replay(7, account);
     try std.testing.expectEqualStrings("", launch.value);
@@ -227,7 +230,7 @@ test "owner changes invalidate paused Turns and stale completions" {
     }
 }
 
-test "two providers' Turns keep their values whatever order their owners launch in" {
+test "two providers' Turns keep their values while their different owners launch in turn" {
     var storage: [2 * std.enums.values(protocol.Provider).len]TurnStates.Entry = @splat(.{});
     var states: PerProvider = .init(&storage);
     defer states.deinit();
