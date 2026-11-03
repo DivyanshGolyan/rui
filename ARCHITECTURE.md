@@ -734,15 +734,16 @@ Different Session references or Store selectors yield separate affinity values w
 Neither header is canonical authority, a provider-retention promise or a prerequisite for cache-independent reconstruction.
 A cold-prefix native comparison found immediate reuse with `session-id` but not with `prompt_cache_key` alone; this selects the tested header without claiming a 100-Session cache-hit target.
 
-Managed Codex also keeps the pinned client's per-Turn sticky routing ([client contract](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/core/src/client.rs#L256-L283)).
-The first `x-codex-turn-state` value in a successful (2xx) response to a Turn's request is that Turn's routing state.
+The Host keeps per-Turn sticky routing for every provider, following the pinned Codex client ([client contract](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/core/src/client.rs#L256-L283)) without asking which provider it serves.
+The codec names the routing header (`x-codex-turn-state` for `openai-responses/1`); the first value of it in a successful (2xx) response to a Turn's request is that Turn's routing state.
 Every later request of the same Turn sends it unchanged: retries, replacement Attempts, tool continuations and in-Turn compaction.
+A provider that never sends the header has no value to send back.
 A later value in the same Turn, any value on an interim or error response, and an empty, non-printable-ASCII or over-4,096-byte value are ignored rather than failing the transfer.
 No other Turn sends the value.
-It belongs to the account and FedRAMP binding that received it.
-Refresh keeps that binding; observing another binding while preparing a request clears every cached Turn and advances a Host-local routing epoch, matching the pinned owner-change rule rather than Rui's per-refresh credential generation.
-A transfer delivers the value as its headers arrive, under its launch epoch, so it cannot repopulate the table after an owner change, even if the original account later returns.
-The value is Host process memory, not canonical state: the Store never holds it, a fresh Host starts every Turn without it, and a table bounded by execution capacity replaces the least recently used Turn.
+It belongs to the owner that received it: a ChatGPT sign-in's account and FedRAMP binding, or the one owner of a key or of no credential, which a Host never changes.
+Refresh keeps that binding; observing another owner while preparing a request clears every cached Turn of that provider and advances that provider's Host-local routing epoch, matching the pinned owner-change rule rather than Rui's per-refresh credential generation.
+A transfer delivers the value as its headers arrive, under its provider and launch epoch, so it cannot repopulate the table after an owner change, even if the original account later returns.
+The value is Host process memory, not canonical state: the Store never holds it, a fresh Host starts every Turn without it, and each provider's table, bounded by execution capacity, replaces the least recently used Turn.
 Losing it only loses stickiness, because every request carries complete reconstructed input.
 
 Use closed semantic variants and opaque view-scoped handles, not storage rows or a generic query language.
@@ -1396,8 +1397,8 @@ A codec that cannot encode a request declines it, which fails the Attempt `provi
 Request headers come from two owners.
 The codec writes its own once per request from the frozen settings, which carry the Session's affinity, into the prepared request's own bounded storage: at most 8, whose values total at most 192 bytes.
 Each name is a tag of the codec's constant `RequestHeader` enum, so the request stores only its index and the 192 bytes count values alone.
-Each name is a lowercase token that names no field the Host or h2 writes itself (`content-type`, the credential's `authorization` and `chatgpt-account-id`, `user-agent`, `x-openai-fedramp`, `x-codex-turn-state`, and h2's `content-length`, `accept-encoding`, `host` and connection fields) and no earlier header, and each value is printable ASCII without a leading or trailing space; a built-in codec's headers are tested against these rules over its settings domain rather than checked at runtime.
-The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the credential path's `authorization` and `chatgpt-account-id`, `user-agent`, `x-openai-fedramp` when the binding is FedRAMP and the Turn's `x-codex-turn-state` when it has one.
+Each name is a lowercase token that names no field the Host or h2 writes itself (`content-type`, the credential's `authorization` and `chatgpt-account-id`, `user-agent`, `x-openai-fedramp`, every codec's routing header, and h2's `content-length`, `accept-encoding`, `host` and connection fields) and no earlier header, and each value is printable ASCII without a leading or trailing space; a built-in codec's headers are tested against these rules over its settings domain rather than checked at runtime.
+The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the credential path's `authorization` and `chatgpt-account-id`, `user-agent`, `x-openai-fedramp` when the binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
 A route without a credential sends the codec's headers and no credential-path fields.
 To classify an HTTP error body, the shell maps the sealed body read-only and gives it whole, as one slice, to the classifier of the codec the request was encoded with, with scratch the shell lends for that call and the classifier writes before it reads.
 The classifier writes its answer into one value the shell lends: context overflow, or else the error's code with a quota's reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
