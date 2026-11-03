@@ -5,7 +5,8 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
-const Access = @import("../access.zig").Access;
+const store_access = @import("../access.zig");
+const Access = store_access.Access;
 const rsql = @import("../rsql.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
@@ -102,19 +103,6 @@ pub const ContentReader = struct {
     }
 };
 
-/// One read handle reused only within a locked Store entry point.
-/// Its overflow-page index costs SQLite heap of about length/1024 bytes.
-pub const ContentBlob = struct {
-    handle: ?*c.sqlite3_blob = null,
-    content_id: i64 = 0,
-
-    pub fn close(self: *ContentBlob) void {
-        // Close reports only an earlier read failure, already returned.
-        if (self.handle) |handle| _ = c.sqlite3_blob_close(handle);
-        self.* = .{};
-    }
-};
-
 const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
     .Args = struct { digest: *const [32]u8, length: u64, private: bool },
@@ -149,10 +137,55 @@ pub const stop_cancellation: Import = blk: {
     break :blk .ofBytes(stop_cancellation_text, false);
 };
 
+/// The empty value's identity, hashed when the Host is built.
+pub const empty_content: Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes("", false);
+};
+
 /// Queues the read that finds `value`'s row; `importSlot` follows its round.
 /// `value` must outlive the round, which reads its digest in place.
 pub fn lookup(a: anytype, value: *Import) void {
     a.read(lookup_content, .{ .digest = &value.digest, .length = value.length, .private = value.private }, &value.found);
+}
+
+/// Two values' rows in one statement, for a round that needs both: a
+/// round queues `lookup_content` once.
+const lookup_pair = rsql.Read(.{
+    .sql = "SELECT (SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3) AS first," ++
+        "(SELECT content_id FROM content WHERE digest=?4 AND byte_length=?5 AND private=?6) AS second",
+    .Args = struct { first_digest: *const [32]u8, first_length: u64, first_private: bool, second_digest: *const [32]u8, second_length: u64, second_private: bool },
+    .Row = struct { first: ?rsql.Positive, second: ?rsql.Positive },
+    .cardinality = .one,
+});
+
+pub const Pair = lookup_pair.Result;
+
+/// Whether `first` and `second` name one content row. Two imports of one
+/// round share a value when they do, so the first one's insert is the
+/// second one's row (`importSlot`), and a lookup made before the round
+/// never goes stale.
+pub fn sameIdentity(first: *const Import, second: *const Import) bool {
+    return first.length == second.length and first.private == second.private and std.mem.eql(u8, &first.digest, &second.digest);
+}
+
+/// `lookup` of two values at once; `foundPair` follows its round. Both
+/// values and `rows` must outlive the round.
+pub fn lookupPair(a: anytype, first: *const Import, second: *const Import, rows: *Pair) void {
+    a.read(lookup_pair, .{
+        .first_digest = &first.digest,
+        .first_length = first.length,
+        .first_private = first.private,
+        .second_digest = &second.digest,
+        .second_length = second.length,
+        .second_private = second.private,
+    }, rows);
+}
+
+/// After `lookupPair`'s round: each value's row, as `lookup` leaves it.
+pub fn foundPair(rows: *const Pair, first: *Import, second: *Import) void {
+    first.found = if (rows.first) |id| .{ .content_id = id } else null;
+    second.found = if (rows.second) |id| .{ .content_id = id } else null;
 }
 
 const ContentSlot = struct { id: i64, existing: bool };
@@ -160,17 +193,20 @@ const ContentSlot = struct { id: i64, existing: bool };
 /// After `lookup`'s round: the found row, or a new row queued with a Host
 /// identity and a zeroed payload of the right length. `value` must outlive
 /// the round that writes it.
-pub fn importSlot(a: anytype, value: *const Import) !ContentSlot {
+pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try a.identity(.content_id);
     a.write(insert_content, .{ .content_id = id, .digest = &value.digest, .length = value.length, .private = value.private });
+    // The row now exists for this Access, so a second import of the same
+    // value reuses it and inserts nothing.
+    value.found = .{ .content_id = .of(id) };
     return .{ .id = @intCast(id), .existing = false };
 }
 
 /// After `lookup`'s round: the id of `bytes`, whose identity `value` is,
 /// queueing the row and its payload when none exists. `bytes` must outlive
 /// the round that writes them.
-pub fn importBytes(a: anytype, value: *const Import, bytes: []const u8) !u64 {
+pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
     std.debug.assert(bytes.len == value.length);
     const slot = try importSlot(a, value);
     if (!slot.existing) a.writeContent(@intCast(slot.id), bytes);
@@ -229,32 +265,38 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     if (wanted != 0) reader.prepareRead();
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    try entry.finish(Ordinary.none, readOwnedContentLocked(self, reader, start, destination[0..wanted]));
+    var a: Access(.read, error{}) = .open(&entry);
+    defer a.deinit();
+    try entry.finish(Ordinary.none, readWindow(&a, reader, start, destination[0..wanted]));
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
 }
 
-/// Fills all of `destination` or fails, so no reader sees a short window.
+/// `readWindow` for unconverted code, under the Entry it holds.
 pub fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
-    return readReaderBlob(self, reader, reader.content_id, start, reader.reference.length, destination);
+    var a = Access(.read, error{}).within(self);
+    defer a.deinit();
+    return readWindow(&a, reader, start, destination);
 }
 
-// Each reader owns its copied source window. Neither interleaved readers
-// nor another row at the same offset can borrow those bytes. Entry still
-// owns and closes the SQLite handle before callbacks or yields.
-fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: u64, end: u64, destination: []u8) !void {
+/// Fills all of `destination` from `reader`'s content at `start`, or
+/// fails, so no reader sees a short window. Each reader owns its copied
+/// source window: neither interleaved readers nor another row at the same
+/// offset can borrow those bytes.
+fn readWindow(a: anytype, reader: *ContentReader, start: u64, destination: []u8) !void {
     if (destination.len == 0) return;
-    const window = reader.prefetch orelse return readBlob(self, content_id, start, destination);
+    const content_id: u64 = @intCast(reader.content_id);
+    const window = reader.prefetch orelse return a.readRaw(content_id, start, destination);
     var filled: usize = 0;
     while (filled < destination.len) {
         const position = start + filled;
-        if (reader.prefetch_source != content_id or position < reader.prefetch_start or
+        if (reader.prefetch_source != reader.content_id or position < reader.prefetch_start or
             position >= reader.prefetch_start + reader.prefetch_length)
         {
             reader.prefetch_length = 0;
-            const wanted: usize = @intCast(@min(window.len, end - position));
-            try readBlob(self, content_id, position, window[0..wanted]);
-            reader.prefetch_source = content_id;
+            const wanted: usize = @intCast(@min(window.len, reader.reference.length - position));
+            try a.readRaw(content_id, position, window[0..wanted]);
+            reader.prefetch_source = reader.content_id;
             reader.prefetch_start = position;
             reader.prefetch_length = wanted;
         }
@@ -265,65 +307,54 @@ fn readReaderBlob(self: *Store, reader: *ContentReader, content_id: i64, start: 
     }
 }
 
-// Called only inside one Entry. Reuse avoids repeated overflow-page walks
-// within synchronous work, never across callbacks or preparation yields.
-fn readBlob(self: *Store, content_id: i64, start: u64, destination: []u8) !void {
-    if (destination.len == 0) return;
-    if (start > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
-    const blob = &self.read_blob;
-    if (blob.handle == null) {
-        // A failed open leaves the handle null.
-        if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob.handle) != c.SQLITE_OK) return error.ContentReadFailed;
-        blob.content_id = content_id;
-    } else if (blob.content_id != content_id) {
-        // A failed reopen aborts the handle; close remains its release.
-        if (c.sqlite3_blob_reopen(blob.handle, content_id) != c.SQLITE_OK) return error.ContentReadFailed;
-        blob.content_id = content_id;
-    }
-    if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(start)) != c.SQLITE_OK) return error.ContentReadFailed;
-    if (@import("builtin").is_test) _ = self.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
-}
-
 pub fn importEmptyContent(self: *Store) !i64 {
-    var empty: protocol.ContentField = .{ .state = .value };
-    empty.digest = protocol.contentDigest("");
-    return importContent(self, &empty, .{});
+    return importBytesContent(self, "", false, false);
 }
 
-pub fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
-    std.debug.assert(content.state == .value);
-    if (content.file) |source| {
-        if (try source.length(self.io) != content.length) return error.ContentChanged;
-    } else if (content.length != 0 or
-        !std.mem.eql(u8, &protocol.contentDigest(""), &content.digest))
-    {
+/// The identity of sealed caller content, as `lookup` finds it.
+pub fn sealedIdentity(field: *const protocol.ContentField) Import {
+    return .{ .digest = field.digest, .length = field.length, .private = false };
+}
+
+/// After `lookup`'s round: the id of the sealed content `field`, whose
+/// identity `value` is. A file must still hold `field.length` bytes. A new
+/// row is queued and its round run, then the file streams into its payload
+/// while hashed, so a file that changed fails before COMMIT; a row that
+/// exists still has its file verified. A new row whose insert would join
+/// one already queued (an `importBytes` row) runs that one first.
+pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *Import, faults: Faults) !u64 {
+    std.debug.assert(field.state == .value);
+    if (field.file) |source| {
+        if (try source.length(io) != field.length) return error.ContentChanged;
+    } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
-    const slot = try contentSlot(self, &content.digest, content.length, false);
-    if (slot.existing) {
-        if (content.file) |source| {
-            try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
-        }
-        return slot.id;
+    if (value.found == null and a.queued != 0) try a.run();
+    const slot = try importSlot(a, value);
+    const id: u64 = @intCast(slot.id);
+    // Run now, so a second import in this Access can queue its own row.
+    if (!slot.existing) try a.run();
+    if (slot.existing or field.length == 0) {
+        if (field.file) |source| try verifyExternalContent(io, source, field.length, &field.digest, null, faults);
+        return id;
     }
-    const content_id = slot.id;
+    const file = field.file orelse return error.MissingContentCustody;
+    const sink = try a.contentSink(id);
+    defer sink.close();
+    try verifyExternalContent(io, file, field.length, &field.digest, sink, faults);
+    return id;
+}
 
-    if (content.length == 0) {
-        if (content.file) |source| {
-            try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
-        }
-        return content_id;
-    }
-    var blob: ?*c.sqlite3_blob = null;
-    if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 1, &blob) != c.SQLITE_OK) {
-        return error.ContentWriteFailed;
-    }
-    defer _ = c.sqlite3_blob_close(blob);
-    const file = content.file orelse return error.MissingContentCustody;
-    // Verify the exact bytes copied while the row is still uncommitted.
-    // The caller rolls back the whole transaction if verification fails.
-    try verifyExternalContent(self.io, file, content.length, &content.digest, blob, faults);
-    return content_id;
+/// `importSealed` for unconverted code, inside its transaction.
+pub fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
+    var a = Access(.nested, error{}).within(self);
+    defer a.deinit();
+    var value = sealedIdentity(content);
+    lookup(&a, &value);
+    try a.run();
+    const id = try importSealed(&a, self.io, content, &value, faults);
+    try a.apply();
+    return @intCast(id);
 }
 
 pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
@@ -350,7 +381,9 @@ fn resolveContentReference(self: *Store, reference: ContentReference, private: b
     defer sqlite.resetCached(statement);
     try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, null);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return @intCast((try sqlite.decodeRow(lookup_content.Row, statement)).content_id.get());
+    var row: lookup_content.Row = undefined;
+    try sqlite.decodeRow(lookup_content.Row, statement, &row);
+    return @intCast(row.content_id.get());
 }
 
 /// A content hash and one window of the bytes it hashes. Declared as
@@ -370,7 +403,7 @@ fn verifyExternalContent(
     file: std.Io.File,
     expected_length: u64,
     expected_digest: *const [32]u8,
-    destination: ?*c.sqlite3_blob,
+    destination: ?store_access.ContentSink,
     faults: Faults,
 ) !void {
     var copy: HashedWindow(protocol.content_window_bytes) = .{ .hash = protocol.contentHasher() };
@@ -381,11 +414,8 @@ fn verifyExternalContent(
         if (count != wanted) return error.ContentReadFailed;
         if (faults.content_read) return error.InjectedContentReadFailure;
         copy.hash.update(copy.window[0..count]);
-        if (destination) |blob| {
-            if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
-            if (c.sqlite3_blob_write(blob, copy.window[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
-                return error.ContentWriteFailed;
-            }
+        if (destination) |sink| {
+            try sink.write(copy.window[0..count], offset);
             if (faults.content_import) return error.InjectedContentImportFailure;
         }
         offset += count;

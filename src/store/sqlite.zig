@@ -44,12 +44,6 @@ pub fn pragmaInt(database: *c.sqlite3, sql: [:0]const u8) !u32 {
     return @intCast(value);
 }
 
-/// SQLite binds the text without copying it, so it borrows the caller's
-/// Label, never a by-value copy that ends with this call.
-pub fn bindOptionalLabel(statement: *c.sqlite3_stmt, index: c_int, label: *const ?protocol.Bounded(protocol.max_label_bytes)) !void {
-    if (label.*) |*value| try bindText(statement, index, value.slice()) else try bindNullableI64(statement, index, null);
-}
-
 pub fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bounded(protocol.max_label_bytes) {
     if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
     var label: protocol.Bounded(protocol.max_label_bytes) = .{};
@@ -429,45 +423,76 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
     }
 }
 
-/// The current row as `Row`. Every value that breaks its type is
+/// Fills `row` from the current row, field by field in place, so a Row
+/// over 1 KiB is never copied. A pointer field fills what it points to
+/// (`rsql.fillsInPlace`). Every value that breaks its type is
 /// `CorruptStore`, here and nowhere else.
-pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt) error{CorruptStore}!Row {
-    var row: Row = undefined;
+pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt, row: *Row) error{CorruptStore}!void {
     comptime var column: c_int = 0;
     const info = @typeInfo(Row).@"struct";
     inline for (info.field_names, info.field_types) |name, Field| {
-        @field(row, name) = decodeValue(Field, statement, column) catch return error.CorruptStore;
+        decodeValue(Field, statement, column, &@field(row, name)) catch return error.CorruptStore;
         column += if (Field == rsql.SessionHead) 3 else 1;
     }
-    return row;
 }
 
-fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int) !T {
+/// Whether `T` is a `protocol.Bounded`: text up to its capacity.
+fn isBounded(comptime T: type) bool {
+    if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
+    const bytes = @typeInfo(@FieldType(T, "bytes"));
+    return bytes == .array and T == protocol.Bounded(bytes.array.len);
+}
+
+fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out: *T) !void {
     if (T == rsql.SessionHead) {
         const ref = try columnText(statement, column);
         if (ref.len != @sizeOf(@FieldType(rsql.SessionHead, "ref"))) return error.CorruptStore;
-        return .{
+        out.* = .{
             .ref = ref[0..@sizeOf(@FieldType(rsql.SessionHead, "ref"))].*,
             .workspace_key = .of(try readPositive(statement, column + 1)),
             .next_position = .of(try readPositive(statement, column + 2)),
         };
+        return;
     }
-    if (T == rsql.Positive) return .of(try readPositive(statement, column));
+    if (T == rsql.Positive) {
+        out.* = .of(try readPositive(statement, column));
+        return;
+    }
+    // Text goes straight into the Row's own bytes.
+    if (comptime isBounded(T)) return out.set(try columnText(statement, column));
     switch (@typeInfo(T)) {
-        .optional => |optional| {
-            if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
-            return try decodeValue(optional.child, statement, column);
+        .pointer => |pointer| {
+            comptime std.debug.assert(pointer.size == .one);
+            try decodeValue(pointer.child, statement, column, out.*);
         },
-        .bool => return switch (try readCount(statement, column)) {
+        .optional => |optional| {
+            if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) {
+                out.* = null;
+            } else if (comptime isBounded(optional.child)) {
+                // Naming only `len` leaves the bytes unwritten until `set` fills them.
+                out.* = optional.child{ .len = 0 };
+                try decodeValue(optional.child, statement, column, &out.*.?);
+            } else {
+                var present: optional.child = undefined;
+                try decodeValue(optional.child, statement, column, &present);
+                out.* = present;
+            }
+        },
+        .bool => out.* = switch (try readCount(statement, column)) {
             0 => false,
             1 => true,
-            else => error.CorruptStore,
+            else => return error.CorruptStore,
         },
-        .int => return std.math.cast(T, try readCount(statement, column)) orelse error.CorruptStore,
-        .@"enum" => return std.meta.stringToEnum(T, try columnText(statement, column)) orelse error.CorruptStore,
-        .array => {
-            comptime std.debug.assert(T == [32]u8);
-            return readDigest(statement, column);
+        .int => out.* = std.math.cast(T, try readCount(statement, column)) orelse return error.CorruptStore,
+        .@"enum" => out.* = std.meta.stringToEnum(T, try columnText(statement, column)) orelse return error.CorruptStore,
+        // A blob of exactly the array's length, such as a digest.
+        .array => |array| {
+            comptime std.debug.assert(array.child == u8);
+            // The type first: reading the bytes may convert the value.
+            if (c.sqlite3_column_type(statement, column) != c.SQLITE_BLOB) return error.CorruptStore;
+            const bytes = columnBytes(statement, column);
+            if (bytes.len != array.len) return error.CorruptStore;
+            @memcpy(out, bytes);
         },
         else => @compileError("rsql: " ++ @typeName(T) ++ " is not a typed statement value"),
     }
