@@ -13,7 +13,8 @@ const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const sqlite = @import("../sqlite.zig");
 const rsql = @import("../rsql.zig");
-const Access = @import("../access.zig").Access;
+const store_access = @import("../access.zig");
+const Access = store_access.Access;
 const c = sqlite.c;
 const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
@@ -283,7 +284,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
         .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
     }
 
-    if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found) reads.next.provider else null)) {
+    if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, &digest, .model_capability_unavailable, faults);
     }
     const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, faults, reads)) {
@@ -321,7 +322,8 @@ pub const ConfigurationReads = struct {
     /// The Session's saved configuration, which the plan then updates in
     /// place: one 4.6 KB value, not a copy of it.
     next: CurrentConfiguration,
-    found: bool = false,
+    /// Whether the Session exists: `.missing` for a creation, which reads none.
+    found: store_access.Found = .missing,
     reference: [protocol.session_id_bytes]u8 = undefined,
     workspace_digest: [32]u8 = undefined,
     creation: creation_facts.Result = undefined,
@@ -452,7 +454,7 @@ const insert_revision = rsql.Write(.{
 /// `CurrentConfiguration`'s field defaults: the settings a creation
 /// starts from.
 /// `checkSaved` follows the round.
-pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfiguration, found: *bool) void {
+pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfiguration, found: *store_access.Found) void {
     a.readInto(saved_session, .{ .session = session_ref }, current, found);
 }
 
@@ -470,11 +472,11 @@ pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void
 pub fn readSession(self: *Store, session_ref: []const u8, current: *CurrentConfiguration) !bool {
     var a = Access(.read, error{}).within(self);
     defer a.deinit();
-    var found = false;
+    var found: store_access.Found = undefined;
     readSaved(&a, session_ref, current, &found);
     try a.run();
-    if (found) try checkSaved(current);
-    return found;
+    if (found.get()) try checkSaved(current);
+    return found.get();
 }
 
 /// A fresh Session reference: 32 symbols divide 256 exactly, so six
@@ -545,11 +547,11 @@ pub fn applyConfiguration(
 
     if (reads.pair) |*rows| content_domain.foundPair(rows, reads.instructionsValue(configuration), &reads.output_schema);
     const next = &reads.next;
-    if (!creating and !reads.found) {
+    if (!creating and !reads.found.get()) {
         return .{ .rejected = .unknown_session };
     }
-    if (reads.found) try checkSaved(next);
-    const current_configuration: ?*const CurrentConfiguration = if (reads.found) next else null;
+    if (reads.found.get()) try checkSaved(next);
+    const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     if (configurationBeforeWorkspace(current_configuration, configuration)) |rejection| {
         return .{ .rejected = rejection };
     }
@@ -557,7 +559,7 @@ pub fn applyConfiguration(
     // An existing Session's Workspace is only compared, in sameWorkspace's
     // own frame; a created one's was canonicalized into `next`.
     const workspace_matches: ?bool = if (configuration.workspace.state == .value) matches: {
-        if (reads.found) {
+        if (reads.found.get()) {
             break :matches sameWorkspace(io, configuration.workspace.value.slice(), next.workspace.slice()) catch {
                 return .{ .rejected = .invalid_workspace };
             };
@@ -567,7 +569,7 @@ pub fn applyConfiguration(
         break :matches true;
     } else null;
 
-    const created = !reads.found;
+    const created = !reads.found.get();
     const content_actions = switch (planConfigurationUpdate(
         current_configuration,
         configuration,

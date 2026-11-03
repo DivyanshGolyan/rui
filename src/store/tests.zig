@@ -1228,7 +1228,7 @@ const TestingRound = struct {
     }
 };
 
-test "a content sink opens only a content id its Access took, stepping its queued insert" {
+test "a content sink opens only a content id its Access itself took, stepping its queued insert" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1251,15 +1251,21 @@ test "a content sink opens only a content id its Access took, stepping its queue
     a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
     const first = try a.identity(.content_id);
     a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
+    // Taken by other code between this Access's own ids, as `.nested`
+    // callers may: inside the range of the ids it took, but not its own.
+    const between = try store_core.takeIdentity(&storage, .content_id);
     const never = try a.identity(.content_id);
     const last = try a.identity(.content_id);
     a.write(TestingRound.insert_content, .{ .content_id = last, .digest = digests[2], .length = 4 });
-    try std.testing.expectEqual(first + 2, last);
+    try std.testing.expectEqual(first + 3, last);
     // Refused: 0, a committed row, one taken in this transaction before
-    // this Access's first, and one past its last.
+    // this Access's first, one other code took between its own, and one
+    // past its last. A check of the range from its first id to its last
+    // accepted `between`.
     try std.testing.expectError(error.ContentNotInserted, a.contentSink(0));
     try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
     try std.testing.expectError(error.ContentNotInserted, a.contentSink(before));
+    try std.testing.expectError(error.ContentNotInserted, a.contentSink(between));
     try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1));
     // The old rule took only the last id, with nothing queued: here the
     // first id opens while inserts are queued, and the pass steps them.
@@ -1380,6 +1386,33 @@ test "a queued read's destination holds poison until the pass that steps it" {
     try std.testing.expect(poisoned(std.mem.asBytes(&second)));
     try a.run();
     try std.testing.expectEqualSlices(u8, session.slice(), &second.head.ref);
+}
+
+test "a queued readInto's Found is pending until the pass that steps it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "found-pending");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.read, error{}) = .open(&entry);
+    defer a.deinit();
+    var current: configuration_domain.CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
+    var missing_current: configuration_domain.CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
+    // A bool here held 0xAA, which reads as true: found before any step.
+    var found: store_access.Found = .missing;
+    var missing: store_access.Found = .found;
+    configuration_domain.readSaved(&a, session.slice(), &current, &found);
+    try std.testing.expectEqual(store_access.Found.pending, found);
+    // Queuing it again steps the first, which defines it before `run`.
+    configuration_domain.readSaved(&a, "AAAAAA", &missing_current, &missing);
+    try std.testing.expectEqual(store_access.Found.found, found);
+    try std.testing.expectEqual(store_access.Found.pending, missing);
+    try a.run();
+    try std.testing.expect(found.get());
+    try std.testing.expect(!missing.get());
 }
 
 test "abandoning an Access that has ended runs nothing" {
