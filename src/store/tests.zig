@@ -85,7 +85,7 @@ const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
 const submitTestMessage = store_testing.submitTestMessage;
 const testingPublicProjection = store_testing.testingPublicProjection;
 const testing_absent_model_evidence = store_testing.testing_absent_model_evidence;
-const tool_continuation_selection_sql = model_admission_domain.tool_continuation_selection_sql;
+const tool_continuation_selection = model_admission_domain.tool_continuation_selection;
 
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
@@ -3995,7 +3995,7 @@ test "tool continuation admission runs its selection once" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "output", &calls);
 
-    const selection = try store_core.cached(&storage, tool_continuation_selection_sql);
+    const selection = try store_core.cachedTyped(&storage, tool_continuation_selection);
     const runs_before = c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0);
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
@@ -4120,7 +4120,7 @@ test "tool continuation selection never visits a Turn waiting for its tool resul
         const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
         try settleTwoActionsForTesting(&storage, &tmp, binding, config);
 
-        const select = try sqlite.prepare(storage.database, tool_continuation_selection_sql);
+        const select = try sqlite.prepare(storage.database, tool_continuation_selection.sql);
         defer _ = c.sqlite3_finalize(select);
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
         cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
@@ -5521,8 +5521,8 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
     try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
     try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
     const digest = protocol.contentDigest("item-63");
-    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
-    defer sqlite.resetCached(statement);
+    const statement = try sqlite.prepare(storage.database, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
+    defer _ = c.sqlite3_finalize(statement);
     try sqlite.bindBlob(statement, 1, &digest);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(1, c.sqlite3_column_int64(statement, 0));

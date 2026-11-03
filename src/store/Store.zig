@@ -1234,11 +1234,12 @@ pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !Pro
     return page;
 }
 
-/// Prepares `sql` once for the Store's lifetime; the caller resets it
-/// with `resetCached` before releasing the Store mutex. Comptime only
-/// pins the SQL to static storage, so one body serves every statement.
-pub inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
-    comptime rsql.checkStatement(sql);
+/// Prepares `sql`, a statement of this file's own (transaction control,
+/// identity reads, and test-only fixtures and oracles), once for the
+/// Store's lifetime; the caller resets it with `resetCached` before
+/// releasing the Store mutex. Comptime only pins the SQL to static storage,
+/// so one body serves every statement.
+inline fn cached(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
     return cachedStatic(self, sql);
 }
 
@@ -1267,9 +1268,8 @@ fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
     return statement;
 }
 
-/// Runs a cached statement that returns no rows.
-pub inline fn execute(self: *Store, comptime sql: [:0]const u8) !void {
-    comptime rsql.checkStatement(sql);
+/// Runs one of this file's own statements (`cached`) that returns no rows.
+inline fn execute(self: *Store, comptime sql: [:0]const u8) !void {
     return executeStatic(self, sql);
 }
 
