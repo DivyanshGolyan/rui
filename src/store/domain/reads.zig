@@ -998,9 +998,9 @@ pub noinline fn appendToolPresentation(self: *Store, operation: u64, ordinal: u6
 
 /// The Session columns an Activity page reads, its workspace into the
 /// page itself. They are the columns main's Session facts read, so a
-/// damaged one still fails the page, and how far a person read.
+/// damaged one still fails the page.
 const page_session = rsql.Read(.{
-    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace,read_through " ++
+    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -1014,7 +1014,6 @@ const page_session = rsql.Read(.{
         created_at: rsql.Positive,
         provider: protocol.Provider,
         workspace: *protocol.Bounded(protocol.max_workspace_bytes),
-        read_through: ?rsql.Positive,
     },
     .cardinality = .optional,
 });
@@ -1049,7 +1048,6 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     if (end >= next or request.position > end) return error.InvalidCursor;
     if (guard != null) return error.CorruptStore;
     page.end = end;
-    page.read_through = if (session.read_through) |position| position.get() else null;
     // The cursor as a bound on (position, ordinal): a whole position is
     // passed or kept by the largest ordinal, and a backward page with
     // no cursor starts after the end's last row.
@@ -1071,12 +1069,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     } else try runRows(a);
     try work.advance();
     page.count = @min(rows.len, page.items.len);
-    if (rows.len > page.items.len) {
-        page.more = true;
-        // The row after a backward page's oldest says whether the
-        // unseen rows reach past it.
-        page.beyond_unseen = !forward and if (page.read_through) |read| rows.items[page.items.len].position.get() > read else true;
-    }
+    page.more = rows.len > page.items.len;
     var at: [page.items.len]ItemAt = undefined;
     for (rows.slice()[0..page.count], at[0..page.count]) |row, *item| item.* = .{ .position = row.position.get(), .ordinal = row.ordinal };
     const boundary: ?ItemAt = if (page.more) at[page.count - 1] else null;
@@ -1106,44 +1099,6 @@ const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };
 
 /// An Activity item's place: its position and ordinal.
 const ItemAt = struct { position: u64, ordinal: u64 };
-
-/// Main's one guarded UPDATE: how far a person read moves only forward,
-/// and stays below the Session's next position. No Session list row shows
-/// `read_through` (`schema` marks it unlisted), so the write touches no
-/// Session and names it by its reference alone.
-const advance_read_through = rsql.Write(.{
-    .sql = "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1) AND ?2<next_position AND (read_through IS NULL OR read_through<?2)",
-    .Args = struct { session: rsql.SessionRef, position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ReadThroughKept } },
-});
-
-/// Round 1 is the guarded write, which commits itself. Only when it
-/// changes no row does a read round ask why, as main did: an unknown
-/// Session, a position not reached, or one already read, which is no
-/// error. A failed read is `SessionReadFailed`, main's name for it.
-pub fn markRead(entry: *const store_core.Entry, request: *const protocol.MarkRead) !void {
-    // Main's bind refused a position past maxInt(i64), which fences.
-    if (request.position > std.math.maxInt(i64)) return error.IntegerOutOfRange;
-    const session = request.session.slice();
-    const Ref = @FieldType(rsql.SessionRef, "ref");
-    // The schema's check holds every session_ref to this length, so a
-    // text of any other names no Session.
-    if (session.len != @sizeOf(Ref)) return error.SessionNotFound;
-    kept: {
-        var a: store_access.Access(.single, error{ReadThroughKept}) = .open(entry);
-        defer a.deinit();
-        a.write(advance_read_through, .{ .session = .{ .ref = session[0..@sizeOf(Ref)].* }, .position = request.position });
-        a.commit() catch |err| switch (err) {
-            error.ReadThroughKept => break :kept,
-            else => |failed| return failed,
-        };
-        return;
-    }
-    var a: ReadAccess = .open(entry);
-    defer a.deinit();
-    const next = try readNextPosition(&a, session) orelse return error.SessionNotFound;
-    if (request.position >= next) return error.PositionNotReached;
-}
 
 const PersonMessageArgs = struct { session: []const u8, after: u64, before: u64 };
 const PersonMessageRow = struct { admission_position: rsql.Positive, content_id: rsql.Positive };
