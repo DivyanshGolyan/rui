@@ -260,23 +260,30 @@ def main():
                 wire = copy.deepcopy(valid)
                 wire["items"] = [{"position": "1", "ordinal": "0", "at": "1", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
+            def received(sender):
+                # Another Session's Message is a received row, which names
+                # its sender; a person's admission row never does.
+                wire = copy.deepcopy(valid)
+                value = wire["items"][0]["value"]
+                value["received"] = value.pop("admission")
+                value["received"]["sender"] = sender
+                return wire
+            for sender, ok in ((None, False), ({"session": "k7m2qx"}, True)):
+                mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode(), ok=ok)
+            wire = copy.deepcopy(valid)
+            wire["items"][0]["value"]["admission"]["sender"] = {"session": "k7m2qx"}
+            mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             # Pages carry complete canonical IDs, never renderer abbreviations.
             for session in (SESSION, foreign, "k7m2qx"):
-                wire = copy.deepcopy(valid)
                 sender = {"session": session}
-                wire["items"][0]["value"]["admission"]["sender"] = sender
-                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=True)
+                mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode(), ok=True)
                 sender["prefix"] = "6"
-                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
+                mock_reply(fields["socket"], store, "page", json.dumps(received(sender)).encode())
             # A sender carries its Session's label when it has one.
             for label, ok in (("Review", True), ("", False), ("a\nb", False)):
-                wire = copy.deepcopy(valid)
-                wire["items"][0]["value"]["admission"]["sender"] = {"session": "k7m2qx", "label": label}
-                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
+                mock_reply(fields["socket"], store, "page", json.dumps(received({"session": "k7m2qx", "label": label})).encode(), ok=ok)
             for session in ("rui/1a2b3c4d-0000-4000-8000-000000000001", "reviewer", "K7m2qx", "k7m2qi", "k7\x00qx"):
-                wire = copy.deepcopy(valid)
-                wire["items"][0]["value"]["admission"]["sender"] = {"session": session}
-                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
+                mock_reply(fields["socket"], store, "page", json.dumps(received({"session": session})).encode())
             for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender", "undated", "dated"):
                 wire = copy.deepcopy(valid)
                 # Every row is dated, and an admission by its own admission.

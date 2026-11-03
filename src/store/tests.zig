@@ -1836,45 +1836,115 @@ test "a list row carries its Session's Label, times, first Message, work and pee
     try std.testing.expect(!storage.isFenced());
 }
 
-test "a person's Message next to a position is one indexed row, at a fixed end" {
+/// The position of the person's Message next to `request`'s cursor, on a
+/// one-row page of `admission` rows, or null.
+fn personStep(storage: *Store, request: protocol.ActivityPage) !?u64 {
+    const page = try store_core.activityPageForTesting(storage, request);
+    if (page.count == 0) return null;
+    try std.testing.expect(page.count == 1 and page.items[0].value == .admission);
+    return page.items[0].position;
+}
+
+test "a person's Message next to a position is a one-row page of admission rows, at a fixed end" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "person-config");
-    var request: protocol.ReadPersonMessage = .{ .direction = .backward };
+    const peer = try configureTestSession(&storage, "person-peer");
+    var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
     try request.session.set(session.slice());
-    try std.testing.expectEqual(protocol.PersonMessage{ .end = 0 }, try storage.personMessage(&request));
+    try std.testing.expectEqual(@as(?u64, null), try personStep(&storage, request));
     for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
+    // Another Session sent the newest one: it is a received row, not the
+    // person's, and every step passes over it.
+    try submitTestMessage(&storage, &tmp, "from-peer", "from-peer", session.slice(), "peer");
+    {
+        var sql: [256]u8 = undefined;
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()}, 0));
+        try store_core.touch(&storage, session.slice());
+        try store_core.touch(&storage, peer.slice());
+    }
     var positions: [3]u64 = undefined;
-    inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
-    const newest = try storage.personMessage(&request);
-    try std.testing.expectEqual(positions[2], newest.message.?.position);
-    try std.testing.expectEqual(protocol.contentDigest("three"), newest.message.?.content.digest);
-    try std.testing.expectEqual(@as(u64, 5), newest.message.?.content.length);
-    request.end = newest.end;
+    inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission WHERE sender_session_ref IS NULL ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
+    const page = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(page.more);
+    try std.testing.expectEqual(positions[2], page.items[0].position);
+    try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.digest);
+    try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.length);
+    request.end = page.end;
     // Older from each one, then newer back: each step names its neighbour.
     for ([_]?u64{ positions[1], positions[0], null }, [_]u64{ positions[2], positions[1], positions[0] }) |expected, from| {
         request.position = from;
-        const found = try storage.personMessage(&request);
-        try std.testing.expectEqual(expected, if (found.message) |message| message.position else null);
+        try std.testing.expectEqual(expected, try personStep(&storage, request));
     }
     request.direction = .forward;
     try submitTestMessage(&storage, &tmp, "four", "four", session.slice(), "four");
     for ([_]?u64{ positions[1], positions[2], null }, positions) |expected, from| {
         request.position = from;
-        try std.testing.expectEqual(expected, if ((try storage.personMessage(&request)).message) |message| message.position else null);
+        try std.testing.expectEqual(expected, try personStep(&storage, request));
     }
     // A later Message waits beyond the end it was read at.
     request.end = null;
     request.position = positions[2];
-    try std.testing.expect((try storage.personMessage(&request)).message.?.position > positions[2]);
-    request.end = try queryU64(storage.database, "SELECT next_position FROM session");
-    try std.testing.expectError(error.InvalidCursor, storage.personMessage(&request));
-    try request.session.set("nosuch");
-    request.end = null;
-    try std.testing.expectError(error.SessionNotFound, storage.personMessage(&request));
+    try std.testing.expect((try personStep(&storage, request)).? > positions[2]);
+    // The peer's Message is the page's received row.
+    var received: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.received) };
+    try received.session.set(session.slice());
+    const peers = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(peers.count == 1 and peers.items[0].value == .received);
+    try std.testing.expectEqualStrings(peer.slice(), peers.items[0].value.received.sender.?.session.slice());
+    // Both kinds read the one admission source, each row once, by its sender.
+    received.kinds = .initMany(&.{ .admission, .received });
+    const both = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(both.count == 5 and !both.more);
+    var counts: [2]usize = .{ 0, 0 };
+    for (both.items[0..both.count]) |item| counts[@intFromBool(item.value == .received)] += 1;
+    try std.testing.expectEqual([2]usize{ 4, 1 }, counts);
+    // A cursor may name the received row; an admission page steps past it.
+    received.kinds = .initOne(.admission);
+    received.end = both.end;
+    received.position = peers.items[0].position;
+    received.ordinal = peers.items[0].ordinal;
+    const before = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(before.count > 0 and before.items[0].position < peers.items[0].position);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a page lists only the kinds it asks for, up to its limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "kinds-config");
+    for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const all = try store_core.activityPageForTesting(&storage, request);
+    // Three admissions, and a User row for each the attempt took.
+    var user_rows: usize = 0;
+    for (all.items[0..all.count]) |item| user_rows += @intFromBool(item.value == .user);
+    try std.testing.expect(user_rows > 0 and all.count == 3 + user_rows and !all.more);
+    request.kinds = .initOne(.user);
+    const users = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(users.count == user_rows and !users.more);
+    for (users.items[0..users.count]) |item| try std.testing.expect(item.value == .user);
+    request.kinds = .initMany(&.{ .admission, .user });
+    request.limit = 2;
+    const two = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(two.count == 2 and two.more);
+    try std.testing.expectEqual(all.items[0].position, two.items[0].position);
+    try std.testing.expectEqual(all.items[1].position, two.items[1].position);
+    request.limit = 0;
+    try std.testing.expectError(error.InvalidCursor, store_core.activityPageForTesting(&storage, request));
+    request.limit = 1;
+    request.kinds = .empty;
+    try std.testing.expectError(error.InvalidCursor, store_core.activityPageForTesting(&storage, request));
     try std.testing.expect(!storage.isFenced());
 }
 
@@ -7963,7 +8033,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try session.set(allocated_session_1.slice());
     const received = try store_core.activityPageForTesting(&storage, .{ .session = session });
     try std.testing.expectEqual(@as(usize, 1), received.count);
-    const peer = received.items[0].value.admission.sender.?;
+    const peer = received.items[0].value.received.sender.?;
     try std.testing.expectEqualStrings(sender, peer.session.slice());
     {
         // The receiver's row names that peer as its starter; no person has
@@ -8005,7 +8075,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
         var receiver: protocol.Bounded(protocol.max_session_bytes) = .{};
         try receiver.set(allocated_session_1.slice());
         const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
-        try std.testing.expectEqualStrings("Lead", named.items[0].value.admission.sender.?.label.slice());
+        try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
     }
     try storage.revokeActionSender(action);
     try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
@@ -11699,7 +11769,7 @@ test "every activity row is dated by the fact that owns it" {
             .tool_result => 106,
             .outcome => 107,
             .stop => 108,
-            .hosted_call, .sent, .send_failed => unreachable,
+            .hosted_call, .sent, .send_failed, .received => unreachable,
         };
         try std.testing.expectEqual(expected, item.at);
         seen.insert(item.value);
@@ -12016,6 +12086,128 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
         const later = try store_core.activityPageForTesting(&storage, forward);
         try std.testing.expect(later.more);
         try std.testing.expectEqual(tail, later.items[0].position);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "a one-row page of a person's Messages costs the same steps after 10 or 10,000 received ones" {
+    // Ctrl-P from the end passes over every Message another Session sent
+    // to reach the person's first one, through their own index.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "recall-config");
+        const peer = try configureTestSession(&storage, "recall-peer");
+        try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value FROM history; " ++
+                "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice(), peer.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].value == .admission and !page.more);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "a forward one-row page of a person's Messages costs the same steps past 10 or 10,000 tool groups" {
+    // Ctrl-N from the first Message steps to the second, with every tool
+    // group completed between it and the third. The page lists no calls, so it reads no
+    // call activity.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "forward-config");
+        try submitTestMessage(&storage, &tmp, "forward-first", "first", session.slice(), "first");
+        try submitTestMessage(&storage, &tmp, "forward-second", "second", session.slice(), "second");
+        const first = try queryU64(storage.database, "SELECT min(admission_position) FROM message_admission");
+        // Foreign keys are off: each tool group names its Turn before the
+        // Turn row exists. A cancelled Turn needs no answer content.
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT 1000+value AS value,next_position+3*(value-1) AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1 FROM history; " ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT value,0,'{1s}',position,3,1,zeroblob(32),0,content,0 FROM history; " ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                "SELECT value,'{1s}',0,0,content,content,content,zeroblob(120),'unknown_tool',content,position+1 FROM history; " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT value,'{1s}',value,value,value,'cancelled',position+2,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+3*{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        try submitTestMessage(&storage, &tmp, "forward-third", "third", session.slice(), "third");
+        var request: protocol.ActivityPage = .{ .position = first, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].position > first and page.more);
+        try std.testing.expectEqual(@as(u64, 0), page.call_activity.total);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "a one-row page of a person's Messages costs the same steps past 100 or 10,000 waiting ones" {
+    // Ctrl-P from the end reads the newest Message, with every other one
+    // still waiting. The page is filtered, so it reads no queue footer.
+    // Each Store holds more waiting Messages than a page source reads.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 100, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "waiting-config");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                "SELECT 1000+value,'{1s}',printf('waiting-%d',value),content,position,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        // Foreign keys are off: the waiting Messages have no commands.
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");
+        var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].value.admission.state == .queued and page.more);
+        try std.testing.expectEqual(@as(u64, 0), page.queued.count);
     }
     try std.testing.expectEqual(steps[0], steps[1]);
 }

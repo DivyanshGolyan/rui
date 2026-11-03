@@ -243,7 +243,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_page_request, .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction });
+        try body.appendShape(protocol.activity_page_request, .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -256,31 +256,6 @@ pub const Requests = struct {
         var buffer: ReplyBuffer = .{};
         return switch (try readReportResponse(self, fd, &sink, &buffer)) {
             .report => .{ .page = try protocol_reply.ActivityPage.parse(sink.buffer.slice(), cursor) },
-            .command => |reply| .{ .failure = try protocol_reply.decodeReadFailure(reply, false) },
-        };
-    }
-
-    /// One step over the Messages without a Session sender: the one next to
-    /// `request.position`, older or newer, at `request.end`.
-    pub fn personMessage(self: Requests, store_path: []const u8, request: protocol.ReadPersonMessage) !protocol_reply.PersonMessageReply {
-        try self.check();
-        try protocol_reply.validateIdentityInputs("", request.session.slice());
-        try request.validate();
-        const paths = try platform.resolveClientPaths(self.io, store_path);
-        var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.person_message_request, .{ paths.store.slice(), request.session.slice(), request.end, request.position, request.direction });
-        const fd = try openRead(self, &paths, "/v1/person-message", body.slice());
-        defer closeSocket(self.io, fd);
-        const Sink = struct {
-            buffer: protocol.FixedJsonBuffer(protocol.max_person_message_response_bytes) = .{},
-            pub fn feed(s: *@This(), bytes: []const u8) !void {
-                try s.buffer.append(bytes);
-            }
-        };
-        var sink: Sink = .{};
-        var buffer: ReplyBuffer = .{};
-        return switch (try readReportResponse(self, fd, &sink, &buffer)) {
-            .report => .{ .found = try protocol_reply.parsePersonMessage(sink.buffer.slice(), request) },
             .command => |reply| .{ .failure = try protocol_reply.decodeReadFailure(reply, false) },
         };
     }
@@ -3159,9 +3134,8 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
         .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
         .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
-        .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward }, protocol.max_activity_page_request_bytes },
+        .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
-        .{ protocol.person_message_request, .{ &store, &session, optional_id, id, Direction.backward }, protocol.max_person_message_request_bytes },
         .{ protocol.model_list_request, .{&store}, protocol.max_model_list_request_bytes },
     };
     var largest: usize = 0;
