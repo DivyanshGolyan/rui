@@ -5316,7 +5316,14 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.database, insert);
-        try std.testing.expectEqual(@as(u64, 1), try command_domain.countPendingMessages(&storage, session.slice()));
+        var counted: reads_domain.First(command_domain.pending_messages.Row) = .{};
+        {
+            var a = reads_domain.ReadAccess.within(&storage);
+            defer a.deinit();
+            a.readEach(command_domain.pending_messages, .{ .session = session.slice(), .cutoff = history }, 1, &counted);
+            try a.run();
+        }
+        try std.testing.expectEqual(@as(u64, 1), counted.row.?.pending);
 
         const cutoff_statement = try sqlite.prepare(storage.database, session_stop_cutoff_sql);
         defer _ = c.sqlite3_finalize(cutoff_statement);
@@ -5477,7 +5484,7 @@ fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: 
 }
 
 test "an item id repeated in a later batch or the same batch fails the settlement" {
-    inline for (.{ 17, 1 }) |repeat_at| {
+    inline for (.{ 65, 1 }) |repeat_at| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -5486,14 +5493,62 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
         const session = try configureTestSession(&storage, "repeat-item-config");
         try submitTestMessage(&storage, &tmp, "repeat-item-input", "repeat-item-key", session.slice(), "repeat");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        // Item 17 is in the second batch: a check over one batch's ids
+        // Item 65 is in the second batch: a check over one batch's ids
         // alone passes it, and only the read of the saved items finds it.
-        try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 18, false, repeat_at));
+        try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 66, false, repeat_at));
         try std.testing.expect(!storage.isFenced());
         try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
-        try settleMessagesForTesting(&storage, &tmp, binding, 18, false, null);
-        try std.testing.expectEqual(18, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+        try settleMessagesForTesting(&storage, &tmp, binding, 66, false, null);
+        try std.testing.expectEqual(66, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
         try expectDenseSessionPositions(&storage, session.slice());
+    }
+}
+
+/// How many times a settlement read its saved item ids, then its content
+/// identities, each in a narrow (sixteen digests) and a wide (64)
+/// statement.
+fn digestReadsForTesting(storage: *Store) [4]i64 {
+    var reads: [4]i64 = @splat(0);
+    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+        const sql = std.mem.span(slot.sql.?);
+        const kind: usize = if (std.mem.startsWith(u8, sql, "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1"))
+            0
+        else if (std.mem.startsWith(u8, sql, "SELECT content_id,digest,byte_length,private FROM content WHERE digest IN ("))
+            2
+        else
+            continue;
+        const wide = std.mem.endsWith(u8, sql, "?65)") or std.mem.endsWith(u8, sql, "?64)");
+        reads[kind + @intFromBool(wide)] += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 0);
+    };
+    return reads;
+}
+
+test "a settlement batch holds 64 items, read narrow up to sixteen" {
+    // One batch per 64 items, so a reply of 64 settles in two rounds; a
+    // batch of at most sixteen ids binds main's narrow statement. Each
+    // message imports its text and its bag, and the usage record one
+    // more, so 64 items look up 129 identities: two wide statements of 64
+    // while more than 48 are left, then one narrow; 16 items' 33 take
+    // main's three narrow ones.
+    inline for (.{
+        .{ 1, .{ 1, 0, 1, 0 } },
+        .{ 16, .{ 1, 0, 3, 0 } },
+        .{ 17, .{ 0, 1, 3, 0 } },
+        .{ 64, .{ 0, 1, 1, 2 } },
+        .{ 65, .{ 1, 1, 2, 2 } },
+        .{ 100, .{ 0, 2, 2, 3 } },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "batch-width-config");
+        try submitTestMessage(&storage, &tmp, "batch-width-input", "batch-width-key", session.slice(), "width");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleMessagesForTesting(&storage, &tmp, binding, case[0], false, null);
+        try std.testing.expectEqual([4]i64{ case[1][0], case[1][1], case[1][2], case[1][3] }, digestReadsForTesting(&storage));
+        try std.testing.expectEqual(case[0], try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
     }
 }
 
@@ -5506,12 +5561,12 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
     const session = try configureTestSession(&storage, "full-batch-calls-config");
     try submitTestMessage(&storage, &tmp, "full-batch-calls-input", "full-batch-calls-key", session.slice(), "full");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // Sixteen function_call items fill the first item batch and no usage
+    // 64 function_call items fill the first item batch and no usage
     // record follows, so the next item batch is empty and the call batch
     // is collected before any round steps the last item's queued row.
-    var item_ids: [16][16]u8 = undefined;
-    var call_ids: [16][16]u8 = undefined;
-    var calls: [16]TestingCall = undefined;
+    var item_ids: [64][16]u8 = undefined;
+    var call_ids: [64][16]u8 = undefined;
+    var calls: [64]TestingCall = undefined;
     for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
         const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
         call.* = .{
@@ -5524,14 +5579,14 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
         };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
-    const digest = protocol.contentDigest("item-15");
-    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=15 AND item_id_digest=?1");
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
+    const digest = protocol.contentDigest("item-63");
+    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
     defer sqlite.resetCached(statement);
     try sqlite.bindBlob(statement, 1, &digest);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(1, c.sqlite3_column_int64(statement, 0));
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
@@ -5581,7 +5636,7 @@ test "a success settlement whose pending Messages read fails reports main's Sess
     try std.testing.expect(storage.isFenced());
 }
 
-test "sixteen calls with distinct unknown names fit one call batch's identities" {
+test "64 calls with distinct unknown names fit one call batch's identities" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -5591,12 +5646,12 @@ test "sixteen calls with distinct unknown names fit one call batch's identities"
     try submitTestMessage(&storage, &tmp, "unknown-calls-input", "unknown-calls-key", session.slice(), "unknown");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // Each call imports four identities: its name, call_id, arguments and
-    // rejection text, 64 in all, which a 48-identity batch split in two.
-    var item_ids: [16][16]u8 = undefined;
-    var call_ids: [16][16]u8 = undefined;
-    var names: [16][16]u8 = undefined;
-    var arguments: [16][32]u8 = undefined;
-    var calls: [16]TestingCall = undefined;
+    // rejection text, 256 in all: exactly one batch's identities.
+    var item_ids: [64][16]u8 = undefined;
+    var call_ids: [64][16]u8 = undefined;
+    var names: [64][16]u8 = undefined;
+    var arguments: [64][32]u8 = undefined;
+    var calls: [64]TestingCall = undefined;
     for (&calls, &item_ids, &call_ids, &names, &arguments, 0..) |*call, *item_id, *call_id, *name, *argument, index| {
         const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
         const text = try std.fmt.bufPrint(argument, "{{}}{d}", .{index});
@@ -5610,9 +5665,9 @@ test "sixteen calls with distinct unknown names fit one call batch's identities"
         };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "unknown-calls", &calls);
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'"));
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT name_content_id) FROM model_tool_call"));
-    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT name_content_id) FROM model_tool_call"));
+    try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call"));
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
@@ -5626,9 +5681,9 @@ test "equal texts in many batches share one row, and entries keep item order" {
     try submitTestMessage(&storage, &tmp, "same-text-input", "same-text-key", session.slice(), "same");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // A later batch's lookup runs after the earlier batch's inserts.
-    try settleMessagesForTesting(&storage, &tmp, binding, 40, true, null);
+    try settleMessagesForTesting(&storage, &tmp, binding, 140, true, null);
     try std.testing.expectEqual(1, try queryU64(storage.database, "SELECT count(DISTINCT message_content_id) FROM model_output_item"));
-    try std.testing.expectEqual(40, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"));
+    try std.testing.expectEqual(140, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"));
     try std.testing.expectEqual(0, try queryU64(storage.database, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i " ++
         "ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal WHERE e.session_position<>i.session_position"));
     try expectDenseSessionPositions(&storage, session.slice());
@@ -5643,15 +5698,15 @@ test "an item with more content than a batch holds settles through its own looku
     const session = try configureTestSession(&storage, "wide-item-config");
     try submitTestMessage(&storage, &tmp, "wide-item-input", "wide-item-key", session.slice(), "wide");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // 60 distinct summary texts: more identities than one batch's 48.
-    var reasoning_buffer: [4096]u8 = undefined;
+    // 300 distinct summary texts: more identities than one batch's 256.
+    var reasoning_buffer: [16384]u8 = undefined;
     var writer = std.Io.Writer.fixed(&reasoning_buffer);
     try writer.writeAll("{\"type\":\"reasoning\",\"id\":\"wide\",\"summary\":[");
-    for (0..60) |index| try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"summary {d}\"}}", .{ if (index == 0) "" else ",", index });
+    for (0..300) |index| try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"summary {d}\"}}", .{ if (index == 0) "" else ",", index });
     try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
     const items = [_][]const u8{ writer.buffered(), "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}" };
     try settleItemsForTesting(&storage, &tmp, binding, &items, "done");
-    try std.testing.expectEqual(60, try queryU64(storage.database, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3"));
+    try std.testing.expectEqual(300, try queryU64(storage.database, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3"));
     try std.testing.expectEqual(2, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
     try expectDenseSessionPositions(&storage, session.slice());
 }
@@ -5665,11 +5720,11 @@ test "a call id repeated in a later call batch fails the settlement" {
     const session = try configureTestSession(&storage, "repeat-call-config");
     try submitTestMessage(&storage, &tmp, "repeat-call-input", "repeat-call-key", session.slice(), "repeat");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var item_ids: [17][16]u8 = undefined;
-    var call_ids: [17][16]u8 = undefined;
-    var calls: [17]TestingCall = undefined;
+    var item_ids: [65][16]u8 = undefined;
+    var call_ids: [65][16]u8 = undefined;
+    var calls: [65]TestingCall = undefined;
     for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
-        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{if (index == 16) 0 else index});
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{if (index == 64) 0 else index});
         call.* = .{
             .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
             .name = "bash",
@@ -8411,6 +8466,7 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_threadsafe());
     try std.testing.expectEqual(@as(i64, sqlite_heap_bytes), c.sqlite3_hard_heap_limit64(-1));
     try std.testing.expectEqual(@as(c_int, 16 * 1024), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_SQL_LENGTH, -1));
+    try std.testing.expectEqual(@as(c_int, 65), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_VARIABLE_NUMBER, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_ATTACHED, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_WORKER_THREADS, -1));
 
@@ -12322,6 +12378,151 @@ test "live tool activity counts calls past the sixteenth Operation" {
     try std.testing.expect(page.call_activity.entries[0].operation > first);
 }
 
+test "activity judges every candidate Operation's tool outcomes, not only its kept calls" {
+    // The page keeps three calls' presentations; the rule must still reach
+    // the fourth call, by one read per Operation while there are at most
+    // `max_operations`, 32, and by one read over them all past that.
+    for ([_]enum { one_operation, many_operations }{ .one_operation, .many_operations }) |shape| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "outcome-config");
+        try submitTestMessage(&storage, &tmp, "outcome-input", "input", session.slice(), "propose");
+        switch (shape) {
+            .one_operation => {
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var calls: [4]TestingCall = undefined;
+                var ids: [4][16]u8 = undefined;
+                for (&calls, &ids, 0..) |*call, *id_buffer, index| {
+                    const id = try std.fmt.bufPrint(id_buffer, "outcome-{d}", .{index});
+                    call.* = .{
+                        .item_id = id,
+                        .name = "bash",
+                        .encoded_call_id = id,
+                        .decoded_call_id = id,
+                        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+                        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
+                    };
+                }
+                try settleCallsForTesting(&storage, &tmp, binding, "outcome-calls", &calls);
+            },
+            .many_operations => for (0..40) |index| {
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var identity: [24]u8 = undefined;
+                const id = try std.fmt.bufPrint(&identity, "ops-{d}", .{index});
+                var prefix: [24]u8 = undefined;
+                const calls = [_]TestingCall{.{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" }};
+                try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "ops-calls-{d}", .{index}), &calls);
+            },
+        }
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
+        try std.testing.expect(page.call_activity.total >= 4);
+        // One call each, so as many candidate Operations as calls.
+        if (shape == .many_operations) try std.testing.expect(page.call_activity.total > 32);
+        // The last candidate call's item stops being a call item; no kept
+        // presentation reads that call.
+        try sqlite.exec(storage.database, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
+            "(SELECT operation_id,item_ordinal FROM model_tool_call ORDER BY operation_id DESC,call_ordinal DESC LIMIT 1)");
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "the tool outcome rule counts an Operation's calls against its call items" {
+    // One call's item stops being a call item: every call left is valid
+    // and as many as the call items, so only the count of calls differs.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "count-config");
+    try submitTestMessage(&storage, &tmp, "count-input", "input", session.slice(), "propose");
+    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "count-calls");
+    try sqlite.exec(storage.database, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3 AND item_ordinal=" ++
+        "(SELECT item_ordinal FROM model_tool_call WHERE call_ordinal=1)");
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "the Current report's resolved and rejected calls carry their group's publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "publication-config");
+    try submitTestMessage(&storage, &tmp, "publication-input", "input", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{
+            .item_id = "publication-item-0",
+            .name = "bash",
+            .encoded_call_id = "publication-call-0",
+            .decoded_call_id = "publication-call-0",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
+        },
+        .{ .item_id = "publication-item-1", .name = "other", .encoded_call_id = "publication-call-1", .decoded_call_id = "publication-call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "publication-calls", &calls);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation"), .decision = .allow_once };
+    try allow.key.set("publication-allow");
+    try allow.session.set(session.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+    const group = try queryU64(storage.database, "SELECT max(acceptance_position) FROM action_operation");
+    try std.testing.expect(group > try queryU64(storage.database, "SELECT acceptance_position FROM model_tool_call WHERE rejection_code IS NOT NULL"));
+
+    const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer report.deinit();
+    const resolved = report.value.object.get("actions").?.object.get("resolved").?.array.items;
+    const rejected = report.value.object.get("rejected_calls").?.object.get("items").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), resolved.len);
+    try std.testing.expectEqual(@as(usize, 1), rejected.len);
+    var expected: [20]u8 = undefined;
+    const position = try std.fmt.bufPrint(&expected, "{d}", .{group});
+    for ([_]std.json.Value{ resolved[0], rejected[0] }) |row| {
+        const published = row.object.get("presentation").?.object.get("publication_position").?;
+        try std.testing.expectEqualStrings(position, switch (published) {
+            .string => |text| text,
+            else => return error.TestUnexpectedResult,
+        });
+    }
+}
+
+test "the Current report fences an unauthorized Action proposed under bypass" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "unauthorized-config");
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("unauthorized-mode");
+    try update.session.set(session.slice());
+    update.configuration.permission_mode.state = .value;
+    try update.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "unauthorized-input", "input", session.slice(), "propose");
+    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "unauthorized-calls");
+    // The CHECK pairs a grant with its decision, so the damage clears both.
+    try sqlite.exec(storage.database, "UPDATE action_operation SET authorized=0,decided_at=NULL WHERE call_ordinal=1");
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    try std.testing.expect(storage.isFenced());
+}
+
 test "compaction overflow admits a new Operation without losing applied input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -13752,11 +13953,18 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
 /// The rendered text of the one statement `report_domain.report_failures`
 /// names `failed` whose text holds `fragment`.
 fn reportStatementForTesting(comptime failed: anyerror, comptime fragment: []const u8) [:0]const u8 {
-    @setEvalBranchQuota(100_000);
+    return namedStatementForTesting(report_domain.report_failures, failed, fragment);
+}
+
+/// The rendered text of the one statement the failure table `named`
+/// holds whose text holds `fragment`, among those it names `failed` when
+/// that is not null.
+fn namedStatementForTesting(comptime named: anytype, comptime failed: ?anyerror, comptime fragment: []const u8) [:0]const u8 {
+    @setEvalBranchQuota(200_000);
     comptime var found: ?[:0]const u8 = null;
-    inline for (report_domain.report_failures) |pair| {
-        if (comptime pair[1] == failed and std.mem.indexOf(u8, pair[0].sql, fragment) != null) {
-            if (found != null) @compileError("two statements hold " ++ fragment);
+    inline for (named) |pair| {
+        if (comptime (failed == null or pair[1] == failed.?) and std.mem.indexOf(u8, pair[0].sql, fragment) != null) {
+            if (found != null and !std.mem.eql(u8, found.?, pair[0].sql)) @compileError("two statements hold " ++ fragment);
             found = pair[0].sql;
         }
     }
@@ -13918,17 +14126,162 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     try std.testing.expectEqual(1 + 8 + 6 + 6 + 2 + 2 + 6, a.passes);
 }
 
-/// The rounds a Current report's work, peer facts and first Message take
-/// for a Session of `shape`.
-fn reportFactsRoundsForTesting(shape: TestingWorkShape) !u32 {
+test "a Current report's step faults answer the name of the earliest round that steps the table" {
+    // Each read keeps main's name; when reads in two rounds fail, the
+    // earlier round's name wins. The Action count steps after the tool
+    // outcome rule in their round, so a faulted action_operation answers
+    // the rule's CallReadFailed, as on main. A list with nothing to show
+    // is not read, where main read every list and answered
+    // ActionReadFailed for a faulted session_revision.
+    inline for (.{
+        .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
+        .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
+        .{ TestingWorkShape.awaiting, "session_revision", error.ActionReadFailed },
+        .{ TestingWorkShape.idle, "session_revision", null },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try case[0].make(&storage, &tmp, "fault-names");
+        try failAtStepForTesting(storage.database, case[1]);
+        if (comptime @TypeOf(case[2]) == @TypeOf(null)) {
+            std.testing.allocator.free(try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+        } else try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    }
+}
+
+/// Fails the statement whose text is `sql` while `route` reads `session`,
+/// and expects `expected`.
+fn expectRouteStepFailure(storage: *Store, tmp: *std.testing.TmpDir, route: enum { report, inspection, activity }, session: []const u8, sql: [:0]const u8, expected: anyerror) !void {
+    var fault: TestingStatementFault = .{ .sql = sql };
+    fault.arm(storage.database);
+    defer fault.disarm(storage.database);
+    const result: anyerror!void = switch (route) {
+        .report => if (testingSessionReport(storage, tmp, session, 1024 * 1024)) |report| std.testing.allocator.free(report) else |err| err,
+        .inspection => if (storage.inspectSessionForTesting(session)) |_| {} else |err| err,
+        .activity => blk: {
+            var request: protocol.ActivityPage = .{ .direction = .backward };
+            try request.session.set(session);
+            break :blk if (store_core.activityPageForTesting(storage, request)) |_| {} else |err| err;
+        },
+    };
+    try std.testing.expectError(expected, result);
+    try std.testing.expect(fault.failed > 0);
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a Proposal check folded into the tool outcome rule answers the rule's CallReadFailed" {
+    // Main checked each call's Proposal in a statement of its own, whose
+    // failed step went through as StatementFailed; the rule's read now
+    // checks it, on an Activity page (`operation_outcome`) and in the
+    // Current report (`active_tool_calls`), and answers that read's name.
+    inline for (.{
+        .{ .activity, namedStatementForTesting(reads_domain.read_failures, null, "SELECT DISTINCT ?1 AS operation_id") },
+        .{ .report, namedStatementForTesting(report_domain.session_count_failures, null, "SELECT DISTINCT operation.operation_id") },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "proposal-fold");
+        try expectRouteStepFailure(&storage, &tmp, case[0], session.slice(), case[1], error.CallReadFailed);
+    }
+}
+
+test "a Current report's presentation reads answer their list's name" {
+    // Main read each listed call's line and fields apart and named their
+    // failed steps CorruptStore; they are the list's own columns now. The
+    // Turn proposes an asked-for call, whose Action waits, and a call of
+    // an unknown tool, which is rejected.
+    inline for (.{
+        .{ namedStatementForTesting(report_domain.current_failures, null, "a.resolution_code IS NULL ORDER BY a.action_id"), error.ActionReadFailed },
+        .{ namedStatementForTesting(report_domain.current_failures, null, "CROSS JOIN content rejection"), error.CallReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "presentation-fold");
+        try submitTestMessage(&storage, &tmp, "presentation-fold-input", "presentation-fold-message", session.slice(), "call");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "presentation-fold-asked", .name = "bash", .encoded_call_id = "presentation-fold-asked", .decoded_call_id = "presentation-fold-asked", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+            .{ .item_id = "presentation-fold-unknown", .name = "unknown", .encoded_call_id = "presentation-fold-unknown", .decoded_call_id = "presentation-fold-unknown", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTesting(&storage, &tmp, binding, "presentation-fold-output", &calls);
+        try expectRouteStepFailure(&storage, &tmp, .report, session.slice(), case[0], case[1]);
+    }
+}
+
+test "admission's context read answers CorruptStore, as admission names it" {
+    // Main checked whether the context changed in a statement of its own,
+    // whose failed step went through as StatementFailed, and named the
+    // estimate's CorruptStore; `admission_context` reads both. The second
+    // Message follows a Turn with usage under a trigger, so admission
+    // weighs the context, and the report estimates it.
+    for ([_]bool{ false, true }) |report| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "context-fold");
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("context-fold-trigger");
+        try patch.session.set(session.slice());
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("1000");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "context-fold-one", "context-fold-one", session.slice(), "one");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
+        try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
+        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT") };
+        fault.arm(storage.database);
+        defer fault.disarm(storage.database);
+        if (report)
+            try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
+        else
+            try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "Session inspection's count reads answer main's names" {
+    // Inspection reads the Current report's counts and the rule in the
+    // same rounds, under main's names.
+    inline for (.{
+        .{ "SELECT operation.operation_id FROM", error.CallReadFailed },
+        .{ "SELECT DISTINCT operation.operation_id", error.CallReadFailed },
+        .{ "count(*) AS actions", error.ActionReadFailed },
+        .{ "count(*) AS rejected", error.CallReadFailed },
+        .{ "count(*) AS pending", error.MessageAdmissionReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "inspection-names");
+        // A queued Message, so the pending count steps.
+        try submitTestMessage(&storage, &tmp, "inspection-names-queued", "inspection-names-queued", session.slice(), "later");
+        try expectRouteStepFailure(&storage, &tmp, .inspection, session.slice(), namedStatementForTesting(report_domain.session_count_failures, null, case[0]), case[1]);
+    }
+}
+
+/// The rounds a Current report takes for a Session of `shape`.
+fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try shape.make(&storage, &tmp, "report-rounds");
-    var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
-    try std.testing.expect(try configuration_domain.readSession(&storage, session.slice(), &current));
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
@@ -13937,17 +14290,166 @@ fn reportFactsRoundsForTesting(shape: TestingWorkShape) !u32 {
     defer capture.deinit();
     var a = reads_domain.ReadAccess.within(&storage);
     defer a.deinit();
-    try report_domain.renderWorkAndRowFacts(&a, session.slice(), current.created_at, &capture);
-    try std.testing.expectEqual(a.rounds, a.passes);
+    try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
     return a.rounds;
 }
 
-test "a report's row facts share its work's rounds" {
-    // The work's latest Turn with the peer and first-Message seeks; the
-    // cutoff or Actions with the first Message's row; then the rest of
-    // the work.
-    try std.testing.expectEqual(@as(u32, 3), try reportFactsRoundsForTesting(.idle));
-    try std.testing.expectEqual(@as(u32, 3), try reportFactsRoundsForTesting(.finished));
-    try std.testing.expectEqual(@as(u32, 5), try reportFactsRoundsForTesting(.stopped));
-    try std.testing.expectEqual(@as(u32, 2), try reportFactsRoundsForTesting(.awaiting));
+/// The statements the Store's cached statements ran and the VM steps they
+/// took since the last call, which resets them.
+fn cachedWorkForTesting(storage: *Store) struct { statements: i64, steps: i64 } {
+    var statements: i64 = 0;
+    var steps: i64 = 0;
+    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+        statements += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
+        steps += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+    };
+    return .{ .statements = statements, .steps = steps };
+}
+
+/// One tool cycle of the cost fixture: a Message whose Operation proposes
+/// two Bash calls and an unknown one; one call is allowed and runs, one
+/// denied, the unknown one rejected; the continuation answers.
+fn costCycleForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, index: usize) !void {
+    var name: [64]u8 = undefined;
+    var key: [64]u8 = undefined;
+    try submitTestMessage(storage, tmp, try std.fmt.bufPrint(&name, "cycle-{d}-input", .{index}), try std.fmt.bufPrint(&key, "cycle-{d}-key", .{index}), session, "list the files, then summarize");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-a", .name = "bash", .encoded_call_id = "call-a", .decoded_call_id = "call-a", .encoded_arguments = "{\\\"description\\\":\\\"List files\\\",\\\"cmd\\\":\\\"ls -la\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"List files\",\"cmd\":\"ls -la\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-b", .name = "bash", .encoded_call_id = "call-b", .decoded_call_id = "call-b", .encoded_arguments = "{\\\"description\\\":\\\"Remove files\\\",\\\"cmd\\\":\\\"rm -rf x\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Remove files\",\"cmd\":\"rm -rf x\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-c", .name = "unknown", .encoded_call_id = "call-c", .decoded_call_id = "call-c", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(storage, tmp, binding, try std.fmt.bufPrint(&name, "cycle-{d}-calls", .{index}), &calls);
+    const first_action = try queryU64(storage.database, "SELECT max(action_id)-1 FROM action_operation");
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = first_action, .decision = .allow_once };
+    try allow.key.set(try std.fmt.bufPrint(&key, "cycle-{d}-allow", .{index}));
+    try allow.session.set(session);
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try denyForTesting(storage, session, try std.fmt.bufPrint(&key, "cycle-{d}-deny", .{index}), first_action + 1);
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    _ = try storage.settleActionAttempt(action, .succeeded, "total 8\ndrwxr-xr-x 2 user user 4096 a\n-rw-r--r-- 1 user user 120 b\n", .{});
+    const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Two files; the removal was denied.\"}]}"};
+    try settleItemsForTesting(storage, tmp, continued, &items, "Two files; the removal was denied.");
+}
+
+/// The cost fixture: an answered greeting, a reconfigure, `cycles` tool
+/// cycles, a stopped Turn with a Message the stop excluded, and a Turn
+/// awaiting one asked Bash call beside a rejected unknown one.
+fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usize) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSessionAsk(storage, "probe-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "hello there", .decoded = "hello there" }};
+    try answerTestTurn(storage, tmp, session.slice(), "probe-greeting", &answer);
+    var reconfigure: protocol.ConfigureCommand = .{};
+    try reconfigure.key.set("probe-reconfigure");
+    try reconfigure.session.set(session.slice());
+    reconfigure.configuration.instructions = try testingBytesContent(tmp, "probe-instructions", "Be brief and careful.");
+    reconfigure.configuration.label.state = .value;
+    try reconfigure.configuration.label.value.set("probe label");
+    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+    for (0..cycles) |index| try costCycleForTesting(storage, tmp, session.slice(), index);
+    try submitTestMessage(storage, tmp, "probe-stopped-input", "probe-stopped-key", session.slice(), "start something long");
+    _ = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try submitTestMessage(storage, tmp, "probe-excluded-input", "probe-excluded-key", session.slice(), "and then this");
+    var stop = try completeSessionStop("probe-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    var late_stop = try completeSessionStop("probe-stop-idle", session.slice());
+    _ = storage.stopSession(&late_stop, .{});
+    try submitTestMessage(storage, tmp, "probe-awaiting-input", "probe-awaiting-key", session.slice(), "check the disk");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-d", .name = "bash", .encoded_call_id = "call-d", .decoded_call_id = "call-d", .encoded_arguments = "{\\\"description\\\":\\\"Disk usage\\\",\\\"cmd\\\":\\\"df -h\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Disk usage\",\"cmd\":\"df -h\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-e", .name = "unknown", .encoded_call_id = "call-e", .decoded_call_id = "call-e", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(storage, tmp, binding, "probe-awaiting-calls", &calls);
+    return session;
+}
+
+test "a Current report and inspection do no more work than main at the cost fixture" {
+    // Main's counts at 72db6de9, each the second, cached, run on this
+    // fixture: statements run and VM steps, the report then inspection.
+    inline for (.{
+        .{ 1, [4]i64{ 37, 2954, 12, 633 } },
+        .{ 8, [4]i64{ 37, 5674, 12, 633 } },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try costFixtureForTesting(&storage, &tmp, case[0]);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        _ = cachedWorkForTesting(&storage);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        const report = cachedWorkForTesting(&storage);
+        _ = try storage.inspectSessionForTesting(session.slice());
+        _ = cachedWorkForTesting(&storage);
+        _ = try storage.inspectSessionForTesting(session.slice());
+        const inspection = cachedWorkForTesting(&storage);
+        const main = case[1];
+        try std.testing.expect(report.statements > 0 and inspection.statements > 0);
+        std.testing.expect(report.statements <= main[0] and report.steps <= main[1] and inspection.statements <= main[2] and inspection.steps <= main[3]) catch |err| {
+            std.debug.print("report {d} statements, {d} steps; inspection {d}, {d}\n", .{ report.statements, report.steps, inspection.statements, inspection.steps });
+            return err;
+        };
+    }
+}
+
+/// A Session whose active Turn's one Operation proposed `count` calls of
+/// an unknown tool, each rejected, so the report lists every one.
+fn rejectedCallsForTesting(storage: *Store, tmp: *std.testing.TmpDir, count: usize) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSession(storage, "one-operation-config");
+    try submitTestMessage(storage, tmp, "one-operation-input", "one-operation-key", session.slice(), "many calls");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var ids: [256][16]u8 = undefined;
+    var calls: [256]TestingCall = undefined;
+    for (calls[0..count], ids[0..count], 0..) |*call, *id_buffer, index| {
+        const id = try std.fmt.bufPrint(id_buffer, "call-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(storage, tmp, binding, "one-operation-calls", calls[0..count]);
+    return session;
+}
+
+test "a Current report's work grows linearly in one Operation's calls, as main's did" {
+    // Main's counts at 3b3d941a, each the second, cached, report: its
+    // statements and VM steps with 16, 64 and 256 rejected calls in one
+    // Operation. Each listed call's publication is its Operation's, read
+    // once per Operation, not once per call.
+    inline for (.{
+        .{ 16, [2]i64{ 93, 12411 } },
+        .{ 64, [2]i64{ 285, 47067 } },
+        .{ 256, [2]i64{ 1053, 185691 } },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try rejectedCallsForTesting(&storage, &tmp, case[0]);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        _ = cachedWorkForTesting(&storage);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        const report = cachedWorkForTesting(&storage);
+        try std.testing.expect(report.statements > 0);
+        std.testing.expect(report.statements <= case[1][0] and report.steps <= case[1][1]) catch |err| {
+            std.debug.print("{d} calls: {d} statements, {d} steps\n", .{ case[0], report.statements, report.steps });
+            return err;
+        };
+    }
+}
+
+test "a Current report takes its reads' dependency depth in rounds, not its rows" {
+    // Every shape: the saved Session; the facts' first round, with the
+    // work's and compaction facts' latest Turn; the pending count with
+    // their second stages; then the recent Messages. Idle and finished
+    // work reads the queue after the cutoff in a fourth round; stopped
+    // work then the excluded Message and its stop.
+    try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(.idle));
+    try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(.finished));
+    try std.testing.expectEqual(@as(u32, 7), try reportRoundsForTesting(.stopped));
+    // Awaiting work ends with its Actions in the third round; its Action
+    // adds the unresolved, resolved and actionable lists, and with no
+    // rejected call there is no rejected list.
+    try std.testing.expectEqual(@as(u32, 7), try reportRoundsForTesting(.awaiting));
 }

@@ -33,6 +33,7 @@ const BashExecutionInput = action_domain.BashExecutionInput;
 const CommandObservation = command_domain.CommandObservation;
 const ConfigureReply = configuration_domain.ConfigureReply;
 const ContentBlob = @import("access.zig").ContentBlob;
+const Found = @import("access.zig").Found;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
@@ -209,8 +210,9 @@ pub const Store = struct {
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
-        // 17: a created Session's INSERT binds its sixteen Args as ?1..?16 and `@now` as ?17.
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, 17);
+        // 65: a settlement's wide duplicate read binds its Operation and 64 digests as
+        // ?1..?65 (`model_settlement.batch_items`); a created Session's INSERT binds 17.
+        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, rsql.max_parameters);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 4096);
         try sqlite.setLimit(database.?, c.SQLITE_LIMIT_ATTACHED, 0);
@@ -532,7 +534,7 @@ pub const Store = struct {
         {
             const entry = try enter(self, .none);
             defer entry.release();
-            try entry.finishCapture(&capture, report_domain.renderSessionReportLocked(self, session_ref, options.profile, options.execution, &capture));
+            try entry.finishCapture(&capture, report_domain.renderSessionReport(&entry, session_ref, options.profile, options.execution, &capture));
         }
         return capture.seal();
     }
@@ -885,16 +887,24 @@ const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
+/// The resident bytes the owner accepted for a settlement batch of 64
+/// items, beyond the configure reads' 4888.
+const accepted_settlement_growth = 10240;
+
 comptime {
-    // Settlement's table shares the configure scratch, so it adds no byte.
-    std.debug.assert(@sizeOf(model_settlement_domain.Batch) <= @sizeOf(configuration_domain.ConfigurationReads));
+    // The settlement batch is the larger use: 14480 bytes, 9592 beyond the
+    // configure reads. Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 4888 or scratch_bytes != 14480)
+        @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
+    if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
 
 /// The change ring, and the scratch beside it, in pages of their own,
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: about 5 KiB, the configure reads' size.
+/// resident for the Store's life: at most 14480 bytes, a settlement
+/// batch's size, of which a configure writes 4888.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -1186,9 +1196,18 @@ pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
     return err;
 }
 
+/// The saved Session, as `configuration.readSaved` reads it, in a read
+/// Access of its own, then checked by `configuration.checkSaved`.
 pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
+    var a = ReadAccess.within(self);
+    defer a.deinit();
     var current: CurrentConfiguration = .{};
-    return if (try configuration_domain.readSession(self, session_ref, &current)) current else null;
+    var found: Found = undefined;
+    configuration_domain.readSaved(&a, session_ref, &current, &found);
+    try a.run();
+    if (!found.get()) return null;
+    try configuration_domain.checkSaved(&current);
+    return current;
 }
 
 pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {

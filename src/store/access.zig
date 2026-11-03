@@ -354,9 +354,19 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// field holds the last row stepped, and after a decode failure a
         /// row half written.
         pub fn readEach(a: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
+            a.readEachFrom(S, &args, limit, visitor);
+        }
+
+        /// `readEach` with Args its caller keeps, for Args too large to
+        /// copy into a frame. The Args struct itself may be reused once
+        /// this returns: its fixed-size values are copied when queued. The
+        /// bytes its `[]const u8` and `rsql.Bytes` fields point to are read
+        /// in place at the pass, so they must outlive it unchanged, which
+        /// debug and test builds check with a checksum (`Borrowed`).
+        pub fn readEachFrom(a: *Self, comptime S: type, args: *const S.Args, limit: u64, visitor: anytype) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
             if (comptime eachVisitorError(S.Row, @TypeOf(visitor.*))) |message| @compileError(message ++ ": " ++ S.sql);
-            _ = a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } });
+            _ = a.queueStatement(S, args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } });
         }
 
         /// Ends the round: runs every queued statement in order, and

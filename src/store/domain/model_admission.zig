@@ -17,7 +17,7 @@ const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const historical_domain = @import("historical.zig");
 const model_settlement_domain = @import("model_settlement.zig");
-const report_domain = @import("report.zig");
+const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
@@ -39,8 +39,6 @@ pub const ModelAdmissionKind = enum { message, tool_continuation };
 /// `@index` cannot say this: it names only an index the schema declares,
 /// and the primary key of this WITHOUT ROWID table is the table itself,
 /// named only by SQLite's internal `sqlite_autoindex_model_output_item_1`.
-/// The fragment also reaches `firstRunnableAdmission`'s untyped text,
-/// where no marker renders.
 const complete_tool_results_sql =
     store_schema.resolutionIs("current.resolution_code", .tool_proposals) ++ " AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3" ++
@@ -150,47 +148,109 @@ pub const AttemptAdmission = struct {
     permit: DispatchPermit,
 };
 
+/// The latest Turn as `previousTurn` weighs it: its current Operation's
+/// purpose and resolution, whether it is active, and the first Message it
+/// took. Main's text, but that it reads whether the Turn is active, not
+/// its outcome code, which it weighed only for that.
+const latest_turn = rsql.Read(.{
+    .sql = "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code IS NULL AS active,latest.first_admission_id " ++
+        "FROM turn latest @index(turn_session_latest) LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
+        "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1",
+    .Args = struct { session: []const u8 },
+    .Row = struct {
+        purpose: u1,
+        resolution_code: ?protocol.Bounded(protocol.max_code_bytes),
+        operation_id: rsql.Positive,
+        active: bool,
+        first_admission_id: rsql.Positive,
+    },
+    .cardinality = .optional,
+});
+
+/// The first Message admission would select for the Session's next Turn,
+/// or 0 when none is runnable: a later Message has a new admission.
+const first_runnable = rsql.Read(.{
+    .sql = "SELECT coalesce(min(m.admission_id),0) AS first FROM message_admission m WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql,
+    .Args = struct { session: []const u8 },
+    .Row = struct { first: u64 },
+    .cardinality = .one,
+});
+
+/// The names main gave `CompactionRead`'s failed steps: each is
+/// `CorruptStore`, where main's own check of whether the context changed
+/// let `StatementFailed` through, which `admission_context` now reads.
+pub const compaction_failures = .{
+    .{ latest_turn, error.CorruptStore },
+    .{ first_runnable, error.CorruptStore },
+    .{ admission_context, error.CorruptStore },
+};
+
 /// The facts the next model call's purpose rests on, read only as far as
-/// `turn_policy` needs them. Admission and the Current report's
-/// `context_estimate` both read them here. `first_admission` starts the
-/// next Turn; null reads the Session's first runnable Message, which
-/// admission would select.
-pub fn compactionFacts(self: *Store, session_ref: []const u8, first_admission: ?i64, next_position: u64, provider: protocol.Provider, model: []const u8, policy: model_capability.CompactionPolicy) !turn_policy.CompactionFacts {
-    var facts: turn_policy.CompactionFacts = .{
-        .trigger = policy.compaction_trigger,
-        .context_changed = false,
-        .usage_tokens = null,
-        .uncovered_bytes = 0,
-        .output_reservation = policy.output_reservation,
-    };
-    const last = try store_core.cached(self, "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
-        "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
-        "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1");
-    defer sqlite.resetCached(last);
-    try sqlite.bindText(last, 1, session_ref);
-    const result = c.sqlite3_step(last);
-    if (result == c.SQLITE_DONE) return facts;
-    if (result != c.SQLITE_ROW) return error.CorruptStore;
-    _ = try sqlite.readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
-    var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
-    try sqlite.readText(last, 1, &resolution);
-    const compaction = switch (c.sqlite3_column_int(last, 0)) {
-        0 => false,
-        1 => true,
-        else => return error.CorruptStore,
-    };
-    const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
-    const latest_first: u64 = @intCast(try sqlite.readNullablePositiveI64(last, 4) orelse return error.CorruptStore);
-    const next_first: ?u64 = if (asksNextInput(compaction, active)) @intCast(first_admission orelse try firstRunnableAdmission(self, session_ref)) else null;
-    facts.previous = previousTurn(compaction, resolution.slice(), active, latest_first, next_first);
-    if (turn_policy.forcedPurpose(facts.previous, facts.trigger) != null) return facts;
-    facts.context_changed = try contextChangedSinceBase(self, session_ref, next_position);
-    if (!facts.context_changed) return facts;
-    const estimate = try contextEstimate(self, session_ref, next_position, provider, model);
-    facts.usage_tokens = estimate.usage_tokens;
-    facts.uncovered_bytes = estimate.uncovered_bytes;
-    return facts;
-}
+/// `turn_policy` needs them, in stages a caller's rounds share, for the
+/// Current report's `context_estimate`: the latest Turn; only where
+/// `asksNextInput`, the first runnable Message, which admission would
+/// select; and only when `turn_policy.forcedPurpose` leaves the purpose
+/// open, `admission_context`, the facts admission weighs in that case.
+pub const CompactionRead = struct {
+    session: []const u8,
+    /// The Session's next position, provider and model.
+    boundary: u64,
+    provider: protocol.Provider,
+    model: []const u8,
+    facts: turn_policy.CompactionFacts,
+    stage: enum { latest, first, context, done } = .latest,
+    latest: latest_turn.Result = undefined,
+    first: first_runnable.Result = undefined,
+    context: admission_context.Result = undefined,
+
+    pub fn init(session: []const u8, boundary: u64, provider: protocol.Provider, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
+        return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .facts = .{
+            .trigger = policy.compaction_trigger,
+            .context_changed = false,
+            .usage_tokens = null,
+            .uncovered_bytes = 0,
+            .output_reservation = policy.output_reservation,
+        } };
+    }
+
+    /// Queues this stage's read; false once the facts are read.
+    pub fn queue(read: *CompactionRead, a: anytype) bool {
+        switch (read.stage) {
+            .latest => a.read(latest_turn, .{ .session = read.session }, &read.latest),
+            .first => a.read(first_runnable, .{ .session = read.session }, &read.first),
+            .context => a.read(admission_context, .{ .session = read.session, .boundary = read.boundary, .provider = read.provider, .model = read.model }, &read.context),
+            .done => return false,
+        }
+        return true;
+    }
+
+    /// After the round that ran this stage's read: takes it and picks the
+    /// next stage.
+    pub fn advance(read: *CompactionRead) !void {
+        read.stage = switch (read.stage) {
+            .latest => stage: {
+                const latest = read.latest orelse break :stage .done;
+                if (asksNextInput(latest.purpose == 1, latest.active)) break :stage .first;
+                break :stage read.weigh(null);
+            },
+            .first => read.weigh(read.first.first),
+            .context => stage: {
+                try takeContext(&read.facts, &read.context);
+                break :stage .done;
+            },
+            .done => .done,
+        };
+    }
+
+    /// The latest Turn's `previousTurn`, given the next Turn's first
+    /// Message where it asks; then whether the context is still to read.
+    fn weigh(read: *CompactionRead, next_first: ?u64) @TypeOf(read.stage) {
+        const latest = read.latest.?;
+        const resolution: []const u8 = if (latest.resolution_code) |*code| code.slice() else "";
+        read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first);
+        return if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger) == null) .context else .done;
+    }
+};
 
 /// Whether `turn_policy` asks the latest Turn which input comes next:
 /// only an ended compaction's Turn.
@@ -211,17 +271,24 @@ fn previousTurn(compaction: bool, resolution: []const u8, active: bool, latest_f
     };
 }
 
-/// The first Message admission would select for this Session's next
-/// Turn, or 0 when none is runnable: a later Message has a new admission.
-fn firstRunnableAdmission(self: *Store, session_ref: []const u8) !i64 {
-    const statement = try store_core.cached(self, "SELECT coalesce(min(m.admission_id),0) FROM message_admission m WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql);
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return c.sqlite3_column_int64(statement, 0);
+/// `admission_context`'s row into `compaction`: whether the context
+/// changed, and only when it did, the usage's pressure and the bytes it
+/// does not cover.
+fn takeContext(compaction: *turn_policy.CompactionFacts, context: *const admission_context.Row) !void {
+    compaction.context_changed = context.changed;
+    if (!context.changed) return;
+    if (context.uncached) |uncached| {
+        const counts: output_format.Usage = .{
+            .uncached = uncached,
+            .cache_read = context.cache_read orelse return error.CorruptStore,
+            .cache_write = context.cache_write orelse return error.CorruptStore,
+            .output = context.output orelse return error.CorruptStore,
+        };
+        if (context.usage_position == null or context.result_admission == null) return error.CorruptStore;
+        compaction.usage_tokens = counts.pressure();
+    }
+    compaction.uncovered_bytes = context.uncovered_bytes;
 }
-
-const ContextEstimate = struct { usage_tokens: ?u64, uncovered_bytes: u64 };
 
 /// The newest accepted usage on the Session's model at or after the
 /// compaction base `frontier`, and where it ends: its last output item, or
@@ -254,9 +321,9 @@ fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []c
         "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
         "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal),0)),0) FROM model_output_item i " ++
         "WHERE i.session_ref=?1 AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
-        "FROM model_operation b INDEXED_BASES JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
+        "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
         "WHERE b.session_ref=?1 AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0))) + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o INDEXED_HISTORY " ++
+        "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o @index(model_operation_context_history) " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id " ++
         "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=" ++ result_admission ++ " " ++
         "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ") + " ++
@@ -269,79 +336,6 @@ fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []c
         "AND r.instructions_updated=1) + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
         "WHERE r.session_ref=?1 AND r.revision=1 AND " ++ usage_position ++ "=0)";
-}
-
-/// `uncoveredBytesSql` with its index choices in `spelling`: SQLite's
-/// `INDEXED BY` for the legacy text, `@index` for a typed statement.
-fn uncoveredBytes(comptime spelling: enum { legacy, typed }, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
-    const text = uncoveredBytesSql(usage_position, frontier, result_admission);
-    const bases, const history = switch (spelling) {
-        .legacy => .{ "INDEXED BY model_operation_compaction_bases", "INDEXED BY model_operation_context_history" },
-        .typed => .{ "@index(model_operation_compaction_bases)", "@index(model_operation_context_history)" },
-    };
-    return comptime replaced(replaced(text, "INDEXED_BASES", bases), "INDEXED_HISTORY", history);
-}
-
-fn replaced(comptime text: []const u8, comptime from: []const u8, comptime to: []const u8) []const u8 {
-    comptime {
-        @setEvalBranchQuota(100 * text.len);
-        const at = std.mem.indexOf(u8, text, from).?;
-        return text[0..at] ++ to ++ text[at + from.len ..];
-    }
-}
-
-/// What the next model call would start from, before the Session position
-/// `next_position`: the newest accepted usage on this model since the
-/// last compaction, and the bytes it does not cover. The Current report
-/// reads this estimate; admission reads the same rules in
-/// `admission_context`.
-fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, provider: protocol.Provider, model: []const u8) !ContextEstimate {
-    var usage_tokens: ?u64 = null;
-    const base = try store_core.cached(self, "SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
-        "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
-    defer sqlite.resetCached(base);
-    try sqlite.bindText(base, 1, session_ref);
-    try sqlite.bindU64(base, 2, next_position);
-    if (c.sqlite3_step(base) != c.SQLITE_ROW) return error.CorruptStore;
-    const frontier = try sqlite.readNullableTokens(base, 0, true) orelse return error.CorruptStore;
-    // Without a usage anchor, all retained host input still contributes.
-    // Covered provider/tool material is excluded separately by the base.
-    var usage_position: u64 = 0;
-    var result_admission = frontier;
-    const usage = try store_core.cached(self, comptime std.fmt.comptimePrint("{s}", .{latestUsageSql("?2", "?3", "?4")}));
-    defer sqlite.resetCached(usage);
-    try sqlite.bindText(usage, 1, session_ref);
-    try sqlite.bindU64(usage, 2, frontier);
-    try sqlite.bindText(usage, 3, @tagName(provider));
-    try sqlite.bindText(usage, 4, model);
-    switch (c.sqlite3_step(usage)) {
-        c.SQLITE_ROW => {
-            if (try sqlite.readNullableTokens(usage, 0, true)) |uncached| {
-                const counts: output_format.Usage = .{
-                    .uncached = uncached,
-                    .cache_read = try sqlite.readNullableTokens(usage, 1, true) orelse return error.CorruptStore,
-                    .cache_write = try sqlite.readNullableTokens(usage, 2, true) orelse return error.CorruptStore,
-                    .output = try sqlite.readNullableTokens(usage, 3, true) orelse return error.CorruptStore,
-                };
-                usage_tokens = counts.pressure();
-                usage_position = @intCast(try sqlite.readNullablePositiveI64(usage, 4) orelse return error.CorruptStore);
-                // Include this producer: its results follow usage.
-                result_admission = @intCast(try sqlite.readNullablePositiveI64(usage, 5) orelse return error.CorruptStore);
-            }
-        },
-        c.SQLITE_DONE => {},
-        else => return error.CorruptStore,
-    }
-    const estimate = try store_core.cached(self, comptime std.fmt.comptimePrint("SELECT {s}", .{uncoveredBytes(.legacy, "?2", "?3", "?4")}));
-    defer sqlite.resetCached(estimate);
-    try sqlite.bindText(estimate, 1, session_ref);
-    try sqlite.bindU64(estimate, 2, usage_position);
-    try sqlite.bindU64(estimate, 3, frontier);
-    try sqlite.bindU64(estimate, 4, result_admission);
-    if (c.sqlite3_step(estimate) != c.SQLITE_ROW) return error.CorruptStore;
-    const bytes = c.sqlite3_column_int64(estimate, 0);
-    if (bytes < 0) return error.CorruptStore;
-    return .{ .usage_tokens = usage_tokens, .uncovered_bytes = @intCast(bytes) };
 }
 
 /// The Session ?1's newest compaction base before the position ?2, as the
@@ -369,15 +363,6 @@ pub const context_changed = rsql.Read(.{
     .Row = struct { changed: bool },
     .cardinality = .one,
 });
-
-fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64) !bool {
-    var a = store_access.Access(.read, error{}).within(self);
-    defer a.deinit();
-    var changed: context_changed.Result = undefined;
-    a.read(context_changed, .{ .session = session_ref, .boundary = boundary }, &changed);
-    try a.run();
-    return changed.changed;
-}
 
 /// Disagreeing stored continuations: an active Turn whose
 /// `continuation_operation_id` says otherwise than its Operation, which
@@ -443,9 +428,10 @@ const admission_facts = rsql.Read(.{
 /// The facts automatic compaction weighs, in one statement before the
 /// position ?2: whether the context changed since the newest compaction
 /// base (`context_changed`), and, only when it did, the newest usage
-/// after that base and the bytes it does not cover (`contextEstimate`'s
-/// rules). Otherwise the usage is NULL and the bytes 0. Admission reads it
-/// only when `turn_policy.forcedPurpose` leaves the purpose open. `since`
+/// after that base (`latestUsageSql`) and the bytes it does not cover
+/// (`uncoveredBytesSql`). Otherwise the usage is NULL and the bytes 0.
+/// Admission and the Current report (`CompactionRead`) read it only when
+/// `turn_policy.forcedPurpose` leaves the purpose open. `since`
 /// and `usage` are each named once, so SQLite need not materialize them.
 /// `base` is `context_changed`'s and named twice: a one-row `base` named
 /// once measured 5 steps cheaper here and 11 dearer in `context_changed`.
@@ -463,7 +449,7 @@ const admission_context = rsql.Read(.{
         "CASE WHEN usage.uncached IS NULL THEN since.frontier ELSE usage.result_admission END AS results " ++
         "FROM since LEFT JOIN usage ON since.changed AND usage.result_admission>=since.frontier) " ++
         "SELECT measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
-        "CASE WHEN measured.changed THEN " ++ uncoveredBytes(.typed, "measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
+        "CASE WHEN measured.changed THEN " ++ uncoveredBytesSql("measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
         "FROM measured",
     .Args = struct { session: []const u8, boundary: u64, provider: protocol.Provider, model: []const u8 },
     .Row = struct {
@@ -547,7 +533,9 @@ const insert_operation = rsql.Write(.{
 
 /// Admits the next model Attempt of `kind`. The read Access `reader`
 /// selects, outside any transaction; with nothing selected it runs main's
-/// idle checks and answers null. The write Access `writer` reads
+/// idle checks, the disagreeing continuations with whether any Operation
+/// is blocked, and only then the blocked calls' outcomes, and answers
+/// null. The write Access `writer` reads
 /// `admission_facts` after its BEGIN; when `turn_policy.forcedPurpose`
 /// leaves the purpose open, it reads `admission_context` in a round of its
 /// own. Then it writes the Turn, binds and projects the Messages and
@@ -564,10 +552,12 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     try store_access.runAs(reader, error.RunnableSelectionFailed);
     const selection = found orelse {
         var disagreeing: disagreeing_continuation.Result = undefined;
+        var blocked: reads_domain.First(blocked_operation.Row) = .{};
         reader.read(disagreeing_continuation, .{}, &disagreeing);
-        try store_access.runAs(reader, error.TurnReadFailed);
+        reader.readEach(blocked_operation, .{}, 1, &blocked);
+        try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
         if (disagreeing != null) return error.CorruptStore;
-        try validateBlockedToolCalls(reader.store);
+        if (blocked.row != null) try validateBlockedToolCalls(reader);
         return null;
     };
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
@@ -602,20 +592,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
             .model = facts.model.slice(),
         }, &context);
         try store_access.runAs(writer, error.CorruptStore);
-        compaction.context_changed = context.changed;
-        if (context.changed) {
-            if (context.uncached) |uncached| {
-                const counts: output_format.Usage = .{
-                    .uncached = uncached,
-                    .cache_read = context.cache_read orelse return error.CorruptStore,
-                    .cache_write = context.cache_write orelse return error.CorruptStore,
-                    .output = context.output orelse return error.CorruptStore,
-                };
-                if (context.usage_position == null or context.result_admission == null) return error.CorruptStore;
-                compaction.usage_tokens = counts.pressure();
-            }
-            compaction.uncovered_bytes = context.uncovered_bytes;
-        }
+        try takeContext(&compaction, &context);
     }
     const purpose = turn_policy.nextPurpose(compaction);
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
@@ -750,24 +727,32 @@ pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active
     } } };
 }
 
+/// Every active Turn's current Operation that proposed tool calls, the
+/// Operations that can be blocking successor discovery: main's scope.
+const blocked_operations_sql = "FROM turn active JOIN model_operation operation ON operation.operation_id=active.operation_id " ++
+    "WHERE active.outcome_code IS NULL AND " ++ store_schema.resolutionIs("operation.resolution_code", .tool_proposals);
+
+/// Whether any Operation is blocked: one row stepped, so an idle Store
+/// with none pays only this seek, where main's scope read cost as much.
+const blocked_operation = rsql.Read(.{
+    .sql = "SELECT operation.operation_id " ++ blocked_operations_sql,
+    .Args = struct {},
+    .Row = struct { operation_id: rsql.Positive },
+    .cardinality = .each,
+});
+
+/// The tool outcome rule (`reads.ToolOutcome`) over those Operations.
+const blocked_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operation.operation_id," ++
+    reads_domain.expectedCallsSql("operation.operation_id") ++ " " ++ blocked_operations_sql, struct {}, false);
+
 /// Before declaring the Store idle, distinguish valid permission waits
-/// from malformed canonical classification. Only each active Turn's
-/// current Operation can be blocking successor discovery.
-fn validateBlockedToolCalls(self: *Store) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
-            "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
-            "AND " ++ store_schema.resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
-    );
-    defer sqlite.resetCached(statement);
-    while (true) switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {
-            const operation_id = c.sqlite3_column_int64(statement, 0);
-            if (operation_id <= 0) return error.CorruptStore;
-            _ = try report_domain.readToolOutcomeFacts(self, @intCast(operation_id), false);
-        },
-        c.SQLITE_DONE => return,
-        else => return error.CallReadFailed,
-    };
+/// from malformed canonical classification: the tool outcome rule over
+/// `blocked_tool_calls`, in a round of its own, once `blocked_operation`
+/// found one. A failed step is `CallReadFailed`, main's name for each of
+/// its statements.
+fn validateBlockedToolCalls(reader: anytype) !void {
+    var check: reads_domain.ToolOutcomeCheck = .{};
+    reader.readEach(blocked_tool_calls, .{}, std.math.maxInt(u64), &check);
+    try store_access.runAs(reader, error.CallReadFailed);
+    try check.finish();
 }

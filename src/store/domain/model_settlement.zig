@@ -520,8 +520,9 @@ const success_facts = rsql.Read(.{
 });
 
 /// The Messages of the Operation's Session that no Turn took and no stop
-/// excludes, as main's `countPendingMessages`: one statement of its own, so
-/// a failed step reports main's `SessionStopReadFailed`.
+/// excludes, as main's pending count (`command.pending_messages`): one
+/// statement of its own, so a failed step reports main's
+/// `SessionStopReadFailed`.
 const pending_messages = rsql.Read(.{
     .sql = "SELECT count(*) AS pending FROM model_operation o JOIN message_admission m ON m.session_ref=o.session_ref " ++
         "WHERE o.operation_id=?1 AND m.turn_id IS NULL AND m.admission_id>coalesce((" ++
@@ -542,8 +543,9 @@ fn runSettlement(a: anytype) !void {
         if (err != error.StatementFailed) return err;
         if (a.failedOn(attempt_facts) or a.failedOn(success_facts)) return error.OperationReadFailed;
         if (a.failedOn(pending_messages)) return error.SessionStopReadFailed;
-        if (a.failedOn(content_batch) or a.failedOn(content_domain.lookup_content) or
-            a.failedOn(duplicate_items) or a.failedOn(duplicate_calls)) return error.OutputReadFailed;
+        if (a.failedOn(content_batch) or a.failedOn(content_batch_wide) or a.failedOn(content_domain.lookup_content) or
+            a.failedOn(duplicate_items) or a.failedOn(duplicate_items_wide) or
+            a.failedOn(duplicate_calls) or a.failedOn(duplicate_calls_wide)) return error.OutputReadFailed;
         return err;
     };
 }
@@ -551,70 +553,120 @@ fn runSettlement(a: anytype) !void {
 /// "?k,?k+1,...": `count` parameters from `first`.
 fn parameters(comptime first: usize, comptime count: usize) []const u8 {
     comptime {
+        @setEvalBranchQuota(20_000);
         var text: []const u8 = "";
         for (first..first + count) |number| text = text ++ (if (number == first) "" else ",") ++ std.fmt.comptimePrint("?{d}", .{number});
         return text;
     }
 }
 
-/// Args of the `u64` fields `lead`, then sixteen digests `d1..d16`, bound
-/// by value in the order an IN list binds them.
-fn DigestArgs(comptime lead: []const [:0]const u8) type {
-    @setEvalBranchQuota(10_000);
-    const count = lead.len + lookup_width;
+/// Args of the `u64` fields `lead`, then `width` digests `d1..`, bound
+/// by value in the order an IN list binds them. Extern, so the digests sit
+/// back to back after the lead and a batch binds its own storage in place:
+/// `Batch.identity_digests` for a lookup, `Batch.ids` for a duplicate read.
+fn DigestArgs(comptime lead: []const [:0]const u8, comptime width: usize) type {
+    @setEvalBranchQuota(20_000);
+    const count = lead.len + width;
     var names: [count][:0]const u8 = undefined;
     var types: [count]type = undefined;
     for (lead, 0..) |name, index| {
         names[index] = name;
         types[index] = u64;
     }
-    for (0..lookup_width) |index| {
+    for (0..width) |index| {
         names[lead.len + index] = std.fmt.comptimePrint("d{d}", .{index + 1});
         types[lead.len + index] = [32]u8;
     }
-    return @Struct(.auto, null, &names, &types, &@splat(.{}));
+    return @Struct(.@"extern", null, &names, &types, &@splat(.{}));
 }
 
-/// Fills Args' `d1..d16` with `digests` in order, the first repeated in
-/// the slots it leaves: a repeated digest adds no row to an IN list.
-fn bindDigests(args: anytype, digests: []const *const [32]u8) void {
-    std.debug.assert(digests.len != 0 and digests.len <= lookup_width);
-    inline for (1..lookup_width + 1) |number| {
-        @field(args, std.fmt.comptimePrint("d{d}", .{number})) = (if (number <= digests.len) digests[number - 1] else digests[0]).*;
-    }
+/// `width` digests from `digests[0]`, as `S`'s Args: the first `count`
+/// are the read's, and the slots after them take the first again, since a
+/// repeated digest adds no row to an IN list. The slots past `count` are
+/// ones the batch does not use, so writing them loses nothing.
+fn digestArgs(comptime S: type, comptime width: usize, digests: *[width][32]u8, count: usize) *const S.Args {
+    comptime std.debug.assert(@sizeOf(S.Args) == width * 32 and @offsetOf(S.Args, "d1") == 0);
+    std.debug.assert(count != 0 and count <= width);
+    for (digests[count..]) |*slot| slot.* = digests[0];
+    return @ptrCast(digests);
 }
 
-/// Every content row with one of sixteen digests. A digest names one
+/// Every content row with one of `width` digests. A digest names one
 /// length (import verifies it), so each has at most a public and a private
 /// row: `n` distinct digests return at most `2n` rows.
-const content_batch = rsql.Read(.{
-    .sql = "SELECT content_id,digest,byte_length,private FROM content WHERE digest IN (" ++ parameters(1, lookup_width) ++ ")",
-    .Args = DigestArgs(&.{}),
-    .Row = struct { content_id: rsql.Positive, digest: [32]u8, byte_length: u64, private: bool },
-    .cardinality = .each,
-});
+fn ContentBatch(comptime width: usize) type {
+    return rsql.Read(.{
+        .sql = "SELECT content_id,digest,byte_length,private FROM content WHERE digest IN (" ++ parameters(1, width) ++ ")",
+        .Args = DigestArgs(&.{}, width),
+        .Row = LookupRow,
+        .cardinality = .each,
+    });
+}
 
-/// The item ids among sixteen that the Operation already saved: one row
+const LookupRow = struct { content_id: rsql.Positive, digest: [32]u8, byte_length: u64, private: bool };
+
+/// The item ids among `width` that the Operation already saved: one row
 /// each at most, as `(operation_id, item_id_digest)` is unique. Read with
 /// `readEach`, so `DuplicateVisitor` keeps the lowest batch index any row
 /// names, which `.optional` could not.
-const duplicate_items = rsql.Read(.{
-    .sql = "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1 AND item_id_digest IN (" ++ parameters(2, lookup_width) ++ ")",
-    .Args = DigestArgs(&.{"operation_id"}),
-    .Row = DuplicateRow,
-    .cardinality = .each,
-});
+fn DuplicateItems(comptime width: usize) type {
+    return rsql.Read(.{
+        .sql = "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1 AND item_id_digest IN (" ++ parameters(2, width) ++ ")",
+        .Args = DigestArgs(&.{"operation_id"}, width),
+        .Row = DuplicateRow,
+        .cardinality = .each,
+    });
+}
 
-/// The call ids among sixteen that the Operation already saved: one row
+/// The call ids among `width` that the Operation already saved: one row
 /// each at most, as `(operation_id, call_id_content_id)` is unique and a
 /// call id is public content.
-const duplicate_calls = rsql.Read(.{
-    .sql = "SELECT c.digest FROM model_tool_call t JOIN content c ON c.content_id=t.call_id_content_id " ++
-        "WHERE t.operation_id=?1 AND c.private=0 AND c.digest IN (" ++ parameters(2, lookup_width) ++ ")",
-    .Args = DigestArgs(&.{"operation_id"}),
-    .Row = DuplicateRow,
-    .cardinality = .each,
-});
+fn DuplicateCalls(comptime width: usize) type {
+    return rsql.Read(.{
+        .sql = "SELECT c.digest FROM model_tool_call t JOIN content c ON c.content_id=t.call_id_content_id " ++
+            "WHERE t.operation_id=?1 AND c.private=0 AND c.digest IN (" ++ parameters(2, width) ++ ")",
+        .Args = DigestArgs(&.{"operation_id"}, width),
+        .Row = DuplicateRow,
+        .cardinality = .each,
+    });
+}
+
+/// Each digest read in two widths: a batch binds the narrow one when its
+/// digests fit it, so a reply of at most `narrow_width` items or calls
+/// runs main's statements, and the wide one past that.
+const content_batch = ContentBatch(narrow_width);
+const content_batch_wide = ContentBatch(lookup_width);
+const duplicate_items = DuplicateItems(narrow_width);
+const duplicate_items_wide = DuplicateItems(batch_items);
+const duplicate_calls = DuplicateCalls(narrow_width);
+const duplicate_calls_wide = DuplicateCalls(batch_items);
+
+comptime {
+    // `queueReads` binds `duplicate_items`' Args to a calls read too.
+    std.debug.assert(duplicate_items.Args == duplicate_calls.Args and duplicate_items_wide.Args == duplicate_calls_wide.Args);
+}
+
+/// The Operation and a batch's item or call id digests, laid out as the
+/// wide duplicate read's Args, whose narrow Args are a prefix of it.
+const DuplicateIds = extern struct {
+    operation_id: u64,
+    digests: [batch_items][32]u8,
+
+    comptime {
+        for (.{ duplicate_items.Args, duplicate_items_wide.Args }, .{ narrow_width, batch_items }) |Args, width| {
+            std.debug.assert(@offsetOf(Args, "operation_id") == @offsetOf(DuplicateIds, "operation_id"));
+            std.debug.assert(@offsetOf(Args, "d1") == @offsetOf(DuplicateIds, "digests"));
+            std.debug.assert(@sizeOf(Args) == @offsetOf(DuplicateIds, "digests") + width * 32);
+        }
+    }
+
+    /// The ids as `S`'s Args, padded past `count` as `digestArgs` pads.
+    fn args(ids: *DuplicateIds, comptime S: type, comptime width: usize, count: usize) *const S.Args {
+        std.debug.assert(count != 0 and count <= width);
+        for (ids.digests[count..width]) |*slot| slot.* = ids.digests[0];
+        return @ptrCast(ids);
+    }
+};
 
 const DuplicateRow = struct { digest: [32]u8 };
 
@@ -708,30 +760,44 @@ const resolve_success = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-/// The most items or calls one batch holds: the duplicate read binds one
-/// digest each beside the Operation, within SQLite's 17 variables.
-const batch_items = lookup_width;
-/// The digests one `content_batch` statement binds.
-const lookup_width = 16;
-/// The most distinct content identities one batch looks up, in four
+/// The most items or calls one batch holds: the wide duplicate read binds
+/// one digest each beside the Operation, the Store's 65 variables
+/// (`SQLITE_LIMIT_VARIABLE_NUMBER`).
+const batch_items = 64;
+/// The digests a narrow digest read binds, as main's sixteen.
+const narrow_width = 16;
+/// The digests one wide `content_batch` statement binds.
+const lookup_width = batch_items;
+/// The most distinct content identities one batch looks up, in four wide
 /// `content_batch` statements: a call imports at most four (its name,
-/// call_id, arguments and rejection text), so sixteen calls always fit.
+/// call_id, arguments and rejection text), so 64 calls always fit.
 const batch_identities = 4 * lookup_width;
+/// The identities left above which a lookup takes a wide statement:
+/// measured on digests the Store lacks, 48 took 369 steps in three narrow
+/// statements and 395 in one wide one padded to 64 values, and 49 took
+/// 432 in four narrow and 399 in one wide.
+const wide_lookup_above = 3 * narrow_width;
+/// The `content_batch` statements `n` identities take.
+fn lookupCount(n: usize) usize {
+    var left = n;
+    var count: usize = 0;
+    while (left != 0) : (count += 1) left -= @min(if (left > wide_lookup_above) lookup_width else narrow_width, left);
+    return count;
+}
+/// The most `content_batch` statements one batch queues.
+const max_lookups = blk: {
+    @setEvalBranchQuota(100_000);
+    var most: usize = 0;
+    for (1..batch_identities + 1) |n| most = @max(most, lookupCount(n));
+    break :blk most;
+};
 
-/// A content identity a batch imports, and its row: 0 until the lookup
-/// round found one or the batch inserted one.
+/// A content identity a batch imports, beside its digest in
+/// `Batch.identity_digests`, and its row: 0 until the lookup round found
+/// one or the batch inserted one.
 const Identity = struct {
-    digest: [32]u8,
     length: u64,
     row: packed struct(u64) { content_id: u63, private: bool },
-
-    fn of(value: *const content_domain.Import) Identity {
-        return .{ .digest = value.digest, .length = value.length, .row = .{ .content_id = 0, .private = value.private } };
-    }
-
-    fn names(identity: *const Identity, value: *const content_domain.Import) bool {
-        return identity.length == value.length and identity.row.private == value.private and std.mem.eql(u8, &identity.digest, &value.digest);
-    }
 };
 
 /// Matches one `content_batch` statement's rows to its batch's identities.
@@ -742,7 +808,7 @@ const LookupVisitor = struct {
     rows: u8 = 0,
     overflow: bool = false,
 
-    pub fn visit(visitor: *LookupVisitor, row: *const content_batch.Row) bool {
+    pub fn visit(visitor: *LookupVisitor, row: *const LookupRow) bool {
         if (visitor.rows == visitor.limit) {
             visitor.overflow = true;
             return false;
@@ -766,7 +832,7 @@ const DuplicateVisitor = struct {
             return false;
         }
         visitor.rows += 1;
-        for (visitor.batch.digests[0..visitor.batch.digest_count], 0..) |*candidate, index| {
+        for (visitor.batch.ids.digests[0..visitor.batch.digest_count], 0..) |*candidate, index| {
             if (!std.mem.eql(u8, candidate, &row.digest)) continue;
             if (visitor.lowest == null or index < visitor.lowest.?) visitor.lowest = @intCast(index);
             break;
@@ -789,12 +855,15 @@ pub const Batch = struct {
     stopped: ?anyerror,
     /// Whether no records follow `end` for a later batch of this kind.
     last: bool,
+    /// Each identity's digest, back to back, so a lookup binds a run of
+    /// them in place.
+    identity_digests: [batch_identities][32]u8,
     identities: [batch_identities]Identity,
-    identity_count: u8,
+    identity_count: u16,
     /// Each item's id digest, or each call's call_id digest, in order.
-    digests: [batch_items][32]u8,
+    ids: DuplicateIds,
     digest_count: u8,
-    lookups: [batch_identities / lookup_width]LookupVisitor,
+    lookups: [max_lookups]LookupVisitor,
     lookup_count: u8,
     duplicates: DuplicateVisitor,
 
@@ -820,7 +889,9 @@ pub const Batch = struct {
     }
 
     fn find(batch: *Batch, value: *const content_domain.Import) ?*Identity {
-        for (batch.identities[0..batch.identity_count]) |*identity| if (identity.names(value)) return identity;
+        for (batch.identities[0..batch.identity_count], batch.identity_digests[0..batch.identity_count]) |*identity, *digest| {
+            if (identity.length == value.length and identity.row.private == value.private and std.mem.eql(u8, digest, &value.digest)) return identity;
+        }
         return null;
     }
 
@@ -828,42 +899,58 @@ pub const Batch = struct {
     fn add(batch: *Batch, value: content_domain.Import) bool {
         if (batch.find(&value) != null) return true;
         if (batch.identity_count == batch_identities) return false;
-        batch.identities[batch.identity_count] = .of(&value);
+        batch.identity_digests[batch.identity_count] = value.digest;
+        batch.identities[batch.identity_count] = .{ .length = value.length, .row = .{ .content_id = 0, .private = value.private } };
         batch.identity_count += 1;
         return true;
     }
 
-    /// Queues the lookups of every identity and the duplicate read.
+    /// Queues the lookups of every identity and the duplicate read, each
+    /// in its narrow width when its digests fit it. The identities go in
+    /// wide statements while more than `wide_lookup_above` are left, and in
+    /// narrow ones after (`lookupCount`).
     fn queueReads(batch: *Batch, a: anytype, operation_id: u64) void {
-        var first: u8 = 0;
-        while (first < batch.identity_count) : (first += lookup_width) {
-            const count = @min(lookup_width, batch.identity_count - first);
-            var args: content_batch.Args = undefined;
-            var pointers: [lookup_width]*const [32]u8 = undefined;
+        var first: u16 = 0;
+        while (first < batch.identity_count) {
+            const left = batch.identity_count - first;
+            const count = @min(@as(u16, if (left > wide_lookup_above) lookup_width else narrow_width), left);
+            const chunk = batch.identity_digests[first..][0..count];
             var distinct: u8 = 0;
-            for (batch.identities[first..][0..count], 0..) |*identity, index| {
-                pointers[index] = &identity.digest;
+            for (chunk, 0..) |*digest, index| {
                 // A public and a private identity of one value share a digest.
-                const seen = for (batch.identities[first..][0..index]) |*earlier| {
-                    if (std.mem.eql(u8, &earlier.digest, &identity.digest)) break true;
+                const seen = for (chunk[0..index]) |*earlier| {
+                    if (std.mem.eql(u8, earlier, digest)) break true;
                 } else false;
                 if (!seen) distinct += 1;
             }
-            bindDigests(&args, pointers[0..count]);
             const visitor = &batch.lookups[batch.lookup_count];
             visitor.* = .{ .batch = batch, .limit = 2 * distinct };
             batch.lookup_count += 1;
-            a.readEach(content_batch, args, 2 * @as(u64, distinct) + 1, visitor);
+            const limit = 2 * @as(u64, distinct) + 1;
+            // Only the last run is short, so its padding lands in unused
+            // slots: wide runs start at multiples of 64 and narrow ones at
+            // multiples of 16, below `batch_identities`.
+            if (count <= narrow_width) {
+                a.readEachFrom(content_batch, digestArgs(content_batch, narrow_width, batch.identity_digests[first..][0..narrow_width], count), limit, visitor);
+            } else {
+                a.readEachFrom(content_batch_wide, digestArgs(content_batch_wide, lookup_width, batch.identity_digests[first..][0..lookup_width], count), limit, visitor);
+            }
+            first += count;
         }
         if (batch.digest_count == 0) return;
-        var args: duplicate_items.Args = undefined;
-        args.operation_id = operation_id;
-        var pointers: [batch_items]*const [32]u8 = undefined;
-        for (batch.digests[0..batch.digest_count], 0..) |*digest, index| pointers[index] = digest;
-        bindDigests(&args, pointers[0..batch.digest_count]);
-        switch (batch.kind) {
-            .items => a.readEach(duplicate_items, args, batch_items + 1, &batch.duplicates),
-            .calls => a.readEach(duplicate_calls, args, batch_items + 1, &batch.duplicates),
+        batch.ids.operation_id = operation_id;
+        if (batch.digest_count <= narrow_width) {
+            const args = batch.ids.args(duplicate_items, narrow_width, batch.digest_count);
+            switch (batch.kind) {
+                .items => a.readEachFrom(duplicate_items, args, batch_items + 1, &batch.duplicates),
+                .calls => a.readEachFrom(duplicate_calls, args, batch_items + 1, &batch.duplicates),
+            }
+        } else {
+            const args = batch.ids.args(duplicate_items_wide, batch_items, batch.digest_count);
+            switch (batch.kind) {
+                .items => a.readEachFrom(duplicate_items_wide, args, batch_items + 1, &batch.duplicates),
+                .calls => a.readEachFrom(duplicate_calls_wide, args, batch_items + 1, &batch.duplicates),
+            }
         }
     }
 
@@ -878,7 +965,7 @@ pub const Batch = struct {
     /// or the Store already holds it.
     fn duplicate(batch: *const Batch, index: u8) bool {
         if (batch.duplicates.lowest) |lowest| if (lowest == index) return true;
-        for (batch.digests[0..index]) |*earlier| if (std.mem.eql(u8, earlier, &batch.digests[index])) return true;
+        for (batch.ids.digests[0..index]) |*earlier| if (std.mem.eql(u8, earlier, &batch.ids.digests[index])) return true;
         return false;
     }
 };
@@ -931,7 +1018,7 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                 return;
             }
             if (record.tag == .item) {
-                batch.digests[batch.digest_count] = record.id_digest;
+                batch.ids.digests[batch.digest_count] = record.id_digest;
                 batch.digest_count += 1;
             }
             unit_start = reader.offset;
@@ -952,7 +1039,7 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// Collects the next calls from `start`, as `collectItems` does items:
 /// each call's name, call_id and arguments, and, when the catalog rejects
 /// it, its rejection text. A call imports at most four identities, so
-/// sixteen calls always fit `batch_identities`.
+/// `batch_items` calls always fit `batch_identities`.
 fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, frozen_tools: tool_catalog.ToolSet) void {
     comptime std.debug.assert(batch_identities >= 4 * batch_items);
     batch.reset(.calls, start);
@@ -990,7 +1077,7 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                         } else |_| {}
                     }
                 } else |_| {}
-                batch.digests[batch.digest_count] = call_id_record.content_digest;
+                batch.ids.digests[batch.digest_count] = call_id_record.content_digest;
                 batch.digest_count += 1;
                 name = null;
                 call_id = null;
@@ -1034,9 +1121,12 @@ fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelO
 /// batch, its new content streamed into its rows in process, and reads
 /// the next batch's (`importBatches`). The last round resolves the
 /// Operation, closes its Turn or records its continuation, and commits.
-/// A batch closes at 16 items or calls or at 48 identities, whichever
-/// comes first, so the rounds are one per batch plus one. An identity a
-/// batch did not collect adds a lookup round, and a second when it
+/// An item batch closes at 64 items or before the item whose identities
+/// would pass 256, a call batch at 64 calls, which always fit, so the
+/// rounds are the item batches plus the call batches plus one: a reply of
+/// at most 64 items whose identities fit settles in 2 rounds, and in 3
+/// when it proposes calls. An identity a batch did not collect (a first
+/// item with more than 256) adds a lookup round, and a second when it
 /// inserts.
 pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, output: *const ValidatedOutput, faults: Faults) !void {
     const batch = a.store.settlementBatch();
@@ -1230,7 +1320,7 @@ fn Settlement(comptime A: type) type {
                     .position = s.first_item_position + s.imported_items,
                     .kind = @backingInt(record.kind),
                     .attempt_ordinal = s.binding.attempt_ordinal,
-                    .id_digest = batch.digests[index],
+                    .id_digest = batch.ids.digests[index],
                     .omits_reasoning_text = record.omit_reasoning_text,
                     .phase = @backingInt(record.phase),
                     .extras_content_id = neutral.bag,

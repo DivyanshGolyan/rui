@@ -9,7 +9,6 @@ const protocol = @import("../../protocol.zig");
 const model_capability = @import("../../model_capability.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
-const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const report_domain = @import("report.zig");
@@ -24,7 +23,6 @@ const ContentMetadata = content_domain.ContentMetadata;
 const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
-const SessionReportCapture = report_domain.SessionReportCapture;
 const TurnOutcome = turn_domain.TurnOutcome;
 const accepted_resolutions = store_schema.accepted_resolutions;
 const content_metadata = content_domain.content_metadata;
@@ -116,7 +114,7 @@ pub fn visitRow(visitor: anytype, row: anytype) bool {
 /// many rows' reads answers as main did for the one that failed; any
 /// other is `CorruptStore`. A Proposal's keeps `StatementFailed`, as
 /// main's `proposal` let it through.
-const read_failures = .{
+pub const read_failures = .{
     .{ missing_assistant_entry, error.ConversationReadFailed },
     .{ public_page, error.ConversationReadFailed },
     .{ activity_forward, error.ActivityReadFailed },
@@ -128,6 +126,8 @@ const read_failures = .{
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
+    .{ call_outcomes, error.CallReadFailed },
+    .{ operation_outcome, error.CallReadFailed },
     .{ queued, error.ActivityReadFailed },
 } ++ report_domain.work_failures;
 
@@ -410,8 +410,10 @@ fn readPublicMetadata(a: *ReadAccess, content_id: u64) !ContentMetadata {
 }
 
 /// Round 1 reads the saved Session; round 2 its instructions' and output
-/// schema's metadata. The pending, Action and rejected call counts are
-/// command and report reads, converted with those files.
+/// schema's metadata with the counts' first round (`report.SessionCounts`);
+/// round 3 the counts' second round: the pending count after the latest
+/// stop's cutoff, the tool outcome rule, and the Action and rejected-call
+/// counts.
 pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *SessionObservation) !void {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
@@ -446,15 +448,25 @@ pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *Ses
     if (instructions_id < 0 or (current.output_schema_id orelse 1) < 0) return error.CorruptStore;
     var instructions: content_metadata.Row = undefined;
     var output_schema: content_metadata.Row = undefined;
+    var counts: report_domain.SessionCounts = .{ .session = session_ref };
     a.read(content_metadata, .{ .content_id = @intCast(instructions_id) }, &instructions);
     if (current.output_schema_id) |content_id| a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &output_schema);
-    try store_access.runAs(a, error.CorruptStore);
+    counts.queue(a);
+    try runCounts(a);
     observation.instructions = .{ .length = instructions.byte_length, .digest = instructions.digest };
     if (current.output_schema_id != null) observation.output_schema = .{ .length = output_schema.byte_length, .digest = output_schema.digest };
-    observation.pending_messages = try command_domain.countPendingMessages(a.store, session_ref);
-    try report_domain.validateActiveTurnToolCalls(a.store, session_ref);
-    observation.action_count = try report_domain.countActions(a.store, session_ref);
-    observation.rejected_call_count = try report_domain.countRejectedCalls(a.store, session_ref);
+    counts.queuePending(a);
+    try runCounts(a);
+    const counted = try counts.judge();
+    observation.pending_messages = counted.pending;
+    observation.action_count = counted.actions;
+    observation.rejected_call_count = counted.rejected;
+}
+
+/// Ends a round of `inspectSession`'s counts, naming a failed step as main
+/// did; the content metadata's is `CorruptStore`, as main's.
+fn runCounts(a: *ReadAccess) !void {
+    return store_access.runNamed(a, report_domain.session_count_failures ++ report_domain.work_failures, error.CorruptStore);
 }
 
 /// One public Conversation page: at most 17 rows before cursor (?3, ?4)
@@ -518,7 +530,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.Conversat
             error.ContentNotFound => {},
             else => return err,
         };
-        cursor.found(a) catch |err| switch (err) {
+        cursor.found() catch |err| switch (err) {
             error.ContentNotFound => return error.InvalidCursor,
             else => return err,
         };
@@ -580,7 +592,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
     for (rows, items, reads[0..items.len]) |row, *item, *read| switch (read.reads) {
         .hosted => |*hosted| try hosted.found(),
         .content => |*content| {
-            try content.found(a);
+            try content.found();
             const found = &content.content;
             if (@as(u64, @intCast(found.id)) != row.content_id.? or (row.kind == 1) != (found.admitted_at != null)) return error.CorruptStore;
             item.admitted_at = found.admitted_at;
@@ -731,8 +743,10 @@ pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_oper
 // metadata. Neither may accept a private or absent canonical result.
 /// Public content's reads, in rounds it may share with other rows. `queue`
 /// the entry with its assistant check, or the Tool Result; after that
-/// round, `found` (a Tool Result's group outcome facts are a report read
-/// it runs then), then `queueMetadata`; after that round, `takeMetadata`.
+/// round, `found`, then `queueMetadata`, which also queues a Tool Result's
+/// group outcome check (`ToolOutcomeCheck`);
+/// after that round, `takeMetadata`, which judges that check first, as
+/// main checked the group before it read the metadata.
 const PublicContentRead = struct {
     position: u64,
     ordinal: u64,
@@ -741,6 +755,7 @@ const PublicContentRead = struct {
     content: PublicContent = undefined,
     missing: missing_assistant_entry.Result = null,
     metadata: content_metadata.Row = undefined,
+    outcome: ToolOutcomeCheck = .{},
     count: RowCount = .{},
 
     fn queue(read: *PublicContentRead, a: *ReadAccess, session: []const u8) void {
@@ -766,17 +781,21 @@ const PublicContentRead = struct {
     }
 
     /// After the first round: none is `ContentNotFound`.
-    fn found(read: *PublicContentRead, a: *ReadAccess) !void {
+    fn found(read: *const PublicContentRead) !void {
         if (read.missing != null) return error.CorruptStore;
         if (!try read.count.found()) return error.ContentNotFound;
-        if (read.content.tool_operation) |operation| _ = try report_domain.readToolOutcomeFacts(a.store, operation, true);
     }
 
+    /// The outcome check first: a failure it records stops only its own
+    /// read, so the metadata read still steps, and `takeMetadata` answers
+    /// the check's failure before the metadata's.
     fn queueMetadata(read: *PublicContentRead, a: *ReadAccess) void {
+        if (read.content.tool_operation) |operation| a.readEach(operation_outcome, .{ .operation = operation }, std.math.maxInt(u64), &read.outcome);
         a.read(content_metadata, .{ .content_id = @intCast(read.content.id) }, &read.metadata);
     }
 
     fn takeMetadata(read: *PublicContentRead) !void {
+        if (read.content.tool_operation != null) try read.outcome.finish();
         read.content.metadata = try content_domain.publicMetadata(&read.metadata);
     }
 };
@@ -786,7 +805,7 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     var read: PublicContentRead = .{ .position = position, .ordinal = ordinal };
     read.queue(a, session);
     try runRows(a);
-    try read.found(a);
+    try read.found();
     read.queueMetadata(a);
     try runRows(a);
     try read.takeMetadata();
@@ -948,17 +967,32 @@ const PresentationRead = struct {
 
     fn finish(read: *PresentationRead) !void {
         try read.proposal.found();
-        const result = read.out;
-        if (result.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.CorruptStore;
-        if (read.code) |code| {
-            result.code = code;
-        } else if (!(read.authorized orelse false)) result.code = .pending_permission;
-        if (result.description == null) switch (result.code) {
-            .unknown_tool, .invalid_arguments => {},
-            else => return error.CorruptStore,
-        };
+        read.out.* = try presentationOf(read.out.description, read.code, read.authorized, read.out.publication_position);
     }
 };
+
+/// A call's presentation from its line, its outcome's code, whether its
+/// Action is authorized, and its group's publication, judged in main's
+/// order: a line must be valid; without a code, a call is unresolved
+/// once authorized and pending permission before; only a call whose tool
+/// or arguments were refused may have no line.
+pub fn presentationOf(
+    description: ?protocol.Bounded(protocol.max_tool_description_bytes),
+    code: ?protocol.ToolPresentation.Code,
+    authorized: ?bool,
+    publication_position: ?u64,
+) error{CorruptStore}!protocol.ToolPresentation {
+    var result: protocol.ToolPresentation = .{ .description = description, .code = .unresolved, .publication_position = publication_position };
+    if (description) |line| if (!protocol.ToolPresentation.validDescription(line.slice())) return error.CorruptStore;
+    if (code) |value| {
+        result.code = value;
+    } else if (!(authorized orelse false)) result.code = .pending_permission;
+    if (description == null) switch (result.code) {
+        .unknown_tool, .invalid_arguments => {},
+        else => return error.CorruptStore,
+    };
+    return result;
+}
 
 /// `PresentationRead` alone, in rounds of its own.
 fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
@@ -1019,19 +1053,6 @@ const HostedRead = struct {
         if (!try read.count.found()) return error.ContentNotFound;
     }
 };
-
-/// `toolPresentation` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    const presentation = try toolPresentation(&a, operation, ordinal, publication_position);
-    var buffer: [protocol.ToolPresentation.max_json_bytes]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try presentation.writeJson(&writer);
-    try capture.append(",\"presentation\":");
-    try capture.append(writer.buffered());
-}
 
 /// The Session columns an Activity page reads, its workspace into the
 /// page itself. They are the columns main's Session facts read, so a
@@ -1117,7 +1138,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     const last = if (forward) boundary else null;
     const call_position = if (last) |item| item.position else end;
     var missing: missing_assistant_entry.Result = null;
-    var calls: CallRows = .{ .store = a.store, .activity = &page.call_activity };
+    var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
     var waiting: QueuedMessages = .{};
     // Only a page that lists assistant rows could lose one to a damaged
     // entry; another may span much more history than it lists.
@@ -1128,7 +1149,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     // Ctrl-P's one-row page of Messages, would scan later tool history and
     // the whole queue for footers it has no use for.
     if (request.kinds.eql(.full)) {
-        a.readEach(call_activity, .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null }, std.math.maxInt(u64), &calls);
+        a.readEach(call_activity, calls.args, std.math.maxInt(u64), &calls);
         a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
     }
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
@@ -1146,86 +1167,110 @@ const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };
 /// An Activity item's place: its position and ordinal.
 const ItemAt = struct { position: u64, ordinal: u64 };
 
-const CallRow = struct { operation_id: rsql.Positive, call_ordinal: u64, position: ?rsql.Positive };
-
 // This projection shares the page's canonical capture, not Current's active
 // Turn lifetime. It is staged until the frontend acknowledges that page.
-/// The calls of every Operation whose tool group is still waiting, or
-/// completes after (?2, ?3), in Operation and call order, with each
-/// group's position. A group still waiting has an Action without its
+/// The Operations whose tool group is still waiting, or completes after
+/// (?2, ?3), with each group's position, and their calls after it, as the
+/// CTE `candidates`. A group still waiting has an Action without its
 /// result; one that completes after the page has an acceptance after it.
 /// Only those Operations are grouped, not the Session's history.
+const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
+    "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
+    "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
+    "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
+    "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+    "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+    "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
+    "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+    "AND count(coalesce(tool_call.acceptance_position,action.acceptance_position))=count(*) " ++
+    "AND count(coalesce(tool_call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+    "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
+    "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+    "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
+    "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3)))";
+
+const CallArgs = struct { session: []const u8, position: u64, ordinal: ?u64 };
+const CallRow = struct { operation_id: rsql.Positive, call_ordinal: u64, position: ?rsql.Positive };
+
+/// The candidate calls, in Operation and call order, with each group's
+/// position: main's text.
 const call_activity = rsql.Read(.{
-    .sql = "WITH ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
-        "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
-        "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
-        "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
-        "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
-        "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-        "AND count(coalesce(tool_call.acceptance_position,action.acceptance_position))=count(*) " ++
-        "AND count(coalesce(tool_call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
-        "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
-        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
-        "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
-        "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3))) " ++
-        "SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal",
-    .Args = struct { session: []const u8, position: u64, ordinal: ?u64 },
+    .sql = "WITH " ++ call_candidates_sql ++ " SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal",
+    .Args = CallArgs,
     .Row = CallRow,
     .cardinality = .each,
     .compound = true,
 });
 
-const ToolOutcomeError = @typeInfo(@typeInfo(@TypeOf(report_domain.readToolOutcomeFacts)).@"fn".return_type.?).error_union.error_set;
+/// The tool outcome rule (`ToolOutcome`) over the candidates' Operations,
+/// for a page whose candidates span more than `CallRows.max_operations`.
+const call_outcomes = ToolOutcome(call_candidates_sql ++ ", ", "SELECT DISTINCT operation_id," ++ expectedCallsSql("candidates.operation_id") ++ " FROM candidates", CallArgs, true);
 
 /// A page's call activity, as main's walk read it while it stepped: every
-/// call counted in `activity.total`, each Operation's group position
-/// checked against its outcome facts (a report read, run when the
-/// Operation's first row arrives), and the first three calls kept, whose
-/// presentations the item rounds after it read (`queue`, `take`). It
-/// keeps nothing per Operation, so its read steps every row the statement
-/// returns: a count has no smaller bound.
+/// call counted in `activity.total`, and the first three kept, whose
+/// presentations the item rounds after it read (`queue`, `take`), each
+/// with its group position as its publication. Main checked each
+/// Operation's outcome facts as its first row arrived, and that their
+/// publication was the group position; round 1 judges the same
+/// Operations by the tool outcome rule before any presentation is taken:
+/// each by itself (`operation_outcome`) while they are at most
+/// `max_operations`, which `operations` holds, and else all of them in
+/// one read (`call_outcomes`). One read repeats the candidates' search,
+/// so it steps more than the reads one per Operation at every count
+/// measured, and more than main (3 Operations: 14135 steps against
+/// 13477 and main's 13722; 33: 30629 against 26131 and 27606); only the
+/// frame bounds `max_operations`. Main's equality holds by the schema's
+/// CHECKs, not the rule: a call has an acceptance exactly when it is
+/// rejected (`model_tool_call`'s) or its Action resolved
+/// (`action_operation`'s), and then has its rejection's or result's
+/// content, so an Operation the rule passes is a group, at its largest
+/// acceptance, exactly when every call has one, and its publication is
+/// then that acceptance. It keeps no row, so its read steps every row the
+/// statement returns: a count has no smaller bound.
 const CallRows = struct {
-    store: *Store,
     activity: *protocol.CallActivity,
-    operation: u64 = 0,
-    publication: ?u64 = null,
-    failure: ?ToolOutcomeError = null,
+    args: CallArgs,
+    /// The candidates' first Operations, in order, and how many there
+    /// are, up to one past what it holds.
+    operations: [max_operations]u64 = undefined,
+    operation_count: usize = 0,
+    check: ToolOutcomeCheck = .{},
     presentations: [@typeInfo(@FieldType(protocol.CallActivity, "entries")).array.len]PresentationRead = undefined,
+
+    const max_operations = 32;
 
     pub fn visit(rows: *CallRows, row: *const CallRow) bool {
         const operation = row.operation_id.get();
-        if (operation != rows.operation) {
-            rows.operation = operation;
-            const facts = report_domain.readToolOutcomeFacts(rows.store, operation, false) catch |err| {
-                rows.failure = err;
-                return false;
-            };
-            rows.publication = facts.position;
-            if (rows.publication != if (row.position) |position| position.get() else null) {
-                rows.failure = error.CorruptStore;
-                return false;
-            }
+        const held = @min(rows.operation_count, max_operations);
+        if (held == 0 or rows.operations[held - 1] != operation) {
+            if (rows.operation_count < max_operations) rows.operations[rows.operation_count] = operation;
+            if (rows.operation_count <= max_operations) rows.operation_count += 1;
         }
         const activity = rows.activity;
         activity.total += 1;
         if (activity.count < activity.entries.len) {
             const entry = &activity.entries[activity.count];
             entry.* = .{ .operation = operation, .ordinal = row.call_ordinal, .presentation = undefined };
-            rows.presentations[activity.count] = .init(operation, row.call_ordinal, rows.publication, &entry.presentation);
+            rows.presentations[activity.count] = .init(operation, row.call_ordinal, optionalPositive(row.position), &entry.presentation);
             activity.count += 1;
         }
         return true;
     }
 
-    /// Queues round `round`'s reads: the kept calls in round 1, their
-    /// Proposals in round 2. The caller queued the call read itself before
-    /// round 0. True when it queued.
+    /// Queues round `round`'s reads: the rule and the kept calls in round
+    /// 1, their Proposals in round 2. The caller queued the call read
+    /// itself before round 0. True when it queued; with no call, there is
+    /// nothing to judge.
     fn queue(rows: *CallRows, a: *ReadAccess, round: u8) bool {
         const kept = rows.presentations[0..rows.activity.count];
         switch (round) {
-            1 => for (kept) |*presentation| presentation.queue(a),
+            1 => {
+                if (rows.operation_count > max_operations)
+                    a.readEach(call_outcomes, rows.args, std.math.maxInt(u64), &rows.check)
+                else for (rows.operations[0..rows.operation_count]) |operation|
+                    a.readEach(operation_outcome, .{ .operation = operation }, std.math.maxInt(u64), &rows.check);
+                for (kept) |*presentation| presentation.queue(a);
+            },
             2 => for (kept) |*presentation| presentation.queueProposal(a),
             else => return false,
         }
@@ -1236,8 +1281,10 @@ const CallRows = struct {
     fn take(rows: *CallRows, round: u8) !void {
         const kept = rows.presentations[0..rows.activity.count];
         switch (round) {
-            0 => if (rows.failure) |err| return err,
-            1 => for (kept) |*presentation| try presentation.checkCall(),
+            1 => {
+                try rows.check.finish();
+                for (kept) |*presentation| try presentation.checkCall();
+            },
             2 => for (kept) |*presentation| try presentation.finish(),
             else => {},
         }
@@ -1624,7 +1671,7 @@ const ItemRead = struct {
         }
     }
 
-    fn take(read: *ItemRead, a: *ReadAccess) !void {
+    fn take(read: *ItemRead) !void {
         defer read.round += 1;
         const item = read.item;
         if (read.round == 0) return read.takeRow();
@@ -1636,7 +1683,7 @@ const ItemRead = struct {
                     // A source names a person's Message or a received one
                     // by its sender; the row read must agree.
                     if (kind != 2 and (kind == 11) != (message.read.message.sender != null)) return error.CorruptStore;
-                    if (kind == 2) try message.entry.found(a);
+                    if (kind == 2) try message.entry.found();
                     return;
                 }
                 const content = try content_domain.publicMetadata(&message.metadata);
@@ -1654,7 +1701,7 @@ const ItemRead = struct {
             3, 5 => {
                 const content = &read.state.content;
                 switch (read.round) {
-                    1 => return content.read.found(a),
+                    1 => return content.read.found(),
                     2 => {
                         try content.read.takeMetadata();
                         const found = content.read.content;
@@ -1817,7 +1864,7 @@ noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, 
         };
         if (!busy) break;
         try runRows(a);
-        for (reads[0..at.len]) |*read| if (!read.done) try read.take(a);
+        for (reads[0..at.len]) |*read| if (!read.done) try read.take();
         if (calls) |activity| try activity.take(round);
     }
     if (located) |first| first.* = reads[0].located();
@@ -1854,28 +1901,37 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
 /// The content columns of a Proposal's three fields, in ProposalField order.
 const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", "arguments_content_id" };
 
+/// A Proposal's columns over its item `item`, and the joins they read
+/// (`proposal_joins`), which the tool outcome rule shares
+/// (`ToolOutcome`). LEFT JOIN keeps missing or contradictory owners
+/// visible as corruption.
+const proposal_columns = "item.operation_id,op.turn_id,tool_call.call_ordinal,action.action_id,tool_call.rejection_code," ++
+    "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id," ++
+    "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
+    store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND op.attempt_ordinal=item.attempt_ordinal AND " ++
+    "((tool_call.rejection_code IS NOT NULL AND action.action_id IS NULL AND tool_call.acceptance_position IS NOT NULL AND " ++
+    "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
+    "(tool_call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
+    "THEN 1 ELSE 0 END AS consistent,tool_call.field_metadata," ++
+    "field0.byte_length AS length0,field0.digest AS digest0,field0.private AS private0," ++
+    "field1.byte_length AS length1,field1.digest AS digest1,field1.private AS private1," ++
+    "field2.byte_length AS length2,field2.digest AS digest2,field2.private AS private2";
+
+/// The joins `proposal_columns` reads, off the item `item`: its
+/// Operation `op`, Turn `t`, call `tool_call`, the call's rejection,
+/// Action `action` and fields.
+const proposal_joins = "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
+    "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
+    "LEFT JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
+    "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+    "LEFT JOIN content field0 ON field0.content_id=tool_call." ++ proposal_fields[0] ++ " " ++
+    "LEFT JOIN content field1 ON field1.content_id=tool_call." ++ proposal_fields[1] ++ " " ++
+    "LEFT JOIN content field2 ON field2.content_id=tool_call." ++ proposal_fields[2] ++ " ";
+
 // Every caller (Activity pages, Action reads, call outcomes, the report) shares one provenance check.
-// LEFT JOIN keeps missing/contradictory owners visible as corruption.
 /// The Proposal at a Session position, with each field's content row.
 pub const proposal_row = rsql.Read(.{
-    .sql = "SELECT item.operation_id,op.turn_id,tool_call.call_ordinal,action.action_id,tool_call.rejection_code," ++
-        "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id," ++
-        "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
-        store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND op.attempt_ordinal=item.attempt_ordinal AND " ++
-        "((tool_call.rejection_code IS NOT NULL AND action.action_id IS NULL AND tool_call.acceptance_position IS NOT NULL AND " ++
-        "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
-        "(tool_call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
-        "THEN 1 ELSE 0 END AS consistent,tool_call.field_metadata," ++
-        "field0.byte_length AS length0,field0.digest AS digest0,field0.private AS private0," ++
-        "field1.byte_length AS length1,field1.digest AS digest1,field1.private AS private1," ++
-        "field2.byte_length AS length2,field2.digest AS digest2,field2.private AS private2 FROM model_output_item item " ++
-        "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
-        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
-        "LEFT JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "LEFT JOIN content field0 ON field0.content_id=tool_call." ++ proposal_fields[0] ++ " " ++
-        "LEFT JOIN content field1 ON field1.content_id=tool_call." ++ proposal_fields[1] ++ " " ++
-        "LEFT JOIN content field2 ON field2.content_id=tool_call." ++ proposal_fields[2] ++ " " ++
+    .sql = "SELECT " ++ proposal_columns ++ " FROM model_output_item item " ++ proposal_joins ++
         "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=3",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
@@ -1917,17 +1973,7 @@ pub const ProposalRead = struct {
     }
 
     fn keep(read: *ProposalRead, row: *const proposal_row.Row) error{CorruptStore}!void {
-        if (!row.consistent) return error.CorruptStore;
-        var fields: [3]protocol.ProposalFieldReference = undefined;
-        inline for (0..proposal_fields.len) |index| {
-            const suffix = std.fmt.comptimePrint("{d}", .{index});
-            const length: u64 = @field(row, "length" ++ suffix);
-            const digest: [32]u8 = @field(row, "digest" ++ suffix);
-            const certified = row.field_metadata[index * 40 ..][0..40];
-            if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
-                !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
-            fields[index] = .{ .length = length, .digest = digest };
-        }
+        const fields = try certifiedFields(row);
         if (read.metadata) |metadata| metadata.* = .{
             .position = read.position,
             .operation = row.operation_id.get(),
@@ -1946,6 +1992,185 @@ pub const ProposalRead = struct {
     }
 };
 
+/// A Proposal's fields, once it is consistent and each field's content is
+/// public and matches the metadata admission certified, so reference
+/// substitution is detectable without reopening payloads.
+fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]protocol.ProposalFieldReference {
+    if (!row.consistent) return error.CorruptStore;
+    var fields: [3]protocol.ProposalFieldReference = undefined;
+    inline for (0..3) |index| {
+        const suffix = std.fmt.comptimePrint("{d}", .{index});
+        const length: u64 = @field(row, "length" ++ suffix);
+        const digest: [32]u8 = @field(row, "digest" ++ suffix);
+        const certified = row.field_metadata[index * 40 ..][0..40];
+        if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
+            !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
+        fields[index] = .{ .length = length, .digest = digest };
+    }
+    return fields;
+}
+
+/// The tool outcome rule's read over the Operations a scope names, as
+/// main's `readToolOutcomeFacts` checked each: one row per call of each
+/// Operation, in Operation and call order, or one row with no call for an
+/// Operation that has none (`ordinal` NULL). `scope` is the text of a CTE
+/// that selects `operation_id` and `expected`, the count of the
+/// Operation's call items, after the CTEs in `with`, if any.
+/// The scope must not be flattened into the join, so `expected` is
+/// counted once per Operation and not once per call: a scope selects
+/// DISTINCT or groups. Each row joins its call's item and reads, off that
+/// item, the Proposal that item's position names (`proposal_columns`):
+/// the item is unique at its position, and the call at its item, so it is
+/// the call's own Proposal, as main read it. `ToolOutcomeCheck` judges
+/// the rows.
+pub fn ToolOutcome(comptime with: []const u8, comptime scope: []const u8, comptime Args: type, comptime compound: bool) type {
+    return rsql.Read(.{
+        .sql = "WITH " ++ with ++ "scope AS (" ++ scope ++ ") " ++
+            "SELECT scope.operation_id AS scope_operation,scope.expected,proposed.call_ordinal AS ordinal,item.item_kind," ++
+            "tool_call.acceptance_position AS call_acceptance,rejection.content_id IS NOT NULL AS rejection_present," ++
+            "action.resolution_code IS NOT NULL AS action_resolved,action.resolution_content_id IS NOT NULL AS action_content," ++
+            "action.acceptance_position AS action_acceptance,result.content_id IS NOT NULL AS result_present," ++ proposal_columns ++ " " ++
+            "FROM scope LEFT JOIN model_tool_call proposed ON proposed.operation_id=scope.operation_id " ++
+            "LEFT JOIN model_output_item item ON item.operation_id=proposed.operation_id AND item.item_ordinal=proposed.item_ordinal " ++
+            proposal_joins ++ "LEFT JOIN content result ON result.content_id=action.resolution_content_id " ++
+            "ORDER BY scope.operation_id,proposed.call_ordinal",
+        .Args = Args,
+        .Row = ToolOutcomeRow,
+        .cardinality = .each,
+        .compound = compound,
+    });
+}
+
+/// `expected` for a scope over the Operations `operation` names.
+pub fn expectedCallsSql(comptime operation: []const u8) []const u8 {
+    return "(SELECT count(*) FROM model_output_item expected WHERE expected.operation_id=" ++ operation ++ " AND expected.item_kind=3) AS expected";
+}
+
+/// A `ToolOutcome` row. Past `result_present` it is `proposal_row`'s,
+/// each column NULL where a missing item, call or row leaves it so.
+pub const ToolOutcomeRow = struct {
+    scope_operation: rsql.Positive,
+    expected: u64,
+    ordinal: ?u64,
+    item_kind: ?u64,
+    call_acceptance: ?rsql.Positive,
+    rejection_present: bool,
+    action_resolved: bool,
+    action_content: bool,
+    action_acceptance: ?rsql.Positive,
+    result_present: bool,
+    operation_id: ?rsql.Positive,
+    turn_id: ?rsql.Positive,
+    call_ordinal: ?u64,
+    action_id: ?rsql.Positive,
+    rejection_code: ?protocol.ProposalRejection,
+    name_content_id: ?rsql.Positive,
+    call_id_content_id: ?rsql.Positive,
+    arguments_content_id: ?rsql.Positive,
+    consistent: bool,
+    field_metadata: ?[120]u8,
+    length0: ?u64,
+    digest0: ?[32]u8,
+    private0: ?bool,
+    length1: ?u64,
+    digest1: ?[32]u8,
+    private1: ?bool,
+    length2: ?u64,
+    digest2: ?[32]u8,
+    private2: ?bool,
+
+    /// The call's Proposal as `proposal_row` reads it; a column it needs
+    /// that is NULL is `CorruptStore`, as main's decode answered, and as
+    /// its NULL source position did when the item was missing.
+    fn proposal(row: *const ToolOutcomeRow) error{CorruptStore}!proposal_row.Row {
+        var out: proposal_row.Row = undefined;
+        inline for (@typeInfo(proposal_row.Row).@"struct".field_names) |name| {
+            const Field = @FieldType(proposal_row.Row, name);
+            const value = @field(row, name);
+            @field(out, name) = if (@typeInfo(Field) == .optional or Field == @TypeOf(value)) value else value orelse return error.CorruptStore;
+        }
+        return out;
+    }
+};
+
+/// The tool outcome rule, judging a `ToolOutcome` read's rows as they
+/// step, in plain Zig, keeping one Operation's counts at a time. For each
+/// Operation, as main's aggregate: it proposed calls; every call item has
+/// a call; every call has its item, its three fields' contents, and is
+/// either rejected with its rejection's content and acceptance and no
+/// Action, or has an Action that is unresolved, with no result and no
+/// acceptance, or resolved, with its result's content and acceptance.
+/// Main also required a public Tool Result's group to be terminal, every
+/// call rejected or resolved; `public_tool_result` only returns a group
+/// whose every call has an acceptance and content, so in the same
+/// snapshot no call the rule passes is unresolved, and no count is kept
+/// for it. For each
+/// call, as main's per-call Proposal read: its Proposal is consistent and
+/// its fields certified (`certifiedFields`). Every failure is
+/// `CorruptStore`, main's answer for each, so which one it meets first
+/// changes nothing. Its counts are `u32`, so an Activity page's sixteen
+/// item reads, each holding one, fit `readItems`' frame budget: more call
+/// items than a `u32` counts is `CorruptStore`, and so is a call past the
+/// count of call items, which main also refused once the count ended.
+pub const ToolOutcomeCheck = struct {
+    operation: u64 = 0,
+    expected: u32 = 0,
+    calls: u32 = 0,
+    valid: u32 = 0,
+    failed: bool = false,
+
+    /// One check may judge several reads' rows, each after the other's,
+    /// in Operation order; after a failure it takes no more.
+    pub fn visit(check: *ToolOutcomeCheck, row: *const ToolOutcomeRow) bool {
+        if (check.failed) return false;
+        check.take(row) catch {
+            check.failed = true;
+            return false;
+        };
+        return true;
+    }
+
+    /// Counts `row`'s call, judging the Operation before it once its
+    /// rows end.
+    pub fn take(check: *ToolOutcomeCheck, row: *const ToolOutcomeRow) error{CorruptStore}!void {
+        const operation = row.scope_operation.get();
+        if (operation != check.operation) {
+            try check.close();
+            check.* = .{ .operation = operation, .expected = std.math.cast(u32, row.expected) orelse return error.CorruptStore };
+        }
+        if (row.ordinal == null) return;
+        if (check.calls == check.expected) return error.CorruptStore;
+        check.calls += 1;
+        _ = try certifiedFields(&try row.proposal());
+        const rejected = row.rejection_code != null and row.rejection_present and row.call_acceptance != null and row.action_id == null;
+        const resolved = row.rejection_code == null and row.action_id != null and row.action_resolved and row.result_present and row.action_acceptance != null;
+        const unresolved = row.rejection_code == null and row.action_id != null and !row.action_resolved and !row.action_content and row.action_acceptance == null;
+        const fields = row.length0 != null and row.length1 != null and row.length2 != null;
+        if (row.item_kind == 3 and fields and (rejected or resolved or unresolved)) check.valid += 1;
+    }
+
+    /// Judges the Operation whose rows ended.
+    fn close(check: *ToolOutcomeCheck) error{CorruptStore}!void {
+        if (check.operation == 0) return;
+        if (check.expected == 0 or check.calls != check.expected or check.valid != check.expected) return error.CorruptStore;
+        check.operation = 0;
+    }
+
+    /// After the read's round: the last Operation judged too.
+    pub fn finish(check: *ToolOutcomeCheck) error{CorruptStore}!void {
+        if (check.failed) return error.CorruptStore;
+        try check.close();
+    }
+};
+
+fn optionalPositive(value: ?rsql.Positive) ?u64 {
+    return if (value) |positive| positive.get() else null;
+}
+
+/// One Operation: a public Tool Result's, or an Activity page's
+/// candidates'.
+const operation_outcome = ToolOutcome("", "SELECT DISTINCT ?1 AS operation_id," ++ expectedCallsSql("?1"), struct { operation: u64 }, false);
+
 /// Queues reading the Proposal at `read.position`; `read.found` follows
 /// its round.
 pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
@@ -1960,12 +2185,4 @@ pub fn proposal(a: anytype, session: []const u8, position: u64) !protocol.Propos
     try a.run();
     try read.found();
     return metadata;
-}
-
-/// `proposal` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn proposalLocked(self: *Store, session: []const u8, position: u64) !protocol.ProposalMetadata {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    return proposal(&a, session, position);
 }
