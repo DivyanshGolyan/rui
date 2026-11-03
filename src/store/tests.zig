@@ -2972,9 +2972,13 @@ test "canonical step faults fence rather than reading as ordinary misses" {
         };
         // Before the Store owned classification these were ResultNotFound or
         // StaleAttemptBinding: ordinary outcomes that left the Store usable.
-        // A result and a failure's settlement read through an Access, whose
-        // failed step is a StatementFailed.
-        try std.testing.expectError(if (route == .result or route == .failure) error.StatementFailed else error.OperationReadFailed, result);
+        // A failure's settlement reads through an Access, whose failed step
+        // is a StatementFailed. A result keeps main's ResultReadFailed.
+        try std.testing.expectError(switch (route) {
+            .result => error.ResultReadFailed,
+            .failure => error.StatementFailed,
+            else => error.OperationReadFailed,
+        }, result);
         try std.testing.expect(storage.isFenced());
     }
 }
