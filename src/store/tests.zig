@@ -1846,45 +1846,115 @@ test "a list row carries its Session's Label, times, first Message, work and pee
     try std.testing.expect(!storage.isFenced());
 }
 
-test "a person's Message next to a position is one indexed row, at a fixed end" {
+/// The position of the person's Message next to `request`'s cursor, on a
+/// one-row page of `admission` rows, or null.
+fn personStep(storage: *Store, request: protocol.ActivityPage) !?u64 {
+    const page = try store_core.activityPageForTesting(storage, request);
+    if (page.count == 0) return null;
+    try std.testing.expect(page.count == 1 and page.items[0].value == .admission);
+    return page.items[0].position;
+}
+
+test "a person's Message next to a position is a one-row page of admission rows, at a fixed end" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "person-config");
-    var request: protocol.ReadPersonMessage = .{ .direction = .backward };
+    const peer = try configureTestSession(&storage, "person-peer");
+    var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
     try request.session.set(session.slice());
-    try std.testing.expectEqual(protocol.PersonMessage{ .end = 0 }, try storage.personMessage(&request));
+    try std.testing.expectEqual(@as(?u64, null), try personStep(&storage, request));
     for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
+    // Another Session sent the newest one: it is a received row, not the
+    // person's, and every step passes over it.
+    try submitTestMessage(&storage, &tmp, "from-peer", "from-peer", session.slice(), "peer");
+    {
+        var sql: [256]u8 = undefined;
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()}, 0));
+        try store_core.touch(&storage, session.slice());
+        try store_core.touch(&storage, peer.slice());
+    }
     var positions: [3]u64 = undefined;
-    inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
-    const newest = try storage.personMessage(&request);
-    try std.testing.expectEqual(positions[2], newest.message.?.position);
-    try std.testing.expectEqual(protocol.contentDigest("three"), newest.message.?.content.digest);
-    try std.testing.expectEqual(@as(u64, 5), newest.message.?.content.length);
-    request.end = newest.end;
+    inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission WHERE sender_session_ref IS NULL ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
+    const page = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(page.more);
+    try std.testing.expectEqual(positions[2], page.items[0].position);
+    try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.digest);
+    try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.length);
+    request.end = page.end;
     // Older from each one, then newer back: each step names its neighbour.
     for ([_]?u64{ positions[1], positions[0], null }, [_]u64{ positions[2], positions[1], positions[0] }) |expected, from| {
         request.position = from;
-        const found = try storage.personMessage(&request);
-        try std.testing.expectEqual(expected, if (found.message) |message| message.position else null);
+        try std.testing.expectEqual(expected, try personStep(&storage, request));
     }
     request.direction = .forward;
     try submitTestMessage(&storage, &tmp, "four", "four", session.slice(), "four");
     for ([_]?u64{ positions[1], positions[2], null }, positions) |expected, from| {
         request.position = from;
-        try std.testing.expectEqual(expected, if ((try storage.personMessage(&request)).message) |message| message.position else null);
+        try std.testing.expectEqual(expected, try personStep(&storage, request));
     }
     // A later Message waits beyond the end it was read at.
     request.end = null;
     request.position = positions[2];
-    try std.testing.expect((try storage.personMessage(&request)).message.?.position > positions[2]);
-    request.end = try queryU64(storage.database, "SELECT next_position FROM session");
-    try std.testing.expectError(error.InvalidCursor, storage.personMessage(&request));
-    try request.session.set("nosuch");
-    request.end = null;
-    try std.testing.expectError(error.SessionNotFound, storage.personMessage(&request));
+    try std.testing.expect((try personStep(&storage, request)).? > positions[2]);
+    // The peer's Message is the page's received row.
+    var received: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.received) };
+    try received.session.set(session.slice());
+    const peers = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(peers.count == 1 and peers.items[0].value == .received);
+    try std.testing.expectEqualStrings(peer.slice(), peers.items[0].value.received.sender.?.session.slice());
+    // Both kinds read the one admission source, each row once, by its sender.
+    received.kinds = .initMany(&.{ .admission, .received });
+    const both = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(both.count == 5 and !both.more);
+    var counts: [2]usize = .{ 0, 0 };
+    for (both.items[0..both.count]) |item| counts[@intFromBool(item.value == .received)] += 1;
+    try std.testing.expectEqual([2]usize{ 4, 1 }, counts);
+    // A cursor may name the received row; an admission page steps past it.
+    received.kinds = .initOne(.admission);
+    received.end = both.end;
+    received.position = peers.items[0].position;
+    received.ordinal = peers.items[0].ordinal;
+    const before = try store_core.activityPageForTesting(&storage, received);
+    try std.testing.expect(before.count > 0 and before.items[0].position < peers.items[0].position);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a page lists only the kinds it asks for, up to its limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "kinds-config");
+    for ([_][]const u8{ "one", "two", "three" }) |text| try submitTestMessage(&storage, &tmp, text, text, session.slice(), text);
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const all = try store_core.activityPageForTesting(&storage, request);
+    // Three admissions, and a User row for each the attempt took.
+    var user_rows: usize = 0;
+    for (all.items[0..all.count]) |item| user_rows += @intFromBool(item.value == .user);
+    try std.testing.expect(user_rows > 0 and all.count == 3 + user_rows and !all.more);
+    request.kinds = .initOne(.user);
+    const users = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(users.count == user_rows and !users.more);
+    for (users.items[0..users.count]) |item| try std.testing.expect(item.value == .user);
+    request.kinds = .initMany(&.{ .admission, .user });
+    request.limit = 2;
+    const two = try store_core.activityPageForTesting(&storage, request);
+    try std.testing.expect(two.count == 2 and two.more);
+    try std.testing.expectEqual(all.items[0].position, two.items[0].position);
+    try std.testing.expectEqual(all.items[1].position, two.items[1].position);
+    request.limit = 0;
+    try std.testing.expectError(error.InvalidCursor, store_core.activityPageForTesting(&storage, request));
+    request.limit = 1;
+    request.kinds = .empty;
+    try std.testing.expectError(error.InvalidCursor, store_core.activityPageForTesting(&storage, request));
     try std.testing.expect(!storage.isFenced());
 }
 
@@ -8022,7 +8092,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try session.set(allocated_session_1.slice());
     const received = try store_core.activityPageForTesting(&storage, .{ .session = session });
     try std.testing.expectEqual(@as(usize, 1), received.count);
-    const peer = received.items[0].value.admission.sender.?;
+    const peer = received.items[0].value.received.sender.?;
     try std.testing.expectEqualStrings(sender, peer.session.slice());
     {
         // The receiver's row names that peer as its starter; no person has
@@ -8064,7 +8134,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
         var receiver: protocol.Bounded(protocol.max_session_bytes) = .{};
         try receiver.set(allocated_session_1.slice());
         const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
-        try std.testing.expectEqualStrings("Lead", named.items[0].value.admission.sender.?.label.slice());
+        try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
     }
     try storage.revokeActionSender(action);
     try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
@@ -11413,83 +11483,48 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
 }
 
-test "public proposal structural corruption fences independently on every route" {
+test "public proposal structural corruption fences the activity page" {
     const faults = [_][:0]const u8{
         "UPDATE content SET private=1,payload=zeroblob(byte_length) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=0)",
         "DELETE FROM model_tool_call WHERE call_ordinal=0",
         "UPDATE turn SET session_ref='f0re1g'",
         "UPDATE model_tool_call SET name_content_id=(SELECT call_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=0)",
     };
     for (faults) |fault| {
-        for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try testingStore(&storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSession(&storage, "config");
-            try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "run tools");
-            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const calls = [_]TestingCall{
-                .{ .item_id = "original", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-                .{ .item_id = "replacement", .name = "unknown", .encoded_call_id = "sibling", .decoded_call_id = "sibling", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-            };
-            try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
-            var request: protocol.ProposalPage = .{};
-            try request.session.set(session.slice());
-            const healthy = try store_core.proposalPageForTesting(&storage, request);
-            try std.testing.expectEqual(@as(usize, 2), healthy.count);
-            const item = healthy.items[0];
-            try std.testing.expectEqual(binding.operation_id, item.operation);
-            try std.testing.expectEqual(binding.turn_id, item.turn);
-            try std.testing.expectEqual(@as(u64, 0), item.call_ordinal);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("unknown"), &item.fields[0].digest);
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-            try sqlite.exec(storage.database, fault);
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
-            request.end = healthy.end;
-            if (route == .cursor) request.after = item.position;
-            const result: anyerror!void = if (route == .content)
-                if (storage.openProposalField(&.{ .session = request.session, .position = item.position, .field = .name })) |value| blk: {
-                    var reader: ContentReader = undefined;
-                    reader.open(value);
-                    reader.close();
-                    break :blk {};
-                } else |err| err
-            else if (store_core.proposalPageForTesting(&storage, request)) |_| {} else |err| err;
-            try std.testing.expectError(error.CorruptStore, result);
-            try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, store_core.proposalPageForTesting(&storage, request));
-            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
-        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "config");
+        try submitTestMessage(&storage, &tmp, "input", "message", session.slice(), "run tools");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "original", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "replacement", .name = "unknown", .encoded_call_id = "sibling", .decoded_call_id = "sibling", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        const healthy = try store_core.activityPageForTesting(&storage, request);
+        const call = for (healthy.items[0..healthy.count]) |item| {
+            if (item.value == .call) break item.value.call;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqual(binding.operation_id, call.operation);
+        try std.testing.expectEqual(binding.turn_id, call.turn);
+        try std.testing.expectEqual(@as(u64, 0), call.call_ordinal);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("unknown"), &call.fields[0].digest);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.database, fault);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
+        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
-}
-
-test "proposal callable cursor domain preserves healthy Store" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSessionAsk(&storage, "proposal-config");
-    var request: protocol.ProposalPage = .{};
-    try request.session.set(session.slice());
-    request.end = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
-    request.end = null;
-    request.after = 1;
-    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
-    request.end = 0;
-    request.after = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidCursor, store_core.proposalPageForTesting(&storage, request));
-    request.after = 0;
-    const page = try store_core.proposalPageForTesting(&storage, request);
-    try std.testing.expectEqual(@as(u64, 0), page.end);
-    try std.testing.expectEqual(@as(usize, 0), page.count);
-    try std.testing.expect(!page.more and !storage.isFenced());
-    try std.testing.expectError(error.ContentNotFound, storage.openProposalField(&.{ .position = std.math.maxInt(u64) }));
 }
 
 test "public activity admission corruption fences page and content independently" {
@@ -11581,59 +11616,45 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
         call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "rounds-output", &calls);
-    var proposals: protocol.ProposalPage = .{};
-    try proposals.session.set(session.slice());
     var conversation: protocol.ConversationPage = .{};
     try conversation.session.set(session.slice());
     var activity: protocol.ActivityPage = .{};
     try activity.session.set(session.slice());
-    const full = try pageRounds(&storage, &proposals, &conversation, &activity);
-    try std.testing.expectEqual(@as(usize, 16), full.proposals);
+    const full = try pageRounds(&storage, &conversation, &activity);
     try std.testing.expectEqual(@as(usize, 16), full.conversation);
     try std.testing.expectEqual(@as(usize, 16), full.activity);
-    // Smaller pages of the same kinds: the first Proposal; the first Tool
-    // Result and the User entry before it; the rows through the first call.
-    proposals.end = full.first_call;
+    // Smaller pages of the same kinds: the first Tool Result and the User
+    // entry before it; the rows through the first call.
     conversation = .{ .session = conversation.session, .end = full.end, .before_position = full.results, .before_ordinal = 2 };
-    activity.end = full.first_call;
-    const small = try pageRounds(&storage, &proposals, &conversation, &activity);
-    try std.testing.expectEqual(@as(usize, 1), small.proposals);
+    activity.end = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
+    const small = try pageRounds(&storage, &conversation, &activity);
     try std.testing.expectEqual(@as(usize, 2), small.conversation);
     try std.testing.expect(small.activity < 16);
     try std.testing.expectEqual(small.rounds, full.rounds);
 }
 
-const PageRounds = struct { rounds: [3]u32, proposals: usize, conversation: usize, activity: usize, first_call: u64, results: u64, end: u64 };
+const PageRounds = struct { rounds: [2]u32, conversation: usize, activity: usize, results: u64, end: u64 };
 
 /// The rounds each page read takes, with its row counts and the positions
 /// its caller bounds smaller pages with.
-fn pageRounds(storage: *Store, proposals: *const protocol.ProposalPage, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
+fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
     var result: PageRounds = undefined;
-    var proposal_page: reads_domain.ProposalPage = undefined;
     var public_page: reads_domain.PublicConversationPage = undefined;
     var activity_page: protocol.ActivityFacts = undefined;
     {
         var a = reads_domain.ReadAccess.within(storage);
         defer a.deinit();
-        try reads_domain.proposalPage(&a, proposals, &proposal_page);
+        try reads_domain.publicConversationPage(&a, conversation, &public_page);
         result.rounds[0] = a.rounds;
     }
     {
         var a = reads_domain.ReadAccess.within(storage);
         defer a.deinit();
-        try reads_domain.publicConversationPage(&a, conversation, &public_page);
+        try reads_domain.activityPage(&a, activity, &activity_page);
         result.rounds[1] = a.rounds;
     }
-    {
-        var a = reads_domain.ReadAccess.within(storage);
-        defer a.deinit();
-        try reads_domain.activityPage(&a, activity, &activity_page);
-        result.rounds[2] = a.rounds;
-    }
-    result.proposals = proposal_page.count;
     result.conversation = public_page.count;
     result.activity = activity_page.count;
-    result.first_call = proposal_page.items[0].position;
     result.results = public_page.items[0].position;
     result.end = public_page.end;
     return result;
@@ -11643,108 +11664,6 @@ test "the tool-group scan answers a missing Proposal as main did, before its out
     // The scan reads a call's Proposal and outcome in one round; main read
     // the Proposal first, so neither row answers ContentNotFound.
     try std.testing.expectError(error.ContentNotFound, historical_domain.scannedCall(&.{ .position = 7 }, null, 1, 0));
-}
-
-test "the touch oracle leaves unwatched exactly the columns the schema marks unlisted" {
-    comptime var unlisted: []const []const u8 = &.{};
-    inline for (store_schema.tables) |table| inline for (table.columns) |column| if (!column.listed) {
-        unlisted = unlisted ++ .{table.name ++ "." ++ column.name};
-    };
-    try std.testing.expectEqual(unlisted.len, sqlite.touch_oracle_unwatched.len);
-    for (unlisted) |name| {
-        const found = for (sqlite.touch_oracle_unwatched) |unwatched| {
-            if (std.mem.eql(u8, unwatched, name)) break true;
-        } else false;
-        if (!found) std.debug.print("unlisted but watched: {s}\n", .{name});
-        try std.testing.expect(found);
-    }
-}
-
-test "read-through only advances, within the Session's committed positions, touches no list, and pages carry it" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSession(&storage, "read-through-config");
-    try submitTestMessage(&storage, &tmp, "read-through-a", "a", session.slice(), "first");
-    try submitTestMessage(&storage, &tmp, "read-through-b", "b", session.slice(), "second");
-    var page: protocol.ActivityPage = .{};
-    try page.session.set(session.slice());
-    const unread = try store_core.activityPageForTesting(&storage, page);
-    try std.testing.expectEqual(@as(?u64, null), unread.read_through);
-    const first = unread.items[0].position;
-    var read: protocol.MarkRead = .{ .position = first };
-    try read.session.set(session.slice());
-    const unmarked = storage.commit_generation.load(.acquire);
-    try storage.markRead(&read);
-    try std.testing.expectEqual(@as(?u64, first), (try store_core.activityPageForTesting(&storage, page)).read_through);
-    // No Session list row shows it, so a list watching the Session has
-    // nothing to read again.
-    var changed: [1]change_ring.Id = undefined;
-    try std.testing.expectEqual(@as(usize, 0), storage.changes.changed(unmarked, storage.commit_generation.load(.acquire), null, null, &changed).len);
-    // A client that saw more moves it on; one that saw less, or the same
-    // write again, leaves it.
-    read.position = unread.end;
-    try storage.markRead(&read);
-    try storage.markRead(&read);
-    read.position = first;
-    try storage.markRead(&read);
-    try std.testing.expectEqual(@as(?u64, unread.end), (try store_core.activityPageForTesting(&storage, page)).read_through);
-    // A position the Session has not reached, or an unknown Session, fails
-    // without fencing the Store.
-    read.position = unread.end + 1;
-    try std.testing.expectError(error.PositionNotReached, storage.markRead(&read));
-    try read.session.set("zzzzzz");
-    read.position = 1;
-    try std.testing.expectError(error.SessionNotFound, storage.markRead(&read));
-    try std.testing.expect(!storage.isFenced());
-    try std.testing.expectEqual(@as(?u64, unread.end), (try store_core.activityPageForTesting(&storage, page)).read_through);
-}
-
-test "a latest page says whether unseen rows reach past its oldest row" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSession(&storage, "beyond-unseen-config");
-    var key: [32]u8 = undefined;
-    for (0..20) |index| {
-        const name = try std.fmt.bufPrint(&key, "beyond-unseen-{d}", .{index});
-        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "row");
-    }
-    var page: protocol.ActivityPage = .{ .direction = .backward };
-    try page.session.set(session.slice());
-    const latest = try store_core.activityPageForTesting(&storage, page);
-    try std.testing.expect(latest.more and latest.count == latest.items.len);
-    // The rows before the page, newest first.
-    var older = page;
-    older.end = latest.end;
-    older.position = latest.items[latest.count - 1].position;
-    older.ordinal = latest.items[latest.count - 1].ordinal;
-    const before = try store_core.activityPageForTesting(&storage, older);
-    const just_before = before.items[0].position;
-    try std.testing.expect(just_before < older.position);
-    var further: u64 = 0;
-    for (before.items[0..before.count]) |item| if (item.position < just_before) {
-        further = item.position;
-        break;
-    };
-    try std.testing.expect(further != 0);
-    var read: protocol.MarkRead = .{ .position = further };
-    try read.session.set(session.slice());
-    // The row just before the page is unseen too.
-    try storage.markRead(&read);
-    try std.testing.expectEqual(true, (try store_core.activityPageForTesting(&storage, page)).beyond_unseen);
-    // Read through it: every unseen row is on the page, so the opening
-    // places the rule there without reading an older page.
-    read.position = just_before;
-    try storage.markRead(&read);
-    const placed = try store_core.activityPageForTesting(&storage, page);
-    try std.testing.expectEqual(true, placed.more);
-    try std.testing.expectEqual(false, placed.beyond_unseen);
-    try std.testing.expectEqual(just_before, placed.read_through.?);
 }
 
 test "an activity page reports the queued Messages at its end, until applied or stopped" {
@@ -11910,7 +11829,7 @@ test "every activity row is dated by the fact that owns it" {
             .tool_result => 106,
             .outcome => 107,
             .stop => 108,
-            .hosted_call, .sent, .send_failed => unreachable,
+            .hosted_call, .sent, .send_failed, .received => unreachable,
         };
         try std.testing.expectEqual(expected, item.at);
         seen.insert(item.value);
@@ -12231,6 +12150,128 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
+test "a one-row page of a person's Messages costs the same steps after 10 or 10,000 received ones" {
+    // Ctrl-P from the end passes over every Message another Session sent
+    // to reach the person's first one, through their own index.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "recall-config");
+        const peer = try configureTestSession(&storage, "recall-peer");
+        try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value FROM history; " ++
+                "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice(), peer.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].value == .admission and !page.more);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "a forward one-row page of a person's Messages costs the same steps past 10 or 10,000 tool groups" {
+    // Ctrl-N from the first Message steps to the second, with every tool
+    // group completed between it and the third. The page lists no calls, so it reads no
+    // call activity.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "forward-config");
+        try submitTestMessage(&storage, &tmp, "forward-first", "first", session.slice(), "first");
+        try submitTestMessage(&storage, &tmp, "forward-second", "second", session.slice(), "second");
+        const first = try queryU64(storage.database, "SELECT min(admission_position) FROM message_admission");
+        // Foreign keys are off: each tool group names its Turn before the
+        // Turn row exists. A cancelled Turn needs no answer content.
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT 1000+value AS value,next_position+3*(value-1) AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1 FROM history; " ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT value,0,'{1s}',position,3,1,zeroblob(32),0,content,0 FROM history; " ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                "SELECT value,'{1s}',0,0,content,content,content,zeroblob(120),'unknown_tool',content,position+1 FROM history; " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT value,'{1s}',value,value,value,'cancelled',position+2,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+3*{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        try submitTestMessage(&storage, &tmp, "forward-third", "third", session.slice(), "third");
+        var request: protocol.ActivityPage = .{ .position = first, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].position > first and page.more);
+        try std.testing.expectEqual(@as(u64, 0), page.call_activity.total);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "a one-row page of a person's Messages costs the same steps past 100 or 10,000 waiting ones" {
+    // Ctrl-P from the end reads the newest Message, with every other one
+    // still waiting. The page is filtered, so it reads no queue footer.
+    // Each Store holds more waiting Messages than a page source reads.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 100, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "waiting-config");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                "SELECT 1000+value,'{1s}',printf('waiting-%d',value),content,position,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        // Foreign keys are off: the waiting Messages have no commands.
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");
+        var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].value.admission.state == .queued and page.more);
+        try std.testing.expectEqual(@as(u64, 0), page.queued.count);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
 /// The VM steps every statement of the Store's connection takes to read one
 /// Activity page.
 fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {
@@ -12344,7 +12385,7 @@ test "live tool activity counts calls past the sixteenth Operation" {
 test "activity judges every candidate Operation's tool outcomes, not only its kept calls" {
     // The page keeps three calls' presentations; the rule must still reach
     // the fourth call, by one read per Operation while there are at most
-    // `max_operations` and by one read over them all past that.
+    // `max_operations`, 32, and by one read over them all past that.
     for ([_]enum { one_operation, many_operations }{ .one_operation, .many_operations }) |shape| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -12371,7 +12412,7 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
                 }
                 try settleCallsForTesting(&storage, &tmp, binding, "outcome-calls", &calls);
             },
-            .many_operations => for (0..32) |index| {
+            .many_operations => for (0..40) |index| {
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 var identity: [24]u8 = undefined;
                 const id = try std.fmt.bufPrint(&identity, "ops-{d}", .{index});
@@ -12385,6 +12426,8 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
         const page = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
         try std.testing.expect(page.call_activity.total >= 4);
+        // One call each, so as many candidate Operations as calls.
+        if (shape == .many_operations) try std.testing.expect(page.call_activity.total > 32);
         // The last candidate call's item stops being a call item; no kept
         // presentation reads that call.
         try sqlite.exec(storage.database, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
@@ -13914,11 +13957,18 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
 /// The rendered text of the one statement `report_domain.report_failures`
 /// names `failed` whose text holds `fragment`.
 fn reportStatementForTesting(comptime failed: anyerror, comptime fragment: []const u8) [:0]const u8 {
-    @setEvalBranchQuota(100_000);
+    return namedStatementForTesting(report_domain.report_failures, failed, fragment);
+}
+
+/// The rendered text of the one statement the failure table `named`
+/// holds whose text holds `fragment`, among those it names `failed` when
+/// that is not null.
+fn namedStatementForTesting(comptime named: anytype, comptime failed: ?anyerror, comptime fragment: []const u8) [:0]const u8 {
+    @setEvalBranchQuota(200_000);
     comptime var found: ?[:0]const u8 = null;
-    inline for (report_domain.report_failures) |pair| {
-        if (comptime pair[1] == failed and std.mem.indexOf(u8, pair[0].sql, fragment) != null) {
-            if (found != null) @compileError("two statements hold " ++ fragment);
+    inline for (named) |pair| {
+        if (comptime (failed == null or pair[1] == failed.?) and std.mem.indexOf(u8, pair[0].sql, fragment) != null) {
+            if (found != null and !std.mem.eql(u8, found.?, pair[0].sql)) @compileError("two statements hold " ++ fragment);
             found = pair[0].sql;
         }
     }
@@ -14082,14 +14132,14 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
 
 test "a Current report's step faults answer the name of the earliest round that steps the table" {
     // Each read keeps main's name; when reads in two rounds fail, the
-    // earlier round's name wins. The Action count steps in the round
-    // before the tool outcome rule, where main read the rule's facts
-    // first and answered CallReadFailed for a faulted action_operation.
-    // A list with nothing to show is not read, where main read every
-    // list and answered ActionReadFailed for a faulted session_revision.
+    // earlier round's name wins. The Action count steps after the tool
+    // outcome rule in their round, so a faulted action_operation answers
+    // the rule's CallReadFailed, as on main. A list with nothing to show
+    // is not read, where main read every list and answered
+    // ActionReadFailed for a faulted session_revision.
     inline for (.{
         .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
-        .{ TestingWorkShape.awaiting, "action_operation", error.ActionReadFailed },
+        .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
         .{ TestingWorkShape.awaiting, "session_revision", error.ActionReadFailed },
         .{ TestingWorkShape.idle, "session_revision", null },
     }) |case| {
@@ -14103,6 +14153,128 @@ test "a Current report's step faults answer the name of the earliest round that 
         if (comptime @TypeOf(case[2]) == @TypeOf(null)) {
             std.testing.allocator.free(try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
         } else try std.testing.expectError(case[2], testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
+    }
+}
+
+/// Fails the statement whose text is `sql` while `route` reads `session`,
+/// and expects `expected`.
+fn expectRouteStepFailure(storage: *Store, tmp: *std.testing.TmpDir, route: enum { report, inspection, activity }, session: []const u8, sql: [:0]const u8, expected: anyerror) !void {
+    var fault: TestingStatementFault = .{ .sql = sql };
+    fault.arm(storage.database);
+    defer fault.disarm(storage.database);
+    const result: anyerror!void = switch (route) {
+        .report => if (testingSessionReport(storage, tmp, session, 1024 * 1024)) |report| std.testing.allocator.free(report) else |err| err,
+        .inspection => if (storage.inspectSessionForTesting(session)) |_| {} else |err| err,
+        .activity => blk: {
+            var request: protocol.ActivityPage = .{ .direction = .backward };
+            try request.session.set(session);
+            break :blk if (store_core.activityPageForTesting(storage, request)) |_| {} else |err| err;
+        },
+    };
+    try std.testing.expectError(expected, result);
+    try std.testing.expect(fault.failed > 0);
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a Proposal check folded into the tool outcome rule answers the rule's CallReadFailed" {
+    // Main checked each call's Proposal in a statement of its own, whose
+    // failed step went through as StatementFailed; the rule's read now
+    // checks it, on an Activity page (`operation_outcome`) and in the
+    // Current report (`active_tool_calls`), and answers that read's name.
+    inline for (.{
+        .{ .activity, namedStatementForTesting(reads_domain.read_failures, null, "SELECT DISTINCT ?1 AS operation_id") },
+        .{ .report, namedStatementForTesting(report_domain.session_count_failures, null, "SELECT DISTINCT operation.operation_id") },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "proposal-fold");
+        try expectRouteStepFailure(&storage, &tmp, case[0], session.slice(), case[1], error.CallReadFailed);
+    }
+}
+
+test "a Current report's presentation reads answer their list's name" {
+    // Main read each listed call's line and fields apart and named their
+    // failed steps CorruptStore; they are the list's own columns now. The
+    // Turn proposes an asked-for call, whose Action waits, and a call of
+    // an unknown tool, which is rejected.
+    inline for (.{
+        .{ namedStatementForTesting(report_domain.current_failures, null, "a.resolution_code IS NULL ORDER BY a.action_id"), error.ActionReadFailed },
+        .{ namedStatementForTesting(report_domain.current_failures, null, "CROSS JOIN content rejection"), error.CallReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "presentation-fold");
+        try submitTestMessage(&storage, &tmp, "presentation-fold-input", "presentation-fold-message", session.slice(), "call");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "presentation-fold-asked", .name = "bash", .encoded_call_id = "presentation-fold-asked", .decoded_call_id = "presentation-fold-asked", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+            .{ .item_id = "presentation-fold-unknown", .name = "unknown", .encoded_call_id = "presentation-fold-unknown", .decoded_call_id = "presentation-fold-unknown", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTesting(&storage, &tmp, binding, "presentation-fold-output", &calls);
+        try expectRouteStepFailure(&storage, &tmp, .report, session.slice(), case[0], case[1]);
+    }
+}
+
+test "admission's context read answers CorruptStore, as admission names it" {
+    // Main checked whether the context changed in a statement of its own,
+    // whose failed step went through as StatementFailed, and named the
+    // estimate's CorruptStore; `admission_context` reads both. The second
+    // Message follows a Turn with usage under a trigger, so admission
+    // weighs the context, and the report estimates it.
+    for ([_]bool{ false, true }) |report| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "context-fold");
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("context-fold-trigger");
+        try patch.session.set(session.slice());
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("1000");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "context-fold-one", "context-fold-one", session.slice(), "one");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
+        try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
+        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT") };
+        fault.arm(storage.database);
+        defer fault.disarm(storage.database);
+        if (report)
+            try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
+        else
+            try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "Session inspection's count reads answer main's names" {
+    // Inspection reads the Current report's counts and the rule in the
+    // same rounds, under main's names.
+    inline for (.{
+        .{ "SELECT operation.operation_id FROM", error.CallReadFailed },
+        .{ "SELECT DISTINCT operation.operation_id", error.CallReadFailed },
+        .{ "count(*) AS actions", error.ActionReadFailed },
+        .{ "count(*) AS rejected", error.CallReadFailed },
+        .{ "count(*) AS pending", error.MessageAdmissionReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "inspection-names");
+        // A queued Message, so the pending count steps.
+        try submitTestMessage(&storage, &tmp, "inspection-names-queued", "inspection-names-queued", session.slice(), "later");
+        try expectRouteStepFailure(&storage, &tmp, .inspection, session.slice(), namedStatementForTesting(report_domain.session_count_failures, null, case[0]), case[1]);
     }
 }
 
@@ -14124,6 +14296,107 @@ fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     defer a.deinit();
     try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
     return a.rounds;
+}
+
+/// The statements the Store's cached statements ran and the VM steps they
+/// took since the last call, which resets them.
+fn cachedWorkForTesting(storage: *Store) struct { statements: i64, steps: i64 } {
+    var statements: i64 = 0;
+    var steps: i64 = 0;
+    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+        statements += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
+        steps += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+    };
+    return .{ .statements = statements, .steps = steps };
+}
+
+/// One tool cycle of the cost fixture: a Message whose Operation proposes
+/// two Bash calls and an unknown one; one call is allowed and runs, one
+/// denied, the unknown one rejected; the continuation answers.
+fn costCycleForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, index: usize) !void {
+    var name: [64]u8 = undefined;
+    var key: [64]u8 = undefined;
+    try submitTestMessage(storage, tmp, try std.fmt.bufPrint(&name, "cycle-{d}-input", .{index}), try std.fmt.bufPrint(&key, "cycle-{d}-key", .{index}), session, "list the files, then summarize");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-a", .name = "bash", .encoded_call_id = "call-a", .decoded_call_id = "call-a", .encoded_arguments = "{\\\"description\\\":\\\"List files\\\",\\\"cmd\\\":\\\"ls -la\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"List files\",\"cmd\":\"ls -la\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-b", .name = "bash", .encoded_call_id = "call-b", .decoded_call_id = "call-b", .encoded_arguments = "{\\\"description\\\":\\\"Remove files\\\",\\\"cmd\\\":\\\"rm -rf x\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Remove files\",\"cmd\":\"rm -rf x\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-c", .name = "unknown", .encoded_call_id = "call-c", .decoded_call_id = "call-c", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(storage, tmp, binding, try std.fmt.bufPrint(&name, "cycle-{d}-calls", .{index}), &calls);
+    const first_action = try queryU64(storage.database, "SELECT max(action_id)-1 FROM action_operation");
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = first_action, .decision = .allow_once };
+    try allow.key.set(try std.fmt.bufPrint(&key, "cycle-{d}-allow", .{index}));
+    try allow.session.set(session);
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try denyForTesting(storage, session, try std.fmt.bufPrint(&key, "cycle-{d}-deny", .{index}), first_action + 1);
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    _ = try storage.settleActionAttempt(action, .succeeded, "total 8\ndrwxr-xr-x 2 user user 4096 a\n-rw-r--r-- 1 user user 120 b\n", .{});
+    const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Two files; the removal was denied.\"}]}"};
+    try settleItemsForTesting(storage, tmp, continued, &items, "Two files; the removal was denied.");
+}
+
+/// The cost fixture: an answered greeting, a reconfigure, `cycles` tool
+/// cycles, a stopped Turn with a Message the stop excluded, and a Turn
+/// awaiting one asked Bash call beside a rejected unknown one.
+fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usize) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSessionAsk(storage, "probe-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "hello there", .decoded = "hello there" }};
+    try answerTestTurn(storage, tmp, session.slice(), "probe-greeting", &answer);
+    var reconfigure: protocol.ConfigureCommand = .{};
+    try reconfigure.key.set("probe-reconfigure");
+    try reconfigure.session.set(session.slice());
+    reconfigure.configuration.instructions = try testingBytesContent(tmp, "probe-instructions", "Be brief and careful.");
+    reconfigure.configuration.label.state = .value;
+    try reconfigure.configuration.label.value.set("probe label");
+    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+    for (0..cycles) |index| try costCycleForTesting(storage, tmp, session.slice(), index);
+    try submitTestMessage(storage, tmp, "probe-stopped-input", "probe-stopped-key", session.slice(), "start something long");
+    _ = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try submitTestMessage(storage, tmp, "probe-excluded-input", "probe-excluded-key", session.slice(), "and then this");
+    var stop = try completeSessionStop("probe-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    var late_stop = try completeSessionStop("probe-stop-idle", session.slice());
+    _ = storage.stopSession(&late_stop, .{});
+    try submitTestMessage(storage, tmp, "probe-awaiting-input", "probe-awaiting-key", session.slice(), "check the disk");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-d", .name = "bash", .encoded_call_id = "call-d", .decoded_call_id = "call-d", .encoded_arguments = "{\\\"description\\\":\\\"Disk usage\\\",\\\"cmd\\\":\\\"df -h\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Disk usage\",\"cmd\":\"df -h\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-e", .name = "unknown", .encoded_call_id = "call-e", .decoded_call_id = "call-e", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(storage, tmp, binding, "probe-awaiting-calls", &calls);
+    return session;
+}
+
+test "a Current report and inspection do no more work than main at the cost fixture" {
+    // Main's counts at 72db6de9, each the second, cached, run on this
+    // fixture: statements run and VM steps, the report then inspection.
+    inline for (.{
+        .{ 1, [4]i64{ 37, 2954, 12, 633 } },
+        .{ 8, [4]i64{ 37, 5674, 12, 633 } },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try costFixtureForTesting(&storage, &tmp, case[0]);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        _ = cachedWorkForTesting(&storage);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        const report = cachedWorkForTesting(&storage);
+        _ = try storage.inspectSessionForTesting(session.slice());
+        _ = cachedWorkForTesting(&storage);
+        _ = try storage.inspectSessionForTesting(session.slice());
+        const inspection = cachedWorkForTesting(&storage);
+        const main = case[1];
+        try std.testing.expect(report.statements > 0 and inspection.statements > 0);
+        std.testing.expect(report.statements <= main[0] and report.steps <= main[1] and inspection.statements <= main[2] and inspection.steps <= main[3]) catch |err| {
+            std.debug.print("report {d} statements, {d} steps; inspection {d}, {d}\n", .{ report.statements, report.steps, inspection.statements, inspection.steps });
+            return err;
+        };
+    }
 }
 
 test "a Current report takes its reads' dependency depth in rounds, not its rows" {

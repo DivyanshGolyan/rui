@@ -54,10 +54,6 @@ Keep scrolling up to read older conversation.
 Esc or Ctrl-G returns to the latest messages, and from there to the overview.
 Ctrl-End, or End on an empty draft, returns to the latest messages and stays in the conversation.
 
-Opening a Session that has rows you have not seen starts at a dim `── new since you looked ──` line above the first of them, unless the latest messages already show it.
-Scroll down through them to reach the latest.
-When you leave, Rui records how far you have scrolled through, so the next opening starts after that.
-
 Normal exit, Ctrl-C and SIGTERM restore the previous screen.
 SIGKILL and native crashes cannot run cleanup.
 If that happens, run your terminal's reset command.

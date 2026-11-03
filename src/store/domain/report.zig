@@ -787,12 +787,12 @@ pub const session_count_failures = .{
 
 /// What the Current report and Session inspection count, with the tool
 /// outcome rule over the active Turn's calls (`active_tool_calls`). Round
-/// 1 (`queue`) reads the latest stop's cutoff, whether the active Turn
-/// proposed calls, and the two counts; round 2 (`queuePending`) the
-/// Messages pending after the cutoff and, only when it proposed calls,
-/// the rule's rows. Each count steps its one row once, as main's did.
-/// `judge` follows round 2, in main's order: the pending count, the rule,
-/// the Actions, the rejected calls.
+/// 1 (`queue`) reads the latest stop's cutoff and whether the active Turn
+/// proposed calls; round 2 (`queuePending`), in main's order, the
+/// Messages pending after the cutoff, only when it proposed calls the
+/// rule's rows, then the two counts, so a fault on a table both step
+/// answers the rule's name, as on main. Each count steps its one row
+/// once, as main's did. `judge` follows round 2, in the same order.
 pub const SessionCounts = struct {
     session: []const u8,
     cutoff: reads_domain.First(command_domain.stop_cutoff.Row) = .{},
@@ -807,8 +807,6 @@ pub const SessionCounts = struct {
     pub fn queue(counts: *SessionCounts, a: *ReadAccess) void {
         a.readEach(command_domain.stop_cutoff, .{ .session = counts.session }, 1, &counts.cutoff);
         a.readEach(active_proposer, .{ .session = counts.session }, 1, &counts.proposer);
-        a.readEach(action_count, .{ .session = counts.session }, 1, &counts.actions);
-        a.readEach(rejected_call_count, .{ .session = counts.session }, 1, &counts.rejected);
     }
 
     /// The latest stop's admission cutoff, 0 without a stop, once round 1
@@ -820,6 +818,8 @@ pub const SessionCounts = struct {
     pub fn queuePending(counts: *SessionCounts, a: *ReadAccess) void {
         a.readEach(command_domain.pending_messages, .{ .session = counts.session, .cutoff = counts.stopCutoff() }, 1, &counts.pending);
         if (counts.proposer.row != null) a.readEach(active_tool_calls, .{ .session = counts.session }, std.math.maxInt(u64), &counts.check);
+        a.readEach(action_count, .{ .session = counts.session }, 1, &counts.actions);
+        a.readEach(rejected_call_count, .{ .session = counts.session }, 1, &counts.rejected);
     }
 
     /// After round 2. An aggregate always has its row, so a missing one is
@@ -904,9 +904,11 @@ const Description = protocol.Bounded(protocol.max_tool_description_bytes);
 /// as main's outcome facts gave it: its largest acceptance when every
 /// call has one, and none otherwise. The rule over `active_tool_calls`
 /// proved every call of each listed Operation valid in an earlier round
-/// of this Access, under the Entry that excludes every writer; a valid
-/// call is terminal exactly when it has an acceptance, and its Operation
-/// has as many calls as call items, so this counts what main counted.
+/// of this Access, under the Entry that excludes every writer, so its
+/// Operation has as many calls as call items. By the schema's CHECKs a
+/// call has an acceptance exactly when it is rejected (`model_tool_call`'s)
+/// or its Action resolved (`action_operation`'s), main's terminal calls,
+/// so this counts what main counted.
 fn publicationSql(comptime operation: []const u8) []const u8 {
     return "(SELECT CASE WHEN count(*)=count(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) " ++
         "THEN max(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) END FROM model_tool_call sibling " ++
@@ -992,7 +994,7 @@ const actionable_permissions = rsql.Read(.{
 /// `CorruptStore`, main's answer for content metadata. A presentation's
 /// reads, which main named apart, are its list's own columns now, so
 /// they take its list's name.
-const current_failures = .{
+pub const current_failures = .{
     .{ selected_active, error.TurnReadFailed },
     .{ selected_queued, error.MessageAdmissionReadFailed },
     .{ recent_messages, error.TurnReadFailed },

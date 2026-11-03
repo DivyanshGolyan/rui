@@ -1430,14 +1430,14 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         // render nothing, and a read boundary must name the first that does.
         sink.item(item);
         switch (item.value) {
-            .admission => |value| {
+            inline .admission, .received => |value, kind| {
                 if (historical and value.state == .applied) continue;
                 // A person's or script's Message shows live when it is
                 // taken: as its row, or at the stop that excluded it. Until
                 // then it waits above the input, unless it is taken next;
                 // one waiting at the opening too. The opening shows one a
                 // stop excluded, labelled.
-                if (value.sender == null and (!historical or value.state == .queued)) {
+                if (kind == .admission and (!historical or value.state == .queued)) {
                     if (!historical and from == null and value.state != .applied) from = item.position - 1;
                     if (!showsAtAdmission(item.position, value, drawn, page.facts.queued, page.facts.work.work.state.holdsQueue())) continue;
                     drawn = .{ .admission = value.admission, .position = item.position };
@@ -1516,7 +1516,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
 /// One shown while it waited is labelled here too: the stop is what asks the
 /// person to send it again. Their bytes belong to no item.
 fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool) !void {
-    var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from };
+    var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from, .kinds = .initOne(.admission) };
     var first = true;
     while (true) {
         const page = switch (try requests.activityPage(store, session, cursor)) {
@@ -1524,11 +1524,8 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             .failure => |failure| return requests.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| {
-            var value = switch (item.value) {
-                .admission => |value| value,
-                else => continue,
-            };
-            if (value.sender != null or value.state != .queued or value.admission > stop.value.stop.cutoff) continue;
+            var value = item.value.admission;
+            if (value.state != .queued or value.admission > stop.value.stop.cutoff) continue;
             if (first) sink.excluding(item.position);
             first = false;
             value.state = .excluded;

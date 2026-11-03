@@ -1209,12 +1209,8 @@ const Route = enum {
     list_sessions,
     conversation_page,
     conversation_content,
-    proposal_page,
-    proposal_field,
     activity_page,
     activity_content,
-    mark_read,
-    person_message,
     model_list,
     unsupported_control,
 
@@ -1480,28 +1476,6 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(200, protocol.max_conversation_page_response_bytes, renderConversationPage, .{page});
         },
         .conversation_content => |*command| try prepareConversationContent(host, fd, command),
-        .proposal_page => |*command| {
-            const page = try createUnfilled(host.allocator, store_module.ProposalPage);
-            defer host.allocator.destroy(page);
-            host.store.proposalPage(command, page) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .proposal_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "proposal page", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
-            };
-            try fd.json(200, protocol.max_proposal_page_response_bytes, renderProposalPage, .{page});
-        },
-        .proposal_field => |*command| {
-            const location = host.store.openProposalField(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(fd, 409, .proposal_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "proposal field", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
-            };
-            try deliverPublicContent(host, fd, location, 0, true);
-        },
         .activity_page => |*command| {
             const page = try createUnfilled(host.allocator, protocol.ActivityFacts);
             defer host.allocator.destroy(page);
@@ -1523,26 +1497,6 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 },
             };
             try deliverPublicContent(host, fd, location, 0, true);
-        },
-        .mark_read => |*command| {
-            host.store.markRead(command) catch |err| switch (err) {
-                error.SessionNotFound, error.PositionNotReached => return respondStatic(fd, 409, .mark_read_refused, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "last read", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
-            };
-            try fd.json(200, protocol.mark_read_ack.len, protocol.JsonOut.append, .{protocol.mark_read_ack});
-        },
-        .person_message => |*command| {
-            const found = host.store.personMessage(command) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "person message", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
-            };
-            try fd.json(200, protocol.max_person_message_response_bytes, renderPersonMessage, .{&found});
         },
         // Host memory only: never SQLite or the network.
         // Sized as written: the bound is tens of KiB, a reply mostly far less.
@@ -1566,10 +1520,6 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
     page.writeJson(out.writer) catch return error.BufferTooLarge;
-}
-
-fn renderPersonMessage(out: protocol.JsonOut, found: *const protocol.PersonMessage) error{BufferTooLarge}!void {
-    found.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
@@ -1664,18 +1614,10 @@ const HeaderReader = struct {
             .conversation_page
         else if (std.mem.eql(u8, path, "/v1/conversation-content"))
             .conversation_content
-        else if (std.mem.eql(u8, path, "/v1/proposal-page"))
-            .proposal_page
-        else if (std.mem.eql(u8, path, "/v1/proposal-field"))
-            .proposal_field
         else if (std.mem.eql(u8, path, "/v1/activity-page"))
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
-        else if (std.mem.eql(u8, path, "/v1/mark-read"))
-            .mark_read
-        else if (std.mem.eql(u8, path, "/v1/person-message"))
-            .person_message
         else if (std.mem.eql(u8, path, "/v1/model-list"))
             .model_list
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
@@ -1962,21 +1904,6 @@ fn renderConversationPage(response: protocol.JsonOut, page: *const store_module.
         const last = page.items[page.count - 1];
         try response.appendShape(shapes.more, .{ last.position, last.ordinal });
     } else try response.appendShape(shapes.last, .{});
-}
-
-fn renderProposalPage(response: protocol.JsonOut, page: *const store_module.ProposalPage) !void {
-    const shapes = protocol.proposal_page_reply;
-    try response.appendShape(shapes.head, .{page.end});
-    for (page.items[0..page.count], 0..) |item, index| {
-        if (index != 0) try response.append(",");
-        try response.appendShape(shapes.item_head, .{ item.position, item.operation, item.turn, item.call_ordinal, item.action, item.rejection });
-        inline for (comptime std.meta.fieldNames(protocol.ProposalField), 0..) |name, field_index| {
-            const reference = item.fields[field_index];
-            try response.appendShape(shapes.field(@field(protocol.ProposalField, name)), .{ reference.length, reference.digest });
-        }
-        try response.appendShape(shapes.item_end, .{});
-    }
-    try response.appendShape(shapes.tail, .{page.more});
 }
 
 fn renderSessionStopReply(
@@ -3137,20 +3064,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     }
     try std.testing.expectEqual(protocol.max_conversation_page_response_bytes, longest_conversation);
 
-    var proposals: store_module.ProposalPage = .{ .end = max, .count = protocol.proposal_page_items, .more = false };
-    for (&proposals.items) |*item| item.* = .{
-        .position = max,
-        .operation = max,
-        .turn = max,
-        .call_ordinal = max,
-        .action = max,
-        .rejection = Worst.tag(protocol.ProposalRejection),
-        .fields = @splat(.{ .length = max, .digest = content.digest }),
-    };
-    var proposal_response: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{};
-    try proposal_response.render(renderProposalPage, .{&proposals});
-    try std.testing.expectEqual(protocol.max_proposal_page_response_bytes, proposal_response.len);
-
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
     // A label is a description's size, so the worst one doubles as both.
@@ -3168,6 +3081,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
+        .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
     };
     try std.testing.expectEqual(std.meta.tags(std.meta.Tag(protocol.ActivityItem.Value)).len, values.len);
     var longest_item: protocol.ActivityItem = undefined;
@@ -3210,7 +3124,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     facts.work = .{ .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max }, .revision = max };
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.len = protocol.max_workspace_bytes;
-    facts.read_through = max;
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
     try facts.writeJson(&page_writer);
