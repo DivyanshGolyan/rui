@@ -161,6 +161,17 @@ pub fn resetCached(statement: *c.sqlite3_stmt) void {
     }
 }
 
+/// Resets a cached statement that was bound but not stepped since its
+/// last `resetCached`, such as one queued after a failed step. Its plan
+/// read no bound value: SQLite re-prepares with bound values only inside a
+/// step, and the `resetCached` after that step would have panicked. So an
+/// expiry it carries came from a schema change, which its next step
+/// re-prepares for, and the check does not apply.
+pub fn resetUnstepped(statement: *c.sqlite3_stmt) void {
+    _ = c.sqlite3_reset(statement);
+    _ = c.sqlite3_clear_bindings(statement);
+}
+
 pub fn exec(database: *c.sqlite3, sql: [:0]const u8) !void {
     if (c.sqlite3_exec(database, sql, null, null, null) != c.SQLITE_OK) return error.SqliteExecFailed;
 }

@@ -67,6 +67,76 @@ pub fn First(comptime Row: type) type {
     };
 }
 
+/// The rows a per-row read stepped, kept by the visitor it hands them to,
+/// so a read run through `readEach` keeps the meaning `.one` or
+/// `.optional` gave it: a second row is `CorruptStore`, and is not stepped
+/// for when the text rules one out (`rsql.Read.single_row`). A visitor
+/// writes what it keeps into its caller's buffers, such as a page's items,
+/// so a page's rows share their rounds without a row slot each.
+const RowCount = struct {
+    rows: u8 = 0,
+    failure: ?error{CorruptStore} = null,
+
+    /// Whether the read found its row, once its round ran.
+    fn found(count: RowCount) error{CorruptStore}!bool {
+        if (count.failure) |err| return err;
+        return count.rows != 0;
+    }
+};
+
+/// Queues `S` for `visitor`, which has a `count` and a `keep` of `S.Row`.
+fn readRow(a: anytype, comptime S: type, args: S.Args, visitor: anytype) void {
+    visitor.count = .{};
+    a.readEach(S, args, if (S.single_row) 1 else 2, visitor);
+}
+
+/// `readRow` stepping one row only, as main did for these texts, which do
+/// not rule out a second.
+fn readFirst(a: anytype, comptime S: type, args: S.Args, visitor: anytype) void {
+    visitor.count = .{};
+    a.readEach(S, args, 1, visitor);
+}
+
+/// A per-row visitor's `visit`: counts the row, then keeps it. A second
+/// row, or one `keep` refuses, stops the read and is its failure.
+fn visitRow(visitor: anytype, row: anytype) bool {
+    visitor.count.rows += 1;
+    if (visitor.count.rows > 1) {
+        visitor.count.failure = error.CorruptStore;
+        return false;
+    }
+    visitor.keep(row) catch |err| {
+        visitor.count.failure = err;
+        return false;
+    };
+    return true;
+}
+
+/// The name main gave each statement here whose step fails, so a round of
+/// many rows' reads answers as main did for the one that failed; any
+/// other is `CorruptStore`. A Proposal's keeps `StatementFailed`, as
+/// main's `proposal` let it through.
+const read_failures = .{
+    .{ missing_assistant_entry, error.ConversationReadFailed },
+    .{ public_page, error.ConversationReadFailed },
+    .{ activity_forward, error.ActivityReadFailed },
+    .{ activity_backward, error.ActivityReadFailed },
+    .{ proposal_positions, error.ProposalReadFailed },
+    .{ public_entry, error.ConversationReadFailed },
+    .{ public_tool_result, error.PublicContentReadFailed },
+    .{ hosted_call, error.ActivityReadFailed },
+    .{ activity_item, error.ActivityReadFailed },
+    .{ peer_label, error.SessionReadFailed },
+    .{ proposal_row, error.StatementFailed },
+    .{ call_activity, error.CallReadFailed },
+    .{ queued, error.ActivityReadFailed },
+};
+
+/// Ends a round of per-row reads, naming a failed step by `read_failures`.
+fn runRows(a: *ReadAccess) !void {
+    return store_access.runNamed(a, read_failures, error.CorruptStore);
+}
+
 const public_tool_groups_sql = "WITH tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
     "FROM model_operation op JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -373,11 +443,12 @@ const public_page = rsql.Read(.{
     .compound = true,
 });
 
-/// Round 1 reads the Session's next position, then the cursor's item is
-/// resolved (`hostedCall`, `publicConversationContent`), then one round
-/// reads the page's rows into this frame, and each row's own reads follow
-/// in rounds of their own. Every later round depends on a row an earlier
-/// one read.
+/// Round 1 reads the Session's next position. Round 2 reads the page's
+/// rows into this frame, with the cursor's item: its hosted call and its
+/// content row together at ordinal 0, where main read the content only
+/// when no hosted call was there. The rows' own reads follow
+/// (`readPublicRows`), each round shared by every row, and the cursor's
+/// content metadata shares their first.
 pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.ConversationPage, page: *PublicConversationPage) !void {
     if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
         request.before_ordinal > std.math.maxInt(i64) or
@@ -389,50 +460,126 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.Conversat
     const end = if (request.end == 0) next - 1 else request.end;
     if (request.end != 0 and (request.before_position > end or end >= next or
         end > std.math.maxInt(i64))) return error.InvalidCursor;
-    if (request.before_position != 0) cursor: {
-        // A cursor names an item: a hosted call, or an item with content.
-        if (request.before_ordinal == 0) if (hostedCall(a, session, request.before_position)) |_| break :cursor else |err| switch (err) {
-            error.ContentNotFound => {},
-            else => return err,
-        };
-        _ = publicConversationContent(a, session, request.before_position, request.before_ordinal) catch |err| switch (err) {
-            error.ContentNotFound => return error.InvalidCursor,
-            else => return err,
-        };
-    }
     page.* = .{ .end = end };
+    // A cursor needs a nonzero end, so an empty Session has no rows and
+    // no cursor to read.
     if (end == 0) return;
     var rows: Collected(public_page.Row, PublicConversationPage.capacity + 1) = .{};
     a.readEach(public_page, .{ .session = session, .end = end, .before_position = request.before_position, .before_ordinal = request.before_ordinal }, rows.items.len, &rows);
-    try store_access.runAs(a, error.ConversationReadFailed);
+    // A cursor names an item: a hosted call, or an item with content.
+    var hosted_cursor: protocol.ToolPresentation = undefined;
+    var hosted: HostedRead = .{ .position = request.before_position, .presentation = &hosted_cursor };
+    var cursor: PublicContentRead = .{ .position = request.before_position, .ordinal = request.before_ordinal };
+    if (request.before_position != 0) {
+        if (request.before_ordinal == 0) hosted.queue(a, session);
+        cursor.queue(a, session);
+    }
+    try runRows(a);
+    var content_cursor: ?*PublicContentRead = null;
+    if (request.before_position != 0) cursor: {
+        if (request.before_ordinal == 0) if (hosted.found()) |_| break :cursor else |err| switch (err) {
+            error.ContentNotFound => {},
+            else => return err,
+        };
+        cursor.found(a) catch |err| switch (err) {
+            error.ContentNotFound => return error.InvalidCursor,
+            else => return err,
+        };
+        cursor.queueMetadata(a);
+        content_cursor = &cursor;
+    }
     page.more = rows.len > page.items.len;
-    for (rows.slice()[0..@min(rows.len, page.items.len)]) |row| {
-        if (row.kind == 5) {
-            if (row.position == 0 or row.ordinal != 0) return error.CorruptStore;
-            const call = try hostedCall(a, session, row.position);
-            page.items[page.count] = .{ .position = row.position, .ordinal = 0, .kind = .hosted_call, .content = .{ .length = 0, .digest = protocol.contentDigest("") }, .presentation = call.presentation };
-            page.count += 1;
-            continue;
-        }
-        const content_id = row.content_id orelse 0;
-        if (row.position == 0 or content_id == 0 or
-            (row.kind != 1 and row.kind != 3 and row.kind != 4) or
-            (row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;
+    const shown = rows.slice()[0..@min(rows.len, page.items.len)];
+    for (shown, page.items[0..shown.len]) |row, *item| {
         // Do not filter damaged rows out of SQL: validate ordinary
         // producers and the exposed content before publishing metadata.
-        const resolved = try publicConversationContent(a, session, row.position, row.ordinal);
-        if (@as(u64, @intCast(resolved.id)) != content_id or (row.kind == 1) != (resolved.admitted_at != null)) return error.CorruptStore;
-        const metadata = resolved.metadata;
-        page.items[page.count] = .{ .position = row.position, .ordinal = row.ordinal, .kind = switch (row.kind) {
+        if (row.position == 0) return error.CorruptStore;
+        item.* = .{ .position = row.position, .ordinal = row.ordinal, .kind = switch (row.kind) {
             1 => .user,
             3 => .assistant,
             4 => .tool_result,
-            else => unreachable,
-        }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .sender = if (resolved.sender) |sender| try peerNamed(a, sender) else null, .presentation = if (resolved.tool_operation) |operation| try toolPresentation(a, operation, row.ordinal - 1, row.position) else null };
-        page.count += 1;
+            5 => .hosted_call,
+            else => return error.CorruptStore,
+        }, .content = .{ .length = 0, .digest = protocol.contentDigest("") } };
+        if (row.kind == 5) {
+            if (row.ordinal != 0) return error.CorruptStore;
+        } else if ((row.content_id orelse 0) == 0 or (row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;
     }
+    page.count = shown.len;
     const upper = if (request.before_position == 0) end else @min(end, request.before_position - @intFromBool(request.before_ordinal == 0));
-    try checkAssistantEntries(a, session, if (page.more) page.items[page.count - 1].position else 0, upper);
+    try readPublicRows(a, session, shown, page.items[0..shown.len], if (page.more) page.items[page.count - 1].position else 0, upper, content_cursor);
+}
+
+/// One page row's own reads (`readPublicRows`).
+const PublicRowRead = struct {
+    reads: union(enum) { content: PublicContentRead, hosted: HostedRead },
+    label: LabelRead = undefined,
+    presentation: PresentationRead = undefined,
+};
+
+/// The page rows' own reads, each round shared by every row: round 1 each
+/// row's content (`PublicContentRead`) or hosted call, with the page's
+/// assistant check over `lower` through `upper` and the metadata `cursor`
+/// queued; round 2 each content's metadata, its sender's label and its
+/// call's presentation; round 3 each presentation's Proposal. Not
+/// inlined, so its per-row state takes no slot in the page's frame.
+noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const public_page.Row, items: []PublicConversationItem, lower: u64, upper: u64, cursor: ?*PublicContentRead) !void {
+    var reads: [PublicConversationPage.capacity]PublicRowRead = undefined;
+    var missing: missing_assistant_entry.Result = null;
+    if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
+    for (items, reads[0..items.len]) |*item, *read| {
+        if (item.kind == .hosted_call) {
+            item.presentation = @as(protocol.ToolPresentation, undefined);
+            read.* = .{ .reads = .{ .hosted = .{ .position = item.position, .presentation = &item.presentation.? } } };
+            read.reads.hosted.queue(a, session);
+        } else {
+            read.* = .{ .reads = .{ .content = .{ .position = item.position, .ordinal = item.ordinal, .sender = &item.sender } } };
+            read.reads.content.queue(a, session);
+        }
+    }
+    if (items.len != 0 or lower <= upper or cursor != null) try runRows(a);
+    if (cursor) |read| try read.takeMetadata();
+    var contents = false;
+    for (rows, items, reads[0..items.len]) |row, *item, *read| switch (read.reads) {
+        .hosted => |*hosted| try hosted.found(),
+        .content => |*content| {
+            try content.found(a);
+            const found = &content.content;
+            if (@as(u64, @intCast(found.id)) != row.content_id.? or (row.kind == 1) != (found.admitted_at != null)) return error.CorruptStore;
+            item.admitted_at = found.admitted_at;
+            content.queueMetadata(a);
+            contents = true;
+            if (item.sender) |*sender| {
+                read.label = .{ .peer = sender };
+                read.label.queue(a);
+            }
+            if (found.tool_operation) |operation| {
+                item.presentation = @as(protocol.ToolPresentation, undefined);
+                read.presentation = .init(operation, item.ordinal - 1, item.position, &item.presentation.?);
+                read.presentation.queue(a);
+            }
+        },
+    };
+    if (contents) try runRows(a);
+    var proposals = false;
+    for (items, reads[0..items.len]) |*item, *read| switch (read.reads) {
+        .hosted => {},
+        .content => |*content| {
+            try content.takeMetadata();
+            item.content = .{ .length = content.content.metadata.length, .digest = content.content.metadata.digest };
+            if (item.sender != null) try read.label.found();
+            if (content.content.tool_operation != null) {
+                try read.presentation.checkCall();
+                read.presentation.queueProposal(a);
+                proposals = true;
+            }
+        },
+    };
+    if (proposals) {
+        try runRows(a);
+        for (reads[0..items.len]) |*read| if (read.reads == .content and read.reads.content.content.tool_operation != null) try read.presentation.finish();
+    }
+    if (missing != null) return error.CorruptStore;
 }
 
 pub fn openPublicConversationContent(a: *ReadAccess, request: *const protocol.ConversationContent) !ContentLocation {
@@ -498,7 +645,7 @@ const public_entry = rsql.Read(.{
         "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct { content_id: rsql.Positive, consistent: bool, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive },
-    .cardinality = .optional,
+    .cardinality = .each,
 });
 
 /// The Tool Result of call ?3 at position ?2, with whether every call of
@@ -541,39 +688,72 @@ const public_tool_result = rsql.Read(.{
 /// Public content at a Conversation position: an entry (ordinal 0) or a
 /// Tool Result. `at` is when the entry was recorded, or, for a Tool Result,
 /// when its group's last call was accepted.
-pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, sender: ?SessionText = null, at: u64 };
+pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, at: u64 };
 
 // A cursor and a byte reader resolve the same public identity and exposed
 // metadata. Neither may accept a private or absent canonical result.
-/// An entry's round reads its assistant check and its row together; a
-/// Tool Result's reads its row, then its group's outcome facts (a report
-/// read). The metadata of the content found is the last round. A failed
-/// step is main's name: `ConversationReadFailed` for an entry,
-/// `PublicContentReadFailed` for a Tool Result, `CorruptStore` for the
-/// metadata.
-fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64, ordinal: u64) !PublicContent {
-    var content: PublicContent = undefined;
-    if (ordinal == 0) {
-        var missing: missing_assistant_entry.Result = undefined;
-        var row: public_entry.Result = undefined;
-        a.read(missing_assistant_entry, .{ .session = session, .lower = position, .upper = position }, &missing);
-        a.read(public_entry, .{ .session = session, .position = position }, &row);
-        try store_access.runAs(a, error.ConversationReadFailed);
-        if (missing != null) return error.CorruptStore;
-        const entry = row orelse return error.ContentNotFound;
-        if (!entry.consistent) return error.CorruptStore;
-        content = .{ .id = @intCast(entry.content_id.get()), .metadata = undefined, .tool_operation = null, .admitted_at = if (entry.admitted_at) |second| second.get() else null, .sender = entry.sender, .at = entry.recorded_at.get() };
-    } else {
-        var first: First(public_tool_result.Row) = .{};
-        a.readEach(public_tool_result, .{ .session = session, .position = position, .ordinal = ordinal }, 1, &first);
-        try store_access.runAs(a, error.PublicContentReadFailed);
-        const result = first.row orelse return error.ContentNotFound;
-        if (!result.consistent) return error.CorruptStore;
-        _ = try report_domain.readToolOutcomeFacts(a.store, result.operation_id.get(), true);
-        content = .{ .id = @intCast(result.content_id.get()), .metadata = undefined, .tool_operation = result.operation_id.get(), .admitted_at = null, .at = result.at.get() };
+/// Public content's reads, in rounds it may share with other rows. `queue`
+/// the entry with its assistant check, or the Tool Result; after that
+/// round, `found` (a Tool Result's group outcome facts are a report read
+/// it runs then), then `queueMetadata`; after that round, `takeMetadata`.
+const PublicContentRead = struct {
+    position: u64,
+    ordinal: u64,
+    /// Where an entry's sender goes, for a caller that shows it.
+    sender: ?*?protocol.NamedPeer = null,
+    content: PublicContent = undefined,
+    missing: missing_assistant_entry.Result = null,
+    metadata: content_metadata.Row = undefined,
+    count: RowCount = .{},
+
+    fn queue(read: *PublicContentRead, a: *ReadAccess, session: []const u8) void {
+        read.missing = null;
+        if (read.ordinal == 0) {
+            a.read(missing_assistant_entry, .{ .session = session, .lower = read.position, .upper = read.position }, &read.missing);
+            readRow(a, public_entry, .{ .session = session, .position = read.position }, read);
+        } else readFirst(a, public_tool_result, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, read);
     }
-    content.metadata = try readPublicMetadata(a, @intCast(content.id));
-    return content;
+
+    pub fn visit(read: *PublicContentRead, row: anytype) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *PublicContentRead, row: anytype) error{CorruptStore}!void {
+        if (!row.consistent) return error.CorruptStore;
+        if (@TypeOf(row.*) == public_entry.Row) {
+            read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get() };
+            if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
+        } else {
+            read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get() };
+        }
+    }
+
+    /// After the first round: none is `ContentNotFound`.
+    fn found(read: *PublicContentRead, a: *ReadAccess) !void {
+        if (read.missing != null) return error.CorruptStore;
+        if (!try read.count.found()) return error.ContentNotFound;
+        if (read.content.tool_operation) |operation| _ = try report_domain.readToolOutcomeFacts(a.store, operation, true);
+    }
+
+    fn queueMetadata(read: *PublicContentRead, a: *ReadAccess) void {
+        a.read(content_metadata, .{ .content_id = @intCast(read.content.id) }, &read.metadata);
+    }
+
+    fn takeMetadata(read: *PublicContentRead) !void {
+        read.content.metadata = try content_domain.publicMetadata(&read.metadata);
+    }
+};
+
+/// `PublicContentRead` alone, in rounds of its own.
+fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64, ordinal: u64) !PublicContent {
+    var read: PublicContentRead = .{ .position = position, .ordinal = ordinal };
+    read.queue(a, session);
+    try runRows(a);
+    try read.found(a);
+    read.queueMetadata(a);
+    try runRows(a);
+    try read.takeMetadata();
+    return read.content;
 }
 
 /// `publicConversationContent` for unconverted code (`report.zig`). Not inlined, so its
@@ -681,29 +861,79 @@ const tool_presentation = rsql.Read(.{
         session_ref: SessionText,
         session_position: rsql.Positive,
     },
-    .cardinality = .one,
+    .cardinality = .each,
 });
 
-/// Round 1 reads the call; round 2 the Proposal of the item it names. A
-/// failed step of the call's read is `CorruptStore`, main's answer for it.
-fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
-    var row: tool_presentation.Row = undefined;
-    a.read(tool_presentation, .{ .operation = operation, .ordinal = ordinal }, &row);
-    try store_access.runAs(a, error.CorruptStore);
-    _ = try proposal(a, row.session_ref.slice(), row.session_position.get());
-    var result: protocol.ToolPresentation = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
-    if (row.description) |description| {
-        if (!protocol.ToolPresentation.validDescription(description.slice())) return error.CorruptStore;
-        result.description = description;
+/// A call's presentation, in rounds it may share with other rows: `queue`
+/// the call; after that round, `checkCall`, then `queueProposal`, the
+/// Proposal of the item the call names; after that round, `finish`, which
+/// judges the call's line and outcome, in main's order.
+const PresentationRead = struct {
+    operation: u64,
+    ordinal: u64,
+    out: *protocol.ToolPresentation,
+    /// The call's item, whose Proposal the next round reads.
+    session: SessionText = undefined,
+    proposal: ProposalRead = undefined,
+    code: ?protocol.ToolPresentation.Code = null,
+    authorized: ?bool = null,
+    count: RowCount = .{},
+
+    fn init(operation: u64, ordinal: u64, publication_position: ?u64, out: *protocol.ToolPresentation) PresentationRead {
+        out.* = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
+        return .{ .operation = operation, .ordinal = ordinal, .out = out };
     }
-    if (row.code) |code| {
-        result.code = code;
-    } else if (!(row.authorized orelse false)) result.code = .pending_permission;
-    if (result.description == null) switch (result.code) {
-        .unknown_tool, .invalid_arguments => {},
-        else => return error.CorruptStore,
-    };
-    return result;
+
+    fn queue(read: *PresentationRead, a: *ReadAccess) void {
+        readRow(a, tool_presentation, .{ .operation = read.operation, .ordinal = read.ordinal }, read);
+    }
+
+    pub fn visit(read: *PresentationRead, row: *const tool_presentation.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *PresentationRead, row: *const tool_presentation.Row) error{CorruptStore}!void {
+        read.out.description = row.description;
+        read.code = row.code;
+        read.authorized = row.authorized;
+        read.session = row.session_ref;
+        read.proposal = .{ .position = row.session_position.get() };
+    }
+
+    /// After the call's round: it reads `.one`, so none is `CorruptStore`.
+    fn checkCall(read: *const PresentationRead) !void {
+        if (!try read.count.found()) return error.CorruptStore;
+    }
+
+    fn queueProposal(read: *PresentationRead, a: *ReadAccess) void {
+        readProposal(a, read.session.slice(), &read.proposal);
+    }
+
+    fn finish(read: *PresentationRead) !void {
+        try read.proposal.found();
+        const result = read.out;
+        if (result.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.CorruptStore;
+        if (read.code) |code| {
+            result.code = code;
+        } else if (!(read.authorized orelse false)) result.code = .pending_permission;
+        if (result.description == null) switch (result.code) {
+            .unknown_tool, .invalid_arguments => {},
+            else => return error.CorruptStore,
+        };
+    }
+};
+
+/// `PresentationRead` alone, in rounds of its own.
+fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
+    var presentation: protocol.ToolPresentation = undefined;
+    var read: PresentationRead = .init(operation, ordinal, publication_position, &presentation);
+    read.queue(a);
+    try runRows(a);
+    try read.checkCall();
+    read.queueProposal(a);
+    try runRows(a);
+    try read.finish();
+    return presentation;
 }
 
 /// The hosted call at a position, with whether an accepted Operation
@@ -721,23 +951,37 @@ const hosted_call = rsql.Read(.{
         resolved_at: ?rsql.Positive,
         consistent: bool,
     },
-    .cardinality = .optional,
+    .cardinality = .each,
 });
 
 /// The hosted tool call at `position`, as an accepted Operation's output
-/// recorded it: its line, its outcome and when its Operation resolved. A
-/// round of its own; a failed step is `ActivityReadFailed`, main's name.
-fn hostedCall(a: *ReadAccess, session: []const u8, position: u64) !struct { presentation: protocol.ToolPresentation, at: u64 } {
-    var found: hosted_call.Result = undefined;
-    a.read(hosted_call, .{ .session = session, .position = position }, &found);
-    try store_access.runAs(a, error.ActivityReadFailed);
-    const row = found orelse return error.ContentNotFound;
-    if (!row.consistent or !protocol.ToolPresentation.validDescription(row.description.slice())) return error.CorruptStore;
-    return .{
-        .presentation = .{ .description = row.description, .code = if (row.call_failed) .failed else .succeeded, .publication_position = position },
-        .at = (row.resolved_at orelse return error.CorruptStore).get(),
-    };
-}
+/// recorded it, in a round it may share with other rows: its line and its
+/// outcome go to `presentation`, and when its Operation resolved to `at`.
+const HostedRead = struct {
+    position: u64,
+    presentation: *protocol.ToolPresentation,
+    at: u64 = 0,
+    count: RowCount = .{},
+
+    fn queue(read: *HostedRead, a: *ReadAccess, session: []const u8) void {
+        readRow(a, hosted_call, .{ .session = session, .position = read.position }, read);
+    }
+
+    pub fn visit(read: *HostedRead, row: *const hosted_call.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *HostedRead, row: *const hosted_call.Row) error{CorruptStore}!void {
+        if (!row.consistent or !protocol.ToolPresentation.validDescription(row.description.slice())) return error.CorruptStore;
+        read.presentation.* = .{ .description = row.description, .code = if (row.call_failed) .failed else .succeeded, .publication_position = read.position };
+        read.at = (row.resolved_at orelse return error.CorruptStore).get();
+    }
+
+    /// After its round: none is `ContentNotFound`.
+    fn found(read: *const HostedRead) !void {
+        if (!try read.count.found()) return error.ContentNotFound;
+    }
+};
 
 /// `toolPresentation` for unconverted code (`report.zig`). Not inlined, so its
 /// Access takes no slot in the report's frame.
@@ -775,12 +1019,13 @@ const page_session = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Round 1 reads the Session and the sequence guard; the cursor's item
-/// follows (`activityItem`); then one round reads the page's rows into
-/// this frame, and each row's item follows in rounds of its own; then one
-/// round reads the assistant check, the call activity and the queued
-/// Messages, which the page's last row bounds. Call activity past 16
-/// Operations and the work footer (a report read) take more.
+/// Round 1 reads the Session and the sequence guard. Round 2 reads the
+/// page's rows into this frame, with the cursor's item row; the cursor's
+/// kind reads follow in rounds of their own (`readItems`). Then the rows'
+/// items take the rounds their kinds need, each round shared by every
+/// row, and the first of them also reads the assistant check, the call
+/// activity and the queued Messages, which the page's last row bounds.
+/// The work footer is a report read.
 pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
     page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
     const session_ref = request.session.slice();
@@ -790,19 +1035,13 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     var guard: activity_sequence_guard.Result = undefined;
     a.readInto(page_session, .{ .session = session_ref }, &session, &found);
     a.read(activity_sequence_guard, .{ .session = session_ref }, &guard);
-    a.run() catch |err| return if (err == error.StatementFailed) (if (a.failedOn(page_session)) error.SessionReadFailed else error.CorruptStore) else err;
+    try store_access.runNamed(a, .{.{ page_session, error.SessionReadFailed }}, error.CorruptStore);
     if (!found.get()) return error.SessionNotFound;
     if (session.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
     const next = session.next_position.get();
     const end = request.end orelse next - 1;
     if (end >= next or request.position > end) return error.InvalidCursor;
     if (guard != null) return error.CorruptStore;
-    if (request.ordinal) |ordinal| {
-        _ = activityItem(a, session_ref, end, request.position, ordinal) catch |err| switch (err) {
-            error.ContentNotFound => return error.InvalidCursor,
-            else => return err,
-        };
-    }
     page.end = end;
     page.read_through = if (session.read_through) |position| position.get() else null;
     // The cursor as a bound on (position, ordinal): a whole position is
@@ -815,37 +1054,38 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
         a.readEach(activity_forward, .{ .session = session_ref, .end = end, .position = request.position, .ordinal = request.ordinal orelse whole }, rows.items.len, &rows)
     else
         a.readEach(activity_backward, .{ .session = session_ref, .position = if (request.position != 0) request.position else end, .ordinal = if (request.position == 0) whole else request.ordinal orelse 0 }, rows.items.len, &rows);
-    try store_access.runAs(a, error.ActivityReadFailed);
-    for (rows.slice()) |row| {
-        const position = row.position.get();
-        if (page.count == page.items.len) {
-            page.more = true;
-            // The row after a backward page's oldest says whether the
-            // unseen rows reach past it.
-            page.beyond_unseen = !forward and if (page.read_through) |read| position > read else true;
-            break;
-        }
-        page.items[page.count] = (try activityItem(a, session_ref, end, position, row.ordinal)).item;
-        page.count += 1;
+    if (request.ordinal) |ordinal| {
+        // The cursor's item, read into the first slot, which the page's
+        // own first item replaces.
+        readItems(1, a, session_ref, end, &.{.{ .position = request.position, .ordinal = ordinal }}, page.items[0..1], null, null) catch |err| switch (err) {
+            error.ContentNotFound => return error.InvalidCursor,
+            else => return err,
+        };
+    } else try runRows(a);
+    page.count = @min(rows.len, page.items.len);
+    if (rows.len > page.items.len) {
+        page.more = true;
+        // The row after a backward page's oldest says whether the
+        // unseen rows reach past it.
+        page.beyond_unseen = !forward and if (page.read_through) |read| rows.items[page.items.len].position.get() > read else true;
     }
-    const boundary = if (page.more) &page.items[page.count - 1] else null;
+    var at: [page.items.len]ItemAt = undefined;
+    for (rows.slice()[0..page.count], at[0..page.count]) |row, *item| item.* = .{ .position = row.position.get(), .ordinal = row.ordinal };
+    const boundary: ?ItemAt = if (page.more) at[page.count - 1] else null;
     const lower = if (forward) request.position + 1 else if (boundary) |item| item.position else 0;
     const upper = if (forward) (if (boundary) |item| item.position else end) else if (request.position == 0) end else @min(end, request.position - @intFromBool((request.ordinal orelse 0) == 0));
     const last = if (forward) boundary else null;
     const call_position = if (last) |item| item.position else end;
-    const call_ordinal = if (last) |item| item.ordinal else null;
     var missing: missing_assistant_entry.Result = null;
-    var calls: CallRows = .{};
+    var calls: CallRows = .{ .store = a.store, .activity = &page.call_activity };
     var waiting: QueuedMessages = .{};
     if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
-    a.readEach(call_activity, .{ .session = session_ref, .position = call_position, .ordinal = call_ordinal }, std.math.maxInt(u64), &calls);
+    // Both count what they read (`CallActivity.total`, `Queued.count`), so
+    // neither has a smaller bound than every row its statement returns.
+    a.readEach(call_activity, .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null }, std.math.maxInt(u64), &calls);
     a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
-    a.run() catch |err| return if (err == error.StatementFailed)
-        (if (a.failedOn(missing_assistant_entry)) error.ConversationReadFailed else if (a.failedOn(queued)) error.ActivityReadFailed else error.CallReadFailed)
-    else
-        err;
+    try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
-    page.call_activity = try callActivity(a, &calls, .{ .session = session_ref, .position = call_position, .ordinal = call_ordinal, .after = 0 });
     page.queued = waiting.queued;
     // Work as of this same read, so the footer, consent and first Action
     // always describe the page they arrive with.
@@ -855,6 +1095,9 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
 }
 
 const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };
+
+/// An Activity item's place: its position and ordinal.
+const ItemAt = struct { position: u64, ordinal: u64 };
 
 /// Main's one guarded UPDATE: how far a person read moves only forward,
 /// and stays below the Session's next position. No Session list row shows
@@ -937,7 +1180,6 @@ pub fn personMessage(a: *ReadAccess, request: *const protocol.ReadPersonMessage)
 }
 
 const CallRow = struct { operation_id: rsql.Positive, call_ordinal: u64, position: ?rsql.Positive };
-const CallArgs = struct { session: []const u8, position: u64, ordinal: ?u64, after: u64 };
 
 // This projection shares the page's canonical capture, not Current's active
 // Turn lifetime. It is staged until the frontend acknowledges that page.
@@ -945,94 +1187,95 @@ const CallArgs = struct { session: []const u8, position: u64, ordinal: ?u64, aft
 /// completes after (?2, ?3), in Operation and call order, with each
 /// group's position. A group still waiting has an Action without its
 /// result; one that completes after the page has an acceptance after it.
-/// Only those Operations are grouped, not the Session's history. A
-/// `resumed` read takes only Operations after ?4.
-fn CallActivity(comptime resumed: bool) type {
-    return rsql.Read(.{
-        .sql = "WITH ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
-            "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
-            "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
-            "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
-            "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-            "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
-            "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-            "AND count(coalesce(tool_call.acceptance_position,action.acceptance_position))=count(*) " ++
-            "AND count(coalesce(tool_call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
-            "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
-            "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
-            "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
-            "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3))) " ++
-            "SELECT operation_id,call_ordinal,position FROM candidates " ++ (if (resumed) "WHERE operation_id>?4 " else "") ++ "ORDER BY operation_id,call_ordinal",
-        .Args = if (resumed) CallArgs else struct { session: []const u8, position: u64, ordinal: ?u64 },
-        .Row = CallRow,
-        .cardinality = .each,
-        .compound = true,
-    });
-}
-const call_activity = CallActivity(false);
-const call_activity_after = CallActivity(true);
+/// Only those Operations are grouped, not the Session's history.
+const call_activity = rsql.Read(.{
+    .sql = "WITH ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
+        "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
+        "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
+        "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
+        "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+        "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
+        "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+        "AND count(coalesce(tool_call.acceptance_position,action.acceptance_position))=count(*) " ++
+        "AND count(coalesce(tool_call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+        "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
+        "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
+        "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
+        "AND (tool_groups.position IS NULL OR tool_groups.position>?2 OR (tool_groups.position=?2 AND ?3 IS NOT NULL AND tool_call.call_ordinal+1>?3))) " ++
+        "SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal",
+    .Args = struct { session: []const u8, position: u64, ordinal: ?u64 },
+    .Row = CallRow,
+    .cardinality = .each,
+    .compound = true,
+});
 
-/// What a call activity read keeps: every call counted, the first three,
-/// and up to 16 Operations' projected group positions, which the caller
-/// checks against each Operation's outcome facts between rounds. A row
-/// that names a 17th Operation stops the read, and the next round resumes
-/// at it (`call_activity_after`).
+const ToolOutcomeError = @typeInfo(@typeInfo(@TypeOf(report_domain.readToolOutcomeFacts)).@"fn".return_type.?).error_union.error_set;
+
+/// A page's call activity, as main's walk read it while it stepped: every
+/// call counted in `activity.total`, each Operation's group position
+/// checked against its outcome facts (a report read, run when the
+/// Operation's first row arrives), and the first three calls kept, whose
+/// presentations the item rounds after it read (`queue`, `take`). It
+/// keeps nothing per Operation, so its read steps every row the statement
+/// returns: a count has no smaller bound.
 const CallRows = struct {
-    const max_operations = 16;
-    operations: [max_operations]struct { id: u64, projected: ?u64 } = undefined,
-    operation_count: usize = 0,
-    full: bool = false,
-    total: u64 = 0,
-    entries: [@typeInfo(@FieldType(protocol.CallActivity, "entries")).array.len]struct { operation: u64, ordinal: u64 } = undefined,
-    entry_count: usize = 0,
+    store: *Store,
+    activity: *protocol.CallActivity,
+    operation: u64 = 0,
+    publication: ?u64 = null,
+    failure: ?ToolOutcomeError = null,
+    presentations: [@typeInfo(@FieldType(protocol.CallActivity, "entries")).array.len]PresentationRead = undefined,
 
     pub fn visit(rows: *CallRows, row: *const CallRow) bool {
         const operation = row.operation_id.get();
-        if (rows.operation_count == 0 or rows.operations[rows.operation_count - 1].id != operation) {
-            if (rows.operation_count == max_operations) {
-                rows.full = true;
+        if (operation != rows.operation) {
+            rows.operation = operation;
+            const facts = report_domain.readToolOutcomeFacts(rows.store, operation, false) catch |err| {
+                rows.failure = err;
+                return false;
+            };
+            rows.publication = facts.position;
+            if (rows.publication != if (row.position) |position| position.get() else null) {
+                rows.failure = error.CorruptStore;
                 return false;
             }
-            rows.operations[rows.operation_count] = .{ .id = operation, .projected = if (row.position) |position| position.get() else null };
-            rows.operation_count += 1;
         }
-        rows.total += 1;
-        if (rows.entry_count < rows.entries.len) {
-            rows.entries[rows.entry_count] = .{ .operation = operation, .ordinal = row.call_ordinal };
-            rows.entry_count += 1;
+        const activity = rows.activity;
+        activity.total += 1;
+        if (activity.count < activity.entries.len) {
+            const entry = &activity.entries[activity.count];
+            entry.* = .{ .operation = operation, .ordinal = row.call_ordinal, .presentation = undefined };
+            rows.presentations[activity.count] = .init(operation, row.call_ordinal, rows.publication, &entry.presentation);
+            activity.count += 1;
         }
         return true;
     }
-};
 
-/// Checks each Operation a call activity round kept against its outcome
-/// facts (a report read), and reads the first calls' presentations, then
-/// resumes a read that stopped at its 17th Operation. A failed step of a
-/// resumed read is `CallReadFailed`, main's name.
-fn callActivity(a: *ReadAccess, rows: *CallRows, resume_from: CallArgs) !protocol.CallActivity {
-    var result: protocol.CallActivity = .{};
-    var args = resume_from;
-    while (true) {
-        for (rows.operations[0..rows.operation_count]) |operation| {
-            const publication = (try report_domain.readToolOutcomeFacts(a.store, operation.id, false)).position;
-            if (publication != operation.projected) return error.CorruptStore;
-            for (rows.entries[result.count..rows.entry_count]) |entry| {
-                if (entry.operation != operation.id) break;
-                result.entries[result.count] = .{ .operation = entry.operation, .ordinal = entry.ordinal, .presentation = try toolPresentation(a, entry.operation, entry.ordinal, publication) };
-                result.count += 1;
-            }
+    /// Queues round `round`'s reads: the kept calls in round 1, their
+    /// Proposals in round 2. The caller queued the call read itself before
+    /// round 0. True when it queued.
+    fn queue(rows: *CallRows, a: *ReadAccess, round: u8) bool {
+        const kept = rows.presentations[0..rows.activity.count];
+        switch (round) {
+            1 => for (kept) |*presentation| presentation.queue(a),
+            2 => for (kept) |*presentation| presentation.queueProposal(a),
+            else => return false,
         }
-        if (!rows.full) break;
-        args.after = rows.operations[rows.operation_count - 1].id;
-        rows.operation_count = 0;
-        rows.full = false;
-        a.readEach(call_activity_after, args, std.math.maxInt(u64), rows);
-        try store_access.runAs(a, error.CallReadFailed);
+        return kept.len != 0;
     }
-    result.total = rows.total;
-    return result;
-}
+
+    /// Takes round `round`'s rows, once it ran.
+    fn take(rows: *CallRows, round: u8) !void {
+        const kept = rows.presentations[0..rows.activity.count];
+        switch (round) {
+            0 => if (rows.failure) |err| return err,
+            1 => for (kept) |*presentation| try presentation.checkCall(),
+            2 => for (kept) |*presentation| try presentation.finish(),
+            else => {},
+        }
+    }
+};
 
 /// The Messages a person or script sent that were admitted at or before
 /// a position and not taken there (`queued`). Selection and a stop's
@@ -1062,29 +1305,8 @@ const peer_label = rsql.Read(.{
     .sql = "SELECT label FROM session WHERE session_ref=?1",
     .Args = struct { session: SessionText },
     .Row = struct { label: ?protocol.Bounded(protocol.max_label_bytes) },
-    .cardinality = .optional,
+    .cardinality = .each,
 });
-
-/// A peer Session with its label as the Store holds it now, so a rename
-/// shows on every row that names it. One indexed lookup per peer row, in
-/// a round of its own; a failed step is `SessionReadFailed`, main's name.
-fn peerNamed(a: *ReadAccess, session: SessionText) !protocol.NamedPeer {
-    var found: peer_label.Result = undefined;
-    a.read(peer_label, .{ .session = session }, &found);
-    try store_access.runAs(a, error.SessionReadFailed);
-    return namedPeer(session, found);
-}
-
-/// The peer a `peer_label` read found: a failed send can name a Session
-/// this Store never held, which has no label.
-fn namedPeer(session: SessionText, found: peer_label.Result) !protocol.NamedPeer {
-    var peer: protocol.NamedPeer = .{ .session = session };
-    if (found) |row| if (row.label) |label| {
-        if (!protocol.validLabel(label.slice())) return error.CorruptStore;
-        peer.label = label;
-    };
-    return peer;
-}
 
 /// An admitted Message of the Session, with whether it was applied or
 /// excluded at end ?2 and whether its command and Turn agree with it.
@@ -1109,38 +1331,8 @@ const activity_message = rsql.Read(.{
         admitted_at: rsql.Positive,
         sender_session_ref: ?SessionText,
     },
-    .cardinality = .one,
+    .cardinality = .each,
 });
-
-/// Content an Activity item exposes: its row and public metadata.
-const Located = struct { id: i64, metadata: ContentMetadata };
-
-/// Round 1 reads the Message; round 2 its content's metadata and its
-/// sender's label. A failed step is main's name: `CorruptStore` for the
-/// Message and the metadata, `SessionReadFailed` for the label.
-fn activityMessage(a: *ReadAccess, session: []const u8, end: u64, admission: u64) !struct { message: protocol.ActivityItem.Message, content: Located } {
-    var row: activity_message.Row = undefined;
-    a.read(activity_message, .{ .session = session, .end = end, .admission = admission }, &row);
-    try store_access.runAs(a, error.CorruptStore);
-    if (!row.consistent) return error.CorruptStore;
-    var metadata: content_metadata.Row = undefined;
-    var label: peer_label.Result = undefined;
-    a.read(content_metadata, .{ .content_id = row.content_id.get() }, &metadata);
-    if (row.sender_session_ref) |sender| a.read(peer_label, .{ .session = sender }, &label);
-    a.run() catch |err| return if (err == error.StatementFailed) (if (a.failedOn(peer_label)) error.SessionReadFailed else error.CorruptStore) else err;
-    const content = try content_domain.publicMetadata(&metadata);
-    var message: protocol.ActivityItem.Message = .{
-        .admission = admission,
-        .key = row.command_key,
-        .turn = null,
-        .state = if (row.applied) .applied else if (row.excluded) .excluded else .queued,
-        .content = .{ .length = content.length, .digest = content.digest },
-        .admitted_at = row.admitted_at.get(),
-    };
-    if (row.applied) message.turn = (row.turn_id orelse return error.CorruptStore).get();
-    message.sender = if (row.sender_session_ref) |sender| try namedPeer(sender, label) else null;
-    return .{ .message = message, .content = .{ .id = @intCast(row.content_id.get()), .metadata = content } };
-}
 
 pub fn readPeer(statement: *sqlite.c.sqlite3_stmt, column: c_int) !?protocol.Peer {
     if (sqlite.c.sqlite3_column_type(statement, column) == sqlite.c.SQLITE_NULL) return null;
@@ -1148,8 +1340,6 @@ pub fn readPeer(statement: *sqlite.c.sqlite3_stmt, column: c_int) !?protocol.Pee
     try sqlite.readText(statement, column, &sender);
     return .{ .session = sender };
 }
-
-const ActivityIdentity = struct { item: protocol.ActivityItem, content: ?Located = null };
 
 /// When the Operation of a call proposed in the Session resolved.
 const call_resolved = rsql.Read(.{
@@ -1166,7 +1356,7 @@ const sent_message = rsql.Read(.{
         "FROM message_admission m LEFT JOIN core_command c ON c.command_key=m.command_key WHERE m.admission_id=?1 AND m.sender_session_ref=?2 AND m.sender_position=?3",
     .Args = struct { admission: u64, session: []const u8, position: u64 },
     .Row = struct { session_ref: SessionText, content_id: rsql.Positive, admitted_at: rsql.Positive, consistent: bool },
-    .cardinality = .one,
+    .cardinality = .each,
 });
 
 /// A send the Host refused at position ?2, with whether its command
@@ -1182,7 +1372,7 @@ const send_failure = rsql.Read(.{
         consistent: bool,
         rejected_at: rsql.Positive,
     },
-    .cardinality = .one,
+    .cardinality = .each,
 });
 
 /// A Turn's outcome at position ?2, with its causing Operation's.
@@ -1221,142 +1411,449 @@ const session_stop = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The Activity item at (`position`, `ordinal`) through `end`. Round 1
-/// reads its row, with the assistant check of an ordinal 0 position at or
-/// before `end`; its kind's own reads follow, each round reading only
-/// what the one before named. A failed step is main's name for the read:
-/// `ConversationReadFailed` for the assistant check, `ActivityReadFailed`
-/// for the row, and per kind as each helper says; the kind reads main
-/// answered `CorruptStore` for answer it still.
-fn activityItem(a: *ReadAccess, session: []const u8, end: u64, position: u64, ordinal: u64) !ActivityIdentity {
-    var missing: missing_assistant_entry.Result = null;
-    var found: activity_item.Result = undefined;
-    if (ordinal == 0 and position <= end) a.read(missing_assistant_entry, .{ .session = session, .lower = position, .upper = position }, &missing);
-    a.read(activity_item, .{ .session = session, .end = end, .position = position, .ordinal = ordinal }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) (if (a.failedOn(missing_assistant_entry)) error.ConversationReadFailed else error.ActivityReadFailed) else err;
-    if (missing != null) return error.CorruptStore;
-    const row = found orelse return error.ContentNotFound;
-    // Each kind reads `at` from the row that owns its fact.
-    var result: ActivityIdentity = .{ .item = .{ .position = position, .ordinal = ordinal, .at = undefined, .value = undefined } };
-    switch (row.kind) {
-        1, 2 => |kind| {
-            const admission = row.id orelse return error.CorruptStore;
-            const owned = try activityMessage(a, session, end, admission.get());
-            const message = owned.message;
-            if (kind == 2 and message.state != .applied) return error.CorruptStore;
-            result.item.value = if (kind == 1) .{ .admission = message } else .{ .user = message };
-            result.content = owned.content;
-            result.item.at = message.admitted_at;
-            if (kind == 2) {
-                const entry = try publicConversationContent(a, session, position, ordinal);
-                if (entry.id != owned.content.id) return error.CorruptStore;
-                result.item.at = entry.at;
-            }
-        },
-        3, 5 => |kind| {
-            const content = try publicConversationContent(a, session, position, ordinal);
-            result.item.at = content.at;
-            result.item.value = if (kind == 3) .{ .assistant = .{ .length = content.metadata.length, .digest = content.metadata.digest } } else .{ .tool_result = .{ .content = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .presentation = try toolPresentation(a, content.tool_operation orelse return error.CorruptStore, ordinal - 1, position) } };
-            result.content = .{ .id = content.id, .metadata = content.metadata };
-        },
-        4 => {
-            const call = (try proposal(a, session, position)).metadata;
-            result.item.value = .{ .call = call };
-            var resolved: call_resolved.Row = undefined;
-            a.read(call_resolved, .{ .operation = call.operation, .session = session }, &resolved);
-            try store_access.runAs(a, error.CorruptStore);
-            result.item.at = resolved.resolved_at.get();
-        },
-        10 => {
-            const call = try hostedCall(a, session, position);
-            result.item.value = .{ .hosted_call = call.presentation };
-            result.item.at = call.at;
-        },
-        8 => try sentItem(a, session, position, &row, &result),
-        9 => try sendFailureItem(a, session, position, &result),
-        6 => try outcomeItem(a, session, position, &result),
-        7 => try stopItem(a, session, end, position, &result),
-        else => return error.CorruptStore,
+/// A peer Session's label as the Store holds it now, so a rename shows on
+/// every row that names it, read into `peer` in a round it may share with
+/// other rows. A failed send can name a Session this Store never held,
+/// which has no label.
+const LabelRead = struct {
+    peer: *protocol.NamedPeer,
+    count: RowCount = .{},
+
+    fn queue(read: *LabelRead, a: *ReadAccess) void {
+        readRow(a, peer_label, .{ .session = read.peer.session }, read);
     }
-    return result;
-}
 
-/// A Message this Session sent (kind 8): its admission, then its content
-/// and its target's label.
-/// Its own function, so its rows take no slot in `activityItem`'s frame.
-noinline fn sentItem(a: *ReadAccess, session: []const u8, position: u64, row: *const activity_item.Row, result: *ActivityIdentity) !void {
-    const admission = row.id orelse return error.CorruptStore;
-    var sent: sent_message.Row = undefined;
-    a.read(sent_message, .{ .admission = admission.get(), .session = session, .position = position }, &sent);
-    try store_access.runAs(a, error.CorruptStore);
-    if (!sent.consistent) return error.CorruptStore;
-    var metadata: content_metadata.Row = undefined;
-    var label: peer_label.Result = undefined;
-    a.read(content_metadata, .{ .content_id = sent.content_id.get() }, &metadata);
-    a.read(peer_label, .{ .session = sent.session_ref }, &label);
-    a.run() catch |err| return if (err == error.StatementFailed) (if (a.failedOn(peer_label)) error.SessionReadFailed else error.CorruptStore) else err;
-    const content = try content_domain.publicMetadata(&metadata);
-    result.item.value = .{ .sent = .{
-        .admission = admission.get(),
-        .target = try namedPeer(sent.session_ref, label),
-        .content = .{ .length = content.length, .digest = content.digest },
-        .admitted_at = sent.admitted_at.get(),
-    } };
-    result.item.at = sent.admitted_at.get();
-    result.content = .{ .id = @intCast(sent.content_id.get()), .metadata = content };
-}
-
-/// A send this Session's target refused (kind 9).
-/// Its own function, so its rows take no slot in `activityItem`'s frame.
-noinline fn sendFailureItem(a: *ReadAccess, session: []const u8, position: u64, result: *ActivityIdentity) !void {
-    var failure: send_failure.Row = undefined;
-    a.read(send_failure, .{ .session = session, .position = position }, &failure);
-    try store_access.runAs(a, error.CorruptStore);
-    if (!failure.consistent) return error.CorruptStore;
-    result.item.value = .{ .send_failed = .{ .key = failure.command_key, .target = try peerNamed(a, failure.target), .code = failure.code } };
-    result.item.at = failure.rejected_at.get();
-}
-
-/// A Turn's outcome (kind 6), with its Resolution's answer.
-/// Its own function, so its rows take no slot in `activityItem`'s frame.
-noinline fn outcomeItem(a: *ReadAccess, session: []const u8, position: u64, result: *ActivityIdentity) !void {
-    var first: First(turn_outcome.Row) = .{};
-    a.readEach(turn_outcome, .{ .session = session, .position = position }, 1, &first);
-    try store_access.runAs(a, error.CorruptStore);
-    const turn = first.row orelse return error.CorruptStore;
-    if (!turn.consistent) return error.CorruptStore;
-    var outcome: protocol.ActivityItem.Outcome = .{ .turn = turn.turn_id.get(), .operation = turn.operation_id.get(), .code = turn.outcome_code, .content = null };
-    const content_id: ?i64 = if (turn.outcome_content_id) |id| @intCast(id.get()) else null;
-    switch (try TurnOutcome.decode(outcome.code.slice(), content_id)) {
-        // A completed Turn answers with its causing Operation's Resolution.
-        .completed => |answer| if (turn.resolution_content_id == null or turn.resolution_content_id.?.get() != answer) return error.CorruptStore,
-        .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
+    pub fn visit(read: *LabelRead, row: *const peer_label.Row) bool {
+        return visitRow(read, row);
     }
-    if (turn.outcome_content_id) |id| {
-        const content = try readPublicMetadata(a, id.get());
-        outcome.content = .{ .length = content.length, .digest = content.digest };
-        result.content = .{ .id = @intCast(id.get()), .metadata = content };
-    }
-    result.item.value = .{ .outcome = outcome };
-    result.item.at = turn.outcome_at.get();
-}
 
-/// A Session stop (kind 7) and whether its Turn has finished by `end`.
-/// Its own function, so its rows take no slot in `activityItem`'s frame.
-noinline fn stopItem(a: *ReadAccess, session: []const u8, end: u64, position: u64, result: *ActivityIdentity) !void {
-    var first: First(session_stop.Row) = .{};
-    a.readEach(session_stop, .{ .session = session, .position = position }, 1, &first);
-    try store_access.runAs(a, error.CorruptStore);
-    const stop_row = first.row orelse return error.CorruptStore;
-    if (!stop_row.consistent) return error.CorruptStore;
-    const turn: ?u64 = if (stop_row.selected_turn_id) |id| id.get() else null;
-    const outcome_position: ?u64 = if (stop_row.outcome_position) |at| at.get() else null;
-    result.item.value = .{ .stop = .{ .key = stop_row.command_key, .turn = turn, .cutoff = stop_row.admission_cutoff, .completion = if (turn == null or (outcome_position != null and outcome_position.? <= end)) .completed else .pending } };
-    result.item.at = stop_row.stopped_at.get();
+    fn keep(read: *LabelRead, row: *const peer_label.Row) error{CorruptStore}!void {
+        const label = row.label orelse return;
+        if (!protocol.validLabel(label.slice())) return error.CorruptStore;
+        read.peer.label = label;
+    }
+
+    fn found(read: *const LabelRead) !void {
+        _ = try read.count.found();
+    }
+};
+
+/// An admitted Message (kinds 1 and 2), read into `message`; the content
+/// it names is the next round's.
+const MessageRead = struct {
+    message: *protocol.ActivityItem.Message,
+    content_id: u64 = 0,
+    count: RowCount = .{},
+
+    fn queue(read: *MessageRead, a: *ReadAccess, session: []const u8, end: u64) void {
+        readRow(a, activity_message, .{ .session = session, .end = end, .admission = read.message.admission }, read);
+    }
+
+    pub fn visit(read: *MessageRead, row: *const activity_message.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *MessageRead, row: *const activity_message.Row) error{CorruptStore}!void {
+        if (!row.consistent) return error.CorruptStore;
+        const message = read.message;
+        message.key = row.command_key;
+        message.turn = null;
+        message.state = if (row.applied) .applied else if (row.excluded) .excluded else .queued;
+        message.admitted_at = row.admitted_at.get();
+        message.sender = if (row.sender_session_ref) |sender| .{ .session = sender } else null;
+        if (row.applied) message.turn = (row.turn_id orelse return error.CorruptStore).get();
+        read.content_id = row.content_id.get();
+    }
+};
+
+/// A Message this Session sent (kind 8), read into `sent`.
+const SentRead = struct {
+    position: u64,
+    sent: *protocol.ActivityItem.Sent,
+    content_id: u64 = 0,
+    count: RowCount = .{},
+
+    fn queue(read: *SentRead, a: *ReadAccess, session: []const u8) void {
+        readRow(a, sent_message, .{ .admission = read.sent.admission, .session = session, .position = read.position }, read);
+    }
+
+    pub fn visit(read: *SentRead, row: *const sent_message.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *SentRead, row: *const sent_message.Row) error{CorruptStore}!void {
+        if (!row.consistent) return error.CorruptStore;
+        read.sent.target = .{ .session = row.session_ref };
+        read.sent.admitted_at = row.admitted_at.get();
+        read.content_id = row.content_id.get();
+    }
+};
+
+/// A send this Session's target refused (kind 9), read into `failed`.
+const FailureRead = struct {
+    position: u64,
+    failed: *protocol.ActivityItem.SendFailed,
+    at: u64 = 0,
+    count: RowCount = .{},
+
+    fn queue(read: *FailureRead, a: *ReadAccess, session: []const u8) void {
+        readRow(a, send_failure, .{ .session = session, .position = read.position }, read);
+    }
+
+    pub fn visit(read: *FailureRead, row: *const send_failure.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *FailureRead, row: *const send_failure.Row) error{CorruptStore}!void {
+        if (!row.consistent) return error.CorruptStore;
+        read.failed.* = .{ .key = row.command_key, .target = .{ .session = row.target }, .code = row.code };
+        read.at = row.rejected_at.get();
+    }
+};
+
+/// A Turn's outcome (kind 6), with its Resolution's answer, read into
+/// `outcome`; its content, if any, is the next round's.
+const OutcomeRead = struct {
+    position: u64,
+    outcome: *protocol.ActivityItem.Outcome,
+    content_id: ?u64 = null,
+    at: u64 = 0,
+    count: RowCount = .{},
+
+    fn queue(read: *OutcomeRead, a: *ReadAccess, session: []const u8) void {
+        readFirst(a, turn_outcome, .{ .session = session, .position = read.position }, read);
+    }
+
+    pub fn visit(read: *OutcomeRead, row: *const turn_outcome.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *OutcomeRead, row: *const turn_outcome.Row) error{CorruptStore}!void {
+        if (!row.consistent) return error.CorruptStore;
+        read.outcome.* = .{ .turn = row.turn_id.get(), .operation = row.operation_id.get(), .code = row.outcome_code, .content = null };
+        read.content_id = if (row.outcome_content_id) |id| id.get() else null;
+        switch (try TurnOutcome.decode(read.outcome.code.slice(), if (read.content_id) |id| @intCast(id) else null)) {
+            // A completed Turn answers with its causing Operation's Resolution.
+            .completed => |answer| if (row.resolution_content_id == null or row.resolution_content_id.?.get() != answer) return error.CorruptStore,
+            .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
+        }
+        read.at = row.outcome_at.get();
+    }
+};
+
+/// A Session stop (kind 7) and whether its Turn has finished by `end`,
+/// read into `stop`.
+const StopRead = struct {
+    position: u64,
+    end: u64,
+    stop: *protocol.ActivityItem.Stop,
+    at: u64 = 0,
+    count: RowCount = .{},
+
+    fn queue(read: *StopRead, a: *ReadAccess, session: []const u8) void {
+        readFirst(a, session_stop, .{ .session = session, .position = read.position }, read);
+    }
+
+    pub fn visit(read: *StopRead, row: *const session_stop.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *StopRead, row: *const session_stop.Row) error{CorruptStore}!void {
+        if (!row.consistent) return error.CorruptStore;
+        const turn: ?u64 = if (row.selected_turn_id) |id| id.get() else null;
+        const outcome_position: ?u64 = if (row.outcome_position) |at| at.get() else null;
+        read.stop.* = .{ .key = row.command_key, .turn = turn, .cutoff = row.admission_cutoff, .completion = if (turn == null or (outcome_position != null and outcome_position.? <= read.end)) .completed else .pending };
+        read.at = row.stopped_at.get();
+    }
+};
+
+/// One Activity item's reads, in rounds shared with the other items of its
+/// page (`readItems`). Round 1 reads its row, with the assistant check of
+/// an ordinal 0 position at or before `end`. Each later round reads only
+/// what the one before named, per kind; `queue` queues the next round's
+/// reads and `take` takes them once it ran, writing the item as its rows
+/// arrive. The kinds main answered `CorruptStore` for a failed step of
+/// answer it still (`read_failures`).
+const ItemRead = struct {
+    position: u64,
+    ordinal: u64,
+    item: *protocol.ActivityItem,
+    /// The content the item exposes, once its metadata is read.
+    content: ?struct { id: u64, value: *const protocol.ActivityItem.Content } = null,
+    round: u8 = 0,
+    done: bool = false,
+    kind: u8 = 0,
+    state: union {
+        first: struct { missing: missing_assistant_entry.Result, row: activity_item.Result },
+        message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
+        content: struct { read: PublicContentRead, presentation: PresentationRead = undefined },
+        call: struct { proposal: ProposalRead, resolved: call_resolved.Row = undefined },
+        hosted: HostedRead,
+        sent: struct { read: SentRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined },
+        failure: struct { read: FailureRead, label: LabelRead = undefined },
+        outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
+        stop: StopRead,
+    } = undefined,
+
+    fn queue(read: *ItemRead, a: *ReadAccess, session: []const u8, end: u64) void {
+        const item = read.item;
+        if (read.round == 0) {
+            read.state = .{ .first = .{ .missing = null, .row = undefined } };
+            const first = &read.state.first;
+            if (read.ordinal == 0 and read.position <= end) a.read(missing_assistant_entry, .{ .session = session, .lower = read.position, .upper = read.position }, &first.missing);
+            a.read(activity_item, .{ .session = session, .end = end, .position = read.position, .ordinal = read.ordinal }, &first.row);
+            return;
+        }
+        switch (read.kind) {
+            1, 2 => |kind| {
+                const message = &read.state.message;
+                if (read.round == 1) {
+                    message.read.queue(a, session, end);
+                    if (kind == 2) message.entry.queue(a, session);
+                } else {
+                    a.read(content_metadata, .{ .content_id = message.read.content_id }, &message.metadata);
+                    if (message.read.message.sender) |*sender| {
+                        message.label = .{ .peer = sender };
+                        message.label.queue(a);
+                    }
+                    if (kind == 2) message.entry.queueMetadata(a);
+                }
+            },
+            3, 5 => {
+                const content = &read.state.content;
+                switch (read.round) {
+                    1 => content.read.queue(a, session),
+                    2 => {
+                        content.read.queueMetadata(a);
+                        if (read.kind == 5) {
+                            item.value = .{ .tool_result = undefined };
+                            content.presentation = .init(content.read.content.tool_operation.?, read.ordinal - 1, read.position, &item.value.tool_result.presentation);
+                            content.presentation.queue(a);
+                        }
+                    },
+                    else => content.presentation.queueProposal(a),
+                }
+            },
+            4 => {
+                const call = &read.state.call;
+                if (read.round == 1) readProposal(a, session, &call.proposal) else a.read(call_resolved, .{ .operation = item.value.call.operation, .session = session }, &call.resolved);
+            },
+            10 => read.state.hosted.queue(a, session),
+            8 => {
+                const sent = &read.state.sent;
+                if (read.round == 1) sent.read.queue(a, session) else {
+                    a.read(content_metadata, .{ .content_id = sent.read.content_id }, &sent.metadata);
+                    sent.label = .{ .peer = &item.value.sent.target };
+                    sent.label.queue(a);
+                }
+            },
+            9 => {
+                const failure = &read.state.failure;
+                if (read.round == 1) failure.read.queue(a, session) else {
+                    failure.label = .{ .peer = &item.value.send_failed.target };
+                    failure.label.queue(a);
+                }
+            },
+            6 => {
+                const outcome = &read.state.outcome;
+                if (read.round == 1) outcome.read.queue(a, session) else a.read(content_metadata, .{ .content_id = outcome.read.content_id.? }, &outcome.metadata);
+            },
+            7 => read.state.stop.queue(a, session),
+            else => unreachable,
+        }
+    }
+
+    fn take(read: *ItemRead, a: *ReadAccess) !void {
+        defer read.round += 1;
+        const item = read.item;
+        if (read.round == 0) return read.takeRow();
+        switch (read.kind) {
+            1, 2 => |kind| {
+                const message = &read.state.message;
+                if (read.round == 1) {
+                    if (!try message.read.count.found()) return error.CorruptStore;
+                    if (kind == 2) try message.entry.found(a);
+                    return;
+                }
+                const content = try content_domain.publicMetadata(&message.metadata);
+                message.read.message.content = .{ .length = content.length, .digest = content.digest };
+                if (message.read.message.sender != null) try message.label.found();
+                item.at = message.read.message.admitted_at;
+                if (kind == 2) {
+                    if (message.read.message.state != .applied) return error.CorruptStore;
+                    try message.entry.takeMetadata();
+                    if (message.entry.content.id != message.read.content_id) return error.CorruptStore;
+                    item.at = message.entry.content.at;
+                }
+                read.exposes(message.read.content_id, &message.read.message.content);
+            },
+            3, 5 => {
+                const content = &read.state.content;
+                switch (read.round) {
+                    1 => return content.read.found(a),
+                    2 => {
+                        try content.read.takeMetadata();
+                        const found = content.read.content;
+                        item.at = found.at;
+                        const value: protocol.ActivityItem.Content = .{ .length = found.metadata.length, .digest = found.metadata.digest };
+                        if (read.kind == 3) {
+                            item.value = .{ .assistant = value };
+                            read.exposes(@intCast(found.id), &item.value.assistant);
+                            read.done = true;
+                            return;
+                        }
+                        if (found.tool_operation == null) return error.CorruptStore;
+                        item.value.tool_result.content = value;
+                        read.exposes(@intCast(found.id), &item.value.tool_result.content);
+                        return content.presentation.checkCall();
+                    },
+                    else => try content.presentation.finish(),
+                }
+            },
+            4 => {
+                const call = &read.state.call;
+                if (read.round == 1) return call.proposal.found();
+                item.at = call.resolved.resolved_at.get();
+            },
+            10 => {
+                try read.state.hosted.found();
+                item.at = read.state.hosted.at;
+            },
+            8 => {
+                const sent = &read.state.sent;
+                if (read.round == 1) {
+                    if (!try sent.read.count.found()) return error.CorruptStore;
+                    item.at = item.value.sent.admitted_at;
+                    return;
+                }
+                const content = try content_domain.publicMetadata(&sent.metadata);
+                item.value.sent.content = .{ .length = content.length, .digest = content.digest };
+                try sent.label.found();
+                read.exposes(sent.read.content_id, &item.value.sent.content);
+            },
+            9 => {
+                const failure = &read.state.failure;
+                if (read.round == 1) {
+                    if (!try failure.read.count.found()) return error.CorruptStore;
+                    item.at = failure.read.at;
+                    return;
+                }
+                try failure.label.found();
+            },
+            6 => {
+                const outcome = &read.state.outcome;
+                if (read.round == 1) {
+                    if (!try outcome.read.count.found()) return error.CorruptStore;
+                    item.at = outcome.read.at;
+                    if (outcome.read.content_id != null) return;
+                } else {
+                    const content = try content_domain.publicMetadata(&outcome.metadata);
+                    item.value.outcome.content = .{ .length = content.length, .digest = content.digest };
+                    read.exposes(outcome.read.content_id.?, &item.value.outcome.content.?);
+                }
+            },
+            7 => {
+                if (!try read.state.stop.count.found()) return error.CorruptStore;
+                item.at = read.state.stop.at;
+            },
+            else => unreachable,
+        }
+        read.done = true;
+    }
+
+    /// Round 1's row: the kind, and the state its reads need.
+    fn takeRow(read: *ItemRead) !void {
+        const first = read.state.first;
+        if (first.missing != null) return error.CorruptStore;
+        const row = first.row orelse return error.ContentNotFound;
+        const item = read.item;
+        item.* = .{ .position = read.position, .ordinal = read.ordinal, .at = undefined, .value = undefined };
+        read.kind = row.kind;
+        switch (row.kind) {
+            1, 2 => {
+                const admission = (row.id orelse return error.CorruptStore).get();
+                item.value = if (row.kind == 1) .{ .admission = undefined } else .{ .user = undefined };
+                const message = if (row.kind == 1) &item.value.admission else &item.value.user;
+                message.admission = admission;
+                read.state = .{ .message = .{ .read = .{ .message = message }, .entry = .{ .position = read.position, .ordinal = read.ordinal } } };
+            },
+            3, 5 => read.state = .{ .content = .{ .read = .{ .position = read.position, .ordinal = read.ordinal } } },
+            4 => {
+                item.value = .{ .call = undefined };
+                read.state = .{ .call = .{ .proposal = .{ .position = read.position, .metadata = &item.value.call } } };
+            },
+            10 => {
+                item.value = .{ .hosted_call = undefined };
+                read.state = .{ .hosted = .{ .position = read.position, .presentation = &item.value.hosted_call } };
+            },
+            8 => {
+                const admission = (row.id orelse return error.CorruptStore).get();
+                item.value = .{ .sent = undefined };
+                item.value.sent.admission = admission;
+                read.state = .{ .sent = .{ .read = .{ .position = read.position, .sent = &item.value.sent } } };
+            },
+            9 => {
+                item.value = .{ .send_failed = undefined };
+                read.state = .{ .failure = .{ .read = .{ .position = read.position, .failed = &item.value.send_failed } } };
+            },
+            6 => {
+                item.value = .{ .outcome = undefined };
+                read.state = .{ .outcome = .{ .read = .{ .position = read.position, .outcome = &item.value.outcome } } };
+            },
+            7 => {
+                item.value = .{ .stop = undefined };
+                read.state = .{ .stop = .{ .position = read.position, .end = undefined, .stop = &item.value.stop } };
+            },
+            else => return error.CorruptStore,
+        }
+    }
+
+    fn exposes(read: *ItemRead, id: u64, value: *const protocol.ActivityItem.Content) void {
+        read.content = .{ .id = id, .value = value };
+    }
+
+    /// The content the item exposes, for a byte reader.
+    fn located(read: *const ItemRead) ?Located {
+        const content = read.content orelse return null;
+        return .{ .id = @intCast(content.id), .metadata = .{ .length = content.value.length, .digest = content.value.digest, .private = false } };
+    }
+};
+
+/// Content an Activity item exposes: its row and public metadata.
+const Located = struct { id: i64, metadata: ContentMetadata };
+
+/// Reads the items at `at` through `end` into `items`, each round shared
+/// by every item (`ItemRead`), with an Activity page's call presentations
+/// (`calls`) in the rounds after its call read. Round 1 also runs what the
+/// caller queued before it. `max` bounds the items, so a lone item's read
+/// keeps a page's state out of its frame; `located`, when given, receives
+/// the content the first item exposes. Not inlined, so this state takes
+/// no slot in its caller's frame.
+noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []protocol.ActivityItem, calls: ?*CallRows, located: ?*?Located) !void {
+    var reads: [max]ItemRead = undefined;
+    for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .item = item };
+    var round: u8 = 0;
+    while (true) : (round += 1) {
+        // Every item not done queues a read in each round.
+        var busy = round == 0;
+        for (reads[0..at.len]) |*read| if (!read.done) {
+            if (read.kind == 7) read.state.stop.end = end;
+            read.queue(a, session, end);
+            busy = true;
+        };
+        if (calls) |activity| if (activity.queue(a, round)) {
+            busy = true;
+        };
+        if (!busy) break;
+        try runRows(a);
+        for (reads[0..at.len]) |*read| if (!read.done) try read.take(a);
+        if (calls) |activity| try activity.take(round);
+    }
+    if (located) |first| first.* = reads[0].located();
 }
 
 /// Round 1 reads the sequence guard; the item's own reads follow
-/// (`publicConversationContent`, `activityItem`), which read the content's
+/// (`publicConversationContent`, `readItems`), which read the content's
 /// metadata, so no read repeats it.
 pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivityContent) !ContentLocation {
     var guard: activity_sequence_guard.Result = undefined;
@@ -1372,11 +1869,13 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
         };
         break :located .{ .id = found.id, .metadata = found.metadata };
     } else located: {
-        const identity = activityItem(a, request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
+        var item: protocol.ActivityItem = undefined;
+        var located: ?Located = null;
+        readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = 0 }}, (&item)[0..1], null, &located) catch |err| switch (err) {
             error.ContentNotFound => return err,
             else => return store_core.fence(a.store, err),
         };
-        break :located identity.content orelse return error.ContentNotFound;
+        break :located located orelse return error.ContentNotFound;
     };
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
 }
@@ -1393,30 +1892,35 @@ const proposal_positions = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// Round 1 reads the Session's next position, then the cursor's Proposal,
-/// then one round reads the page's positions into this frame, and each
-/// Proposal follows in a round of its own. A failed step of the positions
-/// read is `ProposalReadFailed`, main's name.
+/// Round 1 reads the Session's next position; round 2 the page's positions
+/// into this frame, with the cursor's Proposal; round 3 every row's
+/// Proposal. A failed step of the positions read is `ProposalReadFailed`,
+/// main's name.
 pub fn proposalPage(a: *ReadAccess, request: *const protocol.ProposalPage, page: *ProposalPage) !void {
     const session = request.session.slice();
     const next = try readNextPosition(a, session) orelse return error.SessionNotFound;
     const end = request.end orelse next - 1;
     if (end >= next) return error.InvalidCursor;
-    if (request.after != 0) {
-        _ = proposal(a, session, request.after) catch |err| switch (err) {
-            error.ContentNotFound => return error.InvalidCursor,
-            else => return err,
-        };
-    }
     page.* = .{ .end = end };
     var rows: Collected(proposal_positions.Row, protocol.proposal_page_items + 1) = .{};
+    var cursor: ProposalRead = .{ .position = request.after };
+    if (request.after != 0) readProposal(a, session, &cursor);
     a.readEach(proposal_positions, .{ .session = session, .after = request.after, .end = end }, rows.items.len, &rows);
-    try store_access.runAs(a, error.ProposalReadFailed);
+    try runRows(a);
+    if (request.after != 0) cursor.found() catch |err| switch (err) {
+        error.ContentNotFound => return error.InvalidCursor,
+        else => return err,
+    };
     page.more = rows.len > page.items.len;
-    for (rows.slice()[0..@min(rows.len, page.items.len)]) |row| {
-        page.items[page.count] = (try proposal(a, session, row.session_position.get())).metadata;
-        page.count += 1;
+    page.count = @min(rows.len, page.items.len);
+    if (page.count == 0) return;
+    var reads: [protocol.proposal_page_items]ProposalRead = undefined;
+    for (rows.slice()[0..page.count], page.items[0..page.count], reads[0..page.count]) |row, *item, *read| {
+        read.* = .{ .position = row.session_position.get(), .metadata = item };
+        readProposal(a, session, read);
     }
+    try runRows(a);
+    for (reads[0..page.count]) |*read| try read.found();
 }
 
 pub const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [3]i64 };
@@ -1470,50 +1974,69 @@ pub const proposal_row = rsql.Read(.{
         digest2: [32]u8,
         private2: bool,
     },
-    .cardinality = .optional,
+    .cardinality = .each,
 });
 
-/// Queues reading the Proposal at `position`; `proposalIdentity` follows
-/// its round.
-pub fn readProposal(a: anytype, session: []const u8, position: u64, destination: *proposal_row.Result) void {
-    a.read(proposal_row, .{ .session = session, .position = position }, destination);
-}
+/// The Proposal at `position`, read in a round it may share with other
+/// rows (`readProposal`), into `metadata` and `content_ids` when the
+/// caller keeps them. Each field's content must be public and match the
+/// metadata admission certified, so reference substitution is detectable
+/// without reopening payloads.
+pub const ProposalRead = struct {
+    position: u64,
+    metadata: ?*protocol.ProposalMetadata = null,
+    content_ids: ?*[3]i64 = null,
+    count: RowCount = .{},
 
-/// The identity of the Proposal a `readProposal` round found at `position`.
-/// Each field's content must be public and match the metadata admission
-/// certified, so reference substitution is detectable without reopening
-/// payloads.
-pub fn proposalIdentity(found: proposal_row.Result, position: u64) error{ ContentNotFound, CorruptStore }!ProposalIdentity {
-    const row = found orelse return error.ContentNotFound;
-    if (!row.consistent) return error.CorruptStore;
-    var result: ProposalIdentity = .{ .metadata = .{
-        .position = position,
-        .operation = row.operation_id.get(),
-        .turn = row.turn_id.get(),
-        .call_ordinal = row.call_ordinal,
-        .action = if (row.action_id) |action| action.get() else null,
-        .rejection = row.rejection_code,
-        .fields = undefined,
-    }, .content_ids = undefined };
-    inline for (proposal_fields, 0..) |column, index| {
-        const suffix = std.fmt.comptimePrint("{d}", .{index});
-        const length: u64 = @field(row, "length" ++ suffix);
-        const digest: [32]u8 = @field(row, "digest" ++ suffix);
-        const certified = row.field_metadata[index * 40 ..][0..40];
-        if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
-            !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
-        result.content_ids[index] = @intCast(@field(row, column).get());
-        result.metadata.fields[index] = .{ .length = length, .digest = digest };
+    pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
+        return visitRow(read, row);
     }
-    return result;
+
+    fn keep(read: *ProposalRead, row: *const proposal_row.Row) error{CorruptStore}!void {
+        if (!row.consistent) return error.CorruptStore;
+        var fields: [3]protocol.ProposalFieldReference = undefined;
+        inline for (proposal_fields, 0..) |column, index| {
+            const suffix = std.fmt.comptimePrint("{d}", .{index});
+            const length: u64 = @field(row, "length" ++ suffix);
+            const digest: [32]u8 = @field(row, "digest" ++ suffix);
+            const certified = row.field_metadata[index * 40 ..][0..40];
+            if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
+                !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
+            if (read.content_ids) |ids| ids[index] = @intCast(@field(row, column).get());
+            fields[index] = .{ .length = length, .digest = digest };
+        }
+        if (read.metadata) |metadata| metadata.* = .{
+            .position = read.position,
+            .operation = row.operation_id.get(),
+            .turn = row.turn_id.get(),
+            .call_ordinal = row.call_ordinal,
+            .action = if (row.action_id) |action| action.get() else null,
+            .rejection = row.rejection_code,
+            .fields = fields,
+        };
+    }
+
+    /// After its round: none is `ContentNotFound`, a second or damaged one
+    /// `CorruptStore`.
+    pub fn found(read: *const ProposalRead) error{ ContentNotFound, CorruptStore }!void {
+        if (!try read.count.found()) return error.ContentNotFound;
+    }
+};
+
+/// Queues reading the Proposal at `read.position`; `read.found` follows
+/// its round.
+pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
+    readRow(a, proposal_row, .{ .session = session, .position = read.position }, read);
 }
 
-/// `readProposal` and `proposalIdentity` in a round of their own.
+/// `readProposal` in a round of its own.
 pub fn proposal(a: anytype, session: []const u8, position: u64) !ProposalIdentity {
-    var found: proposal_row.Result = undefined;
-    readProposal(a, session, position, &found);
+    var identity: ProposalIdentity = undefined;
+    var read: ProposalRead = .{ .position = position, .metadata = &identity.metadata, .content_ids = &identity.content_ids };
+    readProposal(a, session, &read);
     try a.run();
-    return proposalIdentity(found, position);
+    try read.found();
+    return identity;
 }
 
 /// `proposal` for unconverted code (`report.zig`). Not inlined, so its

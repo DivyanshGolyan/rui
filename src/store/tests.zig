@@ -11499,10 +11499,85 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
 }
 
+test "a page's rows share their rounds, so a full page takes as many as one row" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "rounds-config");
+    try submitTestMessage(&storage, &tmp, "rounds-input", "message", session.slice(), "run tools");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Seventeen calls in one group: every page below is full.
+    var calls: [17]TestingCall = undefined;
+    var names: [17][16]u8 = undefined;
+    for (&calls, &names, 0..) |*call, *name, index| {
+        const id = try std.fmt.bufPrint(name, "rounds-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "rounds-output", &calls);
+    var proposals: protocol.ProposalPage = .{};
+    try proposals.session.set(session.slice());
+    var conversation: protocol.ConversationPage = .{};
+    try conversation.session.set(session.slice());
+    var activity: protocol.ActivityPage = .{};
+    try activity.session.set(session.slice());
+    const full = try pageRounds(&storage, &proposals, &conversation, &activity);
+    try std.testing.expectEqual(@as(usize, 16), full.proposals);
+    try std.testing.expectEqual(@as(usize, 16), full.conversation);
+    try std.testing.expectEqual(@as(usize, 16), full.activity);
+    // Smaller pages of the same kinds: the first Proposal; the first Tool
+    // Result and the User entry before it; the rows through the first call.
+    proposals.end = full.first_call;
+    conversation = .{ .session = conversation.session, .end = full.end, .before_position = full.results, .before_ordinal = 2 };
+    activity.end = full.first_call;
+    const small = try pageRounds(&storage, &proposals, &conversation, &activity);
+    try std.testing.expectEqual(@as(usize, 1), small.proposals);
+    try std.testing.expectEqual(@as(usize, 2), small.conversation);
+    try std.testing.expect(small.activity < 16);
+    try std.testing.expectEqual(small.rounds, full.rounds);
+}
+
+const PageRounds = struct { rounds: [3]u32, proposals: usize, conversation: usize, activity: usize, first_call: u64, results: u64, end: u64 };
+
+/// The rounds each page read takes, with its row counts and the positions
+/// its caller bounds smaller pages with.
+fn pageRounds(storage: *Store, proposals: *const protocol.ProposalPage, conversation: *const protocol.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
+    var result: PageRounds = undefined;
+    var proposal_page: reads_domain.ProposalPage = undefined;
+    var public_page: reads_domain.PublicConversationPage = undefined;
+    var activity_page: protocol.ActivityFacts = undefined;
+    {
+        var a = reads_domain.ReadAccess.within(storage);
+        defer a.deinit();
+        try reads_domain.proposalPage(&a, proposals, &proposal_page);
+        result.rounds[0] = a.rounds;
+    }
+    {
+        var a = reads_domain.ReadAccess.within(storage);
+        defer a.deinit();
+        try reads_domain.publicConversationPage(&a, conversation, &public_page);
+        result.rounds[1] = a.rounds;
+    }
+    {
+        var a = reads_domain.ReadAccess.within(storage);
+        defer a.deinit();
+        try reads_domain.activityPage(&a, activity, &activity_page);
+        result.rounds[2] = a.rounds;
+    }
+    result.proposals = proposal_page.count;
+    result.conversation = public_page.count;
+    result.activity = activity_page.count;
+    result.first_call = proposal_page.items[0].position;
+    result.results = public_page.items[0].position;
+    result.end = public_page.end;
+    return result;
+}
+
 test "the tool-group scan answers a missing Proposal as main did, before its outcome" {
     // The scan reads a call's Proposal and outcome in one round; main read
     // the Proposal first, so neither row answers ContentNotFound.
-    try std.testing.expectError(error.ContentNotFound, historical_domain.scannedCall(null, null, 7, 1, 0));
+    try std.testing.expectError(error.ContentNotFound, historical_domain.scannedCall(&.{ .position = 7 }, null, 1, 0));
 }
 
 test "the touch oracle leaves unwatched exactly the columns the schema marks unlisted" {
@@ -12174,8 +12249,8 @@ test "live tool activity counts calls past the sixteenth Operation" {
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "ops-config");
     try submitTestMessage(&storage, &tmp, "ops-input", "input", session.slice(), "propose");
-    // One call per Operation, so a read that keeps 16 Operations must
-    // resume to count the rest.
+    // One call per Operation, so the count spans more Operations than a
+    // read bounded by the page's 16 rows would reach.
     var first: u64 = 0;
     for (0..32) |index| {
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;

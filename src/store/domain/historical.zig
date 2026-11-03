@@ -877,9 +877,10 @@ pub const call_outcome = rsql.Read(.{
 /// outcome its round read together, decided in main's order: the
 /// Proposal first, so a missing one is `ContentNotFound` whatever the
 /// outcome holds. Returns where the call was accepted and its result.
-pub fn scannedCall(proposal: reads_domain.proposal_row.Result, found_outcome: call_outcome.Result, position: u64, source: u64, call: u64) error{ ContentNotFound, CorruptStore }!struct { accepted_position: u64, content_id: u64 } {
-    const identity = try reads_domain.proposalIdentity(proposal, position);
-    if (identity.metadata.operation != source or identity.metadata.call_ordinal != call) return error.CorruptStore;
+pub fn scannedCall(proposal: *const reads_domain.ProposalRead, found_outcome: call_outcome.Result, source: u64, call: u64) error{ ContentNotFound, CorruptStore }!struct { accepted_position: u64, content_id: u64 } {
+    try proposal.found();
+    const metadata = proposal.metadata.?;
+    if (metadata.operation != source or metadata.call_ordinal != call) return error.CorruptStore;
     const outcome = found_outcome orelse return error.CorruptStore;
     if (!outcome.consistent) return error.CorruptStore;
     return .{
@@ -933,12 +934,13 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?Historic
         scan.previous_position = position;
         scan.item += 1;
         if (item.item_kind != 3) return error.HistoricalPending;
-        var proposal: reads_domain.proposal_row.Result = undefined;
+        var metadata: protocol.ProposalMetadata = undefined;
+        var proposal: reads_domain.ProposalRead = .{ .position = position, .metadata = &metadata };
         var found_outcome: call_outcome.Result = undefined;
-        reads_domain.readProposal(a, item.session_ref.slice(), position, &proposal);
+        reads_domain.readProposal(a, item.session_ref.slice(), &proposal);
         a.read(call_outcome, .{ .operation = scan.source, .ordinal = scan.calls }, &found_outcome);
         a.run() catch |err| return if (err == error.StatementFailed and a.failedOn(call_outcome)) error.CorruptStore else err;
-        const call = try scannedCall(proposal, found_outcome, position, scan.source, scan.calls);
+        const call = try scannedCall(&proposal, found_outcome, scan.source, scan.calls);
         var result: content_metadata.Row = undefined;
         a.read(content_metadata, .{ .content_id = call.content_id }, &result);
         try store_access.runAs(a, error.CorruptStore);
