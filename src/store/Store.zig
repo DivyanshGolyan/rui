@@ -322,6 +322,15 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    /// What a configure reads, over 4.6 KB, at one address the Store owns
+    /// beside its change ring, so no Host stack frame holds it. A
+    /// configure or a creating Message uses it under the mutex, and no
+    /// entry point runs both.
+    pub fn configurationReads(self: *Store) *configuration_domain.ConfigurationReads {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        return &owned.configuration_reads;
+    }
+
     pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
         lockAdmin(self);
         defer self.mutex.unlock(self.io);
@@ -839,12 +848,19 @@ comptime {
     if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
 
-/// The change ring in pages of its own, which the kernel faults in only as
-/// entries are recorded: an idle Host keeps none of its 88 KiB resident. Not
-/// `Allocator.create`, whose ReleaseSafe 0xAA fill would write every page now.
+/// The Store's state too large for the frame that holds it.
+const OutOfLine = struct {
+    ring: change_ring.Ring,
+    configuration_reads: configuration_domain.ConfigurationReads,
+};
+
+/// The change ring, and `Store.configurationReads` beside it, in pages of
+/// their own, which the kernel faults in only as they are written: an idle
+/// Host keeps none of the ring's 88 KiB resident. Not `Allocator.create`,
+/// whose ReleaseSafe 0xAA fill would write every page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
-    const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(change_ring.Ring), .of(change_ring.Ring), @returnAddress()) orelse return error.OutOfMemory;
-    const ring: *change_ring.Ring = @ptrCast(@alignCast(bytes));
+    const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(OutOfLine), .of(OutOfLine), @returnAddress()) orelse return error.OutOfMemory;
+    const ring: *change_ring.Ring = &@as(*OutOfLine, @ptrCast(@alignCast(bytes))).ring;
     // Every scalar takes Ring's own default; the columns stay unwritten, since
     // only entries below `len` are read.
     const info = @typeInfo(change_ring.Ring).@"struct";
@@ -856,7 +872,8 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
 }
 
 fn destroyRing(ring: *change_ring.Ring) void {
-    std.heap.page_allocator.rawFree(@as([*]u8, @ptrCast(ring))[0..@sizeOf(change_ring.Ring)], .of(change_ring.Ring), @returnAddress());
+    const owned: *OutOfLine = @fieldParentPtr("ring", ring);
+    std.heap.page_allocator.rawFree(@as([*]u8, @ptrCast(owned))[0..@sizeOf(OutOfLine)], .of(OutOfLine), @returnAddress());
 }
 
 /// Expected outcomes of locked entry points. A canonical read or save

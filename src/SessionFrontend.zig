@@ -24,11 +24,14 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
-const slash_commands = @import("slash_commands.zig");
+const slash_commands_shared = @import("slash_commands.zig");
+const slash_commands = slash_commands_shared.conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const unseen = @import("unseen.zig");
+const status_page = @import("status_page.zig");
+const preferences = @import("preferences.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -40,6 +43,9 @@ const ReadEnd = departure.ReadEnd;
 const AdmissionEnd = Submission.End;
 const Settled = departure.Settled;
 init: std.process.Init,
+/// The process's HOME, empty without one; the /status page shows paths
+/// under it with `~`.
+home: []const u8 = "",
 store: []const u8,
 session: []const u8,
 directory: []const u8,
@@ -57,9 +63,13 @@ colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
 input: Input = undefined,
-/// The draft revision Esc closed the command list on; any edit reopens it.
-commands_closed: ?u64 = null,
 submission: Submission = undefined,
+/// What the latest /requests page offers to act on, which its list shows
+/// while the page does.
+saved_requests: reads.SavedRequests = .{},
+/// The /recover row's line for the original, written each time the rows
+/// are listed.
+recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
@@ -81,11 +91,23 @@ inspection: struct {
     kind: Inspection = .status,
     // /status was asked for; the next scan shows it.
     status_requested: bool = false,
-    // The shown inspection page is /status. Each scan replaces it, in the same
-    // frame as its page, when anything it reports changed. Its one Current read
-    // follows the page's, so it is never older than the history it shows with.
-    status_page: bool = false,
-    status_digest: u64 = 0,
+    // What two /status reads took of the Session, each listing its Actions
+    // in the matching `files.actions`: the shown page's, named by `status`,
+    // and the one the next read takes, so neither is copied. Null while the
+    // shown inspection page is not /status. Each scan replaces the page, in
+    // the same frame as its own, when anything it reports changed. Its one
+    // Current read follows the page's, so it is never older than the
+    // history it shows with.
+    sessions: [2]status_page.Session = undefined,
+    status: ?u1 = null,
+    // The defaults new Sessions start from, read when /status opens and
+    // after a command run over it.
+    defaults: status_page.Defaults = error.Unread,
+    // The row Up and Down move `›` over and Enter changes. Each /status
+    // starts at the first; a page that comes back after a change keeps it.
+    selected: status_page.Setting = status_page.first,
+    // The submission the shown page shows under it.
+    submission: ?Submission.View = null,
     // An inspection or Host command started and its result has not been
     // presented. A command may change configuration, so Messages and consent wait
     // for every inspection; exit prints an unshown command's output, which can
@@ -188,8 +210,6 @@ line: reads.Line = .{},
 hint: reads.Hint = .unread,
 shown: session_line.Shown = .{},
 
-/// A short command result shows as a notice up to this size.
-const short_result_bytes = 256;
 const rejection_suffix = " · /discard clears it";
 /// This process's environment cannot change, so the original goes from a
 /// shell with a smaller one.
@@ -200,7 +220,7 @@ const too_large_advice = " Unset or shorten them in another shell, then run rui 
 const notice_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
     "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
-    short_result_bytes + 2 * "! ".len,
+    slash_commands_shared.result_notice_bytes,
     protocol.max_model_bytes + " · ".len + unknown_sign_in.len + model_tail.len,
 );
 
@@ -211,10 +231,12 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
-        job.watch_status = self.inspection.status_page and self.terminal.screen.view == .inspection;
-        job.status_shown = self.inspection.status_digest;
-        // The page reports the submission the UI shows with it.
-        if (job.open_status or job.watch_status) job.inspection_submission = self.submission.view();
+        job.watch_status = self.statusShown();
+        const shown = self.inspection.status;
+        const taken: u1 = if (shown) |index| ~index else 0;
+        job.status_shown = if (shown) |index| &self.inspection.sessions[index] else null;
+        job.status_taken = &self.inspection.sessions[taken];
+        job.status_actions = self.files.actions[taken];
     }
     job.result.compact_tools = self.live.compact_tools;
     return job;
@@ -272,8 +294,8 @@ pub const Outcome = enum { detached, interrupted, returned };
 /// cannot stop at once never holds the terminal raw. `self` stays in the
 /// caller's storage until `leave` returns.
 pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, terminal: *Terminal, interrupted: *client.Cancellation, known_read: ?u64, lender: Lender) !Outcome {
-    self.* = .{ .known_read = known_read, .init = init, .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
-    self.input.init();
+    self.* = .{ .known_read = known_read, .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
+    self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
     defer terminal.pump = null;
@@ -284,6 +306,15 @@ pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []co
         else => return err,
     };
     return self.leaving orelse .detached;
+}
+
+/// A Session's input starts empty, and no frame of it has drawn a list yet:
+/// the screen's list was the previous Session's, at revisions this input
+/// counts again.
+fn startInput(self: *Self) void {
+    self.input.init();
+    self.input.complete(.{ .context = self, .add = tabCompletion });
+    self.terminal.screen.commands = null;
 }
 
 /// After `run` returned `returned`, which Esc only asks for: settles the
@@ -395,7 +426,7 @@ test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no
     var interrupted: client.Cancellation = .{};
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
-    const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page };
+    const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
     const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, null, quiet_overview);
     try std.testing.expectEqual(Outcome.detached, outcome);
     try std.testing.expect(terminal.active and terminal.pump == null);
@@ -489,8 +520,6 @@ const Slash = union(enum) {
     history: History,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
-    /// /effort alone: this model's efforts, from the Session line's facts.
-    efforts,
     /// The Session's model and sign-in, which never change.
     model,
     discard,
@@ -516,8 +545,7 @@ fn parse(text: []const u8) Slash {
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .effort => if (command.argument.len == 0) .efforts else .{ .inspection = .command },
-        .@"inspect-action", .setup, .configure, .result, .rename => .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename, .effort => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,
@@ -547,13 +575,12 @@ fn slashCommand(self: *Self, text: []const u8) void {
             if (self.submission.view() == null) self.poll_at = 0;
         },
         .recover => |key| if (self.submission.view() != null) {
-            self.submission.requestRecovery(key) catch {
+            self.recover(key) catch {
                 self.notice = "! Recovery key does not match this original submission; nothing sent.";
             };
         } else self.unknownCommand(text),
         .wait => self.notice = "Work continues while you compose.",
         .login => self.notice = "Login uses " ++ comptime protocol.Provider.codex.login() ++ " in your shell.",
-        .efforts => self.notice = self.efforts(),
         .model => self.notice = self.modelFacts(),
         .misused => |name| {
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
@@ -562,22 +589,6 @@ fn slashCommand(self: *Self, text: []const u8) void {
         },
         .unknown => self.unknownCommand(text),
     }
-}
-
-/// The efforts the Session's model supports, the effective one marked.
-fn efforts(self: *Self) []const u8 {
-    if (self.line.read == null) return "Efforts show once the Session is read.";
-    const model = self.line.model.slice();
-    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    var listed = false;
-    for (std.enums.values(model_capability.ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
-        const current = self.line.effort == effort;
-        writer.print("{s}{s}{s}{s}", .{ if (listed) " · " else "Efforts: ", if (current) "[" else "", @tagName(effort), if (current) "]" else "" }) catch unreachable;
-        listed = true;
-    };
-    if (!listed) return "Rui lists no efforts for this model.";
-    writer.writeAll(" · /effort LEVEL switches") catch unreachable;
-    return writer.buffered();
 }
 
 const model_tail = " · new Session: /model in overview";
@@ -594,13 +605,7 @@ fn modelFacts(self: *Self) []const u8 {
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
-    // Name the command only when it is short printable ASCII.
-    const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
-    var shown = name.len <= 32;
-    for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
-    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    writer.print("! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
-    self.notice = writer.buffered();
+    self.notice = slash_commands_shared.unknown(self.notice_buffer[0..slash_commands_shared.unknown_bytes], text);
 }
 
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
@@ -613,7 +618,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/result", "! Usage: /result KEY" },
         .{ "/rename", "! Usage: /rename NAME" },
         .{ "/rename lane four", "" },
-        .{ "/effort", "Efforts show once the Session is read." },
+        .{ "/effort", "! Usage: /effort LEVEL" },
         .{ "/effort high", "" },
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
         .{ "/wait", "Work continues while you compose." },
@@ -664,22 +669,27 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
     };
 }
 
-test "frontend /effort alone lists the efforts the Session's model supports and marks the one in force" {
+test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init();
-    const cases = .{
-        .{ "gpt-5.5", @as(?model_capability.ReasoningEffort, .medium), "Efforts: low · [medium] · high · xhigh · /effort LEVEL switches" },
-        .{ "gpt-6-luna", @as(?model_capability.ReasoningEffort, .max), "Efforts: low · medium · high · xhigh · [max] · /effort LEVEL switches" },
-        .{ "unlisted-model", @as(?model_capability.ReasoningEffort, null), "Rui lists no efforts for this model." },
-    };
-    inline for (cases) |case| {
-        self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = case[1] };
-        try self.line.model.set(case[0]);
-        self.notice = null;
-        self.slashCommand("/effort");
-        try std.testing.expectEqualStrings(case[2], self.notice.?);
-        try std.testing.expect(self.input.queuedCommand() == null);
-    }
+    for ("/effort ") |byte| _ = self.input.feed(byte);
+    try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
+    try std.testing.expect(self.nextCommands(null) == null);
+    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .medium };
+    try self.line.model.set("gpt-5.5");
+    var shown = self.nextCommands(null).?;
+    try std.testing.expectEqualStrings("low", shown.list.shown()[0].word);
+    try std.testing.expectEqualStrings("current", shown.list.shown()[1].description);
+    // Down moves the highlight, which the next frame keeps and Tab puts in
+    // the draft.
+    shown.move(true);
+    shown = self.nextCommands(shown).?;
+    try std.testing.expectEqualStrings("medium", shown.completion());
+    // Typing moves it back to the first.
+    _ = self.input.feed('m');
+    try std.testing.expectEqualStrings("/effort m", self.input.composition().bytes);
+    shown = self.nextCommands(shown).?;
+    try std.testing.expectEqualStrings("edium", shown.completion());
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -774,6 +784,7 @@ fn driveActive(self: *Self) !void {
             _ = self.input.takeCommand();
             try self.terminal.screen.latest();
             self.inspection.status_requested = true;
+            self.inspection.selected = status_page.first;
             self.poll_at = 0;
         };
         if (self.input.queuedCommand() != null and self.reader.thread != null and !self.reader.completed()) {
@@ -793,9 +804,7 @@ fn driveActive(self: *Self) !void {
         }
         if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
             const kind = parse(text).inspection;
-            // Input goes to the editor the latest frame shows; this stales
-            // it, so the view returned to is drawn while the inspection runs.
-            try self.terminal.screen.latest();
+            try self.leaveFor(kind);
             self.inspection.kind = kind;
             // The worker borrows its own copy; the editor may queue another.
             const job = self.freeze(.inspection);
@@ -965,7 +974,7 @@ fn drawFrame(self: *Self) !void {
     const position = self.live.cursor.position;
     const through = if (self.transcript.newer) |newer| newer.through else null;
     // Reading completes only after delivery; the receipt stales the frame.
-    const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.commandList(), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+    const change = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
     switch (change.shown) {
         .none => {},
         .live => |span| if (caught_up) self.seen.live(if (self.seen.live_from) |at| span.first <= at else false, position, span.next),
@@ -976,12 +985,72 @@ fn drawFrame(self: *Self) !void {
     }
 }
 
-/// The commands the draft's command word starts, unless Esc closed the
-/// list on this draft.
-fn commandList(self: *const Self) ?slash_commands.Matches {
-    if (self.commands_closed) |closed| if (closed == self.input.revision) return null;
-    const matches = slash_commands.Matches.of(self.input.composition().bytes) orelse return null;
-    return if (matches.count != 0) matches else null;
+/// The list above the draft as it is now, after `previous`: the commands
+/// its command word starts, or the choices for the word typed after one.
+/// Null when nothing matches.
+fn nextCommands(self: *Self, previous: ?slash_commands_shared.Shown) ?slash_commands_shared.Shown {
+    // The Session's model offers its efforts once a read names it.
+    const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
+    const draft = self.input.composition().bytes;
+    if (draft.len != 0) return slash_commands_shared.Shown.next(previous, self.input.revision, slash_commands.suggest(draft, context));
+    // The rows change without the draft: other rows are another list.
+    const rows = self.requestList() orelse return null;
+    var named = std.hash.Wyhash.init(0);
+    for (rows.shown()) |entry| {
+        named.update(entry.word);
+        named.update("\n");
+    }
+    return slash_commands_shared.Shown.nextOf(previous, self.input.revision, named.final(), rows);
+}
+
+/// The rows of the /requests page on screen, which an empty draft lists:
+/// the original's /recover while it can be retried now, then each saved
+/// Message's /result.
+fn requestList(self: *Self) ?slash_commands_shared.List {
+    if (self.terminal.screen.view != .inspection or self.inspection.kind != .requests or self.inspection.status != null) return null;
+    const lead = if (self.recoverable()) |key| slash_commands_shared.recoverEntry(&self.recover_line, key) else null;
+    return self.saved_requests.list(lead);
+}
+
+/// The original a /recover row retries: a plain unconfirmed Message,
+/// nothing in flight, and no Action waiting, at which Ctrl-R and /recover
+/// retry nothing.
+fn recoverable(self: *const Self) ?*const [36]u8 {
+    if (self.terminal.screen.consent != null) return null;
+    return self.submission.unconfirmedMessage();
+}
+
+/// Ctrl-R, or /recover with the original's key: retries the original,
+/// except while an Action waits, which only its choice decides.
+fn recover(self: *Self, key: ?[]const u8) !void {
+    if (self.terminal.screen.consent != null) {
+        self.notice = self.decisionNotice();
+        return;
+    }
+    try self.submission.requestRecovery(key);
+}
+
+/// The draft's list, which Enter, Esc and the arrows act on when the latest
+/// frame drew a list.
+fn shownCommands(self: *Self) ?*slash_commands_shared.Shown {
+    const stored = &self.terminal.screen.commands;
+    return slash_commands_shared.Shown.drawnNow(stored, self.nextCommands(stored.*));
+}
+
+/// Tab: the rest of the highlighted entry's word in the draft's list,
+/// shown, hidden or closed; null for a draft no list is for, which takes
+/// the tab.
+fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
+    // The editor lends back the frontend `startInput` registered, whose
+    // rows' lines this writes.
+    const self: *Self = @ptrCast(@alignCast(@constCast(context)));
+    if (draft.len == 0) {
+        const rows = self.nextCommands(self.terminal.screen.commands) orelse return null;
+        return rows.completion();
+    }
+    if (slash_commands.suggest(draft, .{}) == null) return null;
+    const shown = self.nextCommands(self.terminal.screen.commands) orelse return "";
+    return shown.completion();
 }
 
 // A notice fits the rows under the input as the status fits above it.
@@ -1090,6 +1159,12 @@ fn commandActive(self: *const Self) bool {
 const ConversationAction = enum {
     page_up,
     page_down,
+    /// Up and Down: the shown list's highlight, the /status page's row,
+    /// else a line of scrolling.
+    previous,
+    next,
+    /// Shift-Up and Shift-Down: the shown list's highlight, else a line of
+    /// scrolling, also on the /status page.
     scroll_up,
     scroll_down,
     /// On an empty or recalled draft, the Message sent before the one it
@@ -1128,8 +1203,8 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .ctrl_p = .older,
     .ctrl_r = .recover,
     .ctrl_x = .stop,
-    .up = .scroll_up,
-    .down = .scroll_down,
+    .up = .previous,
+    .down = .next,
     .shift_up = .scroll_up,
     .shift_down = .scroll_down,
     .page_up = .page_up,
@@ -1142,7 +1217,16 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
 fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     switch (action) {
-        .page_up, .page_down, .scroll_up, .scroll_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
+        // A shown list takes the arrows, as the overview's model list does.
+        .previous, .next => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
+            shown.move(action == .next);
+            self.dirty = true;
+        } else if (screen.inputRow() != .draft or !try self.moveSelection(action == .next)) try self.scroll(action == .next, false),
+        .scroll_up, .scroll_down => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
+            shown.move(action == .scroll_down);
+            self.dirty = true;
+        } else try self.scroll(action == .scroll_down, false),
+        .page_up, .page_down => try self.scroll(action == .page_down or action == .scroll_down, action == .page_up or action == .page_down),
         .older, .newer => if (self.input.press(action == .older) == .typed) {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
@@ -1150,11 +1234,11 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc and Ctrl-G only cancel a stop prompt, as on the overview.
             if (action == .close and self.overviewSays().asking) return;
             // Esc closes only a list the person saw.
-            if (action == .close and screen.listed and screen.inputRow() == .draft and self.commandList() != null) {
-                self.commands_closed = self.input.revision;
+            if (action == .close and screen.inputRow() == .draft) if (self.shownCommands()) |shown| {
+                shown.close();
                 self.dirty = true;
                 return;
-            }
+            };
             // Leaving also abandons a Message page not yet shown, and returns
             // the input row to a waiting Action's choice.
             self.dropMessageRequest();
@@ -1185,9 +1269,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .detach => self.leaving = .detached,
         // While approval is paused, recovery waits for the Action and the
         // paused draft stays as it is.
-        .recover => if (screen.consent != null) {
-            self.notice = self.decisionNotice();
-        } else try self.submission.requestRecovery(null),
+        .recover => try self.recover(null),
         // Until the opening read the Session's work is unknown.
         .stop => if (self.reading.opening) {
             self.notice = "Ctrl-X stops the Session once it opens.";
@@ -1431,7 +1513,7 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 
 /// One input at an Action's Allow once / Deny choice. Only arrows and Enter
 /// act on it, and only with the offer this input spent.
-fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
+fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     switch (Editor.select(conversation_keys, decoded)) {
         .none => {},
@@ -1460,7 +1542,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
 
 /// An arrow or Enter at the choice, probed against current geometry,
 /// command and the offer; one that cannot act says why.
-fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?u64) !void {
+fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     switch (screen.choose(key, offer, self.terminal.geometry(), self.commandActive())) {
         .picked => {},
@@ -1498,9 +1580,9 @@ fn reasonNotice(self: *const Self, letter: bool) []const u8 {
 }
 
 /// One input in the draft, with the offer this input spent. Beside an Action
-/// whose latest frame offered the draft as the reason, Enter sends it and
+/// whose standing offer showed the draft as the reason, Enter sends it and
 /// denies the Action.
-fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
+fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     const submission = self.submission.view();
     // Only the first key after an offered frame carries an offer, so the
@@ -1515,6 +1597,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
         .command = self.commandActive(),
         .original = if (submission) |value| (if (value.kind == .decision) .decision else .message) else .none,
     });
+    if (Editor.select(conversation_keys, decoded) == .enter and self.startChange()) return;
     switch (self.input.applySelected(conversation_keys, decoded, allowed)) {
         .message => |ticket| if (reason) |denial| {
             // Consumption precedes fallible submission. The Message goes
@@ -1523,21 +1606,47 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
             screen.releaseAction();
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
-        .command => {
-            self.slashCommand(self.input.composition().bytes);
-            self.input.clear();
-        },
+        .command => self.commandLine(),
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
-            .refused => |why| self.notice = switch (why) {
-                .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
-                .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
-                .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+            .refused => |why| self.notice = refusedNotice(why),
+            // Enter on an empty draft takes a /requests row the frame drew.
+            .submit => if (self.shownCommands() != null) {
+                if (self.input.queuedCommand() != null) self.notice = "! Command still running." else self.commandLine();
             },
-            .none, .append, .redraw, .submit => {},
+            .none, .append, .redraw => {},
         },
     }
+}
+
+/// Enter on a command line, or in a shown list, which takes its highlighted
+/// entry: it runs the command that entry completes, or adds the word
+/// another follows. Only a list the latest frame drew for this draft: a
+/// screen too short for one shows none, and Enter there runs the line as
+/// typed.
+fn commandLine(self: *Self) void {
+    if (self.shownCommands()) |shown| {
+        const taken = shown.list.enter(shown.highlight);
+        switch (self.input.append(taken.rest)) {
+            .refused => |why| self.notice = refusedNotice(why),
+            else => if (taken.runs) {
+                self.slashCommand(self.input.composition().bytes);
+                self.input.clear();
+            },
+        }
+    } else {
+        self.slashCommand(self.input.composition().bytes);
+        self.input.clear();
+    }
+}
+
+fn refusedNotice(why: keymap.Refusal) []const u8 {
+    return switch (why) {
+        .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
+        .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+        .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
+    };
 }
 
 /// Joins a completed Admission, or launches a requested retry, and follows
@@ -1651,6 +1760,11 @@ fn settleReader(self: *Self) !void {
     } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
         if (self.reading.phase != .details or self.admission.details_sent == self.admission.sent) try self.showInspection();
         self.inspection.command_running = false; // Shown; exit no longer prints it.
+        // A /setup run over the page may have changed the defaults it shows.
+        if (self.reading.phase == .inspection and self.inspection.kind == .command and self.statusShown()) {
+            self.inspection.defaults = savedDefaults(self.home);
+            try self.refreshStatusPage();
+        }
     }
     try self.applyReader(end);
 }
@@ -1913,7 +2027,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
             self.admission.echo = null;
         };
-        if (result.status) try self.applyStatus();
+        if (self.job.open_status or self.job.watch_status) try self.applyStatus();
         if (result.line) |*line| self.line = line.*;
         if (result.hint) |*hint| self.hint = hint.*;
         self.live.view = result.live;
@@ -2009,30 +2123,23 @@ test "the queued row shows what waits until it is taken, whatever the work is do
 }
 
 fn showInspection(self: *Self) !void {
-    self.inspection.status_page = false;
     const size = (try self.files.inspection.stat(self.init.io)).size;
-    if (size == 0) {
-        self.notice = "Command finished with no output.";
-        return;
-    }
-    // A short command result is a notice, not a page. Inside the Session the
-    // speaker is known: CLI "Rui: " text loses its prefix and "rui: "
-    // diagnostics become failure notices.
-    if (self.reading.phase == .inspection and self.inspection.kind == .command and size <= short_result_bytes) {
-        var bytes: [short_result_bytes]u8 = undefined;
-        const text = std.mem.trimEnd(u8, bytes[0..try self.files.inspection.readPositionalAll(self.init.io, bytes[0..@intCast(size)], 0)], "\n");
-        if (std.mem.count(u8, text, "\n") < 2) {
-            var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            var lines = std.mem.splitScalar(u8, text, '\n');
-            while (lines.next()) |line| {
-                if (writer.buffered().len != 0) try writer.writeAll("\n");
-                if (std.mem.startsWith(u8, line, "Rui: ")) try writer.writeAll(line[5..]) else if (std.mem.startsWith(u8, line, "rui: ")) try writer.print("! {s}", .{line[5..]}) else try writer.writeAll(line);
-            }
-            self.notice = writer.buffered();
+    // A short command result is a notice, not a page, worded as the
+    // overview words it.
+    if (self.reading.phase == .inspection and self.inspection.kind == .command) {
+        var bytes: [slash_commands_shared.short_result_bytes + 1]u8 = undefined;
+        const read = try self.files.inspection.readPositionalAll(self.init.io, bytes[0..@intCast(@min(size, bytes.len))], 0);
+        if (slash_commands_shared.resultNotice(self.notice_buffer[0..slash_commands_shared.result_notice_bytes], bytes[0..read])) |said| {
+            self.notice = said;
             return;
         }
+    } else if (size == 0) {
+        self.notice = slash_commands_shared.no_output;
+        return;
     }
+    self.inspection.status = null;
     try self.terminal.screen.showFile(self.init.io, self.files.inspection, false);
+    if (self.inspection.kind == .requests) self.saved_requests = self.job.result.requests;
     // The page heading already says how to return.
     self.notice = null;
 }
@@ -2072,15 +2179,109 @@ fn copyFailure(self: *const Self, err: anyerror) []const u8 {
 /// place. An update keeps the reader's place, notice and consent.
 fn applyStatus(self: *Self) !void {
     const screen = self.terminal.screen;
-    if (self.job.open_status and self.inspection.status_requested) {
+    const open = self.job.open_status and self.inspection.status_requested;
+    if (!open and !self.statusShown()) return;
+    const submission = self.submission.view();
+    if (!self.job.result.status and std.meta.eql(submission, self.inspection.submission)) return;
+    if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
+    self.inspection.submission = submission;
+    if (open) {
         self.inspection.status_requested = false;
+        self.inspection.defaults = savedDefaults(self.home);
+        try self.writeStatusPage();
         try screen.showFile(self.init.io, self.files.status, false);
         self.notice = null;
-    } else if (self.inspection.status_page and screen.view == .inspection) {
-        try screen.refreshFile(self.init.io, self.files.status);
-    } else return;
-    self.inspection.status_page = true;
-    self.inspection.status_digest = self.job.result.status_digest;
+    } else try self.refreshStatusPage();
+}
+
+/// The defaults new Sessions start from, as the page shows them.
+fn savedDefaults(home: []const u8) status_page.Defaults {
+    const values = try preferences.load(home);
+    var saved: status_page.Saved = .{
+        .provider = if (values.provider.len == 0) status_page.Saved.rui else std.meta.stringToEnum(protocol.Provider, values.provider.slice()) orelse error.UnsupportedPreferenceProvider,
+        .model = .{ .len = 0 },
+        .effort = values.reasoning_effort,
+        .notifications = values.notifications,
+        .store = .{ .len = 0 },
+    };
+    try saved.model.set(values.model.slice());
+    if (saved.store) |*store| {
+        var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        if (values.store.len != 0) try store.set(values.store.slice()) else if (preferences.defaultStore(home, &fallback)) |path| try store.set(path) else |err| saved.store = err;
+    } else |_| unreachable;
+    return saved;
+}
+
+/// What the shown /status page reports.
+fn statusFacts(self: *const Self) status_page.Facts {
+    return .{ .home = self.home, .store = self.store, .session = &self.inspection.sessions[self.inspection.status.?], .defaults = &self.inspection.defaults };
+}
+
+/// Renders the /status page, `›` on the selected row, into the status file
+/// the screen shows: its facts, the Actions its read listed, then the
+/// submission under it.
+fn writeStatusPage(self: *Self) !void {
+    const io = self.init.io;
+    const file = self.files.status;
+    try file.setLength(io, 0);
+    try io.vtable.fileSeekTo(io.userdata, file, 0);
+    var buffer: [4096]u8 = undefined;
+    var output = file.writerStreaming(io, &buffer);
+    const out = &output.interface;
+    const facts = self.statusFacts();
+    try status_page.render(facts, self.inspection.selected, out);
+    var actions = self.files.actions[self.inspection.status.?].reader(io, &.{});
+    _ = actions.interface.streamRemaining(out) catch |err| return switch (err) {
+        error.ReadFailed => actions.err.?,
+        error.WriteFailed => output.err.?,
+    };
+    try status_page.writeWorkEnd(&facts.session.work, out);
+    try reads.writeSubmission(self.inspection.submission, out);
+    try output.flush();
+}
+
+/// Renders the shown /status page again and shows it in place.
+fn refreshStatusPage(self: *Self) !void {
+    try self.writeStatusPage();
+    try self.terminal.screen.refreshFile(self.init.io, self.files.status);
+}
+
+/// The view an inspection runs over. Input goes to the editor the latest
+/// frame shows; this stales it, so the view returned to is drawn while the
+/// inspection runs. A command run on the /status page leaves the page shown:
+/// a short reply is a notice under it, and the next read shows the change on it.
+fn leaveFor(self: *Self, kind: Inspection) !void {
+    if (kind == .command and self.statusShown()) self.dirty = true else try self.terminal.screen.latest();
+}
+
+/// The /status page is the view shown.
+fn statusShown(self: *const Self) bool {
+    return self.inspection.status != null and self.terminal.screen.view == .inspection;
+}
+
+/// Up or Down on the /status page with an empty draft moves `›` to the
+/// next changeable row, scrolling the page to show it; false otherwise.
+fn moveSelection(self: *Self, down: bool) !bool {
+    if (!self.statusShown() or self.input.composition().bytes.len != 0) return false;
+    self.inspection.selected = status_page.step(self.inspection.selected, down);
+    try self.refreshStatusPage();
+    self.terminal.screen.revealLine(status_page.line(self.inspection.selected));
+    return true;
+}
+
+/// Enter on the /status page with an empty draft starts the selected row's
+/// change: its command in the draft, whose list offers a choice row's
+/// choices, or a typed row's current value to edit. False otherwise.
+fn startChange(self: *Self) bool {
+    if (!self.statusShown() or self.input.composition().bytes.len != 0) return false;
+    var buffer: [status_page.max_draft_bytes]u8 = undefined;
+    // Up and Down select only changeable rows.
+    switch (self.input.append(status_page.draft(self.inspection.selected, self.statusFacts(), &buffer).?)) {
+        // A value too long for the draft says so, as a list word does.
+        .refused => |why| self.notice = refusedNotice(why),
+        else => {},
+    }
+    return true;
 }
 
 test "typing beside a ready Action moves to the draft, whose unoffered Enter decides nothing, and which keeps its text when a page opens or the Action leaves" {
@@ -2094,6 +2295,8 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
     defer directory.cleanup();
     const page = try directory.dir.createFile(std.testing.io, "page", .{ .read = true });
     defer page.close(std.testing.io);
+    const actions = try directory.dir.createFile(std.testing.io, "actions", .{ .read = true });
+    defer actions.close(std.testing.io);
     // Longer than a notice, so it opens as a page and hides the Action.
     const rows: [512]u8 = @splat('\n');
     try page.writePositionalAll(std.testing.io, &rows, 0);
@@ -2101,7 +2304,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
     for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "/status" }, .{ "a", "a" } }) |line| {
         errdefer std.debug.print("change={s} line={s}\n", .{ @tagName(change), line[1] });
         var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
-        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page, .actions = .{ actions, actions } }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
@@ -2138,6 +2341,9 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
                 try self.showInspection();
             },
             .status_page => {
+                self.job.status_taken = &self.inspection.sessions[0];
+                status_page.sample(self.job.status_taken);
+                self.job.result.status = true;
                 self.job.open_status = true;
                 self.inspection.status_requested = true;
                 try self.applyStatus();
@@ -2218,9 +2424,9 @@ const HeldFrontend = struct {
         held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = &held.terminal, .interrupted = &held.interrupted, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         held.self.init.io = std.testing.io;
         held.self.live.work = .{};
-        held.self.input.init();
-        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input, .environment = .empty };
         held.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = pipes[0][0], .output = pipes[1][1], .pump = .{ .context = held, .step = pumpHeld } };
+        held.self.startInput();
+        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input, .environment = .empty };
         return held;
     }
 
@@ -2841,6 +3047,85 @@ test "Esc at the latest view returns to the overview only with nothing to lose o
     try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
 }
 
+test "Up, Down and Enter take a row only from a list the latest frame drew" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // The latest frame drew no list: Down scrolls rather than move a
+    // highlight never seen, and Enter runs the line as typed.
+    try stepKeys(held, "/\x1b[B");
+    try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
+    try stepKeys(held, "\x15/he\r");
+    try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice.?);
+    // Drawn: Enter takes the highlighted /help.
+    try stepKeys(held, "/he");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.notice == null or !std.mem.startsWith(u8, self.notice.?, "! Unknown command"));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+}
+
+test "a key on a draft changed since the latest frame acts on that draft's list when the frame drew one" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    // The frame drew the list for `/h`; `e` changes the draft before any
+    // frame lists it, and Enter takes /help from `/he`'s list.
+    try stepKeys(held, "/h");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    try stepKeys(held, "e\r");
+    try std.testing.expect(self.notice == null or !std.mem.startsWith(u8, self.notice.?, "! Unknown command"));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    // Down on `/c`, typed after the frame drew `/`'s list, moves the
+    // highlight to `/c`'s second row, which the next frame keeps.
+    try stepKeys(held, "/");
+    try held.settle();
+    try stepKeys(held, "c\x1b[B");
+    try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
+    try held.settle();
+    try std.testing.expectEqualStrings("c", held.screen.commands.?.list.typed);
+    try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
+    // Esc on `/co`, typed after the frame drew `/c`'s list, closes the list.
+    try stepKeys(held, "o\x07");
+    try std.testing.expect(self.notice == null);
+    try held.settle();
+    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+}
+
+test "Tab completes from the draft's own list, however many keys arrive before a frame" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    try stepKeys(held, "/he\t");
+    try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
+    // Two Tabs in one batch: the second completes from the list the first
+    // one's word calls for.
+    try stepKeys(held, "\x15/conf\t\t");
+    try std.testing.expectEqualStrings("/configure --permission-mode ", self.input.composition().bytes);
+}
+
+test "a key before a new Session's first frame finds no list the previous Session drew" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try held.settle();
+    try stepKeys(held, "/h");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    // The next Session's input starts over; no frame of it drew a list, so
+    // Enter runs `/he` as typed, and Tab still completes.
+    self.startInput();
+    try stepKeys(held, "/he\r");
+    try std.testing.expectEqualStrings("! Unknown command /he · /help", self.notice orelse "");
+    try stepKeys(held, "/he\t");
+    try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
+}
+
 test "Esc closes the command list first only when the latest frame drew it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -2849,14 +3134,15 @@ test "Esc closes the command list first only when the latest frame drew it" {
     // Drawn: the first Esc closes only the list, the next one acts as Esc.
     try stepKeys(held, "/st");
     try held.settle();
-    try std.testing.expect(held.screen.listed);
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
     try std.testing.expect(self.notice == null);
     try held.settle();
-    try std.testing.expect(!held.screen.listed);
+    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
-    // Typed since the latest frame, so never seen: Esc acts at once.
+    // The latest frame drew no list, the first being closed: Esc acts at
+    // once.
     try stepKeys(held, "\x15/st\x07");
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
     // Over a waiting Action: a shown list closes first, then Esc returns to
@@ -2864,7 +3150,7 @@ test "Esc closes the command list first only when the latest frame drew it" {
     const file = try held.adopt(3);
     defer file.close(std.testing.io);
     try held.settle();
-    try std.testing.expect(held.screen.listed);
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Row.draft, held.screen.inputRow());
@@ -2877,6 +3163,133 @@ test "Esc closes the command list first only when the latest frame drew it" {
     try stepKeys(held, "\x07");
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.inputRow());
+}
+
+test "the /requests page lists its rows over an empty draft, and Enter or Tab takes the row's command as typed" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const original = "01234567-89ab-4cde-8012-0123456789ab";
+    const older = "22222222-89ab-4cde-8012-0123456789ab";
+    const newer = "33333333-89ab-4cde-8012-0123456789ab";
+    self.submission.intent = .{ .message = self.input.submitText("unconfirmed original") };
+    self.submission.state = .unconfirmed;
+    self.submission.key = original.*;
+    self.saved_requests.offer(.{ .nanoseconds = 1 }, "09:00", older);
+    self.saved_requests.offer(.{ .nanoseconds = 2 }, "09:05", newer);
+    self.saved_requests.offer(.{ .nanoseconds = 3 }, "09:10", original);
+    try held.settle();
+    // No rows until the page shows.
+    try std.testing.expect(held.screen.commands == null);
+    const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "Rui: Local recovery handles (not Host work status):\n", 0);
+    try held.screen.showFile(std.testing.io, page, false);
+    self.inspection.kind = .requests;
+    self.dirty = true;
+    try held.settle();
+    const drawn = held.screen.commands.?;
+    try std.testing.expectEqual(.drawn, drawn.seen);
+    // The original has its /recover row only, not a /result row too.
+    try std.testing.expectEqual(@as(usize, 3), drawn.list.count);
+    try std.testing.expectEqualStrings("/recover " ++ original, drawn.list.entries[0].shown);
+    try std.testing.expectEqualStrings("/result " ++ newer, drawn.list.entries[1].shown);
+    try std.testing.expectEqualStrings("09:05 · read this Message's saved answer", drawn.list.entries[1].description);
+    // Enter on the original's row retries it, as Ctrl-R does.
+    try stepKeys(held, "\r");
+    try std.testing.expectEqualSlices(u8, original, &(self.submission.retry orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    self.submission.retry = null;
+    // Down twice reaches the older Message, and Enter queues its /result.
+    try held.settle();
+    try stepKeys(held, "\x1b[B\x1b[B");
+    try std.testing.expectEqual(@as(usize, 2), held.screen.commands.?.highlight);
+    try stepKeys(held, "\r");
+    try std.testing.expectEqualStrings("/result " ++ older, self.input.takeCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    // The original resolves after a frame drew its row highlighted: until
+    // a frame draws the rows that are left, Enter takes none of them.
+    try held.settle();
+    try std.testing.expectEqualStrings("/recover " ++ original, held.screen.commands.?.completion());
+    self.submission.intent = null;
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expect(self.submission.retry == null);
+    try held.settle();
+    try std.testing.expectEqualStrings("/result " ++ original, held.screen.commands.?.list.entries[0].word);
+    // Tab puts the highlighted row's line in the draft, for editing.
+    try stepKeys(held, "\x1b[B\t");
+    try std.testing.expectEqualStrings("/result " ++ newer, self.input.composition().bytes);
+    try held.settle();
+    try std.testing.expect(held.screen.commands == null);
+    // Esc closes the rows first, then leaves the page, which takes them.
+    try stepKeys(held, "\x15");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+    try std.testing.expectEqual(Screen.ViewKind.inspection, held.screen.view);
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expect(held.screen.view != .inspection);
+    try std.testing.expect(held.screen.commands == null);
+    // Enter on an empty draft with no rows does nothing, and Tab is a tab.
+    try stepKeys(held, "\r");
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try stepKeys(held, "\t");
+    try std.testing.expectEqualStrings("\t", self.input.composition().bytes);
+}
+
+test "a pending decision, or a Message that carries one, has no /recover row, and Enter on the page sends nothing" {
+    for (0..3) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const original = "01234567-89ab-4cde-8012-0123456789ab";
+        const newer = "33333333-89ab-4cde-8012-0123456789ab";
+        self.submission.intent = switch (case) {
+            0 => .{ .decision = .{ .action = 0xa, .decision = .allow_once } },
+            1 => .{ .message_then_deny = .{ .ticket = self.input.submitText("reason"), .action = 0xa } },
+            else => .{ .message = self.input.submitText("in flight") },
+        };
+        // The third is a Message whose reply has not come back yet.
+        self.submission.state = if (case == 2) .submitting else .unconfirmed;
+        self.submission.key = original.*;
+        self.saved_requests.offer(.{ .nanoseconds = 2 }, null, newer);
+        const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+        defer page.close(std.testing.io);
+        try page.writePositionalAll(std.testing.io, "Rui: Local recovery handles (not Host work status):\n", 0);
+        try held.screen.showFile(std.testing.io, page, false);
+        self.inspection.kind = .requests;
+        self.dirty = true;
+        try held.settle();
+        const drawn = held.screen.commands.?;
+        try std.testing.expectEqual(@as(usize, 1), drawn.list.count);
+        try std.testing.expectEqualStrings("/result " ++ newer, drawn.list.entries[0].word);
+        try stepKeys(held, "\r");
+        try std.testing.expect(self.submission.retry == null);
+        try std.testing.expectEqualStrings("/result " ++ newer, self.input.takeCommand().?);
+        self.submission.intent = null;
+    }
+}
+
+test "/recover typed beside a waiting Action retries nothing, as Ctrl-R does" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const original = "01234567-89ab-4cde-8012-0123456789ab";
+    self.submission.intent = .{ .message = self.input.submitText("unconfirmed original") };
+    self.submission.state = .unconfirmed;
+    self.submission.key = original.*;
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    try std.testing.expect(held.screen.consent != null);
+    try stepKeys(held, "x\x7f/recover " ++ original ++ "\r");
+    try std.testing.expect(self.submission.retry == null);
+    try std.testing.expect(std.mem.startsWith(u8, self.notice.?, "! Action needs a decision"));
+    self.submission.intent = null;
 }
 
 test "End on an empty draft goes to the latest view and never leaves the conversation" {
@@ -3004,7 +3417,7 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
     }
 }
 
-test "choice readiness: keys pumped by a held redraw act on nothing, and the Enter after its delivery decides the option shown" {
+test "choice readiness: keys pumped by a redraw of the same choice act on the choice shown, and the Enter after a move waits for a frame showing it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -3015,20 +3428,21 @@ test "choice readiness: keys pumped by a held redraw act on nothing, and the Ent
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.?.highlight);
     try std.testing.expect(held.screen.offered() != null);
-    // Left and Enter arrive while a redraw is held: that frame is not yet
-    // delivered, so neither moves nor decides anything.
+    // Left and Enter arrive while a redraw that still shows Deny is held:
+    // Left acts on the Deny the delivered frame showed, and spends the
+    // offer, so the Enter after it decides nothing.
     try held.hold("\x1b[D\r");
     _ = try self.draw();
     try std.testing.expect(held.pumps != 0);
     try std.testing.expect(self.submission.view() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-    try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.?.highlight);
+    try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, held.screen.consent.?.highlight);
     try std.testing.expectEqualStrings("! Not ready; nothing authorized.", self.notice.?);
-    // A delivered frame still shows Deny; then Enter decides it.
+    // A delivered frame shows Allow once; then Enter decides it.
     try held.settle();
     try std.testing.expect(held.screen.offered() != null);
     try sendKeys(self, "\r");
-    try std.testing.expectEqual(protocol.PermissionDecision.deny, self.submission.intent.?.decision.decision);
+    try std.testing.expectEqual(protocol.PermissionDecision.allow_once, self.submission.intent.?.decision.decision);
 }
 
 test "choice readiness: a slash command typed beside the Action keeps the draft, so a second Enter decides nothing" {
@@ -3305,4 +3719,191 @@ test "a line taller than the screen counts as seen once transcript frames drew a
         try held.settle();
     }
     try std.testing.expectEqual(@as(?u64, 9), self.takeSeen());
+}
+
+/// The screen row that contains `needle`, trailing blanks trimmed.
+fn rowWith(screen: *Screen, needle: []const u8, storage: []u8) ?[]const u8 {
+    const window = screen.vx.window();
+    for (0..window.height) |row| {
+        var length: usize = 0;
+        for (0..window.width) |column| {
+            const grapheme = (window.readCell(@intCast(column), @intCast(row)) orelse break).char.grapheme;
+            if (length + grapheme.len > storage.len) break;
+            @memcpy(storage[length..][0..grapheme.len], grapheme);
+            length += grapheme.len;
+        }
+        const text = std.mem.trimEnd(u8, storage[0..length], " ");
+        if (std.mem.indexOf(u8, text, needle) != null) return text;
+    }
+    return null;
+}
+
+/// Shows a /status page as a scan that read it does: the page asked for,
+/// or, with `open` false, the page shown refreshed in place. Its Session is
+/// the sample's named `label`, with the model the composer names and no
+/// web search.
+fn showStatus(held: *HeldFrontend, open: bool, label: []const u8) !void {
+    const self = &held.self;
+    const session = &self.inspection.sessions[if (self.inspection.status) |shown| ~shown else 0];
+    status_page.sample(session);
+    session.web_search = false;
+    try session.model.set("gpt-5.5");
+    try session.label.set(label);
+    self.job.status_taken = session;
+    self.job.result.status = true;
+    self.job.open_status = open;
+    self.inspection.status_requested = open;
+    try self.applyStatus();
+    self.dirty = true;
+    try held.settle();
+}
+
+/// Gives `held` the files a /status page needs, and a HOME with no saved
+/// defaults.
+fn statusFiles(held: *HeldFrontend) !void {
+    const io = std.testing.io;
+    held.self.files.status = try held.tmp.dir.createFile(io, "status", .{ .read = true });
+    for (&held.self.files.actions, 0..) |*file, index| file.* = try held.tmp.dir.createFile(io, if (index == 0) "actions0" else "actions1", .{ .read = true });
+    held.self.home = held.self.directory;
+}
+
+fn closeStatusFiles(held: *HeldFrontend) void {
+    held.self.files.status.close(std.testing.io);
+    for (held.self.files.actions) |file| file.close(std.testing.io);
+}
+
+test "defaults no path or file names are unreadable, and none saved are Rui's" {
+    try std.testing.expectError(error.InvalidHome, savedDefaults(""));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    const saved = try savedDefaults(home);
+    try std.testing.expectEqual(status_page.Saved.rui, try saved.provider);
+    var store: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&store, "{s}/.local/share/rui/store", .{home}), (try saved.store).slice());
+}
+
+test "the /status page marks one changeable row, which Up and Down move and Enter starts changing" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try statusFiles(held);
+    defer closeStatusFiles(held);
+    held.self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .high };
+    try held.self.line.model.set("gpt-5.5");
+    try showStatus(held, true, "fix-safari-export");
+    var storage: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(" › Effort          high  model default", rowWith(held.screen, "Effort ", &storage).?);
+    try std.testing.expectEqualStrings("   Permissions     bypass · Bash runs without asking", rowWith(held.screen, "Permissions", &storage).?);
+    // Shift-Down scrolls as before; the mark stays.
+    try sendKeys(&held.self, "\x1b[1;2B");
+    try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Effort ", &storage).?, " › Effort"));
+    // Down moves the mark, past the Session's fixed Model, Store and
+    // Instructions to the defaults' Model; PageUp and PageDown still scroll.
+    try sendKeys(&held.self, "\x1b[B");
+    try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Effort ", &storage).?, "   Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Permissions", &storage).?, " › Permissions"));
+    for (0..6) |_| try sendKeys(&held.self, "\x1b[B");
+    try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Rui default", &storage).?, " › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "fixed for this Session", &storage).?, "   Model"));
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "set from a shell", &storage).?, "   Instructions"));
+    // A refresh, as the open page's next read, keeps the mark.
+    try showStatus(held, false, "fix-safari-export");
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Rui default", &storage).?, " › Model"));
+    try sendKeys(&held.self, "\x1b[A");
+    try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Headroom", &storage).?, " › Headroom"));
+    // Enter on Headroom drafts only its command, whose list offers
+    // `default`: the model's default never becomes an override of its value.
+    try sendKeys(&held.self, "\r");
+    try std.testing.expectEqualStrings("/configure --output-reservation ", held.self.input.composition().bytes);
+    // With a draft, Up and Down keep their meaning: the mark stays.
+    try sendKeys(&held.self, "\x1b[A");
+    try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Headroom", &storage).?, " › Headroom"));
+    held.self.input.clear();
+    for (0..8) |_| try sendKeys(&held.self, "\x1b[A");
+    try held.settle();
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Effort ", &storage).?, " › Effort"));
+    // Enter on a choice row lists its choices; Down and Enter take one and run it.
+    try sendKeys(&held.self, "\r");
+    try std.testing.expectEqualStrings("/configure --reasoning-effort ", held.self.input.composition().bytes);
+    // The list the next frame draws takes the arrows and Enter.
+    held.self.dirty = true;
+    try held.settle();
+    const list = held.screen.commands.?.list;
+    for (list.shown()) |entry| try std.testing.expectEqual(std.mem.eql(u8, entry.word, "high"), std.mem.eql(u8, entry.description, "current"));
+    try sendKeys(&held.self, "\x1b[B\r");
+    var expected: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/configure --reasoning-effort {s}", .{list.shown()[1].word}), held.self.input.queuedCommand().?);
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(std.mem.startsWith(u8, rowWith(held.screen, "Effort ", &storage).?, " › Effort"));
+}
+
+test "a change run from the /status page replies under the page, which shows the new value on its row; a long failure opens as before" {
+    const Reply = struct {
+        var text: []const u8 = undefined;
+        fn write(context: *anyopaque, _: *Task) !void {
+            const frontend: *Self = @ptrCast(@alignCast(context));
+            try frontend.files.inspection.writePositionalAll(std.testing.io, text, 0);
+        }
+    };
+    const long = comptime long: {
+        var text: []const u8 = "";
+        for (0..40) |_| text = text ++ "rui: --label is 1-100 printable characters; nothing changed\n";
+        break :long text;
+    };
+    for ([_]bool{ true, false }) |configured| {
+        errdefer std.debug.print("configured={}\n", .{configured});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try statusFiles(held);
+        defer closeStatusFiles(held);
+        held.self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "inspection", .{ .read = true });
+        defer held.self.files.inspection.close(std.testing.io);
+        try showStatus(held, true, "fix-safari-export");
+        var storage: [512]u8 = undefined;
+        // The defaults are read as the page opens, not on each read after.
+        const readiness: preferences.Readinesses = .initFill(.missing);
+        _ = try preferences.update(held.self.home, .{ .notifications = false }, &readiness);
+        try showStatus(held, false, "fix-safari-export");
+        try std.testing.expectEqualStrings("   Notifications   on", rowWith(held.screen, "Notifications", &storage).?);
+        for (0..3) |_| try sendKeys(&held.self, "\x1b[B");
+        try sendKeys(&held.self, "\r");
+        try std.testing.expectEqualStrings("/configure --label fix-safari-export", held.self.input.composition().bytes);
+        // Edited, and run as the loop runs a queued command.
+        for (0.."fix-safari-export".len) |_| try sendKeys(&held.self, "\x7f");
+        try sendKeys(&held.self, "\"lane four\"\r");
+        const text = held.self.input.takeCommand().?;
+        try std.testing.expectEqualStrings("/configure --label \"lane four\"", text);
+        try held.self.leaveFor(parse(text).inspection);
+        held.self.inspection.kind = .command;
+        held.self.inspection.command_running = true;
+        held.self.reading.phase = .inspection;
+        Reply.text = if (configured) "Rui: Configured.\n" else long;
+        try held.self.reader.start(std.testing.io, &held.self, Reply.write);
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &held.self, struct {
+            fn joined(frontend: *Self) !bool {
+                return frontend.reader.completed();
+            }
+        }.joined);
+        try held.self.settleReader();
+        held.self.dirty = true;
+        try held.settle();
+        if (configured) {
+            try std.testing.expectEqualStrings("Configured.", held.self.notice.?);
+            // A command run over the page reads them again.
+            try std.testing.expectEqualStrings("   Notifications   off", rowWith(held.screen, "Notifications", &storage).?);
+            try std.testing.expectEqualStrings(" › Name            fix-safari-export", rowWith(held.screen, "Name", &storage).?);
+            // The open page's next read shows the new value, its mark where it was.
+            try showStatus(held, false, "lane four");
+            try std.testing.expectEqualStrings(" › Name            lane four", rowWith(held.screen, "Name", &storage).?);
+        } else {
+            try std.testing.expect(rowWith(held.screen, "--label is 1-100", &storage) != null);
+            try std.testing.expect(rowWith(held.screen, " Name ", &storage) == null);
+        }
+    }
 }

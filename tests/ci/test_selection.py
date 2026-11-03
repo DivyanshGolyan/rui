@@ -449,7 +449,7 @@ class SelectionTest(unittest.TestCase):
     def test_renderer_harnesses_select_no_blocking_target(self):
         workflow = Path(".github/workflows/renderer-contracts.yml").read_text()
         filters = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", workflow)
-        self.assertEqual(len(filters), 2)
+        self.assertEqual(len(filters), 1)
         for block in filters:
             harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
             # The restoration fixture is also a blocking gate, so it keeps its own selection.
@@ -689,44 +689,17 @@ class SelectionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             execution_batches(["test-logic"], "execution")
 
-    def test_wip_pushes_qualify_the_complete_candidate_even_after_an_empty_commit(self):
+    def test_a_dispatch_selects_from_its_explicit_base(self):
+        # A stable qualification's base decides what it covers; nothing replaces it.
         workflow = Path('.github/workflows/check.yml').read_text()
         prefix = dedent(re.search(
             r'(?s)        run: \|\n(          set -euo pipefail\n.*?)'
             r'          python3 tests/ci/select_tests.py', workflow)[1])
-        with tempfile.TemporaryDirectory() as directory:
-            def git(*args):
-                return subprocess.check_output(
-                    ['git', '-c', 'user.name=Selector test', '-c', 'user.email=test@example.invalid',
-                     *args], cwd=directory, text=True, stderr=subprocess.DEVNULL).strip()
-            git('init', '-b', 'main')
-            root = Path(directory)
-            (root / 'build.zig').write_text(Path('build.zig').read_text())
-            git('add', '.')
-            git('commit', '-m', 'base')
-            git('update-ref', 'refs/remotes/origin/main', 'HEAD')
-            base = git('rev-parse', 'HEAD')
-            git('checkout', '-b', 'wip/ci-1')
-            (root / 'src').mkdir()
-            (root / 'src/request_encoding.zig').write_text('// changed owner\n')
-            git('add', '.')
-            git('commit', '-m', 'candidate')
-            before = git('rev-parse', 'HEAD')
-            git('commit', '--allow-empty', '-m', 'same-tree proof')
-            with patch.dict(os.environ, BASE=before, EVENT_NAME='push', REF_NAME='wip/ci-1'):
-                result = subprocess.run(['bash', '-c', prefix + 'printf "%s" "$BASE"'],
-                                        cwd=directory, capture_output=True, text=True, check=True)
-            self.assertEqual(result.stdout, base)
-            selected = subprocess.check_output([
-                sys.executable, str(Path('tests/ci/select_tests.py').resolve()),
-                '--base', result.stdout, '--phase', 'review'], cwd=directory, text=True)
-            self.assertEqual(json.loads(selected)['targets'], ['stack-frames', 'test-logic'])
-            # A dispatched qualification keeps its explicit base even when main already
-            # contains part of the stack, so a landed strict constituent stays selected.
-            with patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch', REF_NAME='wip/ci-1'):
-                result = subprocess.run(['bash', '-c', prefix + 'printf "%s" "$BASE"'],
-                                        cwd=directory, capture_output=True, text=True, check=True)
-            self.assertEqual(result.stdout, '1' * 40)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch'):
+            result = subprocess.run(['bash', '-c', prefix + 'printf "%s" "$BASE"'],
+                                    cwd=directory, capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout, '1' * 40)
 
 
 class FullCheckPartitionTest(unittest.TestCase):

@@ -161,6 +161,14 @@ const lookup_pair = rsql.Read(.{
 
 pub const Pair = lookup_pair.Result;
 
+/// Whether `first` and `second` name one content row. Two imports of one
+/// round share a value when they do, so the first one's insert is the
+/// second one's row (`importSlot`), and a lookup made before the round
+/// never goes stale.
+pub fn sameIdentity(first: *const Import, second: *const Import) bool {
+    return first.length == second.length and first.private == second.private and std.mem.eql(u8, &first.digest, &second.digest);
+}
+
 /// `lookup` of two values at once; `foundPair` follows its round. Both
 /// values and `rows` must outlive the round.
 pub fn lookupPair(a: anytype, first: *const Import, second: *const Import, rows: *Pair) void {
@@ -185,17 +193,20 @@ const ContentSlot = struct { id: i64, existing: bool };
 /// After `lookup`'s round: the found row, or a new row queued with a Host
 /// identity and a zeroed payload of the right length. `value` must outlive
 /// the round that writes it.
-pub fn importSlot(a: anytype, value: *const Import) !ContentSlot {
+pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try a.identity(.content_id);
     a.write(insert_content, .{ .content_id = id, .digest = &value.digest, .length = value.length, .private = value.private });
+    // The row now exists for this Access, so a second import of the same
+    // value reuses it and inserts nothing.
+    value.found = .{ .content_id = .of(id) };
     return .{ .id = @intCast(id), .existing = false };
 }
 
 /// After `lookup`'s round: the id of `bytes`, whose identity `value` is,
 /// queueing the row and its payload when none exists. `bytes` must outlive
 /// the round that writes them.
-pub fn importBytes(a: anytype, value: *const Import, bytes: []const u8) !u64 {
+pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
     std.debug.assert(bytes.len == value.length);
     const slot = try importSlot(a, value);
     if (!slot.existing) a.writeContent(@intCast(slot.id), bytes);
@@ -311,7 +322,7 @@ pub fn sealedIdentity(field: *const protocol.ContentField) Import {
 /// while hashed, so a file that changed fails before COMMIT; a row that
 /// exists still has its file verified. A new row whose insert would join
 /// one already queued (an `importBytes` row) runs that one first.
-pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *const Import, faults: Faults) !u64 {
+pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *Import, faults: Faults) !u64 {
     std.debug.assert(field.state == .value);
     if (field.file) |source| {
         if (try source.length(io) != field.length) return error.ContentChanged;

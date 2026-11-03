@@ -1,12 +1,12 @@
 name: Auto-land
-# Land Linux-green tips on main; promote exact qualified main SHAs to stable separately.
+# Promote exact qualified main SHAs to stable; changes reach main by merging their PRs.
 # See tests/ci/auto_land.py.
 on:
   workflow_run:
     workflows: [Selected checks, Previous installed-release upgrade]
     types: [completed]
-    branches: ['wip/land-*', main]
-  # A merged PR moves main without a landing; promotion dispatches its absent Mac and upgrade runs.
+    branches: [main]
+  # A merged PR moves main; promotion dispatches its absent Mac and upgrade runs.
   push:
     branches: [main]
   workflow_dispatch:
@@ -46,12 +46,12 @@ jobs:
           set -euo pipefail
           python3 -B tests/ci/auto_land.py --check-qualification-run "$COMPLETED_RUN"
           timeout --kill-after=5s 120s gh run watch "$COMPLETED_RUN" --exit-status --repo "$GITHUB_REPOSITORY"
-  land:
+  promote:
     needs: completion
-    # Landing-tip pushes, main pushes and dispatched qualifications wake the lander; pull_request runs never do.
+    # Main pushes and main qualifications wake promotion; pull_request runs never do.
     if: ${{ always() && !github.event.repository.private && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.completion.result == 'success') || (github.event_name == 'workflow_run' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_repository.full_name == github.repository)) }}
     concurrency:
-      # Only ref writers serialize. Waiting for a qualification never holds main.
+      # Only the stable writer serializes. Waiting for a qualification never holds it.
       group: auto-land
       cancel-in-progress: false
     runs-on: ubuntu-24.04
@@ -59,15 +59,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Trusted main code decides; the tip is fetched as data and pushed, never run.
+          # Trusted main code decides.
           ref: main
           fetch-depth: 0
-      - name: Land green tips with non-force fast-forwards
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/auto_land.py
       - name: Promote the newest exact Mac-and-upgrade-green main SHA
-        if: ${{ always() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/auto_land.py --promote-stable

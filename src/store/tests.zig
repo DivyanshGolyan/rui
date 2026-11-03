@@ -1111,10 +1111,11 @@ test "a Session creation that rolls back never reaches a since listing" {
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
         var a = store_access.Access(.nested, error{SessionUpdateFailed}).within(&storage);
         defer a.deinit();
-        var reads: configuration_domain.ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-        configuration_domain.prepareConfiguration(&a, "", &create.configuration, &reads);
+        const reads = storage.configurationReads();
+        reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+        configuration_domain.prepareConfiguration(&a, "", &create.configuration, reads);
         try a.run();
-        try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, .{}, &reads) == .accepted);
+        try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, .{}, reads) == .accepted);
         try a.apply();
         try store_core.rollbackAfterError(&storage, .{});
     }
@@ -1834,6 +1835,53 @@ test "Full preserves rejected model interruption targets as canonical u64 text" 
     }
     try std.testing.expect(!storage.isFenced());
     try std.testing.expect((try storage.inspectSessionForTesting(session.slice())).found);
+}
+
+test "a configure whose instructions and output schema are the same new bytes imports one row and verifies both files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    const rows = "SELECT count(*) FROM content";
+
+    const create_bytes = "{\"title\":\"same-create\"}";
+    var create = try completeConfiguration("same-create", "", workspace, "model-a");
+    create.configuration.instructions = try testingBytesContent(&tmp, "same-create-instructions", create_bytes);
+    create.configuration.output_schema = try testingBytesContent(&tmp, "same-create-schema", create_bytes);
+    defer create.removeTemporaryContent(std.testing.io) catch unreachable;
+    const before_create = try queryU64(storage.database, rows);
+    const created = storage.configure(&create, .{});
+    try std.testing.expect(created == .accepted);
+    try std.testing.expectEqual(before_create + 1, try queryU64(storage.database, rows));
+    const session = created.accepted.session;
+    const after_create = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+    try std.testing.expectEqual(after_create.instructions_id.?, after_create.output_schema_id.?);
+
+    const update_bytes = "{\"title\":\"same-update\"}";
+    var update = try completeConfiguration("same-update", session.slice(), workspace, "model-a");
+    update.configuration.instructions = try testingBytesContent(&tmp, "same-update-instructions", update_bytes);
+    update.configuration.output_schema = try testingBytesContent(&tmp, "same-update-schema", update_bytes);
+    defer update.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try std.testing.expectEqual(before_create + 2, try queryU64(storage.database, rows));
+    const after_update = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+    try std.testing.expectEqual(after_update.instructions_id.?, after_update.output_schema_id.?);
+    try std.testing.expect(after_update.instructions_id.? != after_create.instructions_id.?);
+
+    // The schema's file claims the instructions' identity but holds other
+    // bytes of the same length: sharing the row still verifies its file.
+    const claimed = "{\"title\":\"same-claim\"}";
+    var forged = try completeConfiguration("same-forged", session.slice(), workspace, "model-a");
+    forged.configuration.instructions = try testingBytesContent(&tmp, "same-forged-instructions", claimed);
+    forged.configuration.output_schema = try testingBytesContent(&tmp, "same-forged-schema", "{\"title\":\"same-other\"}");
+    forged.configuration.output_schema.digest = forged.configuration.instructions.digest;
+    defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&forged, .{}) != .accepted);
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE command_key='same-forged'"));
+    try std.testing.expectEqual(before_create + 2, try queryU64(storage.database, rows));
 }
 
 test "Full revisions own repeated content once and render semantic settings" {
@@ -7489,6 +7537,22 @@ test "a peer sender is resolved from its Action handle and exact replays survive
     try std.testing.expectEqualStrings("absent", failed.target.session.slice());
     try std.testing.expectEqualStrings("unknown_session", failed.code.slice());
     try std.testing.expect(own.items[0].position < own.items[1].position);
+    {
+        // Each peer row names the peer by its label as it is now; a peer
+        // without one, or one the Store never held, has none.
+        try std.testing.expectEqual(@as(usize, 0), out.target.label.len);
+        try std.testing.expectEqual(@as(usize, 0), failed.target.label.len);
+        var update: [128]u8 = undefined;
+        try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='Review the WAL' WHERE session_ref='{s}'", .{allocated_session_1.slice()}, 0));
+        const renamed = try store_core.activityPageForTesting(&storage, .{ .session = session, .position = sender_end });
+        try std.testing.expectEqualStrings("Review the WAL", renamed.items[0].value.sent.target.label.slice());
+        try std.testing.expectEqual(@as(usize, 0), renamed.items[1].value.send_failed.target.label.len);
+        try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='Lead' WHERE session_ref='{s}'", .{sender}, 0));
+        var receiver: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try receiver.set(allocated_session_1.slice());
+        const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
+        try std.testing.expectEqualStrings("Lead", named.items[0].value.admission.sender.?.label.slice());
+    }
     try storage.revokeActionSender(action);
     try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
     var stale = sent;

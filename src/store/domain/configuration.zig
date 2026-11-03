@@ -264,8 +264,9 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     const digest = request.semanticDigest();
     var saved: command_domain.saved_command.Result = undefined;
     command_domain.lookupCommand(a, command.key.slice(), &saved);
-    var reads: ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-    prepareConfiguration(a, command.session.slice(), &command.configuration, &reads);
+    const reads = a.store.configurationReads();
+    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    prepareConfiguration(a, command.session.slice(), &command.configuration, reads);
     try a.run();
 
     if (saved != null) try a.abandon(.{});
@@ -284,7 +285,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, &digest, .model_capability_unavailable, faults);
     }
-    const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, faults, &reads)) {
+    const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, faults, reads)) {
         .rejected => |code| return saveConfigurationRejection(a, command, &digest, code, faults),
         .accepted => |value| value,
     };
@@ -328,6 +329,19 @@ pub const ConfigurationReads = struct {
     empty: content_domain.Import = content_domain.empty_content,
     /// The rows `lookupPair` found, when round 1 needed two lookups.
     pair: ?content_domain.Pair = null,
+    /// The output schema names the instructions' content row, so it
+    /// imports through their value (`content_domain.sameIdentity`).
+    schema_shares_instructions: bool = false,
+
+    /// The value the instructions import through: the requested content,
+    /// or the empty default a creation imports.
+    fn instructionsValue(reads: *ConfigurationReads, configuration: *const protocol.Configuration) *content_domain.Import {
+        return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
+    }
+
+    fn outputSchemaValue(reads: *ConfigurationReads, configuration: *const protocol.Configuration) *content_domain.Import {
+        return if (reads.schema_shares_instructions) reads.instructionsValue(configuration) else &reads.output_schema;
+    }
 };
 
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
@@ -479,7 +493,9 @@ fn newReference(io: std.Io, reference: *[protocol.session_id_bytes]u8) !void {
 
 /// Queues what applying `configuration` to `session` reads (an empty
 /// `session` creates one) into `reads`: one content lookup, or one pair of
-/// them when both the instructions and an output schema need one.
+/// them when both the instructions and an output schema need one and name
+/// different rows. When they name one row, the schema shares the
+/// instructions' value, so the first import's insert is the second's row.
 pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *const protocol.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
@@ -491,7 +507,10 @@ pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *con
         reads.output_schema = content_domain.sealedIdentity(&configuration.output_schema);
         break :requested &reads.output_schema;
     } else null;
-    if (instructions != null and output_schema != null) {
+    if (instructions != null and output_schema != null and content_domain.sameIdentity(instructions.?, output_schema.?)) {
+        reads.schema_shares_instructions = true;
+        content_domain.lookup(a, instructions.?);
+    } else if (instructions != null and output_schema != null) {
         reads.pair = .{ .first = null, .second = null };
         content_domain.lookupPair(a, instructions.?, output_schema.?, &reads.pair.?);
     } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
@@ -533,7 +552,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_output_schema };
     }
 
-    if (reads.pair) |*rows| content_domain.foundPair(rows, if (configuration.instructions.state == .value) &reads.instructions else &reads.empty, &reads.output_schema);
+    if (reads.pair) |*rows| content_domain.foundPair(rows, reads.instructionsValue(configuration), &reads.output_schema);
     const next = &reads.next;
     if (!creating and !reads.found) {
         return .{ .rejected = .unknown_session };
@@ -582,7 +601,7 @@ pub fn applyConfiguration(
     switch (content_actions.output_schema) {
         .preserve => {},
         .import_requested => {
-            command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
+            command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, reads.outputSchemaValue(configuration), faults);
             next.output_schema_id = @intCast(command_output_schema_id.?);
         },
         .clear => next.output_schema_id = null,

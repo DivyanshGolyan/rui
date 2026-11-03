@@ -22,12 +22,20 @@ const Bounded = @import("bounded.zig").Bounded;
 const unseen = @import("unseen.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Terminal = @import("SessionTerminal.zig");
+const status_page = @import("status_page.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
-pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
-/// Writes /status from one Current capture whose attention rows are in the file.
-pub const Status = *const fn (std.Io, []const u8, []const u8, *const protocol_reply.Current, std.Io.File, *std.Io.Writer) anyerror!void;
+/// Writes /requests' recovery handles, and offers each saved Message among
+/// them to the page's list.
+pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
+/// The saved Messages a /requests page offers, under the Store's key bound.
+pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
+/// Takes what /status reports of the Session from one Current capture, whose
+/// attention rows are in the first file, into the Session given. True when
+/// it differs from the shown one (always without one): the second file then
+/// lists its Actions awaiting approval, as the page shows them.
+pub const Status = *const fn (std.Io, *const protocol_reply.Current, std.Io.File, *status_page.Session, ?*const status_page.Session, std.Io.File) anyerror!bool;
 pub const Inspection = union(enum) { status, requests, help, command, copy: Copy };
 
 /// What a /copy sends: the last answer or its last code block to the
@@ -50,7 +58,9 @@ pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
 /// Live output renders into the inspection scratch file and shows whole, with
 /// its footer, status and cursor, in one UI step after join.
 /// The frontend's private scratch files, which a read borrows whole.
-pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
+/// `status` holds the /status page shown; `actions` the Actions each of the
+/// two /status reads it alternates between lists.
+pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File, actions: [2]std.Io.File };
 
 /// The moment a Session line was read at. Every input of the context
 /// estimate takes a Session position and every settings change a revision,
@@ -238,11 +248,14 @@ pub const Job = struct {
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
     inspection_action: ?u64 = null,
-    // A scan renders /status from its own Current capture: when the user
-    // asks for it, or when the shown page (`status_shown`) would change.
+    // A scan takes /status from its own Current capture: when the user
+    // asks for it, or while the page shows `status_shown`, into
+    // `status_taken`, listing its Actions in `status_actions`.
     open_status: bool = false,
     watch_status: bool = false,
-    status_shown: u64 = 0,
+    status_shown: ?*const status_page.Session = null,
+    status_taken: *status_page.Session = undefined,
+    status_actions: std.Io.File = undefined,
     // The moment the UI's Session line was read at, and whether it still
     // needs the unlabelled Session's name.
     line_read: ?Moment = null,
@@ -255,9 +268,9 @@ pub const Job = struct {
         line: ?Line = null,
         // The unlabelled Session's name, when this read looked it up.
         hint: ?Hint = null,
-        // /status from one Current capture is in the status file.
+        // `status_taken` holds /status from one Current capture, which
+        // differs from the shown page.
         status: bool = false,
-        status_digest: u64 = 0,
         // The newest Message admission this page holds, for Sent.
         delivered: u64 = 0,
         // Where a transcript may begin in this read's output (see Marks),
@@ -302,6 +315,8 @@ pub const Job = struct {
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
         copied: Copied = .no_answer,
+        // What a /requests page offers to act on.
+        requests: SavedRequests = .{},
         // The sent Message a recall step found, its text staged in scratch.
         recalled: ?Input.Found = null,
         // The step passed over a sent Message the draft cannot hold.
@@ -394,23 +409,54 @@ const RecallStaging = struct {
 /// through its own descriptor. No command reads terminal input.
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    try job.files.inspection.setLength(task.io, 0);
-    try task.io.vtable.fileSeekTo(task.io.userdata, job.files.inspection, 0);
-    // Saved descriptors must not leak into anything the command executes.
-    const saved = [2]c_int{ std.c.fcntl(1, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)), std.c.fcntl(2, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)) };
-    defer for (saved) |fd| if (fd >= 0) {
-        _ = std.c.close(fd);
-    };
-    if (saved[0] < 0 or saved[1] < 0) return error.TerminalCleanupFailed;
-    // Redirected descriptors are output custody: any failure now is fatal.
-    job.result.rendering = true;
-    const page = job.files.inspection.handle;
-    const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else job.command(job.init, .{ .io = task.io, .cancellation = job.interrupted }, job.store, job.session, job.command_text[0..job.command_text_length]);
-    const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
-    job.result.command_stderr_restored = std.c.dup2(saved[1], 2) >= 0;
-    if (!stdout_restored or !job.result.command_stderr_restored) return error.TerminalCleanupFailed;
-    return result;
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = .{ .io = task.io, .cancellation = job.interrupted }, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
+    const ended = run.into(job.files.inspection);
+    job.result.rendering = ended.rendering;
+    job.result.command_stderr_restored = ended.stderr_restored;
+    return ended.outcome;
 }
+
+/// One Host command line, run as a screen runs it: by `command`, for
+/// `session` when it names one.
+pub const CommandRun = struct {
+    command: Command,
+    init: std.process.Init,
+    requests: client.Requests,
+    store: []const u8,
+    session: []const u8,
+    /// Decoded in place.
+    line: []u8,
+
+    /// How a run ended.
+    pub const Ended = struct {
+        /// The output became the page's, after which any failure is the
+        /// caller's to end on.
+        rendering: bool = false,
+        /// Stderr came back from the page. Only then may the caller write
+        /// the page to stderr: otherwise fd 2 may still be the page.
+        stderr_restored: bool = false,
+        outcome: anyerror!void = {},
+    };
+
+    /// Runs the command with its complete stdout and stderr written to
+    /// `page` from its start.
+    pub fn into(self: CommandRun, page: std.Io.File) Ended {
+        const io = self.requests.io;
+        page.setLength(io, 0) catch |err| return .{ .outcome = err };
+        io.vtable.fileSeekTo(io.userdata, page, 0) catch |err| return .{ .outcome = err };
+        // Saved descriptors must not leak into anything the command executes.
+        const saved = [2]c_int{ std.c.fcntl(1, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)), std.c.fcntl(2, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 0)) };
+        defer for (saved) |fd| if (fd >= 0) {
+            _ = std.c.close(fd);
+        };
+        if (saved[0] < 0 or saved[1] < 0) return .{ .outcome = error.TerminalCleanupFailed };
+        // Redirected descriptors are output custody: any failure now is fatal.
+        const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, self.requests, self.store, self.session, self.line);
+        const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
+        const stderr_restored = std.c.dup2(saved[1], 2) >= 0;
+        return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = if (!stdout_restored or !stderr_restored) error.TerminalCleanupFailed else result };
+    }
+};
 
 pub fn permission(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
@@ -443,16 +489,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         if (line_stale) Line.take(&job.result.line, &current, .{ .revision = page.facts.work.revision, .end = page.facts.end });
         // Before anything else reuses scratch, which holds this capture's rows.
         if (job.open_status or job.watch_status) {
-            job.result.status_digest = try statusDigest(job, task.io, &current);
-            if (job.open_status or job.result.status_digest != job.status_shown) {
-                try job.files.status.setLength(task.io, 0);
-                try task.io.vtable.fileSeekTo(task.io.userdata, job.files.status, 0);
-                var buffer: [4096]u8 = undefined;
-                var output = job.files.status.writerStreaming(task.io, &buffer);
-                try writeStatus(job, task.io, &current, &output.interface);
-                try output.flush();
-                job.result.status = true;
-            }
+            job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
         }
     }
     if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first_position) |position| {
@@ -524,23 +561,9 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-/// The /status page for the Current capture whose rows are in scratch.
-fn writeStatus(job: *const Job, io: std.Io, current: *const protocol_reply.Current, out: *std.Io.Writer) !void {
-    try job.status(io, job.store, job.session, current, job.files.scratch, out);
-    try writeSubmission(job, out);
-}
-
-fn statusDigest(job: *const Job, io: std.Io, current: *const protocol_reply.Current) !u64 {
-    var buffer: [256]u8 = undefined;
-    var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(.init(0), &buffer);
-    try writeStatus(job, io, current, &hashing.writer);
-    try hashing.writer.flush();
-    return hashing.hasher.final();
-}
-
-/// Snapshot before launch: this read cannot race Admission settlement.
-fn writeSubmission(job: *const Job, out: *std.Io.Writer) !void {
-    const submission = job.inspection_submission orelse return;
+/// The submission the UI shows under a page.
+pub fn writeSubmission(view: ?Submission.View, out: *std.Io.Writer) !void {
+    const submission = view orelse return;
     try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
     if (submission.last_error) |err| try out.print("Last submission error: {s}\n", .{@errorName(err)});
 }
@@ -614,11 +637,13 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
-            try View.message(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour);
+            var compact = false;
+            try View.message(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour, &compact);
             job.result.listing = null;
         },
         .range => |range| {
             var cursor = range.cursor;
+            var compact = false;
             while (true) {
                 const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
                     .page => |page| page,
@@ -627,7 +652,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
                     const value = listed(item, range.shown) orelse continue;
-                    try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour);
+                    try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour, &compact);
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
                     job.result.listing = .{ .range = next };
@@ -685,7 +710,7 @@ fn listed(item: protocol.ActivityItem, shown: ?DrawnSpan) ?protocol.ActivityItem
 
 test "a range lists the Messages live output showed, never queued Messages still waiting above the input" {
     const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const peer: protocol.Peer = .{ .session = .{ .len = 0 } };
+    const peer: protocol.NamedPeer = .{ .session = .{ .len = 0 } };
     const Case = struct { kind: enum { admission, user }, sender: bool, state: @FieldType(protocol.ActivityItem.Message, "state"), admission: u64, shown: ?DrawnSpan, listed: bool };
     // Live output showed Message 10 while it waited before the dropped
     // span, and Message 14 by its end.
@@ -1667,11 +1692,11 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAn Action takes a or d + Enter\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands · Tab completes one\n\n" ++ slash_commands.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: " ++ comptime protocol.Provider.codex.login() ++ " in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: " ++ comptime protocol.Provider.codex.login() ++ " in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
-        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
-        try writeSubmission(job, &output.interface);
+        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
+        try writeSubmission(job.inspection_submission, &output.interface);
     }
     try output.flush();
 }
@@ -1741,7 +1766,7 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer page.close(io);
     var interrupted: client.Cancellation = .{};
-    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined }, .command = Probe.command, .interrupted = &interrupted };
+    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined, .actions = undefined }, .command = Probe.command, .interrupted = &interrupted };
     var task: Task = .{ .io = io };
     Probe.before = Probe.inheritable();
     try runCommand(&job, &task);
@@ -2037,7 +2062,7 @@ const FakeHost = struct {
         const inspection = try tmp.dir.createFile(io, "inspection", .{ .read = true });
         defer inspection.close(io);
         job.store = root;
-        job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection };
+        job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
         var task: Task = .{ .io = io };
         try work(job, &task);
         self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];

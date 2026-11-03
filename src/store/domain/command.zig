@@ -373,8 +373,10 @@ fn submitTo(
 /// rows the configuration needs. `configuration.applyConfiguration` adds
 /// its own rounds (a created Session's reference, an output schema). The
 /// text's lookup is a round of its own, as the lookup statement is in
-/// round 1; that round also runs the creation's writes. Kept out of
-/// `submitMessage`'s frame: only a creation holds a whole configuration.
+/// round 1; that round also runs the creation's writes. Its configuration
+/// reads, over 4.6 KB, are the Store's (`Store.configurationReads`), and
+/// it is kept out of `submitMessage`'s frame, so the plain path holds none
+/// of what a creation applies.
 noinline fn submitCreating(
     a: anytype,
     io: std.Io,
@@ -386,9 +388,11 @@ noinline fn submitCreating(
 ) !MessageReply {
     const configuration = &command.configuration.?;
     var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
-    var creation: configuration_domain.ConfigurationReads = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    // Over 4.6 KB, so held where the Store owns it, as a configure does.
+    const creation = a.store.configurationReads();
+    creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
     readMessage(a, selector, command, &reads);
-    configuration_domain.prepareConfiguration(a, "", configuration, &creation);
+    configuration_domain.prepareConfiguration(a, "", configuration, creation);
     try a.run();
     if (try replayMessage(a, command, &reads)) |reply| return reply;
     const sender_valid = senderValid(command, selector, reads.sender);
@@ -400,7 +404,7 @@ noinline fn submitCreating(
         .model_capability_unavailable
     else
         null;
-    if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, faults, &creation)) {
+    if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, faults, creation)) {
         .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);

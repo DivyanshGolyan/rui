@@ -28,7 +28,7 @@ A new Host can run 100 executions at once.
 `rui host start --active-capacity 8` starts a new Host with a different capacity.
 A running Host keeps the capacity it started with, even after you upgrade Rui.
 If you pass a different `--active-capacity` while a Host is running, `host start` connects to that Host unchanged and says so on stderr.
-To change the capacity, stop the Host and start it again.
+To change the capacity, pause the Host and start it again.
 
 `host status` reports the capacity as `active_capacity`, the slots in use as `custody_occupied` (running work and cleanup that still holds a slot), and the Unix second the Host started as `started_at`.
 
@@ -36,13 +36,21 @@ The Host raises its open-file soft limit as far as the hard limit allows.
 If that is still too low, the Host accepts fewer simultaneous client requests but keeps all 100 executions.
 If the hard limit is too low even for that, startup fails and names the limit to raise.
 
-## Stop the Host
+## Pause the Host
 
-`host stop` interrupts all work in the selected Store:
+`host pause` shuts the Host down and interrupts all work in the selected Store:
 
 ```sh
-rui host stop
+rui host pause
 ```
+
+Paused work is not cancelled.
+When a Host starts again, including the one the next `rui` starts, each Session picks up where its saved work left off.
+A Bash command cut off by the pause is never run again automatically.
+To end work for good, stop its Session with `rui session stop --session ID` or Ctrl-X in the overview.
+To stop every Session that Ctrl-X could stop, run `rui session stop --all`.
+It needs a running Host, so to cancel the work of a paused Host, start it with `rui host start` and run `rui session stop --all` right away; work resumes in between.
+Each stop is its own saved request with its own reply line, so a lost reply is recovered with `rui request recover`, as for a single stop.
 
 An acknowledgment means Rui accepted the shutdown request.
 Cleanup can still be running.
@@ -58,7 +66,7 @@ rui host serve --store PATH --active-capacity 8 --provider codex
 ```
 
 Each `--provider LABEL` serves one built-in provider at its own endpoint with its own credential: `codex` is ChatGPT sign-in (`rui auth login codex`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
-A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, stop and restart a running Host to add it.
+A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, pause a running Host and start it again to add it.
 An auto-started Host serves `openai` whenever a key is saved.
 To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `RUI_OPENAI_BASE_URL` to its `https://` base URL (for example `https://example.openai.azure.com/openai/v1`) in the environment that starts the Host; the key is then sent only to that URL's `/responses` and `/models`.
 A Host with a key reads the key's model list from `/models` once as it starts, for the model picker; if that fails, the picker shows the models Rui knows.
