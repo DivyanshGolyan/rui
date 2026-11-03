@@ -551,7 +551,9 @@ pub const Store = struct {
         const binding = binding: {
             const entry = try enter(self, .none);
             defer entry.release();
-            break :binding try entry.finish(Ordinary.content, report_domain.failedResponseBindingLocked(self, request.session.slice(), selection));
+            var access: ReadAccess = .open(&entry);
+            defer access.deinit();
+            break :binding try entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, request.session.slice(), selection));
         };
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
@@ -586,7 +588,9 @@ pub const Store = struct {
         {
             const entry = try enter(self, .none);
             defer entry.release();
-            try entry.finishCapture(&capture, report_domain.renderSessionListLocked(self, request, &capture));
+            var access: ReadAccess = .open(&entry);
+            defer access.deinit();
+            try entry.finishCapture(&capture, report_domain.renderSessionList(&access, request, &capture));
         }
         return capture.seal();
     }
@@ -1172,28 +1176,6 @@ pub fn workspaceDigest(workspace: []const u8) [32]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(workspace, &digest, .{});
     return digest;
-}
-
-/// Binds a Workspace as its digest at `digest_index` and its text at
-/// `text_index`. SQLite reads `digest` in place, so it outlives the step.
-pub fn bindWorkspace(statement: *c.sqlite3_stmt, digest_index: c_int, text_index: c_int, workspace: []const u8, digest: *[32]u8) !void {
-    digest.* = workspaceDigest(workspace);
-    try sqlite.bindBlob(statement, digest_index, digest);
-    try sqlite.bindText(statement, text_index, workspace);
-}
-
-/// The change ring's key for a Workspace: the stored key of its
-/// Sessions (the created_seq of its first), or 0 while it has none.
-pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
-    const statement = try cached(self, "SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1");
-    defer sqlite.resetCached(statement);
-    var digest: [32]u8 = undefined;
-    try bindWorkspace(statement, 1, 2, workspace, &digest);
-    return switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => 0,
-        c.SQLITE_ROW => @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
-        else => error.SessionReadFailed,
-    };
 }
 
 const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";

@@ -8,8 +8,11 @@ const model_capability = @import("../../model_capability.zig");
 const tool_catalog = @import("../../tools.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const session_work = @import("../../session_work.zig");
+const Quota = @import("../../transport_policy.zig").Quota;
 const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
+const rsql = @import("../rsql.zig");
+const store_access = @import("../access.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
@@ -29,6 +32,9 @@ const RevisionContentField = configuration_domain.RevisionContentField;
 const TurnOutcome = turn_domain.TurnOutcome;
 const max_action_resolution_code_bytes = action_domain.max_action_resolution_code_bytes;
 const max_permission_decision_bytes = command_domain.max_permission_decision_bytes;
+pub const ReadAccess = reads_domain.ReadAccess;
+const SessionText = protocol.Bounded(protocol.max_session_bytes);
+const Code = protocol.Bounded(protocol.max_code_bytes);
 
 pub const SessionReportExecution = struct {
     dispatch_fenced: bool,
@@ -225,10 +231,10 @@ pub const SessionReportCapture = struct {
     }
 
     fn appendTools(self: *SessionReportCapture, tools_mask: u8) !void {
-        if (tools_mask > tool_catalog.all_tools_mask) return error.CorruptStore;
+        const tools = try configuration_domain.toolSet(tools_mask);
         try self.append("[");
         var first = true;
-        for (std.enums.values(tool_catalog.Tool)) |tool| if (tools_mask & tool_catalog.toolBit(tool) != 0) {
+        for (std.enums.values(tool_catalog.Tool)) |tool| if (tools.contains(tool)) {
             if (!first) try self.append(",");
             first = false;
             try self.append("\"");
@@ -239,11 +245,7 @@ pub const SessionReportCapture = struct {
     }
 
     fn appendPermissionMode(self: *SessionReportCapture, permission_mode: u8) !void {
-        try self.appendJsonString(switch (permission_mode) {
-            0 => "ask",
-            1 => "bypass",
-            else => return error.CorruptStore,
-        });
+        try self.appendJsonString(@tagName(try configuration_domain.permissionMode(permission_mode)));
     }
 
     fn flush(self: *SessionReportCapture) !void {
@@ -299,107 +301,153 @@ pub const SessionReportCapture = struct {
     }
 };
 
-pub fn failedResponseBindingLocked(self: *Store, session: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
-    const statement = try store_core.cached(self, "SELECT turn_id FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal>=?3");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, selection.operation);
-    try sqlite.bindText(statement, 2, session);
-    try sqlite.bindU64(statement, 3, selection.attempt);
-    switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => return error.ContentNotFound,
-        c.SQLITE_ROW => {},
-        else => return error.OperationReadFailed,
-    }
-    return .{
-        .turn_id = @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
-        .operation_id = selection.operation,
-        .attempt_ordinal = selection.attempt,
-    };
+/// The Turn of the Operation a failed response names, in its Session, at
+/// or past its Attempt.
+const failed_response_turn = rsql.Read(.{
+    .sql = "SELECT turn_id FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal>=?3",
+    .Args = struct { operation: u64, session: []const u8, attempt: u64 },
+    .Row = struct { turn_id: rsql.Positive },
+    .cardinality = .optional,
+});
+
+/// One round: the failed response's Operation, which must still be in its
+/// Session at or past the Attempt asked for.
+pub fn failedResponseBinding(a: *ReadAccess, session: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
+    var found: failed_response_turn.Result = undefined;
+    a.read(failed_response_turn, .{ .operation = selection.operation, .session = session, .attempt = selection.attempt }, &found);
+    try store_access.runAs(a, error.OperationReadFailed);
+    const row = found orelse return error.ContentNotFound;
+    return .{ .turn_id = row.turn_id.get(), .operation_id = selection.operation, .attempt_ordinal = selection.attempt };
 }
 
-pub fn renderSessionListLocked(self: *Store, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
+/// The newest Session's creation sequence, the ceiling of a list that
+/// starts from the beginning.
+const list_ceiling = rsql.Read(.{
+    .sql = "SELECT coalesce(max(created_seq),0) AS ceiling FROM session",
+    .Args = struct {},
+    .Row = struct { ceiling: u64 },
+    .cardinality = .each,
+});
+
+/// A page and one Session more, which says whether there are more: the
+/// `LIMIT` of each page read and its `readEach` bound.
+const list_limit = protocol.session_list_page_size + 1;
+
+/// A full traversal's page of Sessions in creation order, with the one
+/// after it.
+const list_page = rsql.Read(.{
+    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+    .Args = struct { after: u64, ceiling: u64 },
+    .Row = ListPage.Row,
+    .cardinality = .each,
+});
+
+/// `list_page` within one Workspace.
+const workspace_list_page = rsql.Read(.{
+    .sql = "SELECT created_seq,session_ref FROM session @index(session_workspace_list) " ++
+        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+    .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8 },
+    .Row = ListPage.Row,
+    .cardinality = .each,
+});
+
+/// The change ring's key for a Workspace: the stored key of its
+/// Sessions, or none while it has none.
+const workspace_key = rsql.Read(.{
+    .sql = "SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1",
+    .Args = struct { digest: [32]u8, workspace: []const u8 },
+    .Row = struct { workspace_key: rsql.Positive },
+    .cardinality = .optional,
+});
+
+/// A page of a full traversal: its Sessions' references, up to a page,
+/// and whether a Session follows them (`list_limit`).
+const ListPage = struct {
+    const Row = struct { created_seq: rsql.Positive, session_ref: SessionText };
+
+    refs: [protocol.session_list_page_size]change_ring.Id = undefined,
+    count: usize = 0,
+    last: u64 = 0,
+    more: bool = false,
+    failure: ?error{CorruptStore} = null,
+
+    pub fn visit(page: *ListPage, row: *const Row) bool {
+        if (page.count == page.refs.len) {
+            page.more = true;
+            return false;
+        }
+        const ref = row.session_ref.slice();
+        // The session table's CHECK (schema.zig) holds every stored
+        // reference to `id_bytes`; main read any up to 128 bytes.
+        if (ref.len != change_ring.id_bytes) {
+            page.failure = error.CorruptStore;
+            return false;
+        }
+        page.refs[page.count] = ref[0..change_ring.id_bytes].*;
+        page.last = row.created_seq.get();
+        page.count += 1;
+        return true;
+    }
+};
+
+pub fn renderSessionList(a: *ReadAccess, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
+    const self = a.store;
     const generation = self.commit_generation.load(.acquire);
     // Changed rows answer while the hint still covers the token; a token
     // from another opening, or one too old, gets a full traversal.
     if (request.since) |since| {
         const through = if (request.changed) |changed| changed.through else generation;
         if (std.mem.eql(u8, &since.instance, &self.instance) and through <= generation and self.changes.covers(since.generation))
-            return renderChangedSessionsLocked(self, request, since.generation, through, capture);
+            return renderChangedSessions(a, request, since.generation, through, capture);
     }
-    try renderAllSessionsLocked(self, request, generation, capture);
+    try renderAllSessions(a, request, generation, capture);
 }
 
 /// Every Session in scope, in creation order, eight per page. A full
-/// traversal reads only the request's scope, `after` and `ceiling`.
-fn renderAllSessionsLocked(self: *Store, request: *const protocol.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
-    var ceiling = request.ceiling;
-    if (request.after == 0) {
-        const maximum = try store_core.cached(self, "SELECT coalesce(max(created_seq),0) FROM session");
-        defer sqlite.resetCached(maximum);
-        if (c.sqlite3_step(maximum) != c.SQLITE_ROW) return error.SessionReadFailed;
-        const value = c.sqlite3_column_int64(maximum, 0);
-        if (value < 0) return error.CorruptStore;
-        ceiling = @intCast(value);
-    }
-    // The page's references first, so no list cursor stays open while
-    // each row's own facts are read.
-    var references: [protocol.session_list_page_size]protocol.Bounded(protocol.max_session_bytes) = undefined;
-    var count: usize = 0;
-    var last: u64 = 0;
-    var more = false;
-    {
-        const statement = if (request.workspace == null)
-            try store_core.cached(self, "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT 9")
-        else
-            try store_core.cached(self, "SELECT created_seq,session_ref FROM session INDEXED BY session_workspace_list WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT 9");
-        defer sqlite.resetCached(statement);
-        try sqlite.bindU64(statement, 1, request.after);
-        try sqlite.bindU64(statement, 2, ceiling);
-        var digest: [32]u8 = undefined;
-        if (request.workspace) |*workspace| {
-            try store_core.bindWorkspace(statement, 3, 4, workspace.slice(), &digest);
-        }
-        while (true) {
-            const step = c.sqlite3_step(statement);
-            if (step == c.SQLITE_DONE) break;
-            if (step != c.SQLITE_ROW) return error.SessionReadFailed;
-            if (count == protocol.session_list_page_size) {
-                more = true;
-                break;
-            }
-            const id = c.sqlite3_column_int64(statement, 0);
-            if (id <= 0) return error.CorruptStore;
-            last = @intCast(id);
-            references[count] = .{};
-            try sqlite.readText(statement, 1, &references[count]);
-            count += 1;
-        }
-    }
-    var shown: [protocol.session_list_page_size][]const u8 = undefined;
-    for (references[0..count], 0..) |*reference, index| shown[index] = reference.slice();
-    try appendSessionRows(self, shown[0..count], capture);
+/// traversal reads only the request's scope, `after` and `ceiling`. A
+/// list from the beginning reads its ceiling in the page's round: every
+/// Session is at or below the newest, so the page needs no bound then.
+fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
+    // An aggregate has one row, stepped once, as main did.
+    var maximum: reads_domain.First(list_ceiling.Row) = .{};
+    if (request.after == 0) a.readEach(list_ceiling, .{}, 1, &maximum);
+    const bound: u64 = if (request.after == 0) std.math.maxInt(i64) else request.ceiling;
+    var page: ListPage = .{};
+    if (request.workspace) |*workspace|
+        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice() }, list_limit, &page)
+    else
+        a.readEach(list_page, .{ .after = request.after, .ceiling = bound }, list_limit, &page);
+    try store_access.runAs(a, error.SessionReadFailed);
+    if (page.failure) |err| return err;
+    const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
+    try appendSessionRows(a, page.refs[0..page.count], capture);
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
-    const since = (protocol.SinceToken{ .instance = self.instance, .generation = generation }).format(&token);
-    if (more)
-        try capture.appendShape(protocol.session_list_reply.full_tail, .{ protocol.ListDelta.full, since, last, ceiling })
+    const since = (protocol.SinceToken{ .instance = a.store.instance, .generation = generation }).format(&token);
+    if (page.more)
+        try capture.appendShape(protocol.session_list_reply.full_tail, .{ protocol.ListDelta.full, since, page.last, ceiling })
     else
         try capture.appendShape(protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, since });
     std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
 }
 
 /// The Sessions in scope that the hint says changed in (since, through],
-/// in ID order, eight per page: one pass over the ring in memory, then
-/// each shown row's own read. A Session it names may be unchanged; one
-/// it omits did not change.
-fn renderChangedSessionsLocked(self: *Store, request: *const protocol.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
-    const workspace: ?u64 = if (request.workspace) |*scope| try store_core.readWorkspaceKey(self, scope.slice()) else null;
+/// in ID order, eight per page: the Workspace's key, then one pass over
+/// the ring in memory, then the shown rows. A Session it names may be
+/// unchanged; one it omits did not change.
+fn renderChangedSessions(a: *ReadAccess, request: *const protocol.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
+    var workspace: ?u64 = null;
+    if (request.workspace) |*scope| {
+        var key: workspace_key.Result = undefined;
+        a.read(workspace_key, .{ .digest = store_core.workspaceDigest(scope.slice()), .workspace = scope.slice() }, &key);
+        try store_access.runAs(a, error.SessionReadFailed);
+        workspace = if (key) |row| row.workspace_key.get() else 0;
+    }
+    const self = a.store;
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
     var references: [protocol.session_list_page_size + 1]change_ring.Id = undefined;
     const changed = self.changes.changed(since, through, workspace, after, &references);
-    var shown: [protocol.session_list_page_size][]const u8 = undefined;
-    const count = @min(changed.len, shown.len);
-    for (changed[0..count], 0..) |*id, index| shown[index] = id;
-    try appendSessionRows(self, shown[0..count], capture);
+    const count = @min(changed.len, protocol.session_list_page_size);
+    try appendSessionRows(a, changed[0..count], capture);
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const next = (protocol.SinceToken{ .instance = self.instance, .generation = through }).format(&token);
     if (changed.len > count)
@@ -409,100 +457,291 @@ fn renderChangedSessionsLocked(self: *Store, request: *const protocol.ListSessio
     std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
 }
 
-/// The page head and its rows, each read fresh under this lock.
-fn appendSessionRows(self: *Store, references: []const []const u8, capture: *SessionReportCapture) !void {
-    const now_ms = try store_core.readUnixMilliseconds(self.io);
-    try capture.appendShape(protocol.session_list_reply.head, .{});
-    var row: protocol.SessionRow = .{ .reference = .{ .len = 0 }, .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
-    for (references, 0..) |reference, index| {
-        if (index != 0) try capture.append(",");
-        try readSessionRowLocked(self, reference, now_ms, &row);
-        try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow }}, .{&row});
-    }
-}
+/// A Session's first Message is the earlier of two seeks: a Turn binds
+/// queued Messages in admission order, so the first Turn's first
+/// admission precedes every other bound one, and the only other candidate
+/// is the oldest Message never bound, queued or excluded by a stop.
+const first_bound = rsql.Read(.{
+    .sql = "SELECT first_admission_id FROM turn @index(turn_session_latest) WHERE session_ref=?1 ORDER BY turn_id LIMIT 1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { first_admission_id: rsql.Positive },
+    .cardinality = .optional,
+});
 
-/// One list row: the Session's settings, then a fixed number of seeks
-/// into its own indexed rows, none of which grows with its history.
-pub fn readSessionRowLocked(self: *Store, session_ref: []const u8, now_ms: i64, row: *protocol.SessionRow) !void {
-    // Every field of `row` is written below, so the previous row's
-    // values need no reset.
-    {
-        // The settings land straight in the row: no configuration copy.
-        const statement = try store_core.cached(self, "SELECT workspace,provider,model,tools_mask,permission_mode,label,created_at,revision,next_position FROM session WHERE session_ref=?1");
-        defer sqlite.resetCached(statement);
-        try sqlite.bindText(statement, 1, session_ref);
-        switch (c.sqlite3_step(statement)) {
-            c.SQLITE_ROW => {},
-            c.SQLITE_DONE => return error.CorruptStore,
-            else => return error.SessionReadFailed,
-        }
-        try sqlite.readText(statement, 0, &row.workspace);
-        row.provider = try sqlite.readProvider(statement, 1);
-        try sqlite.readText(statement, 2, &row.model);
-        const tools_mask = try sqlite.readToolsMask(statement, 3);
-        row.bash = tools_mask & tool_catalog.toolBit(.bash) != 0;
-        row.web_search = tools_mask & tool_catalog.toolBit(.web_search) != 0;
-        row.permission_mode = if (try sqlite.readPermissionMode(statement, 4) == 0) .ask else .bypass;
-        row.label = try sqlite.readNullableLabel(statement, 5);
-        row.created_at = @intCast(try sqlite.readNullablePositiveI64(statement, 6) orelse return error.CorruptStore);
-        row.revision = try sqlite.readPositiveU64(statement, 7);
-        row.end = try sqlite.readPositiveU64(statement, 8) - 1;
-    }
-    row.first_message = try readFirstMessageLocked(self, session_ref);
-    row.work = .fromCore((try readWorkLocked(self, session_ref, row.created_at, now_ms)).work);
-    row.peers = try readPeerFactsLocked(self, session_ref);
-    try row.reference.set(session_ref);
-}
+const first_unbound = rsql.Read(.{
+    .sql = "SELECT admission_id FROM message_admission @index(message_admission_session_pending) " ++
+        "WHERE session_ref=?1 AND turn_id IS NULL ORDER BY admission_id LIMIT 1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { admission_id: rsql.Positive },
+    .cardinality = .optional,
+});
 
-/// One seek: the latest Message with no Session sender.
-fn readPeerFactsLocked(self: *Store, session_ref: []const u8) !protocol.PeerFacts {
-    const statement = try store_core.cached(self, "SELECT admitted_at FROM message_admission INDEXED BY message_admission_person " ++
-        "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindText(statement, 1, session_ref);
-    return switch (c.sqlite3_step(statement)) {
-        c.SQLITE_DONE => .{},
-        c.SQLITE_ROW => .{ .from_person_at = @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore) },
-        else => error.SessionReadFailed,
-    };
-}
+/// Both first-Message seeks, queued in one round.
+const FirstCandidates = struct {
+    bound: first_bound.Result = null,
+    unbound: first_unbound.Result = null,
 
-/// A Turn binds queued Messages in admission order, so the first Turn's
-/// first admission precedes every other bound one. The only other
-/// candidate is the oldest Message never bound: queued, or excluded by a
-/// stop. Two seeks, then the earlier admission's own row.
-fn readFirstMessageLocked(self: *Store, session_ref: []const u8) !?protocol.FirstMessage {
-    var first: ?u64 = null;
-    inline for (.{
-        "SELECT first_admission_id FROM turn INDEXED BY turn_session_latest WHERE session_ref=?1 ORDER BY turn_id LIMIT 1",
-        "SELECT admission_id FROM message_admission INDEXED BY message_admission_session_pending WHERE session_ref=?1 AND turn_id IS NULL ORDER BY admission_id LIMIT 1",
-    }) |sql| {
-        const statement = try store_core.cached(self, sql);
-        defer sqlite.resetCached(statement);
-        try sqlite.bindText(statement, 1, session_ref);
-        switch (c.sqlite3_step(statement)) {
-            c.SQLITE_DONE => {},
-            c.SQLITE_ROW => {
-                const admission: u64 = @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore);
-                first = if (first) |earlier| @min(earlier, admission) else admission;
-            },
-            else => return error.SessionReadFailed,
-        }
+    fn queue(first: *FirstCandidates, a: *ReadAccess, session: []const u8) void {
+        a.read(first_bound, .{ .session = session }, &first.bound);
+        a.read(first_unbound, .{ .session = session }, &first.unbound);
     }
-    const admission = first orelse return null;
-    const statement = try store_core.cached(self, "SELECT admission_position,admitted_at,sender_session_ref,content_id FROM message_admission WHERE admission_id=?1 AND session_ref=?2");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, admission);
-    try sqlite.bindText(statement, 2, session_ref);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    const metadata = try content_domain.readPublicContentMetadata(self, try sqlite.readNullablePositiveI64(statement, 3) orelse return error.CorruptStore);
+
+    /// The earlier candidate, or 0 for none.
+    fn admission(first: *const FirstCandidates) u64 {
+        const bound = if (first.bound) |row| row.first_admission_id.get() else std.math.maxInt(u64);
+        const unbound = if (first.unbound) |row| row.admission_id.get() else std.math.maxInt(u64);
+        const earlier = @min(bound, unbound);
+        return if (earlier == std.math.maxInt(u64)) 0 else earlier;
+    }
+};
+
+/// The latest Message to the Session ?1 with no Session sender.
+const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
+    "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1";
+
+const person_message = rsql.Read(.{
+    .sql = person_message_sql,
+    .Args = struct { session: []const u8 },
+    .Row = struct { admitted_at: rsql.Positive },
+    .cardinality = .optional,
+});
+
+/// The first Message `m`'s own row and its content's metadata.
+const first_message_columns = "m.admission_id AS first_admission,m.admission_position AS first_position,m.admitted_at AS first_admitted_at," ++
+    "m.sender_session_ref AS first_sender,first_content.byte_length AS first_length,first_content.digest AS first_digest,first_content.private AS first_private";
+
+/// The content metadata of the first Message `m`.
+const first_content_join = "JOIN content first_content ON first_content.content_id=m.content_id";
+
+/// A first Message as `firstMessage` reads it; a list row's are null
+/// when it has none.
+const FirstMessageColumns = struct {
+    first_admission: ?rsql.Positive,
+    first_position: ?rsql.Positive,
+    first_admitted_at: ?rsql.Positive,
+    first_sender: ?SessionText,
+    first_length: ?u64,
+    first_digest: ?[32]u8,
+    first_private: ?bool,
+};
+
+const first_message = rsql.Read(.{
+    .sql = "SELECT " ++ first_message_columns ++ " FROM message_admission m " ++ first_content_join ++ " WHERE m.admission_id=?2 AND m.session_ref=?1",
+    .Args = struct { session: []const u8, first: u64 },
+    .Row = FirstMessageColumns,
+    .cardinality = .optional,
+});
+
+const settings_columns = "s.session_ref,s.workspace,s.provider,s.model,s.tools_mask,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
+    "(" ++ person_message_sql ++ ") AS from_person_at,";
+
+/// One list row: the Session's settings, its latest Message from no
+/// Session, and its first Message, the admission ?2. A missing Message
+/// or content finds no row. Its Row is over 1 KiB, so its visitor owns
+/// it (`RowsRender`).
+const list_row = rsql.Read(.{
+    .sql = "SELECT " ++ settings_columns ++ first_message_columns ++ " FROM session s " ++
+        "JOIN message_admission m ON m.admission_id=?2 AND m.session_ref=s.session_ref " ++ first_content_join ++ " WHERE s.session_ref=?1",
+    .Args = struct { session: []const u8, first: u64 },
+    .Row = ListRow,
+    .cardinality = .each,
+});
+
+/// `list_row` of a Session with no first Message.
+const list_row_bare = rsql.Read(.{
+    .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
+        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session s WHERE s.session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = ListRow,
+    .cardinality = .each,
+});
+
+const ListRow = struct {
+    session_ref: SessionText,
+    workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    provider: protocol.Provider,
+    model: protocol.Bounded(protocol.max_model_bytes),
+    tools_mask: u8,
+    permission_mode: u8,
+    label: ?protocol.Bounded(protocol.max_label_bytes),
+    created_at: rsql.Positive,
+    revision: rsql.Positive,
+    next_position: rsql.Positive,
+    from_person_at: ?rsql.Positive,
+    first_admission: ?rsql.Positive,
+    first_position: ?rsql.Positive,
+    first_admitted_at: ?rsql.Positive,
+    first_sender: ?SessionText,
+    first_length: ?u64,
+    first_digest: ?[32]u8,
+    first_private: ?bool,
+};
+
+/// The first Message of a row with `FirstMessageColumns`, read for the
+/// admission `first` (0 for none). Content that is private is
+/// `CorruptStore`.
+fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?protocol.FirstMessage {
+    if (first == 0) return null;
+    if (row.first_private orelse return error.CorruptStore) return error.CorruptStore;
     return .{
-        .position = @intCast(try sqlite.readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
-        .admission = admission,
-        .admitted_at = @intCast(try sqlite.readNullablePositiveI64(statement, 1) orelse return error.CorruptStore),
-        .sender = try reads_domain.readPeer(statement, 2),
-        .content = .{ .length = metadata.length, .digest = metadata.digest },
+        .position = (row.first_position orelse return error.CorruptStore).get(),
+        .admission = (row.first_admission orelse return error.CorruptStore).get(),
+        .admitted_at = (row.first_admitted_at orelse return error.CorruptStore).get(),
+        .sender = if (row.first_sender) |sender| .{ .session = sender } else null,
+        .content = .{ .length = row.first_length orelse return error.CorruptStore, .digest = row.first_digest orelse return error.CorruptStore },
     };
+}
+
+/// The page head and its rows. Each row's first admission and work take
+/// the rounds their reads depend on, shared by every row; the rows'
+/// settings come last (`renderRows`), so the page holds one row's text at
+/// a time and not eight.
+noinline fn appendSessionRows(a: *ReadAccess, references: []const change_ring.Id, capture: *SessionReportCapture) !void {
+    const now_ms = try store_core.readUnixMilliseconds(a.store.io);
+    try capture.appendShape(protocol.session_list_reply.head, .{});
+    var firsts: [protocol.session_list_page_size]FirstCandidates = undefined;
+    var works: [protocol.session_list_page_size]WorkRead = undefined;
+    // Each row's reads queued together: a pass ends where a statement is
+    // queued again, so the round takes one pass per row, not two.
+    for (references, firsts[0..references.len], works[0..references.len]) |*reference, *first, *work| {
+        first.queue(a, reference);
+        work.* = .{ .session = reference };
+        _ = work.queue(a);
+    }
+    try runReport(a);
+    for (works[0..references.len]) |*work| try work.advance();
+    try readWorks(a, works[0..references.len]);
+    var shown: [protocol.session_list_page_size]ShownRow = undefined;
+    for (references, firsts[0..references.len], works[0..references.len], shown[0..references.len]) |*reference, *first, *work, *row|
+        row.* = .{ .reference = reference, .first = first.admission(), .work = work };
+    try renderRows(a, shown[0..references.len], std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange, capture);
+}
+
+/// What a list row read before its settings.
+const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *const WorkRead };
+
+/// Reads each shown row's `list_row` in one round and renders it as it
+/// steps. Not inlined: its visitor holds a row's text.
+noinline fn renderRows(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, capture: *SessionReportCapture) !void {
+    // A literal that omits `decoded` leaves its bytes unwritten until a
+    // row decodes into it.
+    var render: RowsRender = .{ .rows = rows, .now_ms = now_ms, .capture = capture };
+    for (rows) |row| {
+        if (row.first == 0)
+            a.readEach(list_row_bare, .{ .session = row.reference }, 1, &render)
+        else
+            a.readEach(list_row, .{ .session = row.reference, .first = row.first }, 1, &render);
+    }
+    const ran = runReport(a);
+    // A pass stops at a failed step, so a row that failed to render did
+    // before any later row's step failed: its error is main's first.
+    if (render.failure) |err| return err;
+    try ran;
+    if (render.shown != rows.len) return error.CorruptStore;
+}
+
+/// Renders each `list_row` as it steps, in the page's order. A row that
+/// is not the next shown Session's, or a missing one, is `CorruptStore`;
+/// after a failure it renders nothing more.
+const RowsRender = struct {
+    decoded: ListRow = undefined,
+    rows: []const ShownRow,
+    now_ms: u64,
+    capture: *SessionReportCapture,
+    shown: usize = 0,
+    failure: ?RenderError = null,
+
+    const RenderError = @typeInfo(@typeInfo(@TypeOf(renderListRow)).@"fn".return_type.?).error_union.error_set;
+
+    pub fn visit(render: *RowsRender, row: *const ListRow) bool {
+        if (render.failure != null) return false;
+        renderListRow(render.capture, render.rows, render.shown, render.now_ms, row) catch |err| {
+            render.failure = err;
+            return false;
+        };
+        render.shown += 1;
+        return true;
+    }
+};
+
+fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow) !void {
+    if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
+    const tools = try configuration_domain.toolSet(row.tools_mask);
+    if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
+    const work: protocol.SessionWork = .fromCore(try rows[index].work.work(row.created_at.get(), now_ms));
+    const peers: protocol.PeerFacts = .{ .from_person_at = optional(row.from_person_at) };
+    const fields: protocol.SessionRow.Fields = .{
+        .reference = row.session_ref.slice(),
+        .workspace = row.workspace.slice(),
+        .provider = row.provider,
+        .model = row.model.slice(),
+        .bash = tools.contains(.bash),
+        .web_search = tools.contains(.web_search),
+        .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
+        .label = if (row.label) |*label| label.slice() else null,
+        .created_at = row.created_at.get(),
+        .revision = row.revision.get(),
+        .end = row.next_position.get() - 1,
+        .first_message = try firstMessage(row, rows[index].first),
+        .work = &work,
+        .peers = &peers,
+    };
+    if (index != 0) try capture.append(",");
+    try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow.Fields }}, .{&fields});
+}
+
+/// A Session report's work, peer facts and first Message, in one Access.
+/// Not inlined, so the Access and the reads' rows take no slot in the
+/// report's frame, which every report appender shares.
+noinline fn appendWorkAndRowFacts(self: *Store, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
+    var a = ReadAccess.within(self);
+    defer a.deinit();
+    try renderWorkAndRowFacts(&a, session_ref, created_at, capture);
+}
+
+/// `appendWorkAndRowFacts` within `a`, whose rounds tests count. Its rounds
+/// are its reads' dependency depth: round 1 reads the work's latest Turn,
+/// the latest Message from no Session and both first-Message seeks; round
+/// 2 the work's second stage and, when a seek found one, the first
+/// admission's row; the work's later stages follow (`readWorks`). Inline,
+/// so it adds no frame to `appendWorkAndRowFacts`.
+pub inline fn renderWorkAndRowFacts(a: *ReadAccess, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
+    var person: person_message.Result = undefined;
+    var first: FirstCandidates = undefined;
+    var read: WorkRead = .{ .session = session_ref };
+    // Main read the work first, so a round queues it first.
+    _ = read.queue(a);
+    a.read(person_message, .{ .session = session_ref }, &person);
+    first.queue(a, session_ref);
+    try runReport(a);
+    try read.advance();
+    const admission = first.admission();
+    var row: first_message.Result = null;
+    if (admission != 0) a.read(first_message, .{ .session = session_ref, .first = admission }, &row);
+    const more = read.queue(a);
+    if (more or admission != 0) try runReport(a);
+    if (more) try read.advance();
+    if (admission != 0 and row == null) return error.CorruptStore;
+    try readWorks(a, (&read)[0..1]);
+    const work: protocol.SessionWork = .fromCore(try read.work(created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange));
+    try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
+    if (read.outcome()) |outcome| {
+        try capture.append(",\"latest_outcome\":{\"code\":");
+        try capture.appendJsonString(outcome.code);
+        try capture.append(",\"content\":");
+        if (outcome.content_id) |content_id| {
+            const metadata = try content_domain.readContentMetadata(a.store, @intCast(content_id));
+            try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
+        } else {
+            try capture.append("null");
+        }
+        try capture.append("}}");
+    } else try capture.append(",\"latest_outcome\":null}");
+    try capture.append(",\"peers\":");
+    const peers: protocol.PeerFacts = .{ .from_person_at = if (person) |found| found.admitted_at.get() else null };
+    try capture.appendShape(.{protocol.Hole{ .json = protocol.PeerFacts }}, .{peers});
+    try capture.append(",\"first_message\":");
+    try capture.appendShape(.{protocol.Hole{ .optional_json = protocol.FirstMessage }}, .{if (row) |*found| try firstMessage(found, admission) else null});
 }
 
 pub fn renderSessionReportLocked(
@@ -568,11 +807,7 @@ pub fn renderSessionReportLocked(
     try capture.append(",\"label\":");
     if (current.label) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
     try capture.appendFmt(",\"created_at\":\"{d}\"}},\"pending_messages\":\"{d}\",\"work\":", .{ current.created_at, pending_messages });
-    try appendCurrentWork(self, session_ref, current.created_at, capture);
-    try capture.append(",\"peers\":");
-    try capture.appendShape(.{protocol.Hole{ .json = protocol.PeerFacts }}, .{try readPeerFactsLocked(self, session_ref)});
-    try capture.append(",\"first_message\":");
-    try capture.appendShape(.{protocol.Hole{ .optional_json = protocol.FirstMessage }}, .{try readFirstMessageLocked(self, session_ref)});
+    try appendWorkAndRowFacts(self, session_ref, current.created_at, capture);
     try capture.append(",\"selected_message\":");
     try appendSelectedMessage(self, session_ref, capture);
     try capture.append(",\"recent_messages\":[");
@@ -621,193 +856,313 @@ pub fn renderSessionReportLocked(
     });
 }
 
-fn appendCurrentWork(self: *Store, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
-    const read = try readWorkLocked(self, session_ref, created_at, try store_core.readUnixMilliseconds(self.io));
-    const work: protocol.SessionWork = .fromCore(read.work);
-    try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
-    const outcome = read.outcome orelse return capture.append(",\"latest_outcome\":null}");
-    try capture.append(",\"latest_outcome\":{\"code\":");
-    try capture.appendJsonString(outcome.code.slice());
-    try capture.append(",\"content\":");
-    if (outcome.content_id) |content_id| {
-        const metadata = try content_domain.readContentMetadata(self, content_id);
-        try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
-    } else {
-        try capture.append("null");
-    }
-    try capture.append("}}");
-}
+/// The Session's latest Turn and its current Operation. The quota
+/// diagnostic is read only for a failed outcome, and only while it is
+/// small enough to be one (`Quota.max_bytes`).
+const work_latest = rsql.Read(.{
+    .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
+        "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
+        "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
+        " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
+        "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
+        "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
+        "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1",
+    .Args = struct { session: []const u8 },
+    .Row = struct {
+        turn_id: rsql.Positive,
+        operation_id: rsql.Positive,
+        input_cutoff: rsql.Positive,
+        outcome_code: ?Code,
+        outcome_content_id: ?rsql.Positive,
+        outcome_at: ?rsql.Positive,
+        outcome_position: ?rsql.Positive,
+        /// The resolution once resolved, else the last failure's code:
+        /// the schema's checks make a resolution exactly a `resolved_at`.
+        operation_code: ?Code,
+        retry_due_at_ms: ?u64,
+        attempt_ordinal: ?rsql.Positive,
+        attempt_at: ?rsql.Positive,
+        retry_scheduled_at: ?rsql.Positive,
+        resolved_at: ?rsql.Positive,
+        /// Bytes `quotaResetsAt` parses; ones that are not UTF-8 give
+        /// no reset time, as on main.
+        diagnostic: ?rsql.Blob(Quota.max_bytes),
+        stopped_at: ?rsql.Positive,
+    },
+    .cardinality = .each,
+});
 
-const WorkRead = struct {
-    work: session_work.Work,
-    /// The latest Turn's outcome, once it has one.
-    outcome: ?struct { code: protocol.Bounded(protocol.max_code_bytes), content_id: ?i64 } = null,
+/// One aggregate over an active Turn's Operation's Actions, bounded by
+/// its calls. On SQLite it renders as main's text, with column names.
+const work_actions = rsql.Read(.{
+    .sql = "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
+        "@count_where(a.resolution_code IS NULL AND a.authorized=0) AS awaiting," ++
+        "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END) AS first_awaiting," ++
+        "@count_where(a.resolution_code IS NULL AND a.attempt_ordinal=1) AS running," ++
+        // The last resolution is the one at the greatest position.
+        "(SELECT resolved_at FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
+        // Under an `ask` revision only an `allow_once` decision
+        // authorizes; under `bypass` the proposal did.
+        "@max_where(a.decided_at,a.resolution_code IS NULL AND r.permission_mode=0) AS latest_decision_at " ++
+        "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
+        "WHERE a.parent_operation_id=?1",
+    .Args = struct { operation: u64 },
+    .Row = struct {
+        total: u64,
+        unresolved: u64,
+        awaiting: u64,
+        first_awaiting: ?rsql.Positive,
+        running: u64,
+        latest_resolution_at: ?rsql.Positive,
+        latest_decision_at: ?rsql.Positive,
+    },
+    .cardinality = .each,
+});
+
+/// The oldest running Action's call ordinal and saved description.
+const work_oldest = rsql.Read(.{
+    .sql = "SELECT a.attempt_at,tool_call.description,a.call_ordinal FROM action_operation a " ++
+        "JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
+        "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
+    .Args = struct { operation: u64 },
+    .Row = struct { attempt_at: rsql.Positive, description: ?protocol.Bounded(protocol.max_tool_description_bytes), call_ordinal: u64 },
+    .cardinality = .each,
+});
+
+/// The oldest Message queued after the cutoff ?2.
+const work_queued = rsql.Read(.{
+    .sql = "SELECT admitted_at,admission_position FROM message_admission @index(message_admission_session_pending) " ++
+        "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
+    .Args = struct { session: []const u8, cutoff: u64 },
+    .Row = struct { admitted_at: rsql.Positive, admission_position: rsql.Positive },
+    .cardinality = .each,
+});
+
+/// With nothing queued after the cutoff ?2: the newest Message a stop
+/// excluded.
+const work_excluded = rsql.Read(.{
+    .sql = "SELECT admission_id FROM message_admission @index(message_admission_session_pending) " ++
+        "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id<=?2 ORDER BY admission_id DESC LIMIT 1",
+    .Args = struct { session: []const u8, cutoff: u64 },
+    .Row = struct { admission_id: rsql.Positive },
+    .cardinality = .each,
+});
+
+/// The earliest stop that excluded the admission ?2.
+const work_stop = rsql.Read(.{
+    .sql = "SELECT position,stopped_at FROM session_stop @index(session_stop_exclusion) " ++
+        "WHERE session_ref=?1 AND admission_cutoff>=?2 ORDER BY admission_cutoff,position LIMIT 1",
+    .Args = struct { session: []const u8, admission: u64 },
+    .Row = struct { position: rsql.Positive, stopped_at: rsql.Positive },
+    .cardinality = .each,
+});
+
+/// The name main gave each work and list statement whose step fails;
+/// any other is `CorruptStore`, as main's per-row reads answered.
+pub const report_failures = .{
+    .{ list_ceiling, error.SessionReadFailed },
+    .{ list_page, error.SessionReadFailed },
+    .{ workspace_list_page, error.SessionReadFailed },
+    .{ workspace_key, error.SessionReadFailed },
+    .{ first_bound, error.SessionReadFailed },
+    .{ first_unbound, error.SessionReadFailed },
+    .{ person_message, error.SessionReadFailed },
+    .{ first_message, error.CorruptStore },
+    .{ list_row, error.SessionReadFailed },
+    .{ list_row_bare, error.SessionReadFailed },
+} ++ work_failures;
+
+/// The names main gave the work reads' failed steps.
+pub const work_failures = .{
+    .{ work_latest, error.TurnReadFailed },
+    .{ work_actions, error.ActionReadFailed },
+    .{ command_domain.stop_cutoff, error.SessionStopReadFailed },
+    .{ work_queued, error.MessageAdmissionReadFailed },
+    .{ work_excluded, error.MessageAdmissionReadFailed },
 };
 
-/// The Session's work now: a fixed set of seeks under the caller's lock,
-/// none of which reads history, then `session_work.derive`. List rows,
-/// activity pages, Current and Message progress all read work here.
-pub fn readWorkLocked(self: *Store, session_ref: []const u8, created_at: u64, now_ms: i64) !WorkRead {
-    var inputs: session_work.Inputs = .{ .now_ms = @intCast(now_ms), .created_at = created_at };
-    var read: WorkRead = .{ .work = undefined };
-    var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
-    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
-    // The quota diagnostic is read only for a failed outcome, and only
-    // while it is small enough to be one.
-    const latest = try store_core.cached(
-        self,
-        "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
-            "o.resolution_code,o.retry_due_at_ms,o.last_failure_code,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
-            "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=512 AND t.outcome_code NOT IN ('completed','cancelled'))," ++
-            "(SELECT stopped_at FROM session_stop INDEXED BY session_stop_turn WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) " ++
-            "FROM turn t INDEXED BY turn_session_latest JOIN model_operation o ON o.operation_id=t.operation_id " ++
-            "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1",
-    );
-    defer sqlite.resetCached(latest);
-    try sqlite.bindText(latest, 1, session_ref);
-    switch (c.sqlite3_step(latest)) {
-        c.SQLITE_DONE => {},
-        c.SQLITE_ROW => {
-            var turn: session_work.Inputs.Turn = .{
-                .turn_id = try sqlite.readPositive(latest, 0),
-                .operation_id = try sqlite.readPositive(latest, 1),
-                .input_cutoff = try sqlite.readPositive(latest, 2),
-                .stopped_at = try sqlite.readOptionalPositive(latest, 15),
-                .op = undefined,
+/// Ends a round of this file's reads, naming a failed step by
+/// `report_failures`.
+fn runReport(a: *ReadAccess) !void {
+    return store_access.runNamed(a, report_failures, error.CorruptStore);
+}
+
+/// A Session's work now, read in the rounds its seeks depend on, none of
+/// which reads history: its latest Turn; then an active Turn's Actions
+/// and, only while one runs, the oldest running one; or else the latest
+/// stop's cutoff, the oldest Message queued after it and, only when none
+/// is but a stop cut off, the newest Message it excluded and that stop.
+/// On SQLite each stage renders as main's statement with its columns
+/// named, but `work_latest`, which folds main's two code columns into one
+/// (`operation_code`). Many reads share each round (`readWorks`). List
+/// rows, activity pages, Message progress and the Current report read
+/// work here. Each stage reads one row, stepped once, as main did.
+pub const WorkRead = struct {
+    /// Read in place when each stage's pass steps it.
+    session: []const u8,
+    stage: Stage = .latest,
+    count: reads_domain.RowCount = .{},
+    /// What `session_work.derive` weighs, but its texts, which `work`
+    /// points at this read's own copies.
+    inputs: session_work.Inputs = .{ .now_ms = 0, .created_at = 0 },
+    /// The latest Turn's outcome code, once it has one.
+    code: Code = .{},
+    outcome_content_id: ?u64 = null,
+    /// A waiting Operation's failure code.
+    cause: Code = .{},
+    description: ?protocol.Bounded(protocol.max_tool_description_bytes) = null,
+    cutoff: u64 = 0,
+
+    const Stage = enum { latest, actions, oldest, cutoff, queued, excluded, stop, done };
+
+    /// Queues this stage's read; false once the work is read.
+    pub fn queue(w: *WorkRead, a: *ReadAccess) bool {
+        switch (w.stage) {
+            .latest => reads_domain.readFirst(a, work_latest, .{ .session = w.session }, w),
+            .actions => reads_domain.readFirst(a, work_actions, .{ .operation = w.inputs.latest.?.operation_id }, w),
+            .oldest => reads_domain.readFirst(a, work_oldest, .{ .operation = w.inputs.latest.?.operation_id }, w),
+            .cutoff => reads_domain.readFirst(a, command_domain.stop_cutoff, .{ .session = w.session }, w),
+            .queued => reads_domain.readFirst(a, work_queued, .{ .session = w.session, .cutoff = w.cutoff }, w),
+            .excluded => reads_domain.readFirst(a, work_excluded, .{ .session = w.session, .cutoff = w.cutoff }, w),
+            .stop => reads_domain.readFirst(a, work_stop, .{ .session = w.session, .admission = w.inputs.excluded.?.admission }, w),
+            .done => return false,
+        }
+        return true;
+    }
+
+    pub fn visit(w: *WorkRead, row: anytype) bool {
+        return reads_domain.visitRow(w, row);
+    }
+
+    /// After the round that ran this stage's read: judges what it found
+    /// and picks the next stage.
+    pub fn advance(w: *WorkRead) !void {
+        const found = try w.count.found();
+        w.stage = switch (w.stage) {
+            .latest => if (found and w.inputs.latest.?.terminal == null) .actions else .cutoff,
+            // An aggregate always has a row.
+            .actions => if (!found) return error.ActionReadFailed else if (w.inputs.latest.?.actions.running != 0) .oldest else .done,
+            .oldest, .stop => if (!found) return error.CorruptStore else .done,
+            .cutoff => .queued,
+            .queued => if (found or w.cutoff == 0) .done else .excluded,
+            .excluded => if (found) .stop else .done,
+            .done => .done,
+        };
+    }
+
+    pub fn keep(w: *WorkRead, row: anytype) error{CorruptStore}!void {
+        const Row = @TypeOf(row.*);
+        if (Row == work_latest.Row) return w.keepLatest(row);
+        if (Row == work_actions.Row) {
+            const turn = &w.inputs.latest.?;
+            turn.actions = .{
+                .total = row.total,
+                .unresolved = row.unresolved,
+                .awaiting = row.awaiting,
+                .first_awaiting = optional(row.first_awaiting),
+                .running = row.running,
+                .latest_resolution_at = optional(row.latest_resolution_at),
+                .latest_decision_at = optional(row.latest_decision_at),
             };
-            if (c.sqlite3_column_type(latest, 7) != c.SQLITE_NULL) {
-                var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
-                try sqlite.readText(latest, 7, &resolution);
-                turn.op = .{ .resolved = .{ .resolution = turn_policy.Resolution.parse(resolution.slice()), .at = try sqlite.readPositive(latest, 13) } };
-            } else if (c.sqlite3_column_int64(latest, 8) == 0) {
-                turn.op = .{ .in_flight = .{ .attempt_at = try sqlite.readPositive(latest, 11) } };
-            } else {
-                if (c.sqlite3_column_type(latest, 9) == c.SQLITE_NULL) return error.CorruptStore;
-                try sqlite.readText(latest, 9, &cause);
-                turn.op = .{ .waiting = .{
-                    .scheduled_at = try sqlite.readPositive(latest, 12),
-                    .due_at_ms = try sqlite.readPositive(latest, 8),
-                    .cause = cause.slice(),
-                    .attempt = try sqlite.readPositive(latest, 10),
-                } };
-            }
-            if (c.sqlite3_column_type(latest, 3) != c.SQLITE_NULL) {
-                var code: protocol.Bounded(protocol.max_code_bytes) = .{};
-                try sqlite.readText(latest, 3, &code);
-                const content_id = try sqlite.readNullablePositiveI64(latest, 4);
-                read.outcome = .{ .code = code, .content_id = content_id };
-                turn.terminal = .{
-                    .outcome = switch (try TurnOutcome.decode(code.slice(), content_id)) {
-                        .completed => .completed,
-                        .cancelled => .cancelled,
-                        .retry_exhausted, .resource_exceeded, .failed => .failed,
-                    },
-                    .code = read.outcome.?.code.slice(),
-                    .at = try sqlite.readPositive(latest, 5),
-                    .position = try sqlite.readPositive(latest, 6),
-                    .diagnostic = if (c.sqlite3_column_type(latest, 14) == c.SQLITE_BLOB) sqlite.columnBytes(latest, 14) else null,
-                };
-            } else {
-                turn.actions = try readWorkActions(self, turn.operation_id, &description);
-            }
-            inputs.latest = turn;
-        },
-        else => return error.TurnReadFailed,
+        } else if (Row == work_oldest.Row) {
+            w.description = row.description;
+            w.inputs.latest.?.actions.oldest_running = .{ .at = row.attempt_at.get(), .call = row.call_ordinal, .description = null };
+        } else if (Row == command_domain.stop_cutoff.Row) {
+            w.cutoff = row.admission_cutoff;
+        } else if (Row == work_queued.Row) {
+            w.inputs.oldest_pending = .{ .at = row.admitted_at.get(), .position = row.admission_position.get() };
+        } else if (Row == work_excluded.Row) {
+            w.inputs.excluded = .{ .admission = row.admission_id.get(), .stop_position = undefined, .stop_at = undefined };
+        } else if (Row == work_stop.Row) {
+            const excluded = &w.inputs.excluded.?;
+            excluded.stop_position = row.position.get();
+            excluded.stop_at = row.stopped_at.get();
+        } else @compileError("WorkRead reads no " ++ @typeName(Row));
     }
-    if (inputs.latest == null or inputs.latest.?.terminal != null) try readWorkQueue(self, session_ref, &inputs);
-    read.work = try session_work.derive(inputs);
-    return read;
+
+    fn keepLatest(w: *WorkRead, row: *const work_latest.Row) error{CorruptStore}!void {
+        var turn: session_work.Inputs.Turn = .{
+            .turn_id = row.turn_id.get(),
+            .operation_id = row.operation_id.get(),
+            .input_cutoff = row.input_cutoff.get(),
+            .stopped_at = optional(row.stopped_at),
+            .op = undefined,
+        };
+        if (row.resolved_at) |at| {
+            const resolution = row.operation_code orelse return error.CorruptStore;
+            turn.op = .{ .resolved = .{ .resolution = turn_policy.Resolution.parse(resolution.slice()), .at = at.get() } };
+        } else if ((row.retry_due_at_ms orelse 0) == 0) {
+            // NULL reads as 0, as main's integer read did.
+            turn.op = .{ .in_flight = .{ .attempt_at = (row.attempt_at orelse return error.CorruptStore).get() } };
+        } else {
+            w.cause = row.operation_code orelse return error.CorruptStore;
+            turn.op = .{ .waiting = .{
+                .scheduled_at = (row.retry_scheduled_at orelse return error.CorruptStore).get(),
+                .due_at_ms = row.retry_due_at_ms.?,
+                .cause = "",
+                .attempt = (row.attempt_ordinal orelse return error.CorruptStore).get(),
+            } };
+        }
+        if (row.outcome_code) |*code| {
+            w.code = code.*;
+            w.outcome_content_id = optional(row.outcome_content_id);
+            turn.terminal = .{
+                .outcome = switch (try TurnOutcome.decode(code.slice(), if (row.outcome_content_id) |id| @intCast(id.get()) else null)) {
+                    .completed => .completed,
+                    .cancelled => .cancelled,
+                    .retry_exhausted, .resource_exceeded, .failed => .failed,
+                },
+                .code = "",
+                .at = (row.outcome_at orelse return error.CorruptStore).get(),
+                .position = (row.outcome_position orelse return error.CorruptStore).get(),
+                .resets_at = session_work.quotaResetsAt(code.slice(), if (row.diagnostic) |*bytes| bytes.slice() else null),
+            };
+        }
+        w.inputs.latest = turn;
+    }
+
+    /// The latest Turn's outcome code and content, once it has one.
+    pub fn outcome(w: *const WorkRead) ?struct { code: []const u8, content_id: ?u64 } {
+        const turn = w.inputs.latest orelse return null;
+        if (turn.terminal == null) return null;
+        return .{ .code = w.code.slice(), .content_id = w.outcome_content_id };
+    }
+
+    /// The work these reads describe, for a Session created at
+    /// `created_at`, as of `now_ms`.
+    pub fn work(w: *const WorkRead, created_at: u64, now_ms: u64) error{CorruptStore}!session_work.Work {
+        std.debug.assert(w.stage == .done);
+        var inputs = w.inputs;
+        inputs.created_at = created_at;
+        inputs.now_ms = now_ms;
+        if (inputs.latest) |*turn| {
+            if (turn.terminal) |*terminal| terminal.code = w.code.slice();
+            switch (turn.op) {
+                .waiting => |*waiting| waiting.cause = w.cause.slice(),
+                .in_flight, .resolved => {},
+            }
+            if (turn.actions.oldest_running) |*running| running.description = if (w.description) |*text| text.slice() else null;
+        }
+        return session_work.derive(inputs);
+    }
+};
+
+fn optional(value: ?rsql.Positive) ?u64 {
+    return if (value) |positive| positive.get() else null;
 }
 
-/// One aggregate over the Operation's Actions, bounded by its calls, and
-/// the oldest running Action's call ordinal and saved description.
-fn readWorkActions(self: *Store, operation_id: u64, description: *protocol.Bounded(protocol.max_tool_description_bytes)) !session_work.Inputs.Actions {
-    const group = try store_core.cached(
-        self,
-        "SELECT count(*),count(*) FILTER (WHERE a.resolution_code IS NULL)," ++
-            "count(*) FILTER (WHERE a.resolution_code IS NULL AND a.authorized=0)," ++
-            "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END)," ++
-            "count(*) FILTER (WHERE a.resolution_code IS NULL AND a.attempt_ordinal=1)," ++
-            // The last resolution is the one at the greatest position.
-            "(SELECT resolved_at FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1)," ++
-            // Under an `ask` revision only an `allow_once` decision
-            // authorizes; under `bypass` the proposal did.
-            "max(a.decided_at) FILTER (WHERE a.resolution_code IS NULL AND r.permission_mode=0) " ++
-            "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
-            "WHERE a.parent_operation_id=?1",
-    );
-    defer sqlite.resetCached(group);
-    try sqlite.bindU64(group, 1, operation_id);
-    if (c.sqlite3_step(group) != c.SQLITE_ROW) return error.ActionReadFailed;
-    var actions: session_work.Inputs.Actions = .{
-        .total = try sqlite.readCount(group, 0),
-        .unresolved = try sqlite.readCount(group, 1),
-        .awaiting = try sqlite.readCount(group, 2),
-        .first_awaiting = try sqlite.readOptionalPositive(group, 3),
-        .running = try sqlite.readCount(group, 4),
-        .latest_resolution_at = try sqlite.readOptionalPositive(group, 5),
-        .latest_decision_at = try sqlite.readOptionalPositive(group, 6),
-    };
-    if (actions.running == 0) return actions;
-    const oldest = try store_core.cached(
-        self,
-        "SELECT a.attempt_at,tool_call.description,a.call_ordinal FROM action_operation a " ++
-            "JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
-            "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
-    );
-    defer sqlite.resetCached(oldest);
-    try sqlite.bindU64(oldest, 1, operation_id);
-    if (c.sqlite3_step(oldest) != c.SQLITE_ROW) return error.CorruptStore;
-    const described = c.sqlite3_column_type(oldest, 1) != c.SQLITE_NULL;
-    if (described) try sqlite.readText(oldest, 1, description);
-    actions.oldest_running = .{ .at = try sqlite.readPositive(oldest, 0), .call = try sqlite.readCount(oldest, 2), .description = if (described) description.slice() else null };
-    return actions;
-}
-
-/// Without an active Turn: the oldest eligible queued Message, else the
-/// newest stop-excluded one and the earliest stop that excluded it.
-fn readWorkQueue(self: *Store, session_ref: []const u8, inputs: *session_work.Inputs) !void {
-    const cutoff = try command_domain.latestSessionStopCutoff(self, session_ref);
-    const queued = try store_core.cached(
-        self,
-        "SELECT admitted_at,admission_position FROM message_admission INDEXED BY message_admission_session_pending " ++
-            "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
-    );
-    defer sqlite.resetCached(queued);
-    try sqlite.bindText(queued, 1, session_ref);
-    try sqlite.bindU64(queued, 2, cutoff);
-    switch (c.sqlite3_step(queued)) {
-        c.SQLITE_ROW => {
-            inputs.oldest_pending = .{ .at = try sqlite.readPositive(queued, 0), .position = try sqlite.readPositive(queued, 1) };
-            return;
-        },
-        c.SQLITE_DONE => {},
-        else => return error.MessageAdmissionReadFailed,
+/// Reads every `works` to its end, each stage of every one in a shared
+/// round, so the rounds are the deepest work's stages, not the count.
+/// Reads its caller queued before it share its first round, which runs
+/// only while some work is not `.done`; with none, it runs no round.
+pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
+    while (true) {
+        var queued = false;
+        for (works) |*w| queued = w.queue(a) or queued;
+        if (!queued) return;
+        try runReport(a);
+        for (works) |*w| try w.advance();
     }
-    if (cutoff == 0) return;
-    const excluded = try store_core.cached(
-        self,
-        "SELECT admission_id FROM message_admission INDEXED BY message_admission_session_pending " ++
-            "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id<=?2 ORDER BY admission_id DESC LIMIT 1",
-    );
-    defer sqlite.resetCached(excluded);
-    try sqlite.bindText(excluded, 1, session_ref);
-    try sqlite.bindU64(excluded, 2, cutoff);
-    const admission = switch (c.sqlite3_step(excluded)) {
-        c.SQLITE_ROW => try sqlite.readPositive(excluded, 0),
-        c.SQLITE_DONE => return,
-        else => return error.MessageAdmissionReadFailed,
-    };
-    const stop = try store_core.cached(
-        self,
-        "SELECT position,stopped_at FROM session_stop INDEXED BY session_stop_exclusion " ++
-            "WHERE session_ref=?1 AND admission_cutoff>=?2 ORDER BY admission_cutoff,position LIMIT 1",
-    );
-    defer sqlite.resetCached(stop);
-    try sqlite.bindText(stop, 1, session_ref);
-    try sqlite.bindU64(stop, 2, admission);
-    if (c.sqlite3_step(stop) != c.SQLITE_ROW) return error.CorruptStore;
-    inputs.excluded = .{ .admission = admission, .stop_position = try sqlite.readPositive(stop, 0), .stop_at = try sqlite.readPositive(stop, 1) };
 }
 
 fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
@@ -1078,7 +1433,10 @@ fn appendRejectedCalls(
     }
 }
 
-fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+/// Inline, as main's compiler chose: outlined, its 968-byte frame sits
+/// between the report's frame and `appendRevisionContent` on the intake
+/// worker's and main thread's deepest chains.
+inline fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
     const statement = try store_core.cached(
         self,
         "WITH occurrence(revision,field_order,content_id) AS MATERIALIZED (" ++
@@ -1108,7 +1466,8 @@ fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *Sessi
         try capture.append(",\"workspace\":");
         try appendColumnString(statement, 2, protocol.max_workspace_bytes, capture);
         try capture.append(",\"provider\":");
-        try capture.appendJsonString(@tagName(try sqlite.readProvider(statement, 12)));
+        const provider = try sqlite.boundedColumnText(statement, 12, protocol.max_provider_bytes);
+        try capture.appendJsonString(@tagName(std.meta.stringToEnum(protocol.Provider, provider) orelse return error.CorruptStore));
         try capture.append(",\"model\":");
         try appendColumnString(statement, 3, protocol.max_model_bytes, capture);
         try capture.append(",\"compaction_trigger\":");
@@ -1118,7 +1477,14 @@ fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *Sessi
         try capture.append(",\"reasoning_effort\":");
         try appendNullableEffort(try sqlite.readNullableEffort(statement, 15), capture);
         try capture.append(",\"label\":");
-        if (try sqlite.readNullableLabel(statement, 16)) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
+        if (c.sqlite3_column_type(statement, 16) == c.SQLITE_NULL) {
+            try capture.append("null");
+        } else {
+            // Read in place: a label buffer would take a slot in the report's frame.
+            const label = try sqlite.boundedColumnText(statement, 16, protocol.max_label_bytes);
+            try configuration_domain.checkLabel(label);
+            try capture.appendJsonString(label);
+        }
         try capture.append(",\"tools\":");
         try capture.appendTools(@intCast(tools));
         try capture.append(",\"permission_mode\":");

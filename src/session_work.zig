@@ -147,9 +147,9 @@ pub const Inputs = struct {
         code: []const u8,
         at: u64,
         position: u64,
-        /// The failed Operation's saved diagnostic, when it is small enough
-        /// to be a quota record. Unreadable bytes give no reset time.
-        diagnostic: ?[]const u8 = null,
+        /// A quota failure's saved reset time (`quotaResetsAt`), which the
+        /// read parses from the failed Operation's saved diagnostic.
+        resets_at: ?u64 = null,
     };
 
     /// The current Operation, in the three states its CHECK allows.
@@ -211,7 +211,7 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
         work.state = settled(inputs, terminal) orelse switch (terminal.outcome) {
             .completed => .{ .finished = .{ .since = terminal.at } },
             .cancelled => .{ .stopped = .{ .since = terminal.at, .cause = if (latest.stopped_at != null) .stop else .interruption } },
-            .failed => .{ .failed = .{ .since = terminal.at, .code = try bounded(max_code_bytes, terminal.code), .resets_at = quotaResetsAt(terminal.code, terminal.diagnostic) } },
+            .failed => .{ .failed = .{ .since = terminal.at, .code = try bounded(max_code_bytes, terminal.code), .resets_at = terminal.resets_at } },
         };
         return work;
     }
@@ -490,7 +490,7 @@ test "a settled Session reports its latest outcome unless input came after it" {
 
 test "a quota failure carries its saved reset time and nothing else does" {
     var turn = endedTurn(.failed, "provider_quota");
-    turn.terminal.?.diagnostic = "{\"refusal\":\"quota\",\"resets_at\":1792940000}";
+    turn.terminal.?.resets_at = quotaResetsAt("provider_quota", "{\"refusal\":\"quota\",\"resets_at\":1792940000}");
     try expectState(.{ .failed = .{ .since = 500, .code = fixed(max_code_bytes, "provider_quota"), .resets_at = 1792940000 } }, .{ .now_ms = 0, .created_at = 1, .latest = turn });
     for ([_][]const u8{
         "{\"refusal\":\"quota\",\"resets_at\":null}",
@@ -499,7 +499,7 @@ test "a quota failure carries its saved reset time and nothing else does" {
         "{\"refusal\":\"quota\",\"resets_at\":01}",
         "not json",
     }) |diagnostic| {
-        turn.terminal.?.diagnostic = diagnostic;
+        turn.terminal.?.resets_at = quotaResetsAt("provider_quota", diagnostic);
         try std.testing.expectEqual(@as(?u64, null), (try derive(.{ .now_ms = 0, .created_at = 1, .latest = turn })).state.failed.resets_at);
     }
     try std.testing.expectEqual(@as(?u64, null), quotaResetsAt("provider_http_401", "{\"refusal\":\"quota\",\"resets_at\":5}"));

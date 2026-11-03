@@ -198,6 +198,11 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///   @initial(c,'set')    first character in the set: `c GLOB '[set]*'`
 ///   @same(a,b)           null-safe equality: `(a IS b)`
 ///   @distinct(a,b)       its negation: `(a IS NOT b)`
+///   @count_where(c)      the rows where c holds: `count(*) FILTER (WHERE c)`
+///   @max_where(x,c)      the greatest x of those rows: `max(x) FILTER (WHERE c)`
+///
+/// Only SQLite renders today. MySQL has no FILTER; its spelling would be
+/// `count(CASE WHEN c THEN 1 END)` and `max(CASE WHEN c THEN x END)`.
 pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
     comptime {
         if (portabilityError(text, schema_rules)) |message| @compileError(message ++ ": " ++ text);
@@ -221,6 +226,22 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
 
 /// Bytes a statement binds as a blob, read in place like text.
 pub const Bytes = struct { bytes: []const u8 };
+
+/// A stored blob of at most `capacity` bytes, read by value. Unlike text
+/// (`protocol.Bounded`), its bytes are not checked to be UTF-8; a value
+/// that is not a blob, or is longer, is `CorruptStore`.
+pub fn Blob(comptime capacity: usize) type {
+    return struct {
+        bytes: [capacity]u8 = undefined,
+        len: std.math.IntFittingRange(0, capacity) = 0,
+
+        pub const blob_capacity = capacity;
+
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+    };
+}
 
 /// A stored integer that is never 0 or negative: an id or a position.
 pub const Positive = enum(u64) {
@@ -307,10 +328,9 @@ pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
 pub fn Read(comptime spec: ReadSpec) type {
     const parsed = comptime accepted(.read, spec.sql, spec.Args, spec.Row, spec.compound);
     comptime {
-        // `.one` and `.at_most` decode in place; an `.each` Row is decoded
-        // into the round's frame. `Access.read` refuses a big `.optional`.
-        if (spec.cardinality == .each and @sizeOf(spec.Row) > 1024)
-            @compileError("rsql: a Row over 1 KiB is never copied; read it .one or .at_most(1): " ++ spec.sql);
+        // `.one` and `.at_most` decode in place. `Access.readEach` refuses
+        // an `.each` Row over 1 KiB unless its visitor owns the decoded row, and
+        // `Access.read` a big `.optional`.
         if (fillsInPlace(spec.Row) and spec.cardinality != .optional)
             @compileError("rsql: a Row that points into its caller's memory is read .optional, with Access.readInto: " ++ spec.sql);
     }
@@ -1087,8 +1107,8 @@ const Parser = struct {
     }
 
     /// A marker in an expression: `@now` takes no arguments; `@session`
-    /// takes one parameter ?k; `@octets` one expression; `@charset`,
-    /// `@initial`, `@same` and `@distinct` two. `@index` stands only after
+    /// takes one parameter ?k; `@octets` and `@count_where` one expression;
+    /// `@charset`, `@initial`, `@same`, `@distinct` and `@max_where` two. `@index` stands only after
     /// a table (`source`), and any other name is refused.
     fn marker(p: *Parser) Refused!Expr {
         const written = p.next().text;
@@ -1108,7 +1128,9 @@ const Parser = struct {
             p.sessions = p.sessions ++ .{k};
             return .{ .session = k };
         }
-        const arity: usize = if (std.mem.eql(u8, marker_name, "octets")) 1 else for ([_][]const u8{ "charset", "initial", "same", "distinct" }) |binary| {
+        const arity: usize = for ([_][]const u8{ "octets", "count_where" }) |single| {
+            if (std.mem.eql(u8, marker_name, single)) break 1;
+        } else for ([_][]const u8{ "charset", "initial", "same", "distinct", "max_where" }) |binary| {
             if (std.mem.eql(u8, marker_name, binary)) break 2;
         } else return p.refuseWith("rsql: unknown marker " ++ written);
         try p.expectSymbol("(");
@@ -1694,9 +1716,9 @@ fn renderSqlite(comptime text: []const u8) []const u8 {
 }
 
 fn marker(comptime name: []const u8, comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
-    const Marker = enum { octets, charset, initial, same, distinct };
+    const Marker = enum { octets, charset, initial, same, distinct, count_where, max_where };
     const kind = std.meta.stringToEnum(Marker, name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
-    const arity: usize = if (kind == .octets) 1 else 2;
+    const arity: usize = if (kind == .octets or kind == .count_where) 1 else 2;
     if (arguments.len != arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{arity}) ++ " arguments: " ++ text);
     const first = renderSqlite(arguments[0]);
     return switch (kind) {
@@ -1705,6 +1727,8 @@ fn marker(comptime name: []const u8, comptime arguments: []const []const u8, com
         .initial => first ++ " GLOB '[" ++ characterSet(arguments[1], text) ++ "]*'",
         .same => "(" ++ first ++ " IS " ++ renderSqlite(arguments[1]) ++ ")",
         .distinct => "(" ++ first ++ " IS NOT " ++ renderSqlite(arguments[1]) ++ ")",
+        .count_where => "count(*) FILTER (WHERE " ++ first ++ ")",
+        .max_where => "max(" ++ first ++ ") FILTER (WHERE " ++ renderSqlite(arguments[1]) ++ ")",
     };
 }
 
@@ -1802,6 +1826,8 @@ test "each marker renders its SQLite spelling" {
     try std.testing.expectEqualStrings("provider GLOB '[a-z]*'", comptime render(.sqlite, "@initial(provider,'a-z')"));
     try std.testing.expectEqualStrings("(action_kind IS 1)", comptime render(.sqlite, "@same(action_kind,1)"));
     try std.testing.expectEqualStrings("(resolution_code IS NOT 'denied')", comptime render(.sqlite, "@distinct(resolution_code,'denied')"));
+    try std.testing.expectEqualStrings("count(*) FILTER (WHERE a.authorized=0 AND (x IS 1))", comptime render(.sqlite, "@count_where(a.authorized=0 AND @same(x,1))"));
+    try std.testing.expectEqualStrings("max(a.decided_at) FILTER (WHERE r.permission_mode=0)", comptime render(.sqlite, "@max_where(a.decided_at,r.permission_mode=0)"));
 }
 
 test "markers nest, and text outside them is copied" {
@@ -2152,6 +2178,8 @@ test "a marker stands only where it means something" {
     try std.testing.expectEqualStrings("rsql: @index(name) stands only after its table", comptime statementError(.read, "SELECT turn_id FROM turn WHERE turn_id=?1 AND @index(turn_unpositioned) IS NULL", struct { id: u64 }, struct { turn_id: u64 }).?);
     try std.testing.expectEqualStrings("rsql: unknown marker @nope", comptime statementError(.read, "SELECT turn_id FROM turn WHERE turn_id=@nope(?1)", struct { id: u64 }, struct { turn_id: u64 }).?);
     try std.testing.expectEqualStrings("rsql: @same takes 2 arguments", comptime statementError(.read, "SELECT turn_id FROM turn WHERE @same(turn_id)", struct {}, struct { turn_id: u64 }).?);
+    try std.testing.expectEqualStrings("rsql: @count_where takes 1 arguments", comptime statementError(.read, "SELECT @count_where(turn_id,1) AS n FROM turn", struct {}, struct { n: u64 }).?);
+    try std.testing.expectEqualStrings("rsql: @max_where takes 2 arguments", comptime statementError(.read, "SELECT @max_where(turn_id) AS n FROM turn", struct {}, struct { n: u64 }).?);
 }
 
 test "text outside the grammar is refused at the token the parser stopped at" {

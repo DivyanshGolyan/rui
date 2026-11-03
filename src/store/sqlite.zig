@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
-const tool_catalog = @import("../tools.zig");
 const rsql = @import("rsql.zig");
 const store_schema = @import("schema.zig");
 const change_ring = @import("../change_ring.zig");
@@ -43,38 +42,6 @@ pub fn pragmaInt(database: *c.sqlite3, sql: [:0]const u8) !u32 {
     const value = c.sqlite3_column_int64(statement, 0);
     if (value < 0 or value > std.math.maxInt(u32)) return error.CorruptStore;
     return @intCast(value);
-}
-
-pub fn readNullableLabel(statement: *c.sqlite3_stmt, column: c_int) !?protocol.Bounded(protocol.max_label_bytes) {
-    if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
-    var label: protocol.Bounded(protocol.max_label_bytes) = .{};
-    try readText(statement, column, &label);
-    if (!protocol.validLabel(label.slice())) return error.CorruptStore;
-    return label;
-}
-
-pub fn readPositiveU64(statement: *c.sqlite3_stmt, column: c_int) !u64 {
-    const value = c.sqlite3_column_int64(statement, column);
-    if (value <= 0) return error.CorruptStore;
-    return @intCast(value);
-}
-
-pub fn readPermissionMode(statement: *c.sqlite3_stmt, column: c_int) !u8 {
-    const permission = c.sqlite3_column_int(statement, column);
-    if (permission < 0 or permission > 1) return error.CorruptStore;
-    return @intCast(permission);
-}
-
-pub fn readToolsMask(statement: *c.sqlite3_stmt, column: c_int) !u8 {
-    const tools = c.sqlite3_column_int(statement, column);
-    if (tools < 0 or tools > tool_catalog.all_tools_mask) return error.CorruptStore;
-    return @intCast(tools);
-}
-
-pub fn readProvider(statement: *c.sqlite3_stmt, column: c_int) !protocol.Provider {
-    var name: protocol.Bounded(protocol.max_provider_bytes) = .{};
-    try readText(statement, column, &name);
-    return std.meta.stringToEnum(protocol.Provider, name.slice()) orelse error.CorruptStore;
 }
 
 pub fn prepare(database: *c.sqlite3, sql: [:0]const u8) !*c.sqlite3_stmt {
@@ -504,6 +471,11 @@ pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt, row: *Row) erro
     }
 }
 
+/// Whether `T` is an `rsql.Blob`: bytes up to its capacity.
+fn isBlob(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity") and T == rsql.Blob(T.blob_capacity);
+}
+
 /// Whether `T` is a `protocol.Bounded`: text up to its capacity.
 fn isBounded(comptime T: type) bool {
     if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
@@ -528,6 +500,15 @@ fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out:
     }
     // Text goes straight into the Row's own bytes.
     if (comptime isBounded(T)) return out.set(try columnText(statement, column));
+    if (comptime isBlob(T)) {
+        // The type first: reading the bytes may convert the value.
+        if (c.sqlite3_column_type(statement, column) != c.SQLITE_BLOB) return error.CorruptStore;
+        const bytes = columnBytes(statement, column);
+        if (bytes.len > T.blob_capacity) return error.CorruptStore;
+        @memcpy(out.bytes[0..bytes.len], bytes);
+        out.len = @intCast(bytes.len);
+        return;
+    }
     switch (@typeInfo(T)) {
         .pointer => |pointer| {
             comptime std.debug.assert(pointer.size == .one);
@@ -536,7 +517,7 @@ fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out:
         .optional => |optional| {
             if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) {
                 out.* = null;
-            } else if (comptime isBounded(optional.child)) {
+            } else if (comptime isBounded(optional.child) or isBlob(optional.child)) {
                 // Naming only `len` leaves the bytes unwritten until `set` fills them.
                 out.* = optional.child{ .len = 0 };
                 try decodeValue(optional.child, statement, column, &out.*.?);

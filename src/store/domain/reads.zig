@@ -73,33 +73,33 @@ pub fn First(comptime Row: type) type {
 /// for when the text rules one out (`rsql.Read.single_row`). A visitor
 /// writes what it keeps into its caller's buffers, such as a page's items,
 /// so a page's rows share their rounds without a row slot each.
-const RowCount = struct {
+pub const RowCount = struct {
     rows: u8 = 0,
     failure: ?error{CorruptStore} = null,
 
     /// Whether the read found its row, once its round ran.
-    fn found(count: RowCount) error{CorruptStore}!bool {
+    pub fn found(count: RowCount) error{CorruptStore}!bool {
         if (count.failure) |err| return err;
         return count.rows != 0;
     }
 };
 
 /// Queues `S` for `visitor`, which has a `count` and a `keep` of `S.Row`.
-fn readRow(a: anytype, comptime S: type, args: S.Args, visitor: anytype) void {
+pub fn readRow(a: anytype, comptime S: type, args: S.Args, visitor: anytype) void {
     visitor.count = .{};
     a.readEach(S, args, if (S.single_row) 1 else 2, visitor);
 }
 
 /// `readRow` stepping one row only, as main did for these texts, which do
 /// not rule out a second.
-fn readFirst(a: anytype, comptime S: type, args: S.Args, visitor: anytype) void {
+pub fn readFirst(a: anytype, comptime S: type, args: S.Args, visitor: anytype) void {
     visitor.count = .{};
     a.readEach(S, args, 1, visitor);
 }
 
 /// A per-row visitor's `visit`: counts the row, then keeps it. A second
 /// row, or one `keep` refuses, stops the read and is its failure.
-fn visitRow(visitor: anytype, row: anytype) bool {
+pub fn visitRow(visitor: anytype, row: anytype) bool {
     visitor.count.rows += 1;
     if (visitor.count.rows > 1) {
         visitor.count.failure = error.CorruptStore;
@@ -130,7 +130,7 @@ const read_failures = .{
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
     .{ queued, error.ActivityReadFailed },
-};
+} ++ report_domain.work_failures;
 
 /// Ends a round of per-row reads, naming a failed step by `read_failures`.
 fn runRows(a: *ReadAccess) !void {
@@ -1025,7 +1025,9 @@ const page_session = rsql.Read(.{
 /// items take the rounds their kinds need, each round shared by every
 /// row, and the first of them also reads the assistant check, the call
 /// activity and the queued Messages, which the page's last row bounds.
-/// The work footer is a report read.
+/// The work footer is a report read (`report.WorkRead`): its latest Turn
+/// shares round 1 and its next stage round 2, and any later stage runs
+/// after the page's rounds.
 pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
     page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
     const session_ref = request.session.slice();
@@ -1033,10 +1035,14 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     session.workspace = &page.work.workspace;
     var found: store_access.Found = undefined;
     var guard: activity_sequence_guard.Result = undefined;
+    // The work footer's first two stages share the page's first two rounds.
+    var work: report_domain.WorkRead = .{ .session = session_ref };
     a.readInto(page_session, .{ .session = session_ref }, &session, &found);
     a.read(activity_sequence_guard, .{ .session = session_ref }, &guard);
-    try store_access.runNamed(a, .{.{ page_session, error.SessionReadFailed }}, error.CorruptStore);
+    _ = work.queue(a);
+    try store_access.runNamed(a, .{.{ page_session, error.SessionReadFailed }} ++ report_domain.work_failures, error.CorruptStore);
     if (!found.get()) return error.SessionNotFound;
+    try work.advance();
     if (session.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
     const next = session.next_position.get();
     const end = request.end orelse next - 1;
@@ -1054,6 +1060,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
         a.readEach(activity_forward, .{ .session = session_ref, .end = end, .position = request.position, .ordinal = request.ordinal orelse whole }, rows.items.len, &rows)
     else
         a.readEach(activity_backward, .{ .session = session_ref, .position = if (request.position != 0) request.position else end, .ordinal = if (request.position == 0) whole else request.ordinal orelse 0 }, rows.items.len, &rows);
+    _ = work.queue(a);
     if (request.ordinal) |ordinal| {
         // The cursor's item, read into the first slot, which the page's
         // own first item replaces.
@@ -1062,6 +1069,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
             else => return err,
         };
     } else try runRows(a);
+    try work.advance();
     page.count = @min(rows.len, page.items.len);
     if (rows.len > page.items.len) {
         page.more = true;
@@ -1089,8 +1097,8 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     page.queued = waiting.queued;
     // Work as of this same read, so the footer, consent and first Action
     // always describe the page they arrive with.
-    const work = (try report_domain.readWorkLocked(a.store, session_ref, session.created_at.get(), try store_core.readUnixMilliseconds(a.store.io))).work;
-    page.work.work = .fromCore(work);
+    try report_domain.readWorks(a, (&work)[0..1]);
+    page.work.work = .fromCore(try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange));
     page.work.revision = session.revision.get();
 }
 
@@ -1334,13 +1342,6 @@ const activity_message = rsql.Read(.{
     .cardinality = .each,
 });
 
-pub fn readPeer(statement: *sqlite.c.sqlite3_stmt, column: c_int) !?protocol.Peer {
-    if (sqlite.c.sqlite3_column_type(statement, column) == sqlite.c.SQLITE_NULL) return null;
-    var sender: SessionText = .{};
-    try sqlite.readText(statement, column, &sender);
-    return .{ .session = sender };
-}
-
 /// When the Operation of a call proposed in the Session resolved.
 const call_resolved = rsql.Read(.{
     .sql = "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
@@ -1428,9 +1429,10 @@ const LabelRead = struct {
     }
 
     fn keep(read: *LabelRead, row: *const peer_label.Row) error{CorruptStore}!void {
-        const label = row.label orelse return;
-        if (!protocol.validLabel(label.slice())) return error.CorruptStore;
-        read.peer.label = label;
+        if (row.label) |*label| {
+            try configuration_domain.checkLabel(label.slice());
+            read.peer.label = label.*;
+        }
     }
 
     fn found(read: *const LabelRead) !void {

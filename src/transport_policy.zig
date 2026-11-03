@@ -80,7 +80,10 @@ pub const Quota = struct {
         return refusalCode(self.refusal);
     }
 
-    pub fn format(self: Quota, buffer: *[512]u8) []const u8 {
+    /// The most bytes `format` writes.
+    pub const max_bytes = 512;
+
+    pub fn format(self: Quota, buffer: *[max_bytes]u8) []const u8 {
         return std.fmt.bufPrint(buffer, "{{\"refusal\":\"{t}\",\"resets_at\":{?d}}}", .{
             self.refusal, self.resets_at,
         }) catch unreachable;
