@@ -145,10 +145,6 @@ pub const AttemptAdmission = struct {
     permit: DispatchPermit,
 };
 
-fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const SessionFacts, policy: model_capability.CompactionPolicy) !ModelOperationKind {
-    return turn_policy.nextPurpose(try compactionFacts(self, session_ref, first_admission, current.next_position, current.provider, current.model.slice(), policy));
-}
-
 /// The facts the next model call's purpose rests on, read only as far as
 /// `turn_policy` needs them. Admission and the Current report's
 /// `context_estimate` both read them here. `first_admission` starts the
@@ -173,21 +169,15 @@ pub fn compactionFacts(self: *Store, session_ref: []const u8, first_admission: ?
     _ = try sqlite.readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
     var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
     try sqlite.readText(last, 1, &resolution);
-    const purpose: turn_policy.Purpose = switch (c.sqlite3_column_int(last, 0)) {
-        0 => .assistant_response,
-        1 => .compaction,
+    const compaction = switch (c.sqlite3_column_int(last, 0)) {
+        0 => false,
+        1 => true,
         else => return error.CorruptStore,
     };
     const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
-    const latest_first = try sqlite.readNullablePositiveI64(last, 4) orelse return error.CorruptStore;
-    facts.previous = .{
-        .purpose = purpose,
-        .context_overflow = turn_policy.Resolution.parse(resolution.slice()) == .context_overflow,
-        .turn_active = active,
-        // Only an ended compaction's Turn asks which input comes next.
-        .same_input_prefix = purpose == .compaction and !active and
-            (first_admission orelse try firstRunnableAdmission(self, session_ref)) == latest_first,
-    };
+    const latest_first: u64 = @intCast(try sqlite.readNullablePositiveI64(last, 4) orelse return error.CorruptStore);
+    const next_first: ?u64 = if (asksNextInput(compaction, active)) @intCast(first_admission orelse try firstRunnableAdmission(self, session_ref)) else null;
+    facts.previous = previousTurn(compaction, resolution.slice(), active, latest_first, next_first);
     if (turn_policy.forcedPurpose(facts.previous, facts.trigger) != null) return facts;
     facts.context_changed = try contextChangedSinceBase(self, session_ref, next_position);
     if (!facts.context_changed) return facts;
@@ -195,6 +185,25 @@ pub fn compactionFacts(self: *Store, session_ref: []const u8, first_admission: ?
     facts.usage_tokens = estimate.usage_tokens;
     facts.uncovered_bytes = estimate.uncovered_bytes;
     return facts;
+}
+
+/// Whether `turn_policy` asks the latest Turn which input comes next:
+/// only an ended compaction's Turn.
+fn asksNextInput(compaction: bool, active: bool) bool {
+    return compaction and !active;
+}
+
+/// The latest Turn as `turn_policy` weighs it, for admission and the
+/// Current report alike: its call's purpose and resolution, whether it is
+/// active, and, where `asksNextInput`, whether `next_first`, the first
+/// Message the next Turn takes, is the one it started from.
+fn previousTurn(compaction: bool, resolution: []const u8, active: bool, latest_first: u64, next_first: ?u64) turn_policy.Previous {
+    return .{
+        .purpose = if (compaction) .compaction else .assistant_response,
+        .context_overflow = turn_policy.Resolution.parse(resolution) == .context_overflow,
+        .turn_active = active,
+        .same_input_prefix = asksNextInput(compaction, active) and next_first.? == latest_first,
+    };
 }
 
 /// The first Message admission would select for this Session's next
@@ -331,26 +340,27 @@ fn contextEstimate(self: *Store, session_ref: []const u8, next_position: u64, pr
 }
 
 /// The Session ?1's newest compaction base before the position ?2, as the
-/// CTE `base`: zero rows or one.
-const compaction_base_sql = "base AS (SELECT admission_position FROM model_operation @index(model_operation_compaction_bases) " ++
+/// one-row CTE `base`: its admission position `frontier`, or 0 when it has
+/// none.
+const compaction_base_sql = "base AS (SELECT coalesce((SELECT admission_position FROM model_operation @index(model_operation_compaction_bases) " ++
     "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 " ++
-    "ORDER BY admission_position DESC LIMIT 1)";
+    "ORDER BY admission_position DESC LIMIT 1),0) AS frontier)";
 
 /// Over `compaction_base_sql`: true when there is no base, or the base has
 /// a changed suffix before ?2. Any changed suffix of the newest base also
 /// belongs to every older base, so older bases cannot change the answer.
-const changed_since_base_sql = "NOT EXISTS(SELECT 1 FROM base " ++
-    "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
-    "AND e.entry_kind IN (1,2) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
-    "AND NOT EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
+const changed_since_base_sql = "(base.frontier=0 " ++
+    "OR EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
+    "AND e.entry_kind IN (1,2) AND e.session_position>base.frontier AND e.session_position<?2) " ++
+    "OR EXISTS(SELECT 1 FROM model_output_item item @index(model_output_history) " ++
     "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
     "WHERE item.session_ref=?1 AND suffix.session_ref=?1 AND suffix.purpose=0 " ++
-    "AND item.session_position>base.admission_position AND item.session_position<?2))";
+    "AND item.session_position>base.frontier AND item.session_position<?2))";
 
 /// True when the Session has no compaction base before `boundary`, or
 /// the newest one has a changed suffix before it.
 pub const context_changed = rsql.Read(.{
-    .sql = "WITH " ++ compaction_base_sql ++ " SELECT " ++ changed_since_base_sql ++ " AS changed",
+    .sql = "WITH " ++ compaction_base_sql ++ " SELECT " ++ changed_since_base_sql ++ " AS changed FROM base",
     .Args = struct { session: []const u8, boundary: u64 },
     .Row = struct { changed: bool },
     .cardinality = .one,
@@ -377,22 +387,33 @@ const disagreeing_continuation = rsql.Read(.{
     .cardinality = .optional,
 });
 
+/// The applied instruction frontier of the Session the marker or text in
+/// `session` names: assistant admission projects every instruction update
+/// in its revision prefix, so Conversation's unique source_revision index
+/// is the applied frontier, equal or cleared text included.
+fn appliedFrontierSql(comptime session: []const u8) []const u8 {
+    return "coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=" ++ session ++ "),1)";
+}
+
+/// The Conversation's last entry ordinal for the Session `session` names.
+fn lastOrdinalSql(comptime session: []const u8) []const u8 {
+    return "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=" ++ session ++ "),0)";
+}
+
+/// The instruction updates after the applied frontier, up to `revision`.
+fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []const u8) []const u8 {
+    return "r.session_ref=" ++ session ++ " AND r.revision>" ++ appliedFrontierSql(session) ++ " AND r.revision<=" ++ revision ++ " AND r.instructions_updated=1";
+}
+
 /// What admission decides from, inside its transaction: the Session's head
-/// and settings, its latest Turn as `compactionFacts` reads it, the
-/// Conversation's last entry ordinal, and the instruction updates after
-/// the applied frontier, up to the Session's revision. Assistant
-/// admission projects every instruction update in its revision prefix, so
-/// Conversation's unique source_revision index is the applied frontier,
-/// equal or cleared text included.
+/// and settings, its latest Turn as `previousTurn` reads it, and how many
+/// instruction updates `project_instructions` would project.
 const admission_facts = rsql.Read(.{
-    .sql = "WITH applied AS (SELECT coalesce(max(e.source_revision),1) AS frontier FROM conversation_entry e WHERE e.session_ref=?1) " ++
-        "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
+    .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution," ++
-        "(SELECT coalesce(max(e.entry_ordinal),0) FROM conversation_entry e WHERE e.session_ref=?1) AS ordinal_base,applied.frontier," ++
-        "(SELECT count(*) FROM session_revision r WHERE r.session_ref=?1 AND r.revision>applied.frontier " ++
-        "AND r.revision<=s.revision AND r.instructions_updated=1) AS instructions " ++
-        "FROM session s CROSS JOIN applied LEFT JOIN turn latest ON latest.turn_id=(SELECT t.turn_id FROM turn t @index(turn_session_latest) " ++
+        "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions " ++
+        "FROM session s LEFT JOIN turn latest ON latest.turn_id=(SELECT t.turn_id FROM turn t @index(turn_session_latest) " ++
         "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1) " ++
         "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id WHERE s.session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -410,8 +431,6 @@ const admission_facts = rsql.Read(.{
         latest_operation: ?rsql.Positive,
         latest_compaction: ?bool,
         latest_resolution: ?protocol.Bounded(protocol.max_code_bytes),
-        ordinal_base: u64,
-        frontier: rsql.Positive,
         instructions: u64,
     },
     .cardinality = .one,
@@ -421,28 +440,26 @@ const admission_facts = rsql.Read(.{
 /// position ?2: whether the context changed since the newest compaction
 /// base (`context_changed`), and, only when it did, the newest usage
 /// after that base and the bytes it does not cover (`contextEstimate`'s
-/// rules). Otherwise the usage is NULL and the bytes 0, unread. A Session
-/// with no Turn reads none of them and reports `changed` false: its first
-/// call's purpose is forced (`turn_policy.forcedPurpose`), so admission
-/// never weighs them.
+/// rules). Otherwise the usage is NULL and the bytes 0. Admission reads it
+/// only when `turn_policy.forcedPurpose` leaves the purpose open. `base`,
+/// `since` and `usage` are each named once, so SQLite need not
+/// materialize them. The newest usage at or after the base is the newest
+/// usage, when that one is at or after the base, and none otherwise; so
+/// `usage` reads the newest, and the join holds it to the base. `provider`
+/// and `model` are the Session's settings, as `admission_facts` read them.
 const admission_context = rsql.Read(.{
     .sql = "WITH " ++ compaction_base_sql ++ "," ++
-        "since AS (SELECT CASE WHEN EXISTS(SELECT 1 FROM turn t WHERE t.session_ref=?1) THEN " ++ changed_since_base_sql ++
-        " ELSE 0 END AS changed,coalesce((SELECT admission_position FROM base),0) AS frontier)," ++
-        "usage AS (" ++ latestUsageSql(
-        "(SELECT frontier FROM since)",
-        "(SELECT provider FROM session WHERE session_ref=?1)",
-        "(SELECT model FROM session WHERE session_ref=?1)",
-    ) ++ ")," ++
+        "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,base.frontier FROM base)," ++
+        "usage AS (" ++ latestUsageSql("0", "?3", "?4") ++ ")," ++
         "measured AS (SELECT since.changed,since.frontier,usage.uncached,usage.cache_read,usage.cache_write,usage.output," ++
         "usage.usage_position,usage.result_admission," ++
         "CASE WHEN usage.uncached IS NULL THEN 0 ELSE usage.usage_position END AS covered," ++
         "CASE WHEN usage.uncached IS NULL THEN since.frontier ELSE usage.result_admission END AS results " ++
-        "FROM since LEFT JOIN usage ON since.changed) " ++
+        "FROM since LEFT JOIN usage ON since.changed AND usage.result_admission>=since.frontier) " ++
         "SELECT measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
         "CASE WHEN measured.changed THEN " ++ uncoveredBytes(.typed, "measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
         "FROM measured",
-    .Args = struct { session: []const u8, boundary: u64 },
+    .Args = struct { session: []const u8, boundary: u64, provider: protocol.Provider, model: []const u8 },
     .Row = struct {
         changed: bool,
         uncached: ?u64,
@@ -482,22 +499,24 @@ const entry_columns = "INSERT INTO conversation_entry(session_ref,entry_ordinal,
     "source_revision,source_operation_id,content_id,recorded_at) ";
 
 /// Projects the Turn's bound Messages into the Conversation, in admission
-/// order, after the entry ordinal `ordinal_base` and from the position
+/// order, after its last entry ordinal and from the position
 /// `position_base`: the selection's count.
 const project_messages = rsql.Write(.{
-    .sql = entry_columns ++ "SELECT session_ref,?3+row_number() OVER (ORDER BY admission_id),?4+row_number() OVER (ORDER BY admission_id)-1,1,?2," ++
-        "admission_id,NULL,NULL,content_id,@now FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?5 ORDER BY admission_id",
-    .Args = struct { session: rsql.SessionHead, turn_id: u64, ordinal_base: u64, position_base: u64, first_admission: u64 },
+    .sql = entry_columns ++ "SELECT session_ref," ++ lastOrdinalSql("@session(?1)") ++ "+row_number() OVER (ORDER BY admission_id)," ++
+        "?3+row_number() OVER (ORDER BY admission_id)-1,1,?2,admission_id,NULL,NULL,content_id,@now " ++
+        "FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?4 ORDER BY admission_id",
+    .Args = struct { session: rsql.SessionHead, turn_id: u64, position_base: u64, first_admission: u64 },
     .expect = .{ .counted = .{ .otherwise = error.ProjectionFailed } },
 });
 
-/// Projects the instruction updates after `frontier` up to `revision`, in
-/// revision order: `admission_facts`' instruction count.
+/// Projects the instruction updates after the applied frontier up to
+/// `revision`, in revision order, after the last entry ordinal and from
+/// the position `position_base`: `admission_facts`' instruction count.
 const project_instructions = rsql.Write(.{
-    .sql = entry_columns ++ "SELECT session_ref,?3+row_number() OVER (ORDER BY revision),?4+row_number() OVER (ORDER BY revision)-1,2,?2," ++
-        "NULL,revision,NULL,instructions_content_id,@now FROM session_revision WHERE session_ref=@session(?1) AND revision>?5 AND revision<=?6 " ++
-        "AND instructions_updated=1 ORDER BY revision",
-    .Args = struct { session: rsql.SessionHead, turn_id: u64, ordinal_base: u64, position_base: u64, frontier: u64, revision: u64 },
+    .sql = entry_columns ++ "SELECT r.session_ref," ++ lastOrdinalSql("@session(?1)") ++ "+row_number() OVER (ORDER BY r.revision)," ++
+        "?3+row_number() OVER (ORDER BY r.revision)-1,2,?2,NULL,r.revision,NULL,r.instructions_content_id,@now " ++
+        "FROM session_revision r WHERE " ++ pendingInstructionsSql("@session(?1)", "?4") ++ " ORDER BY r.revision",
+    .Args = struct { session: rsql.SessionHead, turn_id: u64, position_base: u64, revision: u64 },
     .expect = .{ .counted = .{ .otherwise = error.InstructionSelectionFailed } },
 });
 
@@ -520,10 +539,41 @@ const insert_operation = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// The purpose of the next model call, from `admission_facts` and
-/// `admission_context` (`compactionFacts`' rules, which read them one
-/// statement at a time for the Current report).
-fn admissionPurpose(facts: *const admission_facts.Row, context: *const admission_context.Row, first_admission: u64, policy: model_capability.CompactionPolicy) !turn_policy.Purpose {
+/// Admits the next model Attempt of `kind`. The read Access `reader`
+/// selects, outside any transaction; with nothing selected it runs main's
+/// idle checks and answers null. The write Access `writer` reads
+/// `admission_facts` after its BEGIN; when `turn_policy.forcedPurpose`
+/// leaves the purpose open, it reads `admission_context` in a round of its
+/// own. Then it writes the Turn, binds and projects the Messages and
+/// instructions, inserts the Operation, claims their positions and
+/// commits: three rounds on a forced path, four otherwise. The held Store
+/// mutex excludes every other writer, so what the selection read still
+/// holds; a moved head is `SelectionChanged`.
+pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    var found: runnable_selection.Result = undefined;
+    switch (kind) {
+        .message => reader.read(runnable_selection, .{}, &found),
+        .tool_continuation => reader.read(tool_continuation_selection, .{}, &found),
+    }
+    reader.run() catch |err| return if (err == error.StatementFailed) error.RunnableSelectionFailed else err;
+    const selection = found orelse {
+        var disagreeing: disagreeing_continuation.Result = undefined;
+        reader.read(disagreeing_continuation, .{}, &disagreeing);
+        reader.run() catch |err| return if (err == error.StatementFailed) error.TurnReadFailed else err;
+        if (disagreeing != null) return error.CorruptStore;
+        try validateBlockedToolCalls(reader.store);
+        return null;
+    };
+    if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
+    const session_ref: []const u8 = &selection.session.ref;
+    const first_admission = selection.first_admission.get();
+
+    var facts: admission_facts.Result = undefined;
+    writer.read(admission_facts, .{ .session = session_ref }, &facts);
+    writer.run() catch |err| return if (err == error.StatementFailed) error.SessionReadFailed else err;
+    if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
+
+    const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
     var compaction: turn_policy.CompactionFacts = .{
         .trigger = policy.compaction_trigger,
         .context_changed = false,
@@ -533,18 +583,19 @@ fn admissionPurpose(facts: *const admission_facts.Row, context: *const admission
     };
     if (facts.latest_turn != null) {
         if (facts.latest_operation == null) return error.CorruptStore;
-        const purpose: turn_policy.Purpose = if (facts.latest_compaction orelse return error.CorruptStore) .compaction else .assistant_response;
-        const active = facts.latest_active;
         const latest_first = facts.latest_first orelse return error.CorruptStore;
-        compaction.previous = .{
-            .purpose = purpose,
-            .context_overflow = if (facts.latest_resolution) |*code| turn_policy.Resolution.parse(code.slice()) == .context_overflow else false,
-            .turn_active = active,
-            // Only an ended compaction's Turn asks which input comes next.
-            .same_input_prefix = purpose == .compaction and !active and first_admission == latest_first.get(),
-        };
+        const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
+        compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission);
     }
     if (turn_policy.forcedPurpose(compaction.previous, compaction.trigger) == null) {
+        var context: admission_context.Result = undefined;
+        writer.read(admission_context, .{
+            .session = session_ref,
+            .boundary = selection.session.next_position.get(),
+            .provider = facts.provider,
+            .model = facts.model.slice(),
+        }, &context);
+        writer.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
         compaction.context_changed = context.changed;
         if (context.changed) {
             if (context.uncached) |uncached| {
@@ -560,79 +611,37 @@ fn admissionPurpose(facts: *const admission_facts.Row, context: *const admission
             compaction.uncovered_bytes = context.uncovered_bytes;
         }
     }
-    return turn_policy.nextPurpose(compaction);
-}
-
-/// Admits the next model Attempt of `kind`, in three rounds. The read
-/// Access `candidate` selects, outside any transaction; with nothing
-/// selected it runs main's idle checks and answers null. The write Access
-/// `a` reads `admission_facts` and `admission_context` after its BEGIN,
-/// decides the purpose in Zig, then writes the Turn, binds and projects
-/// the Messages and instructions, inserts the Operation, claims their
-/// positions and commits. The held Store mutex excludes every other
-/// writer, so what round 1 read still holds; a moved head is
-/// `SelectionChanged`.
-pub fn admitNextModelAttempt(candidate: anytype, a: anytype, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-    var found: runnable_selection.Result = undefined;
-    switch (kind) {
-        .message => candidate.read(runnable_selection, .{}, &found),
-        .tool_continuation => candidate.read(tool_continuation_selection, .{}, &found),
-    }
-    candidate.run() catch |err| return if (err == error.StatementFailed) error.RunnableSelectionFailed else err;
-    const selection = found orelse {
-        var disagreeing: disagreeing_continuation.Result = undefined;
-        candidate.read(disagreeing_continuation, .{}, &disagreeing);
-        candidate.run() catch |err| return if (err == error.StatementFailed) error.TurnReadFailed else err;
-        if (disagreeing != null) return error.CorruptStore;
-        try validateBlockedToolCalls(candidate.store);
-        return null;
-    };
-    if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
-    const session_ref: []const u8 = &selection.session.ref;
-
-    var facts: admission_facts.Result = undefined;
-    var context: admission_context.Result = undefined;
-    a.read(admission_facts, .{ .session = session_ref }, &facts);
-    a.read(admission_context, .{ .session = session_ref, .boundary = selection.session.next_position.get() }, &context);
-    try a.run();
-    if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
-
-    const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
-    const purpose = try admissionPurpose(&facts, &context, selection.first_admission.get(), policy);
+    const purpose = turn_policy.nextPurpose(compaction);
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
     const instructions: u64 = if (purpose == .compaction) 0 else facts.instructions;
 
-    const turn_id = if (selection.turn_id) |existing| existing.get() else try a.identity(.turn_id);
-    const operation_id = try a.identity(.operation_id);
-    const first_admission = selection.first_admission.get();
+    const turn_id = if (selection.turn_id) |existing| existing.get() else try writer.identity(.turn_id);
+    const operation_id = try writer.identity(.operation_id);
     const cutoff = selection.cutoff.get();
     if (selection.turn_id == null) {
-        a.write(insert_turn, .{ .turn_id = turn_id, .session = facts.session, .first_admission = first_admission, .cutoff = cutoff, .operation_id = operation_id });
+        writer.write(insert_turn, .{ .turn_id = turn_id, .session = facts.session, .first_admission = first_admission, .cutoff = cutoff, .operation_id = operation_id });
     } else {
-        a.write(continue_turn, .{ .turn_id = turn_id, .cutoff = cutoff, .operation_id = operation_id, .session = facts.session });
+        writer.write(continue_turn, .{ .turn_id = turn_id, .cutoff = cutoff, .operation_id = operation_id, .session = facts.session });
     }
-    const positions = try a.positions(facts.session);
+    const positions = try writer.positions(facts.session);
     if (selected != 0) {
-        a.writeCount(bind_messages, .{ .turn_id = turn_id, .session = facts.session, .cutoff = cutoff }, selected);
-        a.writeCount(project_messages, .{
+        writer.writeCount(bind_messages, .{ .turn_id = turn_id, .session = facts.session, .cutoff = cutoff }, selected);
+        writer.writeCount(project_messages, .{
             .session = facts.session,
             .turn_id = turn_id,
-            .ordinal_base = facts.ordinal_base,
             .position_base = try positions.take(selected),
             .first_admission = first_admission,
         }, selected);
     }
     if (instructions != 0) {
-        a.writeCount(project_instructions, .{
+        writer.writeCount(project_instructions, .{
             .session = facts.session,
             .turn_id = turn_id,
-            .ordinal_base = facts.ordinal_base + selected,
             .position_base = try positions.take(instructions),
-            .frontier = facts.frontier.get(),
             .revision = facts.revision.get(),
         }, instructions);
     }
-    a.write(insert_operation, .{
+    writer.write(insert_operation, .{
         .operation_id = operation_id,
         .turn_id = turn_id,
         .session = facts.session,
@@ -646,7 +655,7 @@ pub fn admitNextModelAttempt(candidate: anytype, a: anytype, kind: ModelAdmissio
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try a.commit();
+    try writer.commit();
     return .{ .permit = .{ .binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 } } };
 }
 
