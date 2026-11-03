@@ -1257,7 +1257,7 @@ A caller may still escalate an ordinary outcome, such as a stale settlement, to 
 
 The Store's format version is the `format` row of `store_meta`, and SQLite's `PRAGMA user_version` repeats it so an older binary refuses the file cheaply.
 Before any write, open compares the format and then each table's and index's stored CREATE text with the DDL this binary renders, so a Store missing an object, holding an extra one, or carrying a changed column, CHECK or index is refused as the wrong schema.
-The Host accepts only schema 47, which has no migration (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 keeps each Session's [read-through position](#new-since-you-looked), names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules): a Store at any earlier version is rejected as unsupported, and its users must reset it.
+The Host accepts only schema 50, which has no migration (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added): a Store at any earlier version is rejected as unsupported, and its users must reset it.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
 Sessions store a Label and creation time.
@@ -1334,7 +1334,7 @@ Once migrations keep old Stores usable across format changes, Rui should switch 
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
-The unreleased wire label is `4`: it changed when each Message began carrying its sender's environment and the Activity page began carrying `read_through` and `beyond_unseen` beside the `mark_read` request.
+The wire label is `7`: it changed when the Activity page dropped `read_through` and `beyond_unseen` and the Host dropped the `mark_read` request.
 The Store records the wire label it was created with in `store_meta` and opens only at the current one.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
 Pre-provider captures are not accepted or defaulted to Codex.
@@ -2747,6 +2747,7 @@ Any other waits in the row, which shows only in the latest view, whenever the Ho
 It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
+Wire version 7 dropped the Activity page's `read_through` and `beyond_unseen` fields and the `mark_read` request, after version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
 Opening adds no configuration banner or command tutorial.
 Bash bypass mode retains its safety warning.
@@ -3317,8 +3318,6 @@ This is a logical inventory prefix, not a historical transaction snapshot: immut
 Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.
 
-Each page also carries the Session's `read_through` position from the same Store read, null until a person has read it, and `beyond_unseen`: on a backward page with `more`, whether the row just before its oldest comes after `read_through` (or nothing was read), so the opening knows from the latest page alone whether every unseen row is on it ([New since you looked](#new-since-you-looked)).
-
 A page's cost does not grow with the Session's history.
 Each source of rows (Message admissions, User and assistant entries, Tool Calls, rejected calls and Action results by their acceptance, Turn outcomes, Session stops and refused sends) is read through an index on its Session and position: a range seek from the cursor in the page's direction that stops after 17 rows, the three groups merged and cut to the page plus one.
 A Tool Result's group is judged only for the positions on the page, and a single row resolves by the same seeks at its own position.
@@ -3332,48 +3331,6 @@ Invalid identities/cursors do not mutate work; contradictory canonical facts fen
 Ordinary connection capacity bounds readers, fixed metadata/scanner storage and 4-KiB windows; no worker, payload stage/cache or per-Session traversal survives return.
 Persistent draft/input custody, terminal composition and the final one-pass opening/replay consumer remain separate work, including precommit preservation and postcommit fatality.
 These reads alone do not complete opening.
-
-### New since you looked
-
-Divyansh approved this on 2026-10-31 (front-end plan PR 7): "A per-Session last-read position, so opening a Session lands on a 'new since you looked' marker."
-The rest of this section describes current behaviour.
-
-Each Session row keeps `read_through`, the Session position a person has seen its conversation through, null until someone has; a CHECK keeps it positive and below `next_position`.
-It describes the Session, not a client: every client that opens a Session reads the same conversation.
-The Host owns the write.
-`POST /v1/mark-read` takes `kind:"mark_read"`, `session` and a decimal-string `position`, and answers `mark_read_reply` with status `recorded`.
-The position only advances: one at or before the stored one changes nothing, so a repeated write, or a client that saw less, converges on the furthest position anyone saw.
-A missing Session, or a position the Session has not reached, answers `mark_read_refused` with `SessionNotFound` or `PositionNotReached` and changes nothing; a canonical Store failure answers as for any request, and the client returns it as one.
-The write starts no work and changes no settings revision.
-Unlike other Session writes it touches nothing in the change ring: no Session list row shows the position, so a list watching the Session has nothing to read again.
-Wire version 6 added the `label` on the Session a Message row names as sender or target, after version 5 added the pages' `hosted_call` items, version 4 added the request and the page's `read_through` and `beyond_unseen` fields, with each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
-
-Opening reads the latest Activity page as before, and the page's `read_through` places the dim rule `── new since you looked ──` on a line of its own above the first shown item after it.
-The conversation opens at the latest view when the Session was never read, when no item after the position shows, or when the latest view shows the rule.
-Otherwise it opens a transcript that starts at the rule: Activity pages forward from the read-through position, shown as live output shows them, with newer rows below.
-The rule is the transcript's first row, and nothing older loads above it; `/history` leaves it for the ordinary transcript, which reaches the conversation's start.
-Reaching its end loads the next page, up to the opening's end, and a move past that end returns to the latest view, as for any transcript.
-Each page costs one Activity read and its rows' content reads, so an opening costs its own page plus one forward page whatever the number of unseen rows, and later pages load only as the person reaches them.
-
-A row counts as seen only once a frame drew it.
-A frame that shows the end of that transcript has shown every row through its last complete position.
-A caught-up frame of the latest view counts through its end only when it shows the row that the rows already seen reach: the rule, the end of a finished transcript, or the end of the previous counted frame.
-When more than a screen arrives between frames, the latest view skips rows no frame drew; a transcript of live output that draws the rows from that point on extends what was seen to the end of what it drew, so scrolling up over them and back counts them.
-A newer page too long for the transcript to keep pushes out rows no frame drew: the transcript goes on and says so, and what it shows after that is not counted, since the position records only a prefix and those rows stay new.
-A never-read Session's first latest view counts through its end.
-Text that leaves a view before any frame draws it never counts, and an Action or Message view over the opening opens no transcript, so rows its latest view does not reach stay unseen and the next opening lands there again.
-A pending Action wins over the rule: a Session waiting on one opens at the latest view, which shows the choice.
-Leaving takes the position once, when it passed what the Store holds.
-Esc back to the overview hands the position to the overview, so the screen never waits for it.
-The overview keeps one read-through position per Session for its whole run, and it only rises; beside it is the furthest position the Host was sent.
-Whenever the worker has no queued job, including while a conversation holds the terminal, it sends one position the Host lacks.
-Because the Store keeps the furthest position it is sent, the order of sends, a repeat, or one still on its way changes nothing; returning again and again to a stalled Host adds no jobs.
-Reopening a Session hands the conversation the overview's position as a plain value, and the opening places the rule after the later of it and the page's `read_through`, so the rule lands past what the person saw without waiting for any write.
-The page's `beyond_unseen` still describes the Store's position; when the overview's is later, a page whose row before it lies between the two opens the transcript from the overview's position, which shows the same rows below the rule.
-Exit, detach or a signal sends every position the Host lacks, the conversation's own included, after the terminal is restored, all within one second; a send the exit cancelled counts as lacking.
-A Host that does not take a position keeps the earlier one, and the next opening lands there: no saved work depends on it, so a refusal or an unanswered request neither fails nor delays the departure.
-A canonical Store failure ends the overview, as it does for every other request.
-The rule is presentation only, placed again by each opening and never saved; no item carries a read flag.
 
 ### Work state and wait conditions
 
