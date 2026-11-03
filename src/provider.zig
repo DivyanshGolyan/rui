@@ -51,7 +51,7 @@ pub const PreparedRequest = struct {
 const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
 
 /// The request fields the Host writes itself, which no codec header names:
-/// `content_type`, model_adapter.Headers' credential, user-agent and FedRAMP
+/// `content_type`, providers.Headers' credential, user-agent and FedRAMP
 /// fields, and every codec's routing header, which the Host echoes.
 pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp" } ++ routing_fields;
 

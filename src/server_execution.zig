@@ -66,15 +66,17 @@ const AttemptOwner = struct {
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
-    /// The leased credential generation a managed transfer presented.
-    credential_generation: ?u64 = null,
-    /// The transfer presented an API key, so a 401 rejects that key.
-    presented_key: bool = false,
+    /// What a 401 means for the credential the transfer presented, which its
+    /// sign-in source said at launch.
+    rejection: providers.Credential.Rejection = .settle,
     transfer: provider.Transfer = undefined,
 
-    /// The code a failure saves: a rejected API key names its remedy.
+    /// The code a failure saves: a rejected credential may name its remedy.
     fn failureCode(self: *const ProviderSlot, failure: execution.TransferFailure, buffer: *[96]u8) []const u8 {
-        if (self.presented_key and execution.rejectsCredential(failure)) return failure_class.api_key_rejected;
+        if (execution.rejectsCredential(failure)) switch (self.rejection) {
+            .key_rejected => return failure_class.api_key_rejected,
+            .settle, .refresh_once => {},
+        };
         return failure.codeText(buffer);
     }
 };
@@ -417,7 +419,7 @@ pub fn executionMain(host: *Host) void {
     };
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
-    const auth_worker: ?*AuthWorker = if (host.providers.chatgpt()) |authentication| worker: {
+    const auth_worker: ?*AuthWorker = if (host.providers.leasedSignIn()) |authentication| worker: {
         workspace.auth_worker = .{ .io = host.io, .authentication = authentication };
         break :worker &workspace.auth_worker;
     } else null;
@@ -803,9 +805,8 @@ const NativeTurn = struct {
 noinline fn startModelList(host: *Host, reactor: *provider.Reactor, work: *ModelListWork) void {
     const served = host.providers.modelListKey() orelse return;
     if (reactor.model_list_endpoint == null) return host.model_lists.publish(error.OutOfMemory);
-    const key = served.credential.key_file;
-    var headers: model_adapter.Headers = undefined;
-    headers.initKey(served.endpoint, host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err|
+    var headers: providers.Headers = .{};
+    served.credential.fields(served.endpoint, host.providers.ca_file, null, &reactor.credentials, &headers) catch |err|
         return host.model_lists.publish(err);
     work.credential = headers.takeCredential();
     defer headers.deinit();
@@ -1558,8 +1559,8 @@ fn advanceModelPreparation(
         .prepared => |request| {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
-            const route = protocol.routeOf(host.providers.routes(), request.provider);
-            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = route == .chatgpt_device } })) {
+            const leased = host.providers.get(request.provider).?.credential.leased();
+            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = leased } })) {
                 .authenticate => {
                     moveSlot(host, slot, .model_authenticating, .{ .owner = owner });
                     _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?, request);
@@ -1617,7 +1618,7 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
         const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id, .report = "" } };
         switch (result) {
             .refreshed => |refreshed| settleFailure(host, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary),
-            .failed => |err| settleUnansweredFailure(host, active.owner.token, active.owner.binding, model_adapter.authenticationFailureCode(err), .ordinary),
+            .failed => |err| settleUnansweredFailure(host, active.owner.token, active.owner.binding, providers.leaseFailureCode(err), .ordinary),
             .ready => unreachable,
         }
     }
@@ -1663,7 +1664,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
         .abandon, .settle_authentication_failure => {
             request.deinit(host.io, host.scratch_budget.?);
             if (decision == .settle_authentication_failure)
-                settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .ordinary);
+                settleUnansweredFailure(host, owner.token, owner.binding, providers.leaseFailureCode(result.?.failed), .ordinary);
             finishCustodyNow(host, slot);
         },
         else => unreachable,
@@ -1702,7 +1703,7 @@ fn launchPreparedRequest(
     slot: *ExecutionSlot,
     owner: ModelPreparingSlot,
     request: *provider.PreparedRequest,
-    credential: ?*const model_adapter.Credential,
+    lease: ?*const providers.Lease,
 ) void {
     const token = owner.token;
     const binding = owner.binding;
@@ -1714,37 +1715,24 @@ fn launchPreparedRequest(
     var retained_response: ?named_scratch.Owner = null;
     if (failedAtProviderPrepare(host, slot, token, binding, request)) return;
     const served = host.providers.get(request.provider).?;
-    var headers: model_adapter.Headers = .{};
+    var headers: providers.Headers = .{};
     defer headers.deinit();
-    if (credential) |value| {
-        headers.init(served.endpoint, host.providers.ca_file, served.credential.chatgpt_device, value, &reactor.credentials) catch |err| {
-            request.deinit(host.io, host.scratch_budget.?);
-            fenceDispatch(host, "provider preparation", err);
-            finishCustodyNow(host, slot);
-            return;
-        };
-    } else switch (served.credential) {
-        .key_file => |key| headers.initKey(served.endpoint, host.providers.ca_file, key.key, key.fixture, &reactor.credentials) catch |err| {
-            request.deinit(host.io, host.scratch_budget.?);
-            fenceDispatch(host, "provider preparation", err);
-            finishCustodyNow(host, slot);
-            return;
-        },
-        .none => {},
-        // A sign-in's request always launches with its lease.
-        .chatgpt_device => unreachable,
-    }
+    served.credential.fields(served.endpoint, host.providers.ca_file, lease, &reactor.credentials, &headers) catch |err| {
+        request.deinit(host.io, host.scratch_budget.?);
+        fenceDispatch(host, "provider preparation", err);
+        finishCustodyNow(host, slot);
+        return;
+    };
     // Every request echoes its Turn's routing value, whatever its provider:
     // one that never sends the codec's routing header has none to echo.
-    const replay = host.turn_states.get(request.provider).replay(binding.turn_id, served.credential.routingOwner(credential));
+    const replay = host.turn_states.get(request.provider).replay(binding.turn_id, served.credential.routingOwner(lease));
     headers.routing(routing_header, replay.value);
     const turn_state = provider.TurnStateKey{ .provider = request.provider, .turn_id = binding.turn_id, .epoch = replay.epoch };
     // h2 holds the Transfer's stream from launch, so construct it in its
     // final slot and keep that union arm active through completion and deinit.
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding },
-        .credential_generation = if (credential) |value| value.record.generation else null,
-        .presented_key = served.credential == .key_file,
+        .rejection = served.credential.rejection(lease),
     });
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
@@ -1880,8 +1868,9 @@ fn completeTransfer(
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
-                if (execution.rejectsCredential(failure)) if (active.credential_generation) |generation| {
-                    if (beginForcedRefresh(host, slot, &answered, generation)) return;
+                if (execution.rejectsCredential(failure)) switch (active.rejection) {
+                    .refresh_once => |generation| if (beginForcedRefresh(host, slot, &answered, generation)) return,
+                    .settle, .key_rejected => {},
                 };
                 if (diagnostic) |detail| {
                     answered.reject(code, detail, workspace.provider_failure.report.slice(), disposition);
