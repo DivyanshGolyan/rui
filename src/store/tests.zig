@@ -14456,6 +14456,16 @@ test "a Full list takes a statement per 256 rows, and lists each row once in ord
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSessionAsk(&storage, "chunked-stops-config");
+    // An interrupted Operation: the interruptions list follows the stops
+    // in their run, and renders only once the stops finished.
+    try submitTestMessage(&storage, &tmp, "chunked-interrupt", "chunked-interrupt", session.slice(), "interrupt me");
+    const interrupted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var interrupt = try completeModelInterruption("chunked-interrupt-command", session.slice(), interrupted);
+    try std.testing.expect(storage.interruptModel(&interrupt, .{}) == .accepted);
+    if (try storage.admitNextModelAttempt(.{})) |successor| {
+        const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"};
+        try settleItemsForTesting(&storage, &tmp, successor.permit.binding, &items, "ok");
+    }
     for ([_]usize{ 256, 257 }) |rows| {
         while (try queryU64(storage.database, "SELECT count(*) FROM core_command WHERE kind=3") < rows) {
             var key: [32]u8 = undefined;
@@ -14477,8 +14487,86 @@ test "a Full list takes a statement per 256 rows, and lists each row once in ord
             var key: [32]u8 = undefined;
             try std.testing.expectEqualStrings(try std.fmt.bufPrint(&key, "chunked-stop-{d:0>3}", .{index}), stop.object.get("command_key").?.string);
         }
+        const interruptions = parsed.value.object.get("full").?.object.get("model_interruptions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), interruptions.len);
+        try std.testing.expectEqualStrings("chunked-interrupt-command", interruptions[0].object.get("command_key").?.string);
     }
     try std.testing.expect(!storage.isFenced());
+}
+
+test "Full revisions read no statement past a last revision that shows content" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "last-revision-config");
+    var reconfigure: protocol.ConfigureCommand = .{};
+    try reconfigure.key.set("last-revision");
+    try reconfigure.session.set(session.slice());
+    reconfigure.configuration.instructions = try testingBytesContent(&tmp, "last-revision-instructions", "Be brief.");
+    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+    _ = testingRuns(&storage, report_domain.full_revisions);
+    std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), null));
+    // The chunk stops after the second revision to stream its
+    // instructions; its row's `newest` says no revision follows.
+    try std.testing.expectEqual(@as(i64, 1), testingRuns(&storage, report_domain.full_revisions));
+}
+
+/// A list whose statement fails at its first row's step.
+const FailingList = struct {
+    pub const S = rsql.Read(.{
+        .sql = "SELECT t.turn_id FROM turn t WHERE t.session_ref=?1 AND t.turn_id>?2 AND abs(-9223372036854775808+0*t.turn_id)>=0 ORDER BY t.turn_id LIMIT 257",
+        .Args = struct { session: []const u8, after: u64 = 0 },
+        .Row = struct { turn_id: rsql.Positive },
+        .cardinality = .each,
+    });
+    pub const failed = error.TurnReadFailed;
+    pub const header = "],\"failing\":[";
+    pub const State = report_domain.NoState;
+    pub const check = report_domain.noCheck;
+    pub const First = report_domain.NoFirst;
+    pub const queueFirst = report_domain.noQueueFirst;
+    pub const checkFirst = report_domain.noCheckFirst;
+    pub const streams = report_domain.streamsNever;
+    pub const kept_rows = 0;
+
+    pub fn after(session: []const u8, row: *const S.Row) S.Args {
+        return .{ .session = session, .after = row.turn_id.get() };
+    }
+
+    pub fn render(_: *reads_domain.ReadAccess, _: *report_domain.SessionReportCapture, _: *const S.Row) error{}!void {}
+};
+
+test "Full history answers a list's first check before a later list's failed step in its round" {
+    // Conversation's first read finds an assistant message without its
+    // entry, and in the same round the list after it fails its step: main
+    // checked the entries before it read any later list.
+    for ([_]bool{ false, true }) |check| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "first-check-config");
+        const answer = [_]TestingAnswerPart{.{ .encoded = "hello", .decoded = "hello" }};
+        try answerTestTurn(&storage, &tmp, session.slice(), "first-check", &answer);
+        if (check) try sqlite.exec(storage.database, "DELETE FROM conversation_entry WHERE entry_kind=3");
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &root);
+        var used = std.atomic.Value(u64).init(0);
+        var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+        try capture.create(root[0..length], 1, false);
+        defer capture.deinit();
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
+        defer a.deinit();
+        try std.testing.expectError(
+            if (check) error.CorruptStore else error.TurnReadFailed,
+            report_domain.renderRun(&a, .{ report_domain.Conversation, FailingList }, session.slice(), &capture),
+        );
+    }
 }
 
 test "a Full list keeps the rows whose content it shows whole for after their chunk, in order" {
@@ -14716,8 +14804,23 @@ test "Full revisions show each content whole where it first occurs" {
         instructions[1] = 0;
         output_schema[1] = null;
         var fresh: usize = 11;
+        // The texts the Session holds so far, and whether `overflow` filled
+        // `ContentOwners` with a revision's instructions while its output
+        // schema is new: a value that first occurs in the revision that
+        // filled the map.
+        const held = try std.testing.allocator.alloc(bool, 4 * capacity);
+        defer std.testing.allocator.free(held);
+        @memset(held, false);
+        held[0] = true;
+        var distinct: usize = 1;
+        var filled_between = false;
         for (2..revisions + 1) |revision| {
-            instructions[revision] = if (shape == .same) 1 else switch (revision % 5) {
+            const fill = shape == .overflow and distinct == capacity - 1;
+            instructions[revision] = if (shape == .same) 1 else if (fill) blk: {
+                lengths[fresh] = (try std.fmt.bufPrint(&texts[fresh], "{{\"title\":\"fresh {d}\"}}", .{revision})).len;
+                fresh += 1;
+                break :blk fresh - 1;
+            } else switch (revision % 5) {
                 // Older content, out of id order.
                 0 => 1 + (revision * 7) % 10,
                 // An earlier revision's instructions.
@@ -14728,10 +14831,19 @@ test "Full revisions show each content whole where it first occurs" {
                     break :blk fresh - 1;
                 },
             };
-            output_schema[revision] = if (shape == .same) null else switch (revision % 3) {
+            output_schema[revision] = if (shape == .same) null else if (fill) blk: {
+                lengths[fresh] = (try std.fmt.bufPrint(&texts[fresh], "{{\"title\":\"schema {d}\"}}", .{revision})).len;
+                fresh += 1;
+                filled_between = true;
+                break :blk fresh - 1;
+            } else switch (revision % 3) {
                 0 => null,
                 1 => instructions[revision],
                 else => 1 + (revision * 3) % 10,
+            };
+            for ([_]?usize{ instructions[revision], output_schema[revision] }) |text| if (text) |index| if (!held[index]) {
+                held[index] = true;
+                distinct += 1;
             };
             var key: [48]u8 = undefined;
             var reconfigure: protocol.ConfigureCommand = .{};
@@ -14744,7 +14856,7 @@ test "Full revisions show each content whole where it first occurs" {
             } else reconfigure.configuration.output_schema.state = .explicit_null;
             try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
         }
-        if (shape == .overflow) try std.testing.expect(fresh > capacity);
+        try std.testing.expectEqual(shape == .overflow, filled_between and distinct > capacity);
         _ = testingRuns(&storage, report_domain.full_revisions_owned);
         const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .full);
         defer std.testing.allocator.free(full);
@@ -14780,6 +14892,18 @@ test "Full revisions show each content whole where it first occurs" {
                     try std.testing.expectEqualStrings(@tagName(owner.field), reference.get("field").?.string);
                 }
             }
+        }
+        // The next report starts its owners afresh: the other Session's
+        // revisions each own their instructions, which this one's map
+        // placed elsewhere.
+        const again = try testingSessionReportWithProfile(&storage, &tmp, other.slice(), 64 * 1024 * 1024, .full);
+        defer std.testing.allocator.free(again);
+        var reparsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, again, .{});
+        defer reparsed.deinit();
+        const others = reparsed.value.object.get("full").?.object.get("session_revisions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 11), others.len);
+        for (others[1..], 1..) |row, index| {
+            try std.testing.expectEqualStrings(texts[index][0..lengths[index]], row.object.get("instructions").?.object.get("text").?.string);
         }
     }
 }

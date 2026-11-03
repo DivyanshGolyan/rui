@@ -58,12 +58,12 @@ pub const verified_window_bytes = 2048;
 
 /// Streams content `content_id`, whose metadata is `reference`, to
 /// `sink.write(bytes)` in windows of `verified_window_bytes`, each a
-/// round of `a` of its own (`readRaw`), hashed in order by `DigestCheck`.
-/// The last window is compared with the digest before `sink` gets it, so
-/// a wrong payload's earlier windows reach `sink`, and its last does not:
-/// the call is `CorruptStore` and the caller's output must not be sealed.
-/// Empty content reads nothing and is not compared, as `DigestCheck`
-/// says. Not inlined, so its window sits only on the chains that stream.
+/// round of `a` of its own (`readRaw`), hashed in order by `DigestCheck`,
+/// which compares the digest once the last window is hashed. So a wrong
+/// payload's earlier windows reach `sink` before the call is
+/// `CorruptStore`: the caller must not seal what `sink` wrote. Empty
+/// content reads nothing and is not compared. Not inlined, so its window
+/// sits only on the chains that stream.
 pub noinline fn streamVerified(a: anytype, content_id: u64, reference: ContentReference, sink: anytype) !void {
     var check: DigestCheck = .{};
     var window: [verified_window_bytes]u8 = undefined;

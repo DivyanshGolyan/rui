@@ -1597,12 +1597,12 @@ const chunk_limit = std.fmt.comptimePrint(" LIMIT {d}", .{chunk_rows + 1});
 
 /// The hooks a list without them declares: no state, no check, and no
 /// first read.
-const NoState = struct {};
-fn noCheck(_: *NoState, _: anytype) error{}!void {}
-const NoFirst = struct {};
-fn noQueueFirst(_: *ReadAccess, _: []const u8, _: *NoFirst) void {}
-fn noCheckFirst(_: *const NoFirst) error{}!void {}
-fn streamsNever(_: anytype) bool {
+pub const NoState = struct {};
+pub fn noCheck(_: *NoState, _: anytype) error{}!void {}
+pub const NoFirst = struct {};
+pub fn noQueueFirst(_: *ReadAccess, _: []const u8, _: *NoFirst) void {}
+pub fn noCheckFirst(_: *const NoFirst) error{}!void {}
+pub fn streamsNever(_: anytype) bool {
     return false;
 }
 
@@ -1770,7 +1770,7 @@ fn RunError(comptime Ls: anytype) type {
 /// name of the list whose statement failed; a step failure of a list
 /// read ahead answers before the content of the lists before it.
 /// Not inlined, so each run's kept rows take only their own chain.
-noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []const u8, capture: *SessionReportCapture) !void {
+pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []const u8, capture: *SessionReportCapture) !void {
     comptime for (0..Ls.len - 1) |i| std.debug.assert(Ls[i].kept_rows == 0);
     const texts = comptime blk: {
         var list: [Ls.len][]const u8 = undefined;
@@ -1832,9 +1832,7 @@ noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []const
 /// The answer to a failed round of a run: the lists before the one whose
 /// statement failed answer their first read's check and their rows'
 /// failures first, as main reached them first; the failed list answers
-/// its rows' failure, else its name. A list before it that kept rows, or
-/// that the failed list was read ahead of, would have read more before
-/// main reached the failure: the failed list's name answers there.
+/// its rows' failure, else its name.
 fn runFailure(a: *const ReadAccess, comptime Ls: anytype, lists: *RunState(Ls), current: usize, err: RunError(Ls)) RunError(Ls) {
     if (err != error.StatementFailed) return err;
     var failed: ?usize = null;
@@ -1847,13 +1845,7 @@ fn runFailure(a: *const ReadAccess, comptime Ls: anytype, lists: *RunState(Ls), 
         if (i == index) return list.chunk.failure orelse L.failed;
         if (!list.begun) L.checkFirst(&list.first_read) catch |check| return check;
         if (list.chunk.failure) |row| return row;
-        if (list.chunk.count != 0 or list.status.more) return nameOf(Ls, index);
     };
-    unreachable;
-}
-
-fn nameOf(comptime Ls: anytype, index: usize) RunError(Ls) {
-    inline for (Ls, 0..) |L, i| if (i == index) return L.failed;
     unreachable;
 }
 
@@ -1910,10 +1902,15 @@ pub const ContentOwner = struct {
 /// holds it. Revisions list in order, so a value not found here occurs
 /// first in the row that holds it, while every earlier value was added:
 /// until `capacity` values are, after which `renderRevisions` reads the
-/// rest through `full_revisions_owned`.
+/// rest through `full_revisions_owned`. `capacity` keeps the map within
+/// the settlement batch's 14480 bytes, so the scratch does not grow.
 pub const ContentOwners = struct {
-    pub const capacity = 1024;
+    pub const capacity = 896;
 
+    /// Once full, the revision of the value that filled it: every earlier
+    /// revision's values are here, so a value missing first occurs at or
+    /// after it.
+    since: u64,
     count: u16,
     /// Sorted, with `slots` beside them.
     ids: [capacity]u64,
@@ -1948,6 +1945,7 @@ pub const ContentOwners = struct {
         owners.ids[at] = id;
         owners.slots[at] = owner.slot();
         owners.count += 1;
+        if (owners.full()) owners.since = owner.revision;
     }
 };
 
@@ -1998,19 +1996,20 @@ pub const full_revisions = rsql.Read(.{
 });
 
 /// `full_revisions` with each value's owner, for the revisions after
-/// `ContentOwners` filled: a scan of the Session's revisions from its
-/// first, by primary key, that stops at the value's first occurrence.
+/// `ContentOwners` filled: a scan of the Session's revisions from ?3
+/// (`ContentOwners.since`), by primary key, that stops at the value's
+/// first occurrence. Each row's scan grows with the revisions since ?3.
 pub const full_revisions_owned = rsql.Read(.{
     .sql = revisionsSql(ownerSql("r.instructions_content_id") ++ " AS instructions_owner," ++
         "CASE WHEN r.output_schema_content_id IS NULL THEN NULL ELSE " ++ ownerSql("r.output_schema_content_id") ++ " END AS output_schema_owner"),
-    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Args = struct { session: []const u8, after: u64 = 0, since: u64 },
     .Row = RevisionRow,
     .cardinality = .each,
 });
 
 fn ownerSql(comptime content: []const u8) []const u8 {
     return "(SELECT p.revision*2+CASE WHEN p.instructions_content_id=" ++ content ++ " THEN 0 ELSE 1 END FROM session_revision p " ++
-        "WHERE p.session_ref=?1 AND p.revision<=r.revision AND (p.instructions_content_id=" ++ content ++ " OR p.output_schema_content_id=" ++
+        "WHERE p.session_ref=?1 AND p.revision>=?3 AND p.revision<=r.revision AND (p.instructions_content_id=" ++ content ++ " OR p.output_schema_content_id=" ++
         content ++ ") ORDER BY p.revision LIMIT 1)";
 }
 
@@ -2118,22 +2117,22 @@ const RevisionChunk = struct {
         const revision = row.revision.get();
         const instructions_here: ContentOwner = .{ .revision = revision, .field = .instructions };
         const output_schema_here: ContentOwner = .{ .revision = revision, .field = .output_schema };
-        const instructions_owner = (try chunk.ownerOf(row.instructions_id.get(), instructions_here, row.instructions_owner)) orelse return null;
-        const output_schema_owner = if (row.output_schema_id) |id| (try chunk.ownerOf(id.get(), output_schema_here, row.output_schema_owner)) orelse return null else null;
-        try chunk.renderSettings(row);
         const instructions: InlineValue = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
         const output_schema = try optionalValue(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
-        return .{
-            .instructions = .of(instructions, instructions_owner, instructions_here),
-            .output_schema = if (output_schema) |value| .of(value, output_schema_owner.?, output_schema_here) else null,
-        };
+        const instructions_owner = (try chunk.ownerOf(instructions.id, instructions_here, row.instructions_owner)) orelse return null;
+        const output_schema_content: ?RevisionContent = if (output_schema) |value|
+            .of(value, (try chunk.ownerOf(value.id, output_schema_here, row.output_schema_owner)) orelse return null, output_schema_here)
+        else
+            null;
+        try chunk.renderSettings(row);
+        return .{ .instructions = .of(instructions, instructions_owner, instructions_here), .output_schema = output_schema_content };
     }
 
     /// The owner of content `id` at `here`: from `ContentOwners`, or
     /// `here` while it holds every earlier value (and is then added), or
     /// from the row's own `owner` column on `full_revisions_owned`. Null
-    /// when only that read can tell. A column that names no occurrence up
-    /// to `here` is `CorruptStore`.
+    /// when only that read can tell. The column's scan ends at `here`,
+    /// which holds the value, so it is never null; a null is `CorruptStore`.
     fn ownerOf(chunk: *RevisionChunk, id: u64, here: ContentOwner, column: ?rsql.Positive) error{CorruptStore}!?ContentOwner {
         if (chunk.owners.find(id)) |owner| return owner;
         if (!chunk.owners.full()) {
@@ -2141,9 +2140,7 @@ const RevisionChunk = struct {
             return here;
         }
         if (!chunk.owned_read) return null;
-        const slot = (column orelse return error.CorruptStore).get();
-        if (slot > here.slot()) return error.CorruptStore;
-        return .ofSlot(slot);
+        return .ofSlot((column orelse return error.CorruptStore).get());
     }
 
     fn renderSettings(chunk: *RevisionChunk, row: *const RevisionRow) (SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore })!void {
@@ -2189,7 +2186,7 @@ noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *S
     while (true) {
         var chunk: RevisionChunk = .{ .a = a, .capture = capture, .owners = owners, .owned_read = owned_read, .first = first, .after = after };
         if (owned_read) {
-            a.readEach(full_revisions_owned, .{ .session = session_ref, .after = after }, chunk_rows + 1, &chunk);
+            a.readEach(full_revisions_owned, .{ .session = session_ref, .after = after, .since = owners.since }, chunk_rows + 1, &chunk);
         } else a.readEach(full_revisions, .{ .session = session_ref, .after = after }, chunk_rows + 1, &chunk);
         const ran = store_access.runAs(a, error.SessionReadFailed);
         if (chunk.failure) |err| return err;
@@ -2359,7 +2356,7 @@ const full_conversation = rsql.Read(.{
     .cardinality = .each,
 });
 
-const Conversation = struct {
+pub const Conversation = struct {
     const S = full_conversation;
     const failed = error.ConversationReadFailed;
     const header = "],\"conversation\":[";

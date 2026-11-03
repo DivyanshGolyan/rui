@@ -889,9 +889,9 @@ const OutOfLine = struct {
 const ScratchUse = enum(u8) { none, configuration, settlement, report };
 
 /// One entry point's large state: a configure's reads, a settlement's
-/// batch or a Full report's content owners (16392 bytes, within the
-/// batch's 16528), which no entry point holds at once (`Store.scratch` checks that
-/// in safe builds). Bytes, not a union, so it is no bigger than the larger
+/// batch or a Full report's content owners (within the batch's 14480
+/// bytes), which no entry point holds at once (`Store.scratch` checks
+/// that in safe builds). Bytes, not a union, so it is no bigger than the larger
 /// use and needs no tag of its own: `Store.scratch_use` is its tag.
 const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch), @sizeOf(report_domain.ContentOwners));
