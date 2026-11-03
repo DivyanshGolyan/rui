@@ -1513,7 +1513,7 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 
 /// One input at an Action's Allow once / Deny choice. Only arrows and Enter
 /// act on it, and only with the offer this input spent.
-fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
+fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     switch (Editor.select(conversation_keys, decoded)) {
         .none => {},
@@ -1542,7 +1542,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
 
 /// An arrow or Enter at the choice, probed against current geometry,
 /// command and the offer; one that cannot act says why.
-fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?u64) !void {
+fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     switch (screen.choose(key, offer, self.terminal.geometry(), self.commandActive())) {
         .picked => {},
@@ -1580,9 +1580,9 @@ fn reasonNotice(self: *const Self, letter: bool) []const u8 {
 }
 
 /// One input in the draft, with the offer this input spent. Beside an Action
-/// whose latest frame offered the draft as the reason, Enter sends it and
+/// whose standing offer showed the draft as the reason, Enter sends it and
 /// denies the Action.
-fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?u64) !void {
+fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
     const submission = self.submission.view();
     // Only the first key after an offered frame carries an offer, so the
@@ -3417,7 +3417,7 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
     }
 }
 
-test "choice readiness: keys pumped by a held redraw act on nothing, and the Enter after its delivery decides the option shown" {
+test "choice readiness: keys pumped by a redraw of the same choice act on the choice shown, and the Enter after a move waits for a frame showing it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -3428,20 +3428,21 @@ test "choice readiness: keys pumped by a held redraw act on nothing, and the Ent
     try held.settle();
     try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.?.highlight);
     try std.testing.expect(held.screen.offered() != null);
-    // Left and Enter arrive while a redraw is held: that frame is not yet
-    // delivered, so neither moves nor decides anything.
+    // Left and Enter arrive while a redraw that still shows Deny is held:
+    // Left acts on the Deny the delivered frame showed, and spends the
+    // offer, so the Enter after it decides nothing.
     try held.hold("\x1b[D\r");
     _ = try self.draw();
     try std.testing.expect(held.pumps != 0);
     try std.testing.expect(self.submission.view() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-    try std.testing.expectEqual(ConsentPolicy.Choice.deny, held.screen.consent.?.highlight);
+    try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, held.screen.consent.?.highlight);
     try std.testing.expectEqualStrings("! Not ready; nothing authorized.", self.notice.?);
-    // A delivered frame still shows Deny; then Enter decides it.
+    // A delivered frame shows Allow once; then Enter decides it.
     try held.settle();
     try std.testing.expect(held.screen.offered() != null);
     try sendKeys(self, "\r");
-    try std.testing.expectEqual(protocol.PermissionDecision.deny, self.submission.intent.?.decision.decision);
+    try std.testing.expectEqual(protocol.PermissionDecision.allow_once, self.submission.intent.?.decision.decision);
 }
 
 test "choice readiness: a slash command typed beside the Action keeps the draft, so a second Enter decides nothing" {
