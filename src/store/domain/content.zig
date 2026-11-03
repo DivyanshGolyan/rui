@@ -345,18 +345,6 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
     return id;
 }
 
-/// `importSealed` for unconverted code, inside its transaction.
-pub fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
-    var a = Access(.nested, error{}).within(self);
-    defer a.deinit();
-    var value = sealedIdentity(content);
-    lookup(&a, &value);
-    try a.run();
-    const id = try importSealed(&a, self.io, content, &value, faults);
-    try a.apply();
-    return @intCast(id);
-}
-
 pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
 pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
@@ -379,7 +367,7 @@ pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
     const statement = try store_core.cachedTyped(self, lookup_content);
     defer sqlite.resetCached(statement);
-    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, null);
+    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, &.{});
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
     var row: lookup_content.Row = undefined;
     try sqlite.decodeRow(lookup_content.Row, statement, &row);

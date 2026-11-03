@@ -379,7 +379,9 @@ pub const Store = struct {
     ) MessageReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.submitMessageLocked(self, command, committed, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, faults))) catch .infrastructure_failure;
     }
 
     pub fn stopSession(
@@ -389,7 +391,9 @@ pub const Store = struct {
     ) SessionStopReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.stopSessionLocked(self, command, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
     pub fn interruptModel(
@@ -399,7 +403,9 @@ pub const Store = struct {
     ) ModelInterruptionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.interruptModelLocked(self, command, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{InterruptionTargetChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.interruptModel(&access, command, faults))) catch .infrastructure_failure;
     }
 
     pub fn decidePermission(
@@ -409,19 +415,25 @@ pub const Store = struct {
     ) PermissionDecisionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
-        return entry.finishTransaction(Ordinary.none, faults, command_domain.decidePermissionLocked(self, command, faults)) catch .infrastructure_failure;
+        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure;
     }
 
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.none, command_domain.observeCommandLocked(self, key));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, command_domain.observeCommand(&access, key));
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
-        return entry.finish(Ordinary.result, command_domain.commandResultLocked(self, key));
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.result, command_domain.commandResult(&access, key));
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
@@ -1107,7 +1119,7 @@ pub fn readWorkspaceKey(self: *Store, workspace: []const u8) !u64 {
     };
 }
 
-pub const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";
+const session_workspace_key_sql = "SELECT workspace_key FROM session WHERE session_ref=?1";
 
 /// The key of `session_ref`'s Workspace, or null when no such Session
 /// exists.

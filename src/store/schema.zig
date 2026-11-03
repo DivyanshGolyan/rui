@@ -100,7 +100,18 @@ pub const Column = struct {
     default: ?[]const u8 = null,
     /// Rui SQL, joined to the type's own CHECK with AND.
     check: ?[]const u8 = null,
+    /// Which of a row's Sessions read this column, in a table that names
+    /// two (`sessionColumns`). Every other table's one Session reads all
+    /// of its columns, and leaves this `.recipient`.
+    read_by: ReadBy = .recipient,
 };
+
+/// The Sessions whose pages read a column of a table that names two
+/// Sessions: `.recipient`, only its `session_ref`'s; `.both`, its
+/// `sender_session_ref`'s too. A change to a `.both` column changes the
+/// sender's facts, so its writer touches the sender (`rsql.sessionError`)
+/// and the touch oracle records the sender (`sqlite.createTouchOracleForTesting`).
+pub const ReadBy = enum { recipient, both };
 
 /// Checked when its row is written, on every engine: writers insert a
 /// parent before its children.
@@ -268,16 +279,22 @@ pub const tables = [_]Table{
     },
     .{
         .name = "message_admission",
+        // `.both`: what the sender's activity page reads of a sent Message,
+        // by sender_session_ref: its sources (`reads.activitySources`, kind
+        // 8: sender_position, admission_id) and its item (`reads.zig`, kind
+        // 8: session_ref, content_id, admitted_at, and command_key, which
+        // joins the command), keyed by admission_id, sender_session_ref and
+        // sender_position.
         .columns = &.{
-            .{ .name = "admission_id", .type = .int, .check = "admission_id>0" },
-            .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "command_key", .type = .{ .text = null } },
-            .{ .name = "content_id", .type = .int },
+            .{ .name = "admission_id", .type = .int, .check = "admission_id>0", .read_by = .both },
+            .{ .name = "session_ref", .type = .{ .text = null }, .read_by = .both },
+            .{ .name = "command_key", .type = .{ .text = null }, .read_by = .both },
+            .{ .name = "content_id", .type = .int, .read_by = .both },
             .{ .name = "admission_position", .type = .int, .nullable = true, .check = "admission_position>0" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
-            .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0" },
-            .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true },
-            .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0" },
+            .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
+            .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
+            .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
         },
         .primary_key = &.{"admission_id"},
         .uniques = &.{&.{"command_key"}},
@@ -668,6 +685,47 @@ pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
             if (!std.mem.eql(u8, candidate.name, table)) continue;
             for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return true;
             return false;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// The columns of `table` that name a Session: `session_ref`, then
+/// `sender_session_ref`, those it has.
+pub fn sessionColumns(comptime table: []const u8) []const []const u8 {
+    comptime {
+        var columns: []const []const u8 = &.{};
+        for ([_][]const u8{ "session_ref", "sender_session_ref" }) |column| {
+            if (hasColumn(table, column)) columns = columns ++ .{column};
+        }
+        return columns;
+    }
+}
+
+/// The columns of `table` its second Session reads too (`ReadBy.both`):
+/// none unless it names two Sessions.
+pub fn readByBoth(comptime table: []const u8) []const []const u8 {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            var names: []const []const u8 = &.{};
+            for (candidate.columns) |column| if (column.read_by == .both) {
+                names = names ++ .{column.name};
+            };
+            if (names.len != 0 and sessionColumns(table).len != 2) @compileError("schema: only a table that names two Sessions reads a column by both: " ++ table);
+            return names;
+        }
+        @compileError("schema: no table named " ++ table);
+    }
+}
+
+/// Whether `table`'s column `column` may hold NULL.
+pub fn isNullable(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return each.nullable;
+            @compileError("schema: no column " ++ column ++ " in " ++ table);
         }
         @compileError("schema: no table named " ++ table);
     }

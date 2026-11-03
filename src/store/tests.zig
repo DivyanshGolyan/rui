@@ -1059,12 +1059,12 @@ test "a statement that fails after an entry point touched its Session fails and 
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "key-fault-config");
-        // A configure reads the Workspace key in its first round, before it
-        // touches anything, so its arm faults the UPDATE that follows the
-        // touch. A message reads the key after the touch, as on main.
+        // Each route faults a write that follows its touch: a configure
+        // reads the Workspace key in its first round, before it touches
+        // anything, and a Message reads its Session's head there too.
         var fault: TestingStatementFault = .{ .sql = switch (route) {
             .configure => configuration_domain.update_session_sql,
-            .message => store_core.session_workspace_key_sql,
+            .message => command_domain.admit_message_sql,
         } };
         switch (route) {
             .configure => {
@@ -1109,7 +1109,14 @@ test "a Session creation that rolls back never reaches a since listing" {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
         try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        try std.testing.expect(try configuration_domain.applyConfigurationLocked(&storage, "", &create.configuration, .{}) == .accepted);
+        var a = store_access.Access(.nested, error{SessionUpdateFailed}).within(&storage);
+        defer a.deinit();
+        const reads = storage.configurationReads();
+        reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+        configuration_domain.prepareConfiguration(&a, "", &create.configuration, reads);
+        try a.run();
+        try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, .{}, reads) == .accepted);
+        try a.apply();
         try store_core.rollbackAfterError(&storage, .{});
     }
     // The rolled-back insert still moved the commit counter. The hint
@@ -1271,10 +1278,46 @@ test "abandoning an Access that has ended runs nothing" {
 
 test "the tables that carry Sessions are exactly the ones the touch oracle watches" {
     inline for (store_schema.tables) |table| {
-        const watched = comptime for (sqlite.touch_oracle_owners) |owner| {
-            if (std.mem.eql(u8, owner[0], table.name)) break true;
+        const watched = comptime for (sqlite.touch_oracle_tables) |watched_table| {
+            if (std.mem.eql(u8, watched_table, table.name)) break true;
         } else false;
         try std.testing.expectEqual(watched, comptime store_schema.carriesSessions(table.name));
+    }
+}
+
+test "the touch oracle names a sender whose sent Message changed without its touch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const recipient = try configureTestSession(&storage, "oracle-recipient");
+    const sender = try configureTestSession(&storage, "oracle-sender");
+    try submitTestMessage(&storage, &tmp, "oracle-message-file", "oracle-message", recipient.slice(), "hello");
+    var sql: [256]u8 = undefined;
+    {
+        // Make the Message a sent one, touching both its Sessions.
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='oracle-message'", .{sender.slice()}, 0));
+        try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
+        try store_core.touch(&storage, recipient.slice());
+        try store_core.touch(&storage, sender.slice());
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
+    }
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        try store_core.touch(&storage, recipient.slice());
+        // A column only the recipient reads.
+        try sqlite.exec(storage.database, "UPDATE message_admission SET turn_id=NULL WHERE command_key='oracle-message'");
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
+        // A hand-written writer that changes what the sender's page reads
+        // and skips the sender.
+        try sqlite.exec(storage.database, "UPDATE message_admission SET admitted_at=admitted_at+1 WHERE command_key='oracle-message'");
+        try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
+        try store_core.touch(&storage, sender.slice());
+        try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
 }
 
@@ -11099,6 +11142,58 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         }
     }
     try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "a stop cancels its Actions in pages of one write each, in call order at dense positions" {
+    // No Action, one, a page's edges and the next, two pages and one more.
+    inline for (.{ 0, 1, 8, 9, 13, 14, 16, 17, 26, 27 }) |count| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "many-config");
+        try submitTestMessage(&storage, &tmp, "many-input", "many-input", session.slice(), "propose");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // With no Action, the model still runs, and the stop interrupts it.
+        if (count != 0) {
+            var texts: [count][4][96]u8 = undefined;
+            var calls: [count]TestingCall = undefined;
+            for (&calls, &texts, 0..) |*call, *text, index| {
+                const id = try std.fmt.bufPrint(&text[0], "many-{d}", .{index});
+                call.* = .{
+                    .item_id = id,
+                    .name = "bash",
+                    .encoded_call_id = id,
+                    .decoded_call_id = id,
+                    .encoded_arguments = try std.fmt.bufPrint(&text[1], "{{\\\"description\\\":\\\"Run {d}\\\",\\\"cmd\\\":\\\"{d}\\\",\\\"timeout_ms\\\":null}}", .{ index, index }),
+                    .decoded_arguments = try std.fmt.bufPrint(&text[2], "{{\"description\":\"Run {d}\",\"cmd\":\"{d}\",\"timeout_ms\":null}}", .{ index, index }),
+                };
+            }
+            try settleCallsForTesting(&storage, &tmp, binding, "many-calls", &calls);
+        }
+        try std.testing.expectEqual(@as(u64, count), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND attempt_ordinal=0"));
+        var stop = try completeSessionStop("many-stop", session.slice());
+        var statements: TestingStatements = .{};
+        statements.begin(storage.database);
+        const reply = storage.stopSession(&stop, .{});
+        statements.end(storage.database);
+        try std.testing.expect(reply.accepted.completion == .completed);
+        // BEGIN, the three reads of round 1, the command, the stop, the
+        // Turn's close, the position advance and COMMIT; with no Action the
+        // interruption; with Actions the text's lookup and insert, then a
+        // page read and a write per `cancel_chunk` (13) Actions.
+        const pages = (count + 12) / 13;
+        const expected: u64 = if (count == 0) 10 else 11 + 2 * pages;
+        try std.testing.expectEqual(expected, statements.count);
+        try std.testing.expectEqual(@as(u64, count), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'"));
+        // Acceptance follows call order.
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation a JOIN action_operation b " ++
+            "ON b.parent_operation_id=a.parent_operation_id AND a.call_ordinal<b.call_ordinal WHERE a.acceptance_position>=b.acceptance_position"));
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM turn WHERE outcome_code='cancelled'"));
+        try expectDenseSessionPositions(&storage, session.slice());
+        try std.testing.expect(!storage.isFenced());
+    }
 }
 
 test "every activity row is dated by the fact that owns it" {

@@ -213,7 +213,8 @@ pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
 // The rules then read the parsed tree, each doc saying exactly what it checks:
 // - `parameterError`: Args fields bind ?1..?N, in field order;
 // - `rowError`: a read's Row fields name the columns it returns, in order;
-// - `sessionError`: a write names its Session on its table's own session_ref;
+// - `sessionError`: a write names each Session it writes on that Session's
+//   own column (`schema.sessionColumns`);
 // - `compoundError`: a compound SELECT stands only where `.compound` says so;
 // - `returnsOneRow`: when a read needs no step to rule out a second row;
 // - the markers, as they are parsed (`Parser.marker`, `Parser.source`).
@@ -234,9 +235,9 @@ pub const Positive = enum(u64) {
 
 /// A Session as a round loaded it: its reference, its Workspace's key and
 /// its next position, from the columns `session_ref,workspace_key,
-/// next_position`. A write names its Session with one, through the marker
-/// `@session(?k)`, which binds its reference; the Access that queues the
-/// write records the touch from it without a read.
+/// next_position`. A write names each Session it writes with one, through
+/// the marker `@session(?k)`, which binds its reference; the Access that
+/// queues the write records the touch from each without a read.
 pub const SessionHead = struct {
     ref: change_ring.Id,
     workspace_key: Positive,
@@ -326,8 +327,9 @@ pub fn Write(comptime spec: WriteSpec) type {
         pub const expect = spec.expect;
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
         pub const uses_now = parsed.uses_now;
-        /// The Args field `@session` binds, when the write names a Session.
-        pub const session_field: ?[]const u8 = sessionField(Args);
+        /// The Args fields the write's `@session` markers bind, in Args'
+        /// order: none, or one per Session it names.
+        pub const session_fields: []const []const u8 = sessionFields(Args);
     };
 }
 
@@ -461,6 +463,8 @@ const Expr = union(enum) {
     conjunction: []const Expr,
     /// `a = b`.
     equality: *const [2]Expr,
+    /// `column IS NULL`.
+    is_null: Column,
     other,
 };
 
@@ -834,9 +838,10 @@ const Parser = struct {
                 _ = try p.relation();
                 left = .other;
             } else if (p.accept("IS")) {
-                _ = p.accept("NOT");
+                const negated = p.accept("NOT");
                 try p.expect("NULL");
-                left = .other;
+                const tested = left;
+                left = if (!negated and tested == .column) .{ .is_null = tested.column } else .other;
             } else if (p.peek().is("IN") or (p.peek().is("NOT") and p.peekAt(1).is("IN"))) {
                 if (p.accept("NOT")) {}
                 try p.expect("IN");
@@ -994,10 +999,16 @@ fn fieldCount(comptime T: type) usize {
     return @typeInfo(T).@"struct".field_names.len;
 }
 
-fn sessionField(comptime Args: type) ?[]const u8 {
-    const info = @typeInfo(Args).@"struct";
-    for (info.field_names, info.field_types) |name, Field| if (Field == SessionHead) return name;
-    return null;
+/// The SessionHead fields of Args, in order.
+fn sessionFields(comptime Args: type) []const []const u8 {
+    comptime {
+        var fields: []const []const u8 = &.{};
+        const info = @typeInfo(Args).@"struct";
+        for (info.field_names, info.field_types) |name, Field| if (Field == SessionHead) {
+            fields = fields ++ .{name};
+        };
+        return fields;
+    }
 }
 
 /// A compound SELECT (UNION, INTERSECT or EXCEPT), anywhere in the text,
@@ -1027,7 +1038,7 @@ fn parameterError(comptime uses: [64]usize, comptime Args: type) ?[]const u8 {
 /// A read binds no SessionHead and writes no `@session`: it names a
 /// Session by its reference text.
 fn readSessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
-    if (sessionField(Args) != null or parsed.sessions.len != 0) return "rsql: a read binds no SessionHead; it names a Session by its reference text";
+    if (sessionFields(Args).len != 0 or parsed.sessions.len != 0) return "rsql: a read binds no SessionHead; it names a Session by its reference text";
     return null;
 }
 
@@ -1062,69 +1073,130 @@ fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
     }
 }
 
-/// Why a write's Session is unnamed, or named anywhere but on its table's
-/// own `session_ref`, or null. A write to a table that carries Sessions
-/// (`schema.carriesSessions`) binds exactly one SessionHead, as ?k, and its
-/// text holds exactly one `@session(?k)` and uses ?k nowhere else; and:
-/// - an INSERT ... VALUES gives `@session(?k)` as its session_ref value;
-/// - an INSERT ... SELECT copies the bare `session_ref` FROM session alone,
-///   unaliased and unjoined, as its session_ref value, and its WHERE has
-///   the top-level conjunct `session_ref=@session(?k)` (`copyError`);
-/// - an UPDATE or DELETE has that conjunct in its WHERE, and an UPDATE
-///   sets no session_ref.
+/// Why a write's Sessions are unnamed, or named anywhere but on their own
+/// columns, or null. It reads the parsed statement and checks exactly this.
+/// A write to a table that carries no Sessions (`schema.carriesSessions`)
+/// binds no SessionHead and writes no marker. A write to one that does:
+/// - holds at least one `@session(?k)`, and at most one per column of its
+///   `schema.sessionColumns` (exactly one where it has one);
+/// - binds each ?k to a SessionHead field of Args, uses ?k nowhere but in
+///   its marker, and has no SessionHead field that no marker binds;
+/// - as an INSERT ... VALUES (`insertSessionError`), gives each Session
+///   column a lone marker, or NULL (written, or by leaving the column out)
+///   where the column is nullable, and writes no marker in another column;
+/// - as an INSERT ... SELECT, writes to a table whose one Session column is
+///   session_ref, and copies one Session's row (`copyError`);
+/// - as an UPDATE, has the top-level WHERE conjunct `c=@session(?k)` for
+///   the table's first Session column `c` (`ties`), and assigns no Session
+///   column. In a table that names two Sessions, a second marker is the
+///   conjunct `sender_session_ref=@session(?j)`; and a column its sender
+///   reads (`schema.ReadBy.both`) is assigned only under that conjunct or
+///   the top-level conjunct `sender_session_ref IS NULL` (`nulls`);
+/// - as a DELETE, has that conjunct, and deletes from a table with one
+///   Session column only.
 /// A conjunct is a term of the WHERE's AND chain, parentheses dropped, so
-/// it holds of every row written. No write holds a compound SELECT
-/// (`compoundError`). So every row it writes belongs to the Session that
-/// ?k's head names. A write to any other table binds no SessionHead and
-/// writes no marker.
-///
-/// A table with a second Session column (message_admission and
-/// sent_rejection's `sender_session_ref`) is refused here until PR 5
-/// converts its writers: the marker extends to it as a second
-/// `@session(?j)` on that column, and the Access touches both heads.
+/// it holds of every row written; further conjuncts only narrow the rows.
+/// No write holds a compound SELECT (`compoundError`). So an INSERT's or
+/// DELETE's row belongs to the Sessions its heads name, and an UPDATE
+/// changes only columns those Sessions read; the Access that queues it
+/// touches each.
 fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
     comptime {
         const table = switch (parsed.statement) {
             .select => unreachable,
             inline else => |written| written.table,
         };
-        if (schema.hasColumn(table, "sender_session_ref")) return "rsql: " ++ table ++ " names a second Session; its typed writes come with PR 5";
         const fields = @typeInfo(Args).@"struct".field_types;
-        var heads: usize = 0;
-        for (fields) |Field| heads += @intFromBool(Field == SessionHead);
+        const heads = sessionFields(Args).len;
         if (!schema.carriesSessions(table)) {
             if (parsed.sessions.len != 0) return "rsql: " ++ table ++ " carries no Sessions; write no @session";
             if (heads != 0) return "rsql: " ++ table ++ " carries no Sessions; bind no SessionHead";
             return null;
         }
-        if (parsed.sessions.len != 1) return "rsql: a write to " ++ table ++ " names its Session exactly once, as @session(?k)";
-        const k = parsed.sessions[0];
-        if (k > fields.len or fields[k - 1] != SessionHead or heads != 1) return "rsql: @session(?k) binds the one SessionHead field of Args";
-        if (parsed.uses[k - 1] != 1) return "rsql: the SessionHead ?k binds is used only in @session(?k)";
-        const misplaced = "rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE";
+        const columns = schema.sessionColumns(table);
+        const markers = parsed.sessions;
+        if (markers.len == 0 or markers.len > columns.len) return if (columns.len == 1)
+            "rsql: a write to " ++ table ++ " names its Session exactly once, as @session(?k)"
+        else
+            "rsql: a write to " ++ table ++ " names each of its Sessions at most once, and one at least, as @session(?k)";
+        for (markers) |k| {
+            if (k > fields.len or fields[k - 1] != SessionHead or (columns.len == 1 and heads != 1))
+                return if (columns.len == 1) "rsql: @session(?k) binds the one SessionHead field of Args" else "rsql: @session(?k) binds a SessionHead field of Args";
+            if (parsed.uses[k - 1] != 1) return "rsql: the SessionHead ?k binds is used only in @session(?k)";
+        }
+        // Each marker binds its own head, used once: equal counts leave none unbound.
+        if (heads != markers.len) return "rsql: every SessionHead of Args is bound by its own @session(?k)";
+        const misplaced = "rsql: an UPDATE or DELETE names its Session as the conjunct " ++ columns[0] ++ "=@session(?k) of its WHERE";
         switch (parsed.statement) {
             .select => unreachable,
-            .insert => |insert| {
-                const inserted = "rsql: an INSERT names its Session as the session_ref value of its VALUES row";
-                var column: ?usize = null;
-                for (insert.columns, 0..) |name, index| if (std.mem.eql(u8, name, "session_ref")) {
-                    if (column != null) return inserted;
-                    column = index;
-                };
-                const at = column orelse return inserted;
-                return switch (insert.values) {
-                    .row => |row| if (row.len != insert.columns.len)
-                        "rsql: an INSERT gives one value per column"
-                    else if (row[at] != .session) inserted else null,
-                    .select => |select| copyError(select, at, insert.columns.len),
-                };
+            .insert => |insert| return switch (insert.values) {
+                .row => |row| insertSessionError(table, columns, insert.columns, row, markers.len),
+                .select => |select| copy: {
+                    if (columns.len != 1 or !std.mem.eql(u8, columns[0], "session_ref"))
+                        break :copy "rsql: an INSERT ... SELECT copies one Session's row; " ++ table ++ " names its Sessions otherwise";
+                    const copied = "rsql: an INSERT ... SELECT names its Session by copying session_ref FROM session alone, WHERE session_ref=@session(?k)";
+                    const at = (sessionSlot(insert.columns, "session_ref") catch break :copy copied) orelse break :copy copied;
+                    break :copy copyError(select, at, insert.columns.len);
+                },
             },
             .update => |update| {
-                for (update.assigned) |name| if (std.mem.eql(u8, name, "session_ref")) return misplaced;
-                return if (ties(update.where, table)) null else misplaced;
+                for (update.assigned) |name| for (columns) |column| if (std.mem.eql(u8, name, column)) return misplaced;
+                if (!ties(update.where, table, columns[0])) return misplaced;
+                if (columns.len == 1) return null;
+                const sender_tied = ties(update.where, table, columns[1]);
+                if (markers.len == 2 and !sender_tied)
+                    return "rsql: an UPDATE of " ++ table ++ " names its second Session as the conjunct " ++ columns[1] ++ "=@session(?j) of its WHERE";
+                if (sender_tied or nulls(update.where, table, columns[1])) return null;
+                for (update.assigned) |name| for (schema.readByBoth(table)) |both| if (std.mem.eql(u8, name, both))
+                    return "rsql: " ++ table ++ "." ++ both ++ " is read by its sender too; an UPDATE of it has the conjunct " ++
+                        columns[1] ++ "=@session(?j) or " ++ columns[1] ++ " IS NULL";
+                return null;
             },
-            .delete => |delete| return if (ties(delete.where, table)) null else misplaced,
+            .delete => |delete| {
+                if (columns.len > 1) return "rsql: a DELETE from " ++ table ++ " would drop two Sessions' facts; no writer deletes them";
+                return if (ties(delete.where, table, columns[0])) null else misplaced;
+            },
         }
+    }
+}
+
+/// The slot of `column` in an INSERT's column list, or null when it is not
+/// listed; listed twice is an error.
+fn sessionSlot(comptime listed: []const []const u8, comptime column: []const u8) error{Twice}!?usize {
+    var slot: ?usize = null;
+    for (listed, 0..) |name, index| if (std.mem.eql(u8, name, column)) {
+        if (slot != null) return error.Twice;
+        slot = index;
+    };
+    return slot;
+}
+
+/// See `sessionError`: an INSERT's one VALUES row gives one value per
+/// listed column; each Session column's value is a lone `@session(?k)`, or
+/// NULL (the constant, or the column left out) where `schema.isNullable`
+/// says the column is; and the markers so placed are all `markers` of the
+/// text, so none stands in another column's value.
+fn insertSessionError(
+    comptime table: []const u8,
+    comptime columns: []const []const u8,
+    comptime listed: []const []const u8,
+    comptime row: []const Expr,
+    comptime markers: usize,
+) ?[]const u8 {
+    comptime {
+        if (row.len != listed.len) return "rsql: an INSERT gives one value per column";
+        var placed: usize = 0;
+        for (columns) |column| {
+            const inserted = "rsql: an INSERT names its Session as the " ++ column ++ " value of its VALUES row";
+            const slot = sessionSlot(listed, column) catch return inserted;
+            if (slot) |at| switch (row[at]) {
+                .session => placed += 1,
+                .constant => |text| if (!std.ascii.eqlIgnoreCase(text, "NULL") or !schema.isNullable(table, column)) return inserted,
+                else => return inserted,
+            } else if (!schema.isNullable(table, column)) return inserted;
+        }
+        if (placed != markers) return "rsql: an INSERT writes @session(?k) only as a Session column's value";
+        return null;
     }
 }
 
@@ -1139,17 +1211,27 @@ fn copyError(comptime select: Select, comptime column: usize, comptime columns: 
     if (value != .column or !std.mem.eql(u8, value.column.name, "session_ref") or
         (value.column.table != null and !std.mem.eql(u8, value.column.table.?, "session"))) return copied;
     const where = core.where orelse return copied;
-    return if (ties(where, "session")) null else copied;
+    return if (ties(where, "session", "session_ref")) null else copied;
 }
 
-/// Whether `where` has the conjunct `session_ref=@session(?k)`, its column
-/// bare or qualified by `table`.
-fn ties(comptime where: Expr, comptime table: []const u8) bool {
+/// Whether `where` has the conjunct `column=@session(?k)`, its column bare
+/// or qualified by `table`.
+fn ties(comptime where: Expr, comptime table: []const u8, comptime column: []const u8) bool {
     for (conjuncts(where)) |term| {
         if (term != .equality) continue;
-        const column = term.equality[0];
-        if (column == .column and std.mem.eql(u8, column.column.name, "session_ref") and
-            (column.column.table == null or std.mem.eql(u8, column.column.table.?, table)) and term.equality[1] == .session) return true;
+        const named = term.equality[0];
+        if (named == .column and std.mem.eql(u8, named.column.name, column) and
+            (named.column.table == null or std.mem.eql(u8, named.column.table.?, table)) and term.equality[1] == .session) return true;
+    }
+    return false;
+}
+
+/// Whether `where` has the conjunct `column IS NULL`, its column bare or
+/// qualified by `table`.
+fn nulls(comptime where: Expr, comptime table: []const u8, comptime column: []const u8) bool {
+    for (conjuncts(where)) |term| {
+        if (term == .is_null and std.mem.eql(u8, term.is_null.name, column) and
+            (term.is_null.table == null or std.mem.eql(u8, term.is_null.table.?, table))) return true;
     }
     return false;
 }
@@ -1510,7 +1592,7 @@ test "a typed statement renders @now after its Args, @session as its parameter a
         .expect = .{ .at_most = 1 },
     });
     try std.testing.expectEqualStrings("UPDATE turn SET outcome_at=?3 WHERE turn_id=?1 AND session_ref=?2", W.sql);
-    try std.testing.expectEqualStrings("session", W.session_field.?);
+    try std.testing.expectEqualStrings("session", W.session_fields[0]);
 }
 
 test "@now inside a string literal is text, not the Host's second" {
@@ -1583,9 +1665,61 @@ test "a write names its Session with @session on its table's own session_ref" {
     try std.testing.expectEqualStrings("rsql: an INSERT writes one VALUES row", comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now),(?1,'other',?3,0,@now)", Stop, void).?);
 }
 
+test "a Message's write names its two Sessions, each on its own column" {
+    const Sent = struct { id: u64, session: SessionHead, key: []const u8, content_id: u64, position: u64, sender: SessionHead, sender_position: u64 };
+    const Person = struct { id: u64, session: SessionHead, key: []const u8, content_id: u64, position: u64 };
+    const columns = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) ";
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)", Sent, void));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,NULL,NULL)", Person, void));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)", Person, void));
+    try std.testing.expectEqual(2, Write(.{ .sql = columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)", .Args = Sent, .expect = .{ .at_most = 1 } }).session_fields.len);
+
+    // Wrong ties: a sender bound but written as text, a head moved to
+    // another column or wrapped, one head for both, the target left NULL.
+    const sender = "rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row";
+    try std.testing.expectEqualStrings("rsql: every SessionHead of Args is bound by its own @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,?6,?7)", Sent, void).?);
+    try std.testing.expectEqualStrings(sender, comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,?7,@session(?6))", Sent, void).?);
+    try std.testing.expectEqualStrings(sender, comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,coalesce(@session(?6),NULL),?7)", Sent, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the session_ref value of its VALUES row", comptime statementError(.write, columns ++ "VALUES(?1,NULL,?3,?4,?5,@now,@session(?2),NULL)", Person, void).?);
+    try std.testing.expectEqualStrings("rsql: the SessionHead ?k binds is used only in @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?2),?5)", Person, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT writes @session(?k) only as a Session column's value", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,@session(?4),?5,@now,NULL,NULL)", struct { id: u64, session: SessionHead, key: []const u8, sender: SessionHead, position: u64 }, void).?);
+    try std.testing.expectEqualStrings("rsql: a write to message_admission names each of its Sessions at most once, and one at least, as @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,?2,?3,?4,?5,@now,NULL,NULL)", struct { id: u64, session: []const u8, key: []const u8, content_id: u64, position: u64 }, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT copies one Session's row; message_admission names its Sessions otherwise", comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM session WHERE session_ref=@session(?2)", struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 }, void).?);
+
+    // An update names the admission's own Session, and never moves either.
+    const Update = struct { turn_id: u64, session: SessionHead };
+    const tie = "rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE";
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IS NULL", Update, void));
+    try std.testing.expectEqualStrings(tie, comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE sender_session_ref=@session(?2)", Update, void).?);
+    try std.testing.expectEqualStrings(tie, comptime statementError(.write, "UPDATE message_admission SET sender_session_ref=NULL,turn_id=?1 WHERE session_ref=@session(?2)", Update, void).?);
+    // A row-value SET is outside the grammar.
+    try std.testing.expectEqualStrings("rsql: expected a name at '('", comptime statementError(.write, "UPDATE message_admission SET (sender_session_ref,turn_id)=(NULL,?1) WHERE session_ref=@session(?2)", Update, void).?);
+    // A further conjunct on the sender's column only narrows the rows the tie holds of.
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND sender_session_ref IS NULL", Update, void));
+    try std.testing.expectEqualStrings("rsql: a DELETE from message_admission would drop two Sessions' facts; no writer deletes them", comptime statementError(.write, "DELETE FROM message_admission WHERE session_ref=@session(?2) AND turn_id=?1", Update, void).?);
+    // A column the sender reads: the review's input changes the sender's
+    // page without touching the sender.
+    const sender_reads = "rsql: message_admission.admitted_at is read by its sender too; an UPDATE of it has the conjunct sender_session_ref=@session(?j) or sender_session_ref IS NULL";
+    try std.testing.expectEqualStrings(sender_reads, comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1)", struct { session: SessionHead }, void).?);
+    try std.testing.expectEqualStrings(sender_reads, comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND sender_session_ref IS NOT NULL", struct { session: SessionHead }, void).?);
+    try std.testing.expectEqualStrings(sender_reads, comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND (sender_session_ref IS NULL OR turn_id=1)", struct { session: SessionHead }, void).?);
+    const Both = struct { session: SessionHead, sender: SessionHead };
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND sender_session_ref=@session(?2)", Both, void));
+    try std.testing.expectEqual(2, Write(.{ .sql = "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND sender_session_ref=@session(?2)", .Args = Both, .expect = .{ .at_most = 1 } }).session_fields.len);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE message_admission SET admitted_at=@now WHERE session_ref=@session(?1) AND sender_session_ref IS NULL", struct { session: SessionHead }, void));
+    try std.testing.expectEqualStrings("rsql: an UPDATE of message_admission names its second Session as the conjunct sender_session_ref=@session(?j) of its WHERE", comptime statementError(.write, "UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IN (SELECT turn_id FROM turn WHERE session_ref=@session(?3))", struct { turn_id: u64, session: SessionHead, sender: SessionHead }, void).?);
+    try std.testing.expectEqualStrings("rsql: an UPDATE or DELETE names its Session as the conjunct session_ref=@session(?k) of its WHERE", comptime statementError(.write, "UPDATE turn SET session_ref=(SELECT session_ref FROM session) WHERE turn_id=?1 AND session_ref=@session(?2)", Update, void).?);
+
+    // A rejected send names only its sender, on its one Session column.
+    const Rejected = struct { key: []const u8, sender: SessionHead, position: u64 };
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,@session(?2),?3,@now)", Rejected, void));
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row", comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,NULL,?3,@session(?2))", Rejected, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the sender_session_ref value of its VALUES row", comptime statementError(.write, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,?3,@session(?2),@now)", Rejected, void).?);
+}
+
 test "a write to a table that carries no Sessions names no Session" {
     try std.testing.expectEqualStrings("rsql: content carries no Sessions; bind no SessionHead", comptime statementError(.write, "DELETE FROM content WHERE content_id=?1 AND ?2 IS NOT NULL", struct { id: u64, session: SessionHead }, void).?);
-    try std.testing.expectEqualStrings("rsql: sent_rejection names a second Session; its typed writes come with PR 5", comptime statementError(.write, "DELETE FROM sent_rejection WHERE sender_session_ref=?1", struct { ref: []const u8 }, void).?);
+    try std.testing.expectEqualStrings("rsql: a write to sent_rejection names its Session exactly once, as @session(?k)", comptime statementError(.write, "DELETE FROM sent_rejection WHERE sender_session_ref=?1", struct { ref: []const u8 }, void).?);
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO content(content_id) VALUES(?1)", struct { turn_id: u64 }, void));
     // A command's target text, which need not name a Session.
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "DELETE FROM model_interruption_command WHERE session_ref=?1", struct { target: []const u8 }, void));
