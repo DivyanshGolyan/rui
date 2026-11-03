@@ -12174,6 +12174,44 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
+test "a one-row page of a person's Messages costs the same steps past 100 or 10,000 waiting ones" {
+    // Ctrl-P from the end reads the newest Message, with every other one
+    // still waiting. The page is filtered, so it reads no queue footer.
+    // Each Store holds more waiting Messages than a page source reads.
+    var steps: [2]i64 = undefined;
+    for ([_]usize{ 100, 10_000 }, &steps) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "waiting-config");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                "SELECT 1000+value,'{1s}',printf('waiting-%d',value),content,position,1 FROM history; " ++
+                "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        // Foreign keys are off: the waiting Messages have no commands.
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");
+        var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+        try request.session.set(session.slice());
+        cost.* = try activityPageSteps(&storage, request);
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expect(page.count == 1 and page.items[0].value.admission.state == .queued and page.more);
+        try std.testing.expectEqual(@as(u64, 0), page.queued.count);
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
+}
+
 /// The VM steps every statement of the Store's connection takes to read one
 /// Activity page.
 fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {

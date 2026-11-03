@@ -1124,11 +1124,13 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     if (lower <= upper and request.kinds.contains(.assistant)) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
     // Both count what they read (`CallActivity.total`, `Queued.count`), so
     // neither has a smaller bound than every row its statement returns.
-    // Only a page that lists calls reads the calls after it: another, such
-    // as Ctrl-P's one-row page of Messages, would scan later tool history
-    // for a footer it has no use for.
-    if (request.kinds.contains(.call)) a.readEach(call_activity, .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null }, std.math.maxInt(u64), &calls);
-    a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
+    // Only a page of every kind carries them: a filtered one, such as
+    // Ctrl-P's one-row page of Messages, would scan later tool history and
+    // the whole queue for footers it has no use for.
+    if (request.kinds.eql(.full)) {
+        a.readEach(call_activity, .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null }, std.math.maxInt(u64), &calls);
+        a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
+    }
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
     page.queued = waiting.queued;
