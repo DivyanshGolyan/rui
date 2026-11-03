@@ -4,7 +4,6 @@ const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const environment = @import("environment.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
-const codex_auth = @import("codex_auth.zig");
 const execution = @import("execution.zig");
 const model_adapter = @import("model_adapter.zig");
 const model_list = @import("model_list.zig");
@@ -14,6 +13,7 @@ const platform = @import("platform.zig");
 const product_defaults = @import("product_defaults.zig");
 const provider = @import("provider.zig");
 const providers_module = @import("providers.zig");
+const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -269,8 +269,8 @@ pub const Host = struct {
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
     scratch_budget: ?provider.ScratchBudget = null,
-    /// Execution-thread-owned Codex sticky routing; in memory only.
-    turn_states: model_adapter.TurnStates = .{},
+    /// Execution-thread-owned per-Turn sticky routing; in memory only.
+    turn_states: turn_states_module.PerProvider = .{},
     /// Execution-thread-owned history memos: an index preallocated at
     /// start, with span bytes in scratch files deleted at stop.
     history_memos: model_adapter.HistoryMemos = .{},
@@ -413,24 +413,24 @@ pub const ModelLists = struct {
 // while file locks, refresh TLS and persistence run here.
 pub const AuthWorker = struct {
     io: std.Io,
-    authentication: model_adapter.Authentication,
+    authentication: providers_module.Authentication,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
     state: enum { idle, requested, ready, in_use, refreshed, failed } = .idle,
     // Only .ready/.in_use own this final storage. The execution thread borrows
     // it through launch; the worker never publishes a value copy of the lease.
-    credential: model_adapter.Credential = undefined,
+    credential: providers_module.Lease = undefined,
     /// The file and claims each acquisition reads through. The worker lives
     /// in the execution Workspace, so only the pages an acquisition writes
     /// become resident; a refresh maps its own storage for the call.
-    work: codex_auth.Work = undefined,
+    work: providers_module.Authentication.Work = undefined,
     failure: ?anyerror = null,
     /// Set with .requested for a forced refresh at this rejected generation.
     refresh_generation: ?u64 = null,
     refresh_result: bool = false,
     stopping: bool = false,
 
-    const Result = union(enum) { ready: *const model_adapter.Credential, refreshed: bool, failed: anyerror };
+    const Result = union(enum) { ready: *const providers_module.Lease, refreshed: bool, failed: anyerror };
 
     /// Only the execution thread requests and takes, so an idle worker stays
     /// idle until that thread's next request.
@@ -510,12 +510,12 @@ pub const AuthWorker = struct {
             self.refresh_generation = null;
             self.mutex.unlock(self.io);
             const refreshed: ?bool = if (refresh_generation) |generation|
-                codex_auth.forceRefresh(self.io, self.authentication.path, self.authentication.fixture, generation) catch |err| {
+                self.authentication.refresh(self.io, generation) catch |err| {
                     self.publishFailure(err);
                     continue;
                 }
             else refreshed: {
-                codex_auth.acquireInto(self.io, self.authentication.path, self.authentication.fixture, &self.work, &self.credential) catch |err| {
+                self.authentication.acquire(self.io, &self.work, &self.credential) catch |err| {
                     self.publishFailure(err);
                     continue;
                 };
@@ -1055,7 +1055,7 @@ fn appendOptionalSigned(
 
 /// A managed Transfer's connection reuse and request correlation, for tests.
 pub inline fn traceCodexTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    if (host.providers.chatgpt() != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
+    if (host.providers.leasedSignIn() != null and host.hooks.phase_trace) writeCodexTransferTrace(host, transfer, binding);
 }
 
 noinline fn writeCodexTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {

@@ -1,6 +1,4 @@
 const std = @import("std");
-const codex_auth = @import("codex_auth.zig");
-const codex_credentials = @import("codex_credentials.zig");
 const execution = @import("execution.zig");
 const transport_policy = @import("transport_policy.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -9,11 +7,9 @@ const prefix_seal = @import("prefix_seal.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
-const h2 = @import("h2");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const provider = @import("provider.zig");
-const api_key = @import("api_key.zig");
 const output_decode = @import("output_decode.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
@@ -27,10 +23,10 @@ test {
     _ = history_memo;
 }
 
-// The sole V1 model adapter owns Codex wire grammar, output interpretation,
-// and managed-route authentication. The Host owns only effect scheduling and
+// The model adapter prepares requests through the Session's codec and
+// interprets answers. Credentials and the fields they write belong to the
+// sign-in sources (`providers.zig`). The Host owns only effect scheduling and
 // the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
-pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 
 /// Schema support is checked before acquiring validation metadata, preserving
 /// the original failure precedence when metadata acquisition would also fail.
@@ -294,9 +290,6 @@ test "provider interpretation retries clean close but not incomplete framing or 
     try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"slow_down\",\"code\":\"future\"}\n\n", .permanent, "malformed_provider_output");
 }
 
-pub const Authentication = struct { path: []const u8, fixture: bool = false };
-pub const Credential = codex_credentials.Lease;
-
 /// Codex continuation is qualified only for the same requested model binding.
 /// The caller supplies producing-request evidence, never the served model.
 fn validateRequestedBinding(saved_model: []const u8, requested_model: []const u8) !void {
@@ -306,10 +299,6 @@ fn validateRequestedBinding(saved_model: []const u8, requested_model: []const u8
 test "Codex continuation requires identical requested binding" {
     try validateRequestedBinding("model-a", "model-a");
     try std.testing.expectError(error.ContinuationUnavailable, validateRequestedBinding("model-a", "model-b"));
-}
-
-pub fn authenticationFailureCode(err: anyerror) []const u8 {
-    return codex_auth.failureCode(err);
 }
 
 pub fn preparationFailureCode(err: anyerror) []const u8 {
@@ -325,399 +314,6 @@ pub fn preparationFailureCode(err: anyerror) []const u8 {
         error.InjectedRequestSealFailure, error.RequestSealFailed => "request_seal_failed",
         else => "request_preparation_failed",
     };
-}
-
-fn fixtureEndpoint(endpoint: []const u8, ca_file: ?[]const u8) bool {
-    return std.mem.startsWith(u8, endpoint, "http://127.0.0.1:") or
-        std.mem.startsWith(u8, endpoint, "http://[::1]:") or
-        (std.mem.startsWith(u8, endpoint, "https://localhost:") and ca_file != null);
-}
-
-pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication) !void {
-    if (authentication.fixture and !fixtureEndpoint(endpoint, ca_file))
-        return error.InvalidCodexFixtureEndpoint;
-}
-
-/// An API key goes over https, or to a loopback fixture when `fixture`.
-pub fn validateKeyEndpoint(endpoint: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
-    if (fixture) {
-        if (!fixtureEndpoint(endpoint, ca_file)) return error.InvalidKeyFixtureEndpoint;
-    } else if (!std.mem.startsWith(u8, endpoint, "https://")) return error.InsecureKeyEndpoint;
-}
-
-/// The fields the credential path writes after the codec's headers:
-/// the credential, user-agent, FedRAMP and the Turn's turn state, each named
-/// in `provider.host_request_fields` so no codec header can name it.
-pub const Headers = struct {
-    entries: [5]h2.Field = undefined,
-    length: usize = 0,
-    credentials: *provider.Credentials = undefined,
-    /// A use of the Reactor's copy of this credential, owned until
-    /// `takeCredential` hands it to the Transfer.
-    credential: ?*provider.SharedCredential = null,
-
-    /// Initialize in final stack storage. The fields are borrowed only until
-    /// Transfer.start, whose stream copies the per-request ones; h2 borrows
-    /// the credential (its Transfer then holds the use) and the literals.
-    /// A nonempty turn state comes from TurnStates.replay for this Attempt's
-    /// Turn, and is borrowed too.
-    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, shared_credentials: *provider.Credentials, turn_state: []const u8) !void {
-        const access = credential.record.access_token.slice();
-        const account_id = credential.record.account_id.slice();
-        if (authentication.fixture) {
-            if (!fixtureEndpoint(endpoint, ca_file) or
-                !std.mem.eql(u8, access, codex_auth.fixture_access_token) or
-                !std.mem.eql(u8, account_id, codex_auth.fixture_account_id))
-                return error.InvalidManagedFixture;
-        } else if (!std.mem.eql(u8, endpoint, managed_endpoint)) return error.ManagedEndpointMismatch;
-        if (access.len == 0 or account_id.len == 0)
-            return error.InvalidCredentialHeader;
-        for (access) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
-        for (account_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
-        const shared = try shared_credentials.share(access, account_id);
-        self.credentials = shared_credentials;
-        self.credential = shared;
-        // Borrowed where two addresses (16 bytes) are smaller than a copy.
-        self.entries[0..3].* = .{
-            .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
-            .{ .name = "chatgpt-account-id", .value = shared.accountId(), .sensitive = true, .borrowed = true },
-            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision, .borrowed = true },
-        };
-        self.length = 3;
-        if (credential.record.fedramp) {
-            self.entries[self.length] = .{ .name = "x-openai-fedramp", .value = "true", .borrowed = true };
-            self.length += 1;
-        }
-        if (turn_state.len != 0) {
-            self.entries[self.length] = .{ .name = "x-codex-turn-state", .value = turn_state };
-            self.length += 1;
-        }
-    }
-
-    /// An API key's fields: the key and user-agent. The key goes only over
-    /// https, or for a fixture to a loopback endpoint.
-    pub fn initKey(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, key: []const u8, fixture: bool, shared_credentials: *provider.Credentials) !void {
-        try validateKeyEndpoint(endpoint, ca_file, fixture);
-        if (!api_key.valid(key)) return error.InvalidCredentialHeader;
-        const shared = try shared_credentials.share(key, "");
-        self.credentials = shared_credentials;
-        self.credential = shared;
-        self.entries[0..2].* = .{
-            .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
-            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision, .borrowed = true },
-        };
-        self.length = 2;
-    }
-
-    pub fn fields(self: *const Headers) []const h2.Field {
-        return self.entries[0..self.length];
-    }
-
-    pub fn takeCredential(self: *Headers) ?*provider.SharedCredential {
-        defer self.credential = null;
-        return self.credential;
-    }
-
-    pub fn deinit(self: *Headers) void {
-        if (self.credential) |shared| self.credentials.release(shared);
-        self.* = undefined;
-    }
-};
-
-/// Codex sticky routing for the Turns this Host runs. The provider returns
-/// `x-codex-turn-state` on a Turn's first successful response; every later
-/// request of that Turn (retries, replacement Attempts, tool continuations
-/// and in-Turn compaction) sends the first value unchanged, and no other
-/// Turn ever sends it. Process memory only: a fresh Host starts each Turn
-/// without it, and the Store never holds it. Each value belongs to the
-/// account binding that received it. Refresh keeps that binding; another
-/// account or FedRAMP binding drops every value and retires outstanding
-/// captures from the previous binding epoch. The table is bounded by
-/// execution capacity and replaces the least recently used Turn; a dropped
-/// value only loses stickiness, since every request carries full input.
-pub const TurnStates = struct {
-    entries: []Entry = &.{},
-    account: ?Owner = null,
-    epoch: u64 = 0,
-    uses: u64 = 0,
-
-    pub const Owner = [32]u8;
-    pub const Replay = struct {
-        epoch: u64,
-        /// Borrowed until the next mutation of this TurnStates owner.
-        value: []const u8,
-    };
-    /// Zero bytes are an empty entry. A held value is malloc'd at its real
-    /// length, so the table costs a few words per unit of capacity and a
-    /// Turn's value costs its own bytes.
-    pub const Entry = struct {
-        held: ?Held = null,
-        used: u64 = 0,
-    };
-    pub const Held = struct {
-        turn_id: u64,
-        value: []const u8,
-    };
-
-    /// Every managed transfer's header callback delivers its value straight
-    /// here, keyed by the Turn and the epoch its launch selected.
-    pub fn sink(self: *TurnStates) provider.TurnStateSink {
-        return .{ .context = self, .capture = observe };
-    }
-
-    fn observe(context: *anyopaque, key: provider.TurnStateKey, value: []const u8) void {
-        const self: *TurnStates = @ptrCast(@alignCast(context));
-        self.capture(key.turn_id, key.epoch, value);
-    }
-
-    pub fn owner(record: *const codex_credentials.Record) Owner {
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update(&.{@intFromBool(record.fedramp)});
-        hash.update(record.account_id.slice());
-        return hash.finalResult();
-    }
-
-    /// Select the launch binding and return this Turn's value and capture
-    /// epoch. An observed account change invalidates every cached Turn.
-    pub fn replay(self: *TurnStates, turn_id: u64, account: Owner) Replay {
-        if (self.account == null or !std.mem.eql(u8, &self.account.?, &account)) {
-            // Only occupied entries are reset, so an unused entry stays untouched.
-            for (self.entries) |*entry| if (entry.held != null) release(entry);
-            self.account = account;
-            self.epoch += 1;
-            self.uses = 0;
-        }
-        const entry = self.find(turn_id) orelse return .{ .epoch = self.epoch, .value = "" };
-        self.uses += 1;
-        entry.used = self.uses;
-        return .{ .epoch = self.epoch, .value = entry.held.?.value };
-    }
-
-    /// Record a transport-validated value from the selected launch epoch;
-    /// the Turn's first one wins. A late completion cannot revive old state,
-    /// including after the same account has returned in a new epoch.
-    pub fn capture(self: *TurnStates, turn_id: u64, epoch: u64, value: []const u8) void {
-        if (epoch != self.epoch or self.account == null or value.len == 0 or self.entries.len == 0) return;
-        const target = self.find(turn_id) orelse lru: {
-            var oldest = &self.entries[0];
-            for (self.entries) |*entry| if (entry.used < oldest.used) {
-                oldest = entry;
-            };
-            break :lru oldest;
-        };
-        if (target.held != null and target.held.?.turn_id == turn_id) return;
-        std.debug.assert(value.len <= provider.max_turn_state_bytes);
-        // Without memory the value is dropped, which only loses stickiness.
-        const owned = std.heap.c_allocator.dupe(u8, value) catch return;
-        if (target.held != null) release(target);
-        self.uses += 1;
-        target.held = .{ .turn_id = turn_id, .value = owned };
-        target.used = self.uses;
-    }
-
-    pub fn deinit(self: *TurnStates) void {
-        for (self.entries) |*entry| if (entry.held != null) release(entry);
-        self.* = undefined;
-    }
-
-    /// An emptied entry also forgets its recency, so capture fills it
-    /// before evicting any held Turn.
-    fn release(entry: *Entry) void {
-        std.heap.c_allocator.free(entry.held.?.value);
-        entry.* = .{};
-    }
-
-    fn find(self: *TurnStates, turn_id: u64) ?*Entry {
-        for (self.entries) |*entry| if (entry.held != null and entry.held.?.turn_id == turn_id) return entry;
-        return null;
-    }
-};
-
-fn testRecord(account_id: []const u8, fedramp: bool, access: []const u8, generation: u64) !codex_credentials.Record {
-    var record: codex_credentials.Record = .{
-        .generation = generation,
-        .account_id = .{},
-        .fedramp = fedramp,
-        .id_token = .{},
-        .access_token = .{},
-        .refresh_token = .{},
-        .expires_at = 0,
-        .refreshed_at = 0,
-    };
-    try record.account_id.set(account_id);
-    try record.access_token.set(access);
-    return record;
-}
-
-test "Codex turn state replays one Turn's first value and never another Turn's" {
-    var storage: [2]TurnStates.Entry = @splat(.{});
-    var states: TurnStates = .{ .entries = &storage };
-    defer states.deinit();
-    const account = TurnStates.owner(&try testRecord("acct", false, "token-1", 1));
-    // A refresh changes token and generation, not the account binding.
-    const refreshed = TurnStates.owner(&try testRecord("acct", false, "token-2", 2));
-    try std.testing.expectEqualSlices(u8, &account, &refreshed);
-    const launch = states.replay(7, account);
-    try std.testing.expectEqualStrings("", launch.value);
-    states.capture(7, launch.epoch, "");
-    try std.testing.expectEqualStrings("", states.replay(7, account).value);
-    states.capture(7, launch.epoch, "first");
-    const refresh = states.replay(7, refreshed);
-    try std.testing.expectEqual(launch.epoch, refresh.epoch);
-    states.capture(7, refresh.epoch, "second");
-    try std.testing.expectEqualStrings("first", states.replay(7, refreshed).value);
-    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
-    try std.testing.expectEqualStrings("", states.replay(8, account).value);
-    states.capture(8, launch.epoch, "eight");
-    try std.testing.expectEqualStrings("eight", states.replay(8, account).value);
-    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
-
-    // Turn 8 is least recently used, so Turn 9 replaces it, not Turn 7.
-    states.capture(9, launch.epoch, "nine");
-    try std.testing.expectEqualStrings("", states.replay(8, account).value);
-    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
-    try std.testing.expectEqualStrings("nine", states.replay(9, account).value);
-
-    // After a binding change the emptied entries take new Turns before any
-    // held Turn is evicted, whatever their recency before the change.
-    const other = TurnStates.owner(&try testRecord("other", false, "token-1", 3));
-    const rebound = states.replay(10, other);
-    states.capture(10, rebound.epoch, "ten");
-    states.capture(11, rebound.epoch, "eleven");
-    try std.testing.expectEqualStrings("ten", states.replay(10, other).value);
-    try std.testing.expectEqualStrings("eleven", states.replay(11, other).value);
-
-    // Another account or FedRAMP binding never receives the value, and the
-    // original account does not regain it after the change.
-    for ([_]codex_credentials.Record{ try testRecord("other", false, "token-1", 3), try testRecord("acct", true, "token-1", 3) }) |record| {
-        var owned: [1]TurnStates.Entry = @splat(.{});
-        var isolated: TurnStates = .{ .entries = &owned };
-        defer isolated.deinit();
-        const original = isolated.replay(5, account);
-        isolated.capture(5, original.epoch, "acct-value");
-        const changed = TurnStates.owner(&record);
-        try std.testing.expect(!std.mem.eql(u8, &account, &changed));
-        try std.testing.expectEqualStrings("", isolated.replay(5, changed).value);
-        try std.testing.expectEqualStrings("", isolated.replay(5, account).value);
-        const replacement = isolated.replay(5, changed);
-        isolated.capture(5, replacement.epoch, "changed-value");
-        try std.testing.expectEqualStrings("changed-value", isolated.replay(5, changed).value);
-        try std.testing.expectEqualStrings("", isolated.replay(5, account).value);
-    }
-
-    var unused: TurnStates = .{};
-    defer unused.deinit();
-    const ignored = unused.replay(1, account);
-    unused.capture(1, ignored.epoch, "value");
-    try std.testing.expectEqualStrings("", unused.replay(1, account).value);
-}
-
-test "Codex turn state owner changes invalidate paused Turns and stale completions" {
-    const account = TurnStates.owner(&try testRecord("acct", false, "token-1", 1));
-    for ([_]codex_credentials.Record{ try testRecord("other", false, "token-2", 2), try testRecord("acct", true, "token-3", 3) }) |record| {
-        const changed = TurnStates.owner(&record);
-        for ([_]bool{ false, true }) |late_completion| {
-            var storage: [2]TurnStates.Entry = @splat(.{});
-            var states: TurnStates = .{ .entries = &storage };
-            defer states.deinit();
-            const original = states.replay(1, account);
-            try std.testing.expectEqualStrings("", original.value);
-            if (!late_completion) states.capture(1, original.epoch, "paused-a");
-            try std.testing.expectEqualStrings("", states.replay(2, account).value);
-            states.capture(2, original.epoch, "active-a");
-            const replacement = states.replay(2, changed);
-            try std.testing.expectEqualStrings("", replacement.value);
-            states.capture(2, replacement.epoch, "active-b");
-            if (late_completion) states.capture(1, original.epoch, "late-a");
-            // A Turn untouched during A -> B must not resurrect A's hint
-            // when A returns, including an A completion delivered under B.
-            const returned = states.replay(1, account);
-            try std.testing.expectEqualStrings("", returned.value);
-            // A completion from the original A epoch is stale even after
-            // another request has observed B -> A.
-            states.capture(1, original.epoch, "late-original-a");
-            states.capture(2, replacement.epoch, "late-b");
-            try std.testing.expectEqualStrings("", states.replay(1, account).value);
-            try std.testing.expectEqualStrings("", states.replay(2, account).value);
-            states.capture(1, returned.epoch, "fresh-a");
-            try std.testing.expectEqualStrings("fresh-a", states.replay(1, account).value);
-        }
-    }
-}
-
-test "an API key goes only over https or to a loopback fixture, with no account" {
-    var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
-    const own = "https://api.openai.com/v1/responses";
-    {
-        var headers: Headers = .{};
-        defer headers.deinit();
-        try headers.initKey(own, null, "sk-test", false, &credentials);
-        const entries = headers.fields();
-        try std.testing.expectEqual(@as(usize, 2), entries.len);
-        try std.testing.expectEqualStrings("authorization", entries[0].name);
-        try std.testing.expectEqualStrings("Bearer sk-test", entries[0].value);
-        try std.testing.expect(entries[0].sensitive);
-        try std.testing.expectEqualStrings("user-agent", entries[1].name);
-        for (entries) |entry| try std.testing.expect(provider.hostField(entry.name));
-    }
-    {
-        var headers: Headers = .{};
-        defer headers.deinit();
-        try headers.initKey("http://127.0.0.1:9/responses", null, "sk-test", true, &credentials);
-    }
-    var refused: Headers = .{};
-    try std.testing.expectError(error.InsecureKeyEndpoint, refused.initKey("http://127.0.0.1:9/responses", null, "sk-test", false, &credentials));
-    try std.testing.expectError(error.InvalidKeyFixtureEndpoint, refused.initKey(own, null, "sk-test", true, &credentials));
-    try std.testing.expectError(error.InvalidCredentialHeader, refused.initKey(own, null, "sk test", false, &credentials));
-    try std.testing.expectEqual(@as(?*provider.SharedCredential, null), credentials.head);
-}
-
-test "Codex headers carry turn state only when the Turn has one" {
-    var credential: Credential = undefined;
-    var credentials: provider.Credentials = .{ .allocator = std.testing.allocator };
-    for ([_]bool{ false, true }) |fedramp| {
-        credential.record = try testRecord(codex_auth.fixture_account_id, fedramp, codex_auth.fixture_access_token, 1);
-        for ([_][]const u8{ "", "sticky value", &@as([provider.max_turn_state_bytes]u8, @splat('v')) }) |turn_state| {
-            var headers: Headers = .{};
-            defer headers.deinit();
-            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials, turn_state);
-            const entries = headers.fields();
-            var found: ?[]const u8 = null;
-            var fedramp_found = false;
-            for (entries) |entry| {
-                // h2 sends names as given, and HTTP/2 requires them lowercase.
-                for (entry.name) |byte| try std.testing.expect(!std.ascii.isUpper(byte));
-                try std.testing.expectEqual(std.mem.eql(u8, entry.name, "authorization") or
-                    std.mem.eql(u8, entry.name, "chatgpt-account-id"), entry.sensitive);
-                if (std.mem.eql(u8, entry.name, "x-codex-turn-state")) {
-                    try std.testing.expect(found == null);
-                    found = entry.value;
-                }
-                if (std.mem.eql(u8, entry.name, "x-openai-fedramp")) fedramp_found = std.mem.eql(u8, entry.value, "true");
-                if (std.mem.eql(u8, entry.name, "authorization"))
-                    try std.testing.expectEqualStrings("Bearer " ++ codex_auth.fixture_access_token, entry.value);
-                // No codec header names it.
-                try std.testing.expect(provider.hostField(entry.name));
-            }
-            // The credential is the Reactor's one copy, which h2 borrows;
-            // only the per-request values are copied into each stream.
-            for (entries) |entry| try std.testing.expectEqual(entry.name.len + entry.value.len > 16 and
-                !std.mem.eql(u8, entry.name, "x-codex-turn-state"), entry.borrowed);
-            // They follow the codec's headers: the credential, user-agent,
-            // FedRAMP, turn state.
-            const shared = headers.credential.?;
-            try std.testing.expectEqualStrings("authorization", entries[0].name);
-            try std.testing.expectEqual(shared.authorization().ptr, entries[0].value.ptr);
-            try std.testing.expectEqualStrings("chatgpt-account-id", entries[1].name);
-            try std.testing.expectEqual(shared.accountId().ptr, entries[1].value.ptr);
-            try std.testing.expectEqualStrings("user-agent", entries[2].name);
-            if (fedramp) try std.testing.expectEqualStrings("x-openai-fedramp", entries[3].name);
-            if (turn_state.len != 0) try std.testing.expectEqualStrings("x-codex-turn-state", entries[entries.len - 1].name);
-            try std.testing.expectEqual(fedramp, fedramp_found);
-            try std.testing.expectEqual(@as(usize, 3) + @intFromBool(fedramp) + @intFromBool(turn_state.len != 0), entries.len);
-            try std.testing.expectEqualStrings(turn_state, found orelse "");
-        }
-    }
 }
 
 test "the Responses headers are lowercase tokens, header-safe, within bounds and name no Host or h2 field" {

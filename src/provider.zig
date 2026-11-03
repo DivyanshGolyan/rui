@@ -51,9 +51,18 @@ pub const PreparedRequest = struct {
 const content_type: h2.Field = .{ .name = "content-type", .value = "application/json", .borrowed = true };
 
 /// The request fields the Host writes itself, which no codec header names:
-/// `content_type` and model_adapter.Headers' credential, user-agent, FedRAMP
-/// and turn-state fields.
-pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp", "x-codex-turn-state" };
+/// `content_type`, providers.Headers' credential, user-agent and FedRAMP
+/// fields, and every codec's routing header, which the Host echoes.
+pub const host_request_fields = [_][]const u8{ content_type.name, "authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp" } ++ routing_fields;
+
+const routing_fields = fields: {
+    var names: []const []const u8 = &.{};
+    for (std.enums.values(protocol.Codec)) |codec| {
+        const name = codecs.manifest(codec).observe.turn_state;
+        if (name.len != 0) names = names ++ .{name};
+    }
+    break :fields names[0..names.len].*;
+};
 
 /// Whether the Host or h2 writes a field of this name itself.
 pub fn hostField(name: []const u8) bool {
@@ -72,11 +81,12 @@ pub const TurnStateSink = struct {
     capture: *const fn (context: *anyopaque, key: TurnStateKey, value: []const u8) void,
 };
 
-/// The one transfer-specific part of turn-state delivery: its Turn and the
-/// epoch selected at launch.
+/// The one transfer-specific part of turn-state delivery: its provider and
+/// Turn, and the epoch selected at launch.
 pub const TurnStateKey = struct {
-    turn_id: u64 = 0,
-    epoch: u64 = 0,
+    provider: protocol.Provider,
+    turn_id: u64,
+    epoch: u64,
 };
 
 /// One per Reactor, so a Transfer holds a pointer instead of copies.
@@ -489,10 +499,10 @@ pub const SealedResponse = struct {
 const HeaderContext = struct {
     observed: Observed = .{},
     /// Where the observation's sink files the first caller-named routing
-    /// value of a successful final block. A routing hint never fails the
-    /// transfer: an unusable first value is dropped, and later values are
-    /// ignored.
-    turn_state: TurnStateKey = .{},
+    /// value of a successful final block; none for a transfer that files
+    /// nothing. A routing hint never fails the transfer: an unusable first
+    /// value is dropped, and later values are ignored.
+    turn_state: ?TurnStateKey = null,
     turn_state_seen: bool = false,
     successful_block: bool = false,
     /// The largest Retry-After of each form, valid once its flag is set;
@@ -539,7 +549,7 @@ const HeaderContext = struct {
             self.turn_state_seen = true;
             if (value.len == 0 or value.len > max_turn_state_bytes) return;
             for (value) |byte| if (byte < 0x20 or byte > 0x7e) return;
-            if (observation.turn_state) |sink| sink.capture(sink.context, self.turn_state, value);
+            if (observation.turn_state) |sink| if (self.turn_state) |key| sink.capture(sink.context, key, value);
             return;
         }
         const observed: Observed.Name = if (names.request_id.len != 0 and std.mem.eql(u8, name, names.request_id))
@@ -614,7 +624,7 @@ pub const Transfer = struct {
         /// at its first response head, in `deinit`, or in `start` when it
         /// fails.
         credential: ?*SharedCredential = null,
-        turn_state: TurnStateKey = .{},
+        turn_state: ?TurnStateKey = null,
         faults: Faults = .{},
     };
 
@@ -988,30 +998,35 @@ test "turn state observation keeps only the first value of a successful final bl
     for (cases) |case| {
         var record: TurnStateRecord = .{};
         const observation: HeaderObservation = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
-        var context: HeaderContext = .{ .turn_state = .{ .turn_id = 7, .epoch = 3 } };
+        var context: HeaderContext = .{ .turn_state = .{ .provider = .openai, .turn_id = 7, .epoch = 3 } };
         try observeLines(&context, &observation, case.lines);
         try std.testing.expectEqualStrings(case.expected, record.value.slice());
         try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
-        if (record.captures != 0) try std.testing.expectEqual(TurnStateKey{ .turn_id = 7, .epoch = 3 }, record.key);
+        if (record.captures != 0) try std.testing.expectEqual(TurnStateKey{ .provider = .openai, .turn_id = 7, .epoch = 3 }, record.key.?);
     }
     // A value in trailers, after a successful final block, is not routing.
     var record: TurnStateRecord = .{};
     const observation: HeaderObservation = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
-    var trailers: HeaderContext = .{};
+    const key: TurnStateKey = .{ .provider = .codex, .turn_id = 1, .epoch = 1 };
+    var trailers: HeaderContext = .{ .turn_state = key };
     trailers.block(.final, 200);
     trailers.block(.trailers, 0);
     try trailers.field(&observation, name, "late", 0);
     try std.testing.expectEqual(@as(usize, 0), record.captures);
     // Unnamed callers observe nothing.
     const unnamed_observation: HeaderObservation = .{ .turn_state = record.sink() };
-    var unnamed: HeaderContext = .{};
+    var unnamed: HeaderContext = .{ .turn_state = key };
     try observeLines(&unnamed, &unnamed_observation, &.{ ":status 200", "x-codex-turn-state: value" });
+    try std.testing.expectEqual(@as(usize, 0), record.captures);
+    // A transfer launched with no key files nothing.
+    var unkeyed: HeaderContext = .{};
+    try observeLines(&unkeyed, &observation, &.{ ":status 200", "x-codex-turn-state: value" });
     try std.testing.expectEqual(@as(usize, 0), record.captures);
 }
 
 const TurnStateRecord = struct {
     value: protocol.Bounded(max_turn_state_bytes) = .{},
-    key: TurnStateKey = .{},
+    key: ?TurnStateKey = null,
     captures: usize = 0,
 
     fn sink(self: *TurnStateRecord) TurnStateSink {
