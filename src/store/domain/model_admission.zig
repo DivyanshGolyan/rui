@@ -30,16 +30,23 @@ const SessionFacts = configuration_domain.SessionFacts;
 const accepted_resolutions = store_schema.accepted_resolutions;
 
 pub const ModelAdmissionKind = enum { message, tool_continuation };
+/// Whether the Turn's `current` Operation proposed tool calls and each is
+/// rejected or its action resolved. Each table it reads is tied to
+/// `current`'s Session (`rsql.tiedRefs`), for a write that reads it. The
+/// term `item.item_ordinal>=0`, always true, keeps SQLite on
+/// model_output_item's primary key: without it the session_ref tie draws
+/// the planner to model_output_call_history, a scan of the Session's calls.
 const complete_tool_results_sql =
     store_schema.resolutionIs("current.resolution_code", .tool_proposals) ++ " AND EXISTS(" ++
-    " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
-    ") AND (SELECT count(*) FROM model_tool_call tool_call WHERE tool_call.operation_id=current.operation_id)=(" ++
-    " SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
+    " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3" ++
+    ") AND (SELECT count(*) FROM model_tool_call tool_call WHERE tool_call.operation_id=current.operation_id AND tool_call.session_ref=current.session_ref)=(" ++
+    " SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3" ++
     ") AND NOT EXISTS(" ++
     " SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call tool_call " ++
-    " ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
+    " ON tool_call.operation_id=item.operation_id AND tool_call.session_ref=item.session_ref AND tool_call.item_ordinal=item.item_ordinal " ++
     " LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id " ++
-    " AND action.call_ordinal=tool_call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND (" ++
+    " AND action.session_ref=tool_call.session_ref AND action.call_ordinal=tool_call.call_ordinal" ++
+    " WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3 AND (" ++
     " tool_call.operation_id IS NULL OR (tool_call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))" ++
     ")" ++
     ")";
