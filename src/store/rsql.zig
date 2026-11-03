@@ -341,6 +341,10 @@ pub fn Write(comptime spec: WriteSpec) type {
         /// The Args fields the write's `@session` markers bind, in Args'
         /// order: none, or one per Session it names.
         pub const session_fields: []const []const u8 = sessionFields(Args);
+        /// Whether the Access that queues it touches those Sessions: false
+        /// only for an UPDATE whose every assigned column no list row
+        /// shows (`schema.Column.listed`).
+        pub const touches = touchesLists(parsed.statement);
     };
 }
 
@@ -1113,6 +1117,18 @@ fn fieldCount(comptime T: type) usize {
     return @typeInfo(T).@"struct".field_names.len;
 }
 
+/// See `Write.touches`.
+fn touchesLists(comptime statement: Statement) bool {
+    comptime {
+        const update = switch (statement) {
+            .update => |update| update,
+            else => return true,
+        };
+        for (update.assigned) |name| if (schema.isListed(update.table, name)) return true;
+        return false;
+    }
+}
+
 /// The SessionHead fields of Args, in order.
 fn sessionFields(comptime Args: type) []const []const u8 {
     comptime {
@@ -1596,7 +1612,7 @@ fn names(comptime side: Expr, comptime sources: []const Source, comptime index: 
 /// the other markers as `render`.
 fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]const u8 {
     comptime {
-        @setEvalBranchQuota(200 * sql.len + 10_000);
+        @setEvalBranchQuota(200 * sql.len + 10_000 + schema.objects_quota);
         var out: []const u8 = "";
         var start: usize = 0;
         var index: usize = 0;
@@ -1936,6 +1952,16 @@ test "a write names its Session with @session on its table's own session_ref" {
     try std.testing.expectEqualStrings(comptime untiedMessage("session", "session"), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1) OR revision=1", Copy, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT gives one value per column", comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision FROM session WHERE session_ref=@session(?1) AND ?2 IS NOT NULL", Copy, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT writes one VALUES row", comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now),(?1,'other',?3,0,@now)", Stop, void).?);
+}
+
+test "a write touches its Sessions unless it assigns only columns no list row shows" {
+    const Mark = struct { session: SessionHead, position: u64 };
+    const Stop = struct { key: []const u8, session: SessionHead, turn_id: u64 };
+    try std.testing.expect(!Write(.{ .sql = "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1)", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
+    try std.testing.expect(Write(.{ .sql = "UPDATE session SET read_through=?2,label=NULL WHERE session_ref=@session(?1)", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
+    try std.testing.expect(Write(.{ .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?2 AND session_ref=@session(?1)", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
+    try std.testing.expect(Write(.{ .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now)", .Args = Stop, .expect = .{ .at_most = 1 } }).touches);
+    try std.testing.expect(Write(.{ .sql = "DELETE FROM turn WHERE session_ref=@session(?1) AND turn_id=?2", .Args = Mark, .expect = .{ .at_most = 1 } }).touches);
 }
 
 test "a Message's write names its two Sessions, each on its own column" {

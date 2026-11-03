@@ -397,7 +397,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Queues a write, touching each Session its @session markers
-        /// name. A failed guard fails the round that runs it.
+        /// name, unless no list row shows a column it assigns
+        /// (`rsql.Write.touches`). A failed guard fails the round that
+        /// runs it.
         pub fn write(a: *Self, comptime S: type, args: S.Args) void {
             if (S.expect == .counted) @compileError("rsql: a .counted write states its rows through writeCount: " ++ S.sql);
             a.queueWrite(S, &args, .{ .none = {} });
@@ -414,7 +416,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         fn queueWrite(a: *Self, comptime S: type, args: *const S.Args, target: @FieldType(Queued, "target")) void {
             comptime std.debug.assert(S.kind == .write and mode != .read and S.session_fields.len <= max_sessions);
-            inline for (S.session_fields) |field| a.touch(@field(args, field));
+            if (S.touches) inline for (S.session_fields) |field| a.touch(@field(args, field));
             _ = a.queueStatement(S, args, runWrite(S), target);
         }
 

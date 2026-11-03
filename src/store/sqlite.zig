@@ -198,30 +198,24 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
         const sessions = comptime store_schema.sessionColumns(table);
         inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {
             const columns = comptime if (std.mem.eql(u8, event, "UPDATE")) sessions[0..1] else sessions;
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ table, event, event, table, comptime oracleBody(event, columns) }));
+            // An update watches only the columns a list row shows
+            // (`schema.Column.listed`): a write of the others touches nothing.
+            const watched = comptime if (std.mem.eql(u8, event, "UPDATE")) " OF " ++ joinNames(store_schema.listedColumns(table)) else "";
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s}{s} ON main.{s} BEGIN {s} END", .{ table, event, event, watched, table, comptime oracleBody(event, columns) }));
         }
         const both = comptime store_schema.readByBoth(table);
         if (both.len != 0) {
-            const names = comptime blk: {
-                var text: []const u8 = "";
-                for (both, 0..) |name, index| text = text ++ (if (index == 0) "" else ",") ++ name;
-                break :blk text;
-            };
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, names, table, comptime oracleBody("UPDATE", sessions[1..]) }));
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, comptime joinNames(both), table, comptime oracleBody("UPDATE", sessions[1..]) }));
         }
     }
-    // How far a person read is no Session list row's fact, so recording it
-    // needs no touch: the Session's update trigger watches every other
-    // column, read from the schema so a new column is watched too.
-    try exec(database, "DROP TRIGGER temp.touched_session_UPDATE");
-    const columns = "SELECT group_concat(name,',') FROM pragma_table_info('session') WHERE name<>'read_through'";
-    var statement: ?*c.sqlite3_stmt = null;
-    if (c.sqlite3_prepare_v2(database, columns, -1, &statement, null) != c.SQLITE_OK) return error.SqliteExecFailed;
-    defer _ = c.sqlite3_finalize(statement);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SqliteExecFailed;
-    const names = c.sqlite3_column_text(statement, 0) orelse return error.SqliteExecFailed;
-    var sql: [2048]u8 = undefined;
-    try exec(database, try std.fmt.bufPrintSentinel(&sql, "CREATE TEMP TRIGGER touched_session_UPDATE AFTER UPDATE OF {s} ON main.session BEGIN INSERT INTO touched_oracle VALUES(NEW.session_ref);INSERT INTO touched_oracle VALUES(OLD.session_ref); END", .{std.mem.span(names)}, 0));
+}
+
+fn joinNames(comptime names: []const []const u8) []const u8 {
+    comptime {
+        var text: []const u8 = "";
+        for (names, 0..) |name, index| text = text ++ (if (index == 0) "" else ",") ++ name;
+        return text;
+    }
 }
 
 /// A trigger body that notes each of `columns`' Sessions, new and old.
