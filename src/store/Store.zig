@@ -123,15 +123,11 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, historical_domain.prefixSealOf(&access, binding));
     }
 
+    /// Records `seal` for the current `binding` through the production
+    /// write (`historical.recordPrefixSeal`), whatever the seal holds.
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        const statement = try fixtureStatement(self, "UPDATE session SET prefix_seal=?2 WHERE session_ref=(SELECT session_ref FROM model_operation WHERE operation_id=?1)");
-        defer sqlite.resetCached(statement);
-        try sqlite.bindU64(statement, 1, binding.operation_id);
-        const bytes = seal.encode();
-        try sqlite.bindBlob(statement, 2, &bytes);
-        try sqlite.expectDone(statement);
-        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
+        return historical_domain.recordPrefixSeal(self, binding, seal);
     }
 
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {

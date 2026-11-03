@@ -544,7 +544,7 @@ pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
     return try PrefixSeal.decode(&bytes);
 }
 
-fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var a: store_access.Access(.write, error{}) = .open(&entry);

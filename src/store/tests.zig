@@ -339,7 +339,9 @@ fn testingContentReference(storage: *Store, content_id: u64) !ContentReference {
 }
 
 /// Records that the running entry point changed `session`, as an Access's
-/// `@session` tie does, for a test that writes its rows by hand.
+/// `@session` tie does, for a test that writes its rows by hand. It
+/// repeats `Access.touch` because that is private to Access, so that only a
+/// typed write touches, and a hand-written row has no typed write.
 fn touchForTesting(storage: *Store, session: []const u8) !void {
     var sql: [128]u8 = undefined;
     const workspace = try queryU64(storage.database, try std.mem.printSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{session}, 0));
