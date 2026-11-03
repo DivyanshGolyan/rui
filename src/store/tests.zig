@@ -1423,6 +1423,53 @@ test "an Access commits its writes, positions and identities together, or none o
     try std.testing.expect(before <= dated and dated <= after);
 }
 
+const counted_dating = rsql.Write(.{
+    .sql = "UPDATE session SET created_at=?2 WHERE session_ref=@session(?1) AND revision=?3",
+    .Args = struct { session: rsql.SessionHead, at: u64, revision: u64 },
+    .expect = .{ .counted = .{ .otherwise = error.TestingGuard } },
+});
+
+/// Dates `session` at `at` where its revision is `revision`, stating
+/// `rows` as the rows that write changes.
+fn countedDatingForTesting(storage: *Store, session: []const u8, at: u64, revision: u64, rows: u64) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    return entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, struct {
+        fn body(access: anytype, ref: []const u8, value: u64, current: u64, count: u64) !void {
+            var loaded: TestingRound.head.Result = undefined;
+            access.read(TestingRound.head, .{ .session_ref = ref }, &loaded);
+            try access.run();
+            access.writeCount(counted_dating, .{ .session = loaded.head, .at = value, .revision = current }, count);
+            try access.commit();
+        }
+    }.body(&a, session, at, revision, rows)));
+}
+
+test "a counted write commits only when it changes the rows its caller states" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "counted-config");
+    const dated = "SELECT created_at FROM session";
+    const created = try queryU64(storage.database, dated);
+    // One row changes: stating none or two fails before COMMIT.
+    for ([_]u64{ 0, 2 }) |rows| {
+        try std.testing.expectError(error.TestingGuard, countedDatingForTesting(&storage, session.slice(), 7, 1, rows));
+        try std.testing.expectEqual(created, try queryU64(storage.database, dated));
+    }
+    try std.testing.expect(!storage.isFenced());
+    try countedDatingForTesting(&storage, session.slice(), 7, 1, 1);
+    try std.testing.expectEqual(@as(u64, 7), try queryU64(storage.database, dated));
+    // No row changes: zero is checked like any count.
+    try std.testing.expectError(error.TestingGuard, countedDatingForTesting(&storage, session.slice(), 8, 2, 1));
+    try countedDatingForTesting(&storage, session.slice(), 8, 2, 0);
+    try std.testing.expectEqual(@as(u64, 7), try queryU64(storage.database, dated));
+}
+
 test "the touch oracle names a Session whose rows changed without a touch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
