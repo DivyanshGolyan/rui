@@ -697,7 +697,7 @@ pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_oper
 /// Public content's reads, in rounds it may share with other rows. `queue`
 /// the entry with its assistant check, or the Tool Result; after that
 /// round, `found`, then `queueMetadata`, which also queues a Tool Result's
-/// group outcome check (`ToolOutcomeCheck`, every outcome terminal);
+/// group outcome check (`ToolOutcomeCheck`);
 /// after that round, `takeMetadata`, which judges that check first, as
 /// main checked the group before it read the metadata.
 const PublicContentRead = struct {
@@ -708,7 +708,7 @@ const PublicContentRead = struct {
     content: PublicContent = undefined,
     missing: missing_assistant_entry.Result = null,
     metadata: content_metadata.Row = undefined,
-    outcome: ToolOutcomeCheck = .{ .terminal = true },
+    outcome: ToolOutcomeCheck = .{},
     count: RowCount = .{},
 
     fn queue(read: *PublicContentRead, a: *ReadAccess, session: []const u8) void {
@@ -1202,11 +1202,12 @@ const call_outcomes = ToolOutcome(call_candidates_sql ++ ", ", "SELECT DISTINCT 
 /// each by itself (`operation_outcome`) while they are at most
 /// `max_operations`, which `operations` holds, and else all of them in
 /// one read (`call_outcomes`), whose search for them costs more than one
-/// Operation's own read. The rule implies main's equality: a valid call
-/// is terminal exactly when it has an acceptance, and its rejection's or
-/// result's content then, so an Operation the rule passes is a group, at
-/// its largest acceptance, exactly when every call is terminal, and its
-/// publication is then that acceptance. It keeps no row, so its read
+/// Operation's own read. Main's equality holds by the schema's CHECKs,
+/// not the rule: a call has an acceptance exactly when it is rejected
+/// (`model_tool_call`'s) or its Action resolved (`action_operation`'s),
+/// and then has its rejection's or result's content, so an Operation the
+/// rule passes is a group, at its largest acceptance, exactly when every
+/// call has one, and its publication is then that acceptance. It keeps no row, so its read
 /// steps every row the statement returns: a count has no smaller bound.
 const CallRows = struct {
     activity: *protocol.CallActivity,
@@ -2070,11 +2071,12 @@ pub const ToolOutcomeRow = struct {
 /// a call; every call has its item, its three fields' contents, and is
 /// either rejected with its rejection's content and acceptance and no
 /// Action, or has an Action that is unresolved, with no result and no
-/// acceptance, or resolved, with its result's content and acceptance;
-/// with `terminal`, every call is rejected or resolved. Main also
-/// required a terminal Operation's publication, its largest acceptance;
-/// every rejected or resolved call has an acceptance, so a terminal
-/// Operation with a call has one, and no count is kept for it. For each
+/// acceptance, or resolved, with its result's content and acceptance.
+/// Main also required a public Tool Result's group to be terminal, every
+/// call rejected or resolved; `public_tool_result` only returns a group
+/// whose every call has an acceptance and content, so in the same
+/// snapshot no call the rule passes is unresolved, and no count is kept
+/// for it. For each
 /// call, as main's per-call Proposal read: its Proposal is consistent and
 /// its fields certified (`certifiedFields`). Every failure is
 /// `CorruptStore`, main's answer for each, so which one it meets first
@@ -2087,8 +2089,6 @@ pub const ToolOutcomeCheck = struct {
     expected: u32 = 0,
     calls: u32 = 0,
     valid: u32 = 0,
-    terminals: u32 = 0,
-    terminal: bool = false,
     failed: bool = false,
 
     /// One check may judge several reads' rows, each after the other's,
@@ -2108,7 +2108,7 @@ pub const ToolOutcomeCheck = struct {
         const operation = row.scope_operation.get();
         if (operation != check.operation) {
             try check.close();
-            check.* = .{ .terminal = check.terminal, .operation = operation, .expected = std.math.cast(u32, row.expected) orelse return error.CorruptStore };
+            check.* = .{ .operation = operation, .expected = std.math.cast(u32, row.expected) orelse return error.CorruptStore };
         }
         if (row.ordinal == null) return;
         if (check.calls == check.expected) return error.CorruptStore;
@@ -2119,14 +2119,12 @@ pub const ToolOutcomeCheck = struct {
         const unresolved = row.rejection_code == null and row.action_id != null and !row.action_resolved and !row.action_content and row.action_acceptance == null;
         const fields = row.length0 != null and row.length1 != null and row.length2 != null;
         if (row.item_kind == 3 and fields and (rejected or resolved or unresolved)) check.valid += 1;
-        if (rejected or resolved) check.terminals += 1;
     }
 
     /// Judges the Operation whose rows ended.
     fn close(check: *ToolOutcomeCheck) error{CorruptStore}!void {
         if (check.operation == 0) return;
-        if (check.expected == 0 or check.calls != check.expected or check.valid != check.expected or
-            (check.terminal and check.terminals != check.expected)) return error.CorruptStore;
+        if (check.expected == 0 or check.calls != check.expected or check.valid != check.expected) return error.CorruptStore;
         check.operation = 0;
     }
 
@@ -2141,8 +2139,8 @@ fn optionalPositive(value: ?rsql.Positive) ?u64 {
     return if (value) |positive| positive.get() else null;
 }
 
-/// One Operation: a public Tool Result's, every outcome terminal, or an
-/// Activity page's candidates'.
+/// One Operation: a public Tool Result's, or an Activity page's
+/// candidates'.
 const operation_outcome = ToolOutcome("", "SELECT DISTINCT ?1 AS operation_id," ++ expectedCallsSql("?1"), struct { operation: u64 }, false);
 
 /// Queues reading the Proposal at `read.position`; `read.found` follows

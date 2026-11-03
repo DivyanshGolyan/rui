@@ -939,9 +939,11 @@ const Description = protocol.Bounded(protocol.max_tool_description_bytes);
 /// as main's outcome facts gave it: its largest acceptance when every
 /// call has one, and none otherwise. The rule over `active_tool_calls`
 /// proved every call of each listed Operation valid in an earlier round
-/// of this Access, under the Entry that excludes every writer; a valid
-/// call is terminal exactly when it has an acceptance, and its Operation
-/// has as many calls as call items, so this counts what main counted.
+/// of this Access, under the Entry that excludes every writer, so its
+/// Operation has as many calls as call items. By the schema's CHECKs a
+/// call has an acceptance exactly when it is rejected (`model_tool_call`'s)
+/// or its Action resolved (`action_operation`'s), main's terminal calls,
+/// so this counts what main counted.
 fn publicationSql(comptime operation: []const u8) []const u8 {
     return "(SELECT CASE WHEN count(*)=count(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) " ++
         "THEN max(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) END FROM model_tool_call sibling " ++
