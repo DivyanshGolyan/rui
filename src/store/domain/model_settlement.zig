@@ -10,6 +10,8 @@ const turn_policy = @import("../../turn_policy.zig");
 const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const rsql = @import("../rsql.zig");
+const store_schema = @import("../schema.zig");
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
@@ -30,9 +32,14 @@ const TurnOutcome = turn_domain.TurnOutcome;
 const import_window_bytes = content_domain.import_window_bytes;
 const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql;
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
+const context_changed = model_admission_domain.context_changed;
 
 /// Every model Operation resolution ends its Attempt or retry wait at once.
-pub const operation_resolved_at_sql = "resolved_at=unixepoch(),attempt_at=NULL,retry_scheduled_at=NULL";
+/// `settleModelSuccessLocked` is its last caller, and it goes when that
+/// settlement converts.
+const operation_resolved_at_sql = "resolved_at=unixepoch(),attempt_at=NULL,retry_scheduled_at=NULL";
+/// `operation_resolved_at_sql` for typed statements, dated by the Access.
+pub const operation_resolved_now_sql = "resolved_at=@now,attempt_at=NULL,retry_scheduled_at=NULL";
 
 pub const ModelFailureClass = union(enum) {
     ordinary,
@@ -158,53 +165,199 @@ pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !change_rin
     try sqlite.readText(statement, 4, &session);
     try store_core.touch(self, session.slice());
     if (session.len != change_ring.id_bytes) return error.CorruptStore;
-    if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
-        c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
-        return error.StaleAttemptBinding;
-    if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return session.slice()[0..change_ring.id_bytes].*;
-    if (c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL) return error.SupersededByControl;
+    try attemptStanding(.{
+        .turn_id = c.sqlite3_column_int64(statement, 0),
+        .attempt_ordinal = c.sqlite3_column_int64(statement, 1),
+        .resolved = c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL,
+        .interrupted = c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL,
+    }, binding);
+    return session.slice()[0..change_ring.id_bytes].*;
+}
+
+/// The stored facts that decide whether a binding is still current.
+const AttemptFacts = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool };
+
+/// Whether `binding` names the Attempt whose Turn and ordinal these are.
+fn namesAttempt(turn_id: i64, attempt_ordinal: i64, binding: AttemptBinding) bool {
+    return turn_id == binding.turn_id and attempt_ordinal == binding.attempt_ordinal;
+}
+
+/// The one rule for a binding: current while it names its Operation's
+/// unresolved Attempt; otherwise `SupersededByControl` when a control
+/// interrupted that Attempt, else `StaleAttemptBinding`.
+fn attemptStanding(facts: AttemptFacts, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!void {
+    if (!namesAttempt(facts.turn_id, facts.attempt_ordinal, binding)) return error.StaleAttemptBinding;
+    if (!facts.resolved) return;
+    if (facts.interrupted) return error.SupersededByControl;
     return error.StaleAttemptBinding;
 }
 
-pub fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-    const statement = try store_core.cached(self, "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return null;
-    if (step != c.SQLITE_ROW) return error.OperationReadFailed;
-    if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
-        c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
-        return null;
-    if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return null;
-    var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
-    try sqlite.readText(statement, 2, &command_key);
-    return .{ .command_key = command_key };
+/// The Operation `operation_id`'s Attempt as settling it reads it: its
+/// binding, whether it is resolved or interrupted, its purpose and claim,
+/// its Session, and, when `closes`, whether its Turn is open on this
+/// Operation; otherwise `turn_open` is false and unread.
+const attempt_facts = rsql.Read(.{
+    .sql = "SELECT o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved," ++
+        "o.interrupted_by_command_key IS NOT NULL AS interrupted,o.purpose AS compaction,o.admission_position," ++
+        "coalesce(o.retry_due_at_ms,0)<>0 AS retry_waiting,o.auth_refresh_claimed AS refresh_claimed," ++
+        rsql.session_head_columns ++ "," ++
+        "CASE WHEN ?2 THEN EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
+        "AND t.operation_id=o.operation_id) ELSE 0 END AS turn_open " ++
+        "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
+    .Args = struct { operation_id: u64, closes: bool },
+    .Row = struct {
+        turn_id: i64,
+        attempt_ordinal: i64,
+        resolved: bool,
+        interrupted: bool,
+        compaction: bool,
+        admission_position: rsql.Positive,
+        retry_waiting: bool,
+        refresh_claimed: bool,
+        session: rsql.SessionHead,
+        turn_open: bool,
+    },
+    .cardinality = .optional,
+});
+
+/// After an `attempt_facts` round: its row while `attemptStanding` finds
+/// `binding` current; a missing Operation is `StaleAttemptBinding`.
+fn currentAttempt(facts: *const attempt_facts.Result, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!*const attempt_facts.Row {
+    const row = &(facts.* orelse return error.StaleAttemptBinding);
+    try attemptStanding(.{ .turn_id = row.turn_id, .attempt_ordinal = row.attempt_ordinal, .resolved = row.resolved, .interrupted = row.interrupted }, binding);
+    return row;
 }
 
-pub fn claimModelAuthRefreshLocked(self: *Store, binding: AttemptBinding) !bool {
-    try store_core.begin(self);
-    _ = try validateCurrentAttempt(self, binding);
-    const update = try store_core.cached(
-        self,
-        "UPDATE model_operation SET auth_refresh_claimed=1 " ++
-            "WHERE operation_id=?1 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2 " ++
-            "AND auth_refresh_claimed=0 AND " ++ retry_allowance_open_sql,
-    );
-    defer sqlite.resetCached(update);
-    try sqlite.bindU64(update, 1, binding.operation_id);
-    try sqlite.bindU64(update, 2, binding.attempt_ordinal);
-    try sqlite.expectDone(update);
-    if (c.sqlite3_changes(self.database) != 1) {
-        try store_core.rollback(self);
+const superseding_control = rsql.Read(.{
+    .sql = "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+    .Args = struct { operation_id: u64 },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, interrupted_by_command_key: ?protocol.Bounded(protocol.max_key_bytes) },
+    .cardinality = .optional,
+});
+
+/// The control that interrupted the Attempt `binding` names, or null.
+pub fn operationSupersededByControl(a: anytype, binding: AttemptBinding) !?SupersedingControl {
+    var found: superseding_control.Result = undefined;
+    a.read(superseding_control, .{ .operation_id = binding.operation_id }, &found);
+    try runOperationRead(a);
+    const row = found orelse return null;
+    if (!namesAttempt(row.turn_id, row.attempt_ordinal, binding)) return null;
+    return .{ .command_key = row.interrupted_by_command_key orelse return null };
+}
+
+const claim_auth_refresh = rsql.Write(.{
+    .sql = "UPDATE model_operation SET auth_refresh_claimed=1 WHERE operation_id=?1 AND session_ref=@session(?3) " ++
+        "AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2 AND auth_refresh_claimed=0 AND " ++ retry_allowance_open_sql,
+    .Args = struct { operation_id: u64, attempt_ordinal: u64, session: rsql.SessionHead },
+    // Main answered false when it changed no row; `claimModelAuthRefresh`
+    // still does.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.AuthRefreshUnclaimed } },
+});
+
+/// The error a failed step of an Operation read reports, as on main.
+fn runOperationRead(a: anytype) !void {
+    a.run() catch |err| return if (err == error.StatementFailed) error.OperationReadFailed else err;
+}
+
+/// Round 1 reads the Attempt; the claim is written only when the round
+/// found it running, unclaimed and within the allowance. Otherwise, or
+/// when the claim's UPDATE changes no row, the Access is abandoned and
+/// the answer is false, as on main.
+pub fn claimModelAuthRefresh(a: anytype, binding: AttemptBinding) !bool {
+    var facts: attempt_facts.Result = undefined;
+    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &facts);
+    try runOperationRead(a);
+    const row = try currentAttempt(&facts, binding);
+    if (row.retry_waiting or row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) {
+        try a.abandon(.{});
         return false;
     }
-    try store_core.commit(self);
+    a.write(claim_auth_refresh, .{ .operation_id = binding.operation_id, .attempt_ordinal = binding.attempt_ordinal, .session = row.session });
+    a.commit() catch |err| {
+        if (err != error.AuthRefreshUnclaimed) return err;
+        try a.abandon(.{});
+        return false;
+    };
     return true;
 }
 
-pub fn settleModelAttemptFailureLocked(
-    self: *Store,
+/// Resolves an unresolved Attempt with a failure: `ordinary`, a context
+/// overflow and an exhausted retry. `last_failure_code` null keeps the
+/// saved one.
+const resolve_failure = rsql.Write(.{
+    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
+        "last_failure_code=coalesce(?5,last_failure_code)," ++ operation_resolved_now_sql ++ " " ++
+        "WHERE operation_id=?1 AND session_ref=@session(?7) AND resolution_code IS NULL AND attempt_ordinal=?6",
+    .Args = struct { operation_id: u64, resolution: []const u8, content_id: ?u64, request_id: ?[]const u8, last_failure_code: ?[]const u8, attempt_ordinal: u64, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
+});
+
+/// Ends a failed Attempt with a retry due at `due_at_ms`.
+const schedule_retry = rsql.Write(.{
+    .sql = "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=@now,attempt_at=NULL " ++
+        "WHERE operation_id=?1 AND session_ref=@session(?5) AND resolution_code IS NULL AND attempt_ordinal=?4",
+    .Args = struct { operation_id: u64, due_at_ms: u64, code: []const u8, attempt_ordinal: u64, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
+});
+
+/// The content a failure settles with: its diagnostic and its report.
+const FailureContent = struct {
+    diagnostic: ?content_domain.Import,
+    report: ?content_domain.Import,
+    pair: content_domain.Pair = undefined,
+    /// Whether `importDiagnostic` queued a new row.
+    diagnostic_inserted: bool = false,
+
+    fn of(failure: *const ModelFailure) FailureContent {
+        const report = failure.report();
+        return .{
+            .diagnostic = if (failure.diagnostic()) |detail| .ofBytes(detail, false) else null,
+            .report = if (report.len == 0) null else .ofBytes(report, false),
+        };
+    }
+
+    /// Queues the lookups of both values: one statement for one or two.
+    fn lookup(content: *FailureContent, a: anytype) void {
+        if (content.diagnostic != null and content.report != null) {
+            content_domain.lookupPair(a, &content.diagnostic.?, &content.report.?, &content.pair);
+        } else if (content.diagnostic) |*value| {
+            content_domain.lookup(a, value);
+        } else if (content.report) |*value| content_domain.lookup(a, value);
+    }
+
+    /// After the lookup round.
+    fn found(content: *FailureContent) void {
+        if (content.diagnostic != null and content.report != null) content_domain.foundPair(&content.pair, &content.diagnostic.?, &content.report.?);
+    }
+
+    fn importDiagnostic(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
+        const value = if (content.diagnostic) |*value| value else return null;
+        content.diagnostic_inserted = value.found == null;
+        return try content_domain.importBytes(a, value, failure.diagnostic().?);
+    }
+
+    /// The report's row. One equal to the diagnostic is the diagnostic's
+    /// (`content.importSlot`). A round queues `insert_content` once, so
+    /// when the diagnostic's row is new and the report's is a different
+    /// new row, the queued round runs first: one more round trip, only
+    /// then.
+    fn importReport(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
+        const value = if (content.report) |*value| value else return null;
+        if (value.found == null and content.diagnostic_inserted and
+            a.insertedContent(&value.digest, value.length, value.private) == null) try a.run();
+        return try content_domain.importBytes(a, value, failure.report());
+    }
+};
+
+/// Round 1 reads the Attempt and, for a failure that resolves it, looks
+/// up the failure's diagnostic and report. A context overflow reads in
+/// round 2 whether compaction can recover it, which needs the Attempt's
+/// position. The write round resolves the Attempt or schedules its retry,
+/// and closes its Turn or records its continuation, then commits; a new
+/// diagnostic and a new report add one round between (`importReport`).
+pub fn settleModelAttemptFailure(
+    a: anytype,
+    io: std.Io,
     binding: AttemptBinding,
     failure: ModelFailure,
     disposition: ModelFailureClass,
@@ -212,160 +365,153 @@ pub fn settleModelAttemptFailureLocked(
 ) !void {
     const code = failure.code();
     var retry_random: u64 = 0;
-    if (disposition == .retryable) self.io.random(std.mem.asBytes(&retry_random));
-    try store_core.begin(self);
-    const session = try validateCurrentAttempt(self, binding);
+    if (disposition == .retryable) io.random(std.mem.asBytes(&retry_random));
+    // Only a resolving failure saves content: an ordinary one, an overflow,
+    // or a retry that exhausts the allowance.
+    const resolves = switch (disposition) {
+        .ordinary, .context_overflow => true,
+        .refreshed => false,
+        .retryable => binding.attempt_ordinal == retry_policy.maximum_attempts,
+    };
+    var facts: attempt_facts.Result = undefined;
+    var content: FailureContent = if (resolves) .of(&failure) else .{ .diagnostic = null, .report = null };
+    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = resolves }, &facts);
+    content.lookup(a);
+    try runOperationRead(a);
+    content.found();
+    const row = try currentAttempt(&facts, binding);
+    const session = row.session;
     switch (disposition) {
         .ordinary, .context_overflow => {
-            const compact = disposition == .context_overflow and try model_admission_domain.overflowCanCompact(self, binding);
-            const resolution = if (disposition == .context_overflow) @tagName(turn_policy.Resolution.context_overflow) else code;
-            const diagnostic_id = if (failure.diagnostic()) |detail|
-                try content_domain.importBytesContent(self, detail, false, faults.content_import)
-            else
-                null;
-            const update = try store_core.cached(
-                self,
-                "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?6,request_id=?7," ++
-                    "last_failure_code=CASE WHEN ?4=1 THEN ?5 ELSE last_failure_code END," ++ operation_resolved_at_sql ++ " " ++
-                    "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
-            );
-            defer sqlite.resetCached(update);
-            try sqlite.bindU64(update, 1, binding.operation_id);
-            try sqlite.bindText(update, 2, resolution);
-            try sqlite.bindU64(update, 3, binding.attempt_ordinal);
-            try sqlite.bindI64(update, 4, @as(i64, if (disposition == .context_overflow) 1 else 0));
-            try sqlite.bindText(update, 5, code);
-            try sqlite.bindNullableI64(update, 6, diagnostic_id);
-            try sqlite.bindOptionalText(update, 7, failure.requestId());
-            try sqlite.expectDone(update);
-            if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+            const compact = disposition == .context_overflow and compact: {
+                var changed: context_changed.Result = undefined;
+                a.read(context_changed, .{ .session = &session.ref, .boundary = row.admission_position.get() }, &changed);
+                try a.run();
+                const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
+                break :compact turn_policy.recoversOverflow(purpose, changed.changed);
+            };
+            if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
+            const diagnostic_id = try content.importDiagnostic(a, &failure);
+            a.write(resolve_failure, .{
+                .operation_id = binding.operation_id,
+                .resolution = if (disposition == .context_overflow) @tagName(turn_policy.Resolution.context_overflow) else code,
+                .content_id = diagnostic_id,
+                .request_id = optionalText(failure.requestId()),
+                .last_failure_code = if (disposition == .context_overflow) code else null,
+                .attempt_ordinal = binding.attempt_ordinal,
+                .session = session,
+            });
             if (compact) {
-                try turn_domain.recordContinuation(self, binding.turn_id, &session);
-                if (faults.before_commit) return error.InjectedCommitFailure;
-                try store_core.commit(self);
-                return;
+                turn_domain.queueContinuation(a, binding.turn_id, session);
+            } else {
+                if (!row.turn_open) return error.StaleAttemptBinding;
+                if (content.report != null and faults.content_import) return error.InjectedContentImportFailure;
+                const report = try content.importReport(a, &failure);
+                const outcome: TurnOutcome = if (disposition == .context_overflow) .{ .resource_exceeded = optionalId(report) } else .{ .failed = .{
+                    .code = code,
+                    .report = optionalId(report),
+                } };
+                try turn_domain.queueCloseOr(a, try a.positions(session), binding.turn_id, outcome, error.StaleAttemptBinding);
             }
-
-            const report = try importReport(self, &failure, faults);
-            const outcome: TurnOutcome = if (disposition == .context_overflow) .{ .resource_exceeded = report } else .{ .failed = .{
-                .code = code,
-                .report = report,
-            } };
-            if (!try turn_domain.closeTurn(self, binding.turn_id, binding.operation_id, outcome)) return error.StaleAttemptBinding;
         },
         .refreshed => {
-            const update = try store_core.cached(
-                self,
-                "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=unixepoch(),attempt_at=NULL " ++
-                    "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4 " ++
-                    "AND auth_refresh_claimed=1 AND " ++ retry_allowance_open_sql,
-            );
-            defer sqlite.resetCached(update);
-            try sqlite.bindU64(update, 1, binding.operation_id);
-            try sqlite.bindI64(update, 2, @max(1, try store_core.readUnixMilliseconds(self.io)));
-            try sqlite.bindText(update, 3, code);
-            try sqlite.bindU64(update, 4, binding.attempt_ordinal);
-            try sqlite.expectDone(update);
-            if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+            if (!row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) return error.StaleAttemptBinding;
+            a.write(schedule_retry, .{
+                .operation_id = binding.operation_id,
+                .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
+                .code = code,
+                .attempt_ordinal = binding.attempt_ordinal,
+                .session = session,
+            });
         },
-        .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try store_core.readUnixMilliseconds(self.io), retry_random)) {
-            .schedule_at_ms => |due_at_ms| {
-                const update = try store_core.cached(
-                    self,
-                    "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=unixepoch(),attempt_at=NULL " ++
-                        "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4",
-                );
-                defer sqlite.resetCached(update);
-                try sqlite.bindU64(update, 1, binding.operation_id);
-                try sqlite.bindI64(update, 2, due_at_ms);
-                try sqlite.bindText(update, 3, code);
-                try sqlite.bindU64(update, 4, binding.attempt_ordinal);
-                try sqlite.expectDone(update);
-                if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
-            },
+        .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try store_core.readUnixMilliseconds(io), retry_random)) {
+            .schedule_at_ms => |due_at_ms| a.write(schedule_retry, .{
+                .operation_id = binding.operation_id,
+                .due_at_ms = std.math.cast(u64, due_at_ms) orelse return error.IntegerOutOfRange,
+                .code = code,
+                .attempt_ordinal = binding.attempt_ordinal,
+                .session = session,
+            }),
             .exhausted => {
-                const diagnostic_id = if (failure.diagnostic()) |detail|
-                    try content_domain.importBytesContent(self, detail, false, faults.content_import)
-                else
-                    null;
-                const update = try store_core.cached(
-                    self,
-                    "UPDATE model_operation SET retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5," ++ operation_resolved_at_sql ++ " " ++
-                        "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
-                );
-                defer sqlite.resetCached(update);
-                try sqlite.bindU64(update, 1, binding.operation_id);
-                try sqlite.bindText(update, 2, code);
-                try sqlite.bindU64(update, 3, binding.attempt_ordinal);
-                // The settling Attempt's correlation, like a terminal failure.
-                try sqlite.bindOptionalText(update, 4, failure.requestId());
-                try sqlite.bindNullableI64(update, 5, diagnostic_id);
-                try sqlite.expectDone(update);
-                if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
-
-                if (!try turn_domain.closeTurn(self, binding.turn_id, binding.operation_id, .{ .retry_exhausted = try importReport(self, &failure, faults) })) return error.StaleAttemptBinding;
+                if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
+                const diagnostic_id = try content.importDiagnostic(a, &failure);
+                a.write(resolve_failure, .{
+                    .operation_id = binding.operation_id,
+                    .resolution = "retry_exhausted",
+                    .content_id = diagnostic_id,
+                    // The settling Attempt's correlation, like a terminal failure.
+                    .request_id = optionalText(failure.requestId()),
+                    .last_failure_code = code,
+                    .attempt_ordinal = binding.attempt_ordinal,
+                    .session = session,
+                });
+                if (!row.turn_open) return error.StaleAttemptBinding;
+                if (content.report != null and faults.content_import) return error.InjectedContentImportFailure;
+                const report = try content.importReport(a, &failure);
+                try turn_domain.queueCloseOr(a, try a.positions(session), binding.turn_id, .{ .retry_exhausted = optionalId(report) }, error.StaleAttemptBinding);
             },
         },
     }
     if (faults.before_commit) return error.InjectedCommitFailure;
-    try store_core.commit(self);
+    try a.commit();
 }
 
-/// A failure's report as public content, for its Turn's outcome.
-fn importReport(self: *Store, failure: *const ModelFailure, faults: Faults) !?i64 {
-    const report = failure.report();
-    if (report.len == 0) return null;
-    return try content_domain.importBytesContent(self, report, false, faults.content_import);
+/// Text that binds NULL when empty, as `sqlite.bindOptionalText` did.
+fn optionalText(text: []const u8) ?[]const u8 {
+    return if (text.len == 0) null else text;
 }
 
-pub fn recoverOneExhaustedModelAttemptLocked(
-    self: *Store,
+fn optionalId(id: ?u64) ?i64 {
+    return if (id) |value| @intCast(value) else null;
+}
+
+/// Unresolved last Attempts with no retry due, in id order, with their
+/// Session and whether their Turn is open on them.
+const exhausted_attempts = rsql.Read(.{
+    .sql = "SELECT o.turn_id,o.operation_id," ++ rsql.session_head_columns ++ "," ++
+        "EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
+        "AND t.operation_id=o.operation_id) AS turn_open " ++
+        "FROM model_operation o @index(model_operation_retry_exhausted) JOIN session s ON s.session_ref=o.session_ref " ++
+        "WHERE o." ++ retry_exhausted_sql ++ " ORDER BY o.operation_id",
+    .Args = struct {},
+    .Row = struct { turn_id: rsql.Positive, operation_id: rsql.Positive, session: rsql.SessionHead, turn_open: bool },
+    .cardinality = .each,
+});
+
+const resolve_exhausted = rsql.Write(.{
+    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted'," ++ operation_resolved_now_sql ++ " " ++
+        "WHERE operation_id=?1 AND session_ref=@session(?2) AND " ++ retry_exhausted_sql,
+    .Args = struct { operation_id: u64, session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SelectionChanged } },
+});
+
+/// Picks the first scanned Attempt no execution slot holds.
+const ExhaustedChoice = struct {
     active: ActiveOperationFilter,
-) !bool {
-    const scan_limit = try std.math.add(usize, active.maximum_exclusions, 1);
-    const select = try store_core.cached(
-        self,
-        "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted " ++
-            "WHERE " ++ retry_exhausted_sql ++ " " ++
-            "ORDER BY operation_id",
-    );
-    defer sqlite.resetCached(select);
-    var selected: ?AttemptBinding = null;
-    var scanned: usize = 0;
-    while (scanned < scan_limit) : (scanned += 1) {
-        const result = c.sqlite3_step(select);
-        if (result == c.SQLITE_DONE) break;
-        if (result != c.SQLITE_ROW) return error.RetryRecoveryFailed;
-        const turn_id = c.sqlite3_column_int64(select, 0);
-        const operation_id = c.sqlite3_column_int64(select, 1);
-        if (turn_id <= 0 or operation_id <= 0) return error.CorruptStore;
-        if (active.contains(@intCast(operation_id))) continue;
-        selected = .{
-            .turn_id = @intCast(turn_id),
-            .operation_id = @intCast(operation_id),
-            .attempt_ordinal = retry_policy.maximum_attempts,
-        };
-        break;
-    }
-    // Ends the read before any transaction this transition opens.
-    if (c.sqlite3_reset(select) != c.SQLITE_OK) return error.RetryRecoveryFailed;
-    const binding = selected orelse return false;
+    chosen: ?exhausted_attempts.Row = null,
 
-    try store_core.begin(self);
-    {
-        const update_operation = try store_core.cached(
-            self,
-            "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted'," ++ operation_resolved_at_sql ++ " " ++
-                "WHERE operation_id=?1 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2",
-        );
-        defer sqlite.resetCached(update_operation);
-        try sqlite.bindI64(update_operation, 1, binding.operation_id);
-        try sqlite.bindU64(update_operation, 2, retry_policy.maximum_attempts);
-        try sqlite.expectDone(update_operation);
-        if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
+    pub fn visit(choice: *ExhaustedChoice, row: *const exhausted_attempts.Row) bool {
+        if (choice.active.contains(row.operation_id.get())) return true;
+        choice.chosen = row.*;
+        return false;
     }
-    if (!try turn_domain.closeTurn(self, @intCast(binding.turn_id), @intCast(binding.operation_id), .{ .retry_exhausted = null })) return error.SelectionChanged;
-    try store_core.commit(self);
+};
+
+/// Resolves one exhausted Attempt no slot holds and closes its Turn. The
+/// read Access `candidate` scans outside any transaction, so a pass that
+/// finds none runs only the scan; the scan stops at the first Attempt
+/// `active` does not hold, after at most one more than it can exclude.
+/// The held Store mutex excludes every other writer, so the write Access
+/// `a` writes from what the scan read, in one round.
+pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: ActiveOperationFilter) !bool {
+    var choice: ExhaustedChoice = .{ .active = active };
+    candidate.readEach(exhausted_attempts, .{}, try std.math.add(u64, active.maximum_exclusions, 1), &choice);
+    candidate.run() catch |err| return if (err == error.StatementFailed) error.RetryRecoveryFailed else err;
+    const chosen = choice.chosen orelse return false;
+    if (!chosen.turn_open) return error.SelectionChanged;
+    a.write(resolve_exhausted, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
+    try turn_domain.queueCloseOr(a, try a.positions(chosen.session), chosen.turn_id.get(), .{ .retry_exhausted = null }, error.SelectionChanged);
+    try a.commit();
     return true;
 }
 
