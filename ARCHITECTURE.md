@@ -1402,7 +1402,7 @@ Each name is a lowercase token that names no field the Host or h2 writes itself 
 The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT sign-in's `authorization` and `chatgpt-account-id`, or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
 A route without a credential sends the codec's headers and no credential-path fields.
 To classify an HTTP error body, the shell maps the sealed body read-only and gives it whole, as one slice, to the classifier of the codec the request was encoded with, with scratch the shell lends for that call and the classifier writes before it reads.
-The classifier writes its answer into one value the shell lends: context overflow, or else the error's code with a quota's reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
+The classifier writes its answer into one value the shell lends: context overflow, or else the `codec_abi.Refusal` its code names with the reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
 The map shares the capture's page cache, so it makes no second copy of the body.
 The shell alone decides the failure.
 It reads only 4xx and 5xx bodies; it takes a quota only at HTTP 429, then context overflow, then a refusal at any status; the codec alone knows its provider's codes and names each one it knows as a neutral `codec_abi.Refusal` (quota, plan, policy or model unavailable), so a code it does not know narrows nothing; and it decodes, bounds and control-strips the report itself.
@@ -1519,6 +1519,7 @@ Scheduled retries save no rejection content; exhaustion retains only the settlin
 
 HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted` and the two spend limits a quota and `usage_not_included` a plan.
 Each retains its neutral failure code, its refusal and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
+A Turn saved before refusal and sign-in codes became neutral keeps its old code (such as `provider_usage_limit_reached` or `provider_authentication_failed`), which now reads as an unknown failure: it shows its code, no trouble band and no reset time, and the Store does not fence it.
 Missing, null, invalid or duplicate reset metadata stays absent without making the quota refusal retryable.
 Provider prose is not copied into the diagnostic.
 Other HTTP 429 responses retain their temporary status classification unless their code is a known refusal.

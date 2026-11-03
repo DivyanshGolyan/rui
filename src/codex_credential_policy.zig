@@ -671,7 +671,7 @@ test "a replacement must be complete and ready" {
     try std.testing.expectError(error.UnsupportedCredentialVersion, validateReplacement(&record));
 }
 
-test "only failures resolved by logging in again are authentication failures" {
+test "only failures resolved by logging in again save a sign-in code" {
     for ([_]anyerror{ error.RefreshRejected, error.RefreshRequiresLogin, error.ExpiredCredential, error.AccountMismatch, error.AccountChanged, error.InvalidCredentialExpiry }) |err|
         try std.testing.expectEqualStrings("provider_sign_in_required", failureCode(err));
     inline for (@typeInfo(LoginRequired).error_set.error_names.?) |name| try std.testing.expectEqual(failure_class.Class.sign_in, failure_class.of(failureCode(@field(anyerror, name))));

@@ -42,35 +42,37 @@ pub const Evidence = struct {
 /// body; the provider's own code stays in the report.
 pub const Refusal = codec_abi.Refusal;
 
+const refusal_prefix = "provider_";
+
 pub fn refusalCode(refusal: Refusal) []const u8 {
     return switch (refusal) {
-        inline else => |known| "provider_" ++ @tagName(known),
+        inline else => |known| refusal_prefix ++ @tagName(known),
     };
 }
 
 /// The refusal a saved failure code names, if any.
 pub fn refusalOfCode(code: []const u8) ?Refusal {
-    if (!std.mem.startsWith(u8, code, "provider_")) return null;
-    return std.meta.stringToEnum(Refusal, code["provider_".len..]);
+    if (!std.mem.startsWith(u8, code, refusal_prefix)) return null;
+    return std.meta.stringToEnum(Refusal, code[refusal_prefix.len..]);
 }
 
 /// An HTTP 429 that names a quota or plan refusal, not a temporary rate
 /// limit. Only its refusal and a valid reset timestamp enter the saved
 /// diagnostic.
 pub const Quota = struct {
-    /// One that `of` admits.
+    /// One that `admits` accepts.
     refusal: Refusal,
     resets_at: ?u64 = null,
 
     /// Whether `refusal` at HTTP 429 is a quota record.
-    pub fn of(refusal: Refusal) bool {
+    pub fn admits(refusal: Refusal) bool {
         return refusal == .quota or refusal == .plan;
     }
 
     /// The quota refusal a saved failure code names, if any.
     pub fn ofFailureCode(code: []const u8) ?Refusal {
         const refusal = refusalOfCode(code) orelse return null;
-        return if (of(refusal)) refusal else null;
+        return if (admits(refusal)) refusal else null;
     }
 
     /// The same code as the stream refusal it is.
@@ -93,7 +95,7 @@ pub const Quota = struct {
         const rest = bytes[head.len .. bytes.len - 1];
         const split = std.mem.indexOf(u8, rest, middle) orelse return null;
         const refusal = std.meta.stringToEnum(Refusal, rest[0..split]) orelse return null;
-        if (!of(refusal)) return null;
+        if (!admits(refusal)) return null;
         const reset = rest[split + middle.len ..];
         if (std.mem.eql(u8, reset, "null")) return .{ .refusal = refusal };
         if (reset.len == 0 or (reset.len > 1 and reset[0] == '0')) return null;
