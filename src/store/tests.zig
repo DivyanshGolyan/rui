@@ -12189,7 +12189,7 @@ test "live tool activity counts calls past the sixteenth Operation" {
 test "activity judges every candidate Operation's tool outcomes, not only its kept calls" {
     // The page keeps three calls' presentations; the rule must still reach
     // the fourth call, by one read per Operation while there are at most
-    // `max_operations` and by one read over them all past that.
+    // `max_operations`, 32, and by one read over them all past that.
     for ([_]enum { one_operation, many_operations }{ .one_operation, .many_operations }) |shape| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -12216,7 +12216,7 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
                 }
                 try settleCallsForTesting(&storage, &tmp, binding, "outcome-calls", &calls);
             },
-            .many_operations => for (0..32) |index| {
+            .many_operations => for (0..40) |index| {
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 var identity: [24]u8 = undefined;
                 const id = try std.fmt.bufPrint(&identity, "ops-{d}", .{index});
@@ -12230,6 +12230,8 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
         const page = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
         try std.testing.expect(page.call_activity.total >= 4);
+        // One call each, so as many candidate Operations as calls.
+        if (shape == .many_operations) try std.testing.expect(page.call_activity.total > 32);
         // The last candidate call's item stops being a call item; no kept
         // presentation reads that call.
         try sqlite.exec(storage.database, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
