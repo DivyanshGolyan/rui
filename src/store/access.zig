@@ -358,8 +358,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// `readEach` with Args its caller keeps, for Args too large to
-        /// copy into a frame: they are bound when queued, so the caller
-        /// may reuse them once this returns.
+        /// copy into a frame. The Args struct itself may be reused once
+        /// this returns: its fixed-size values are copied when queued. The
+        /// bytes its `[]const u8` and `rsql.Bytes` fields point to are read
+        /// in place at the pass, so they must outlive it unchanged, which
+        /// debug and test builds check with a checksum (`Borrowed`).
         pub fn readEachFrom(a: *Self, comptime S: type, args: *const S.Args, limit: u64, visitor: anytype) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
             if (comptime eachVisitorError(S.Row, @TypeOf(visitor.*))) |message| @compileError(message ++ ": " ++ S.sql);
