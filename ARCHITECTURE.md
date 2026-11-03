@@ -1334,7 +1334,7 @@ Once migrations keep old Stores usable across format changes, Rui should switch 
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
-The wire label is `7`: it changed when the Activity page dropped `read_through` and `beyond_unseen` and the Host dropped the `mark_read` request.
+The unreleased wire label is `7`: it changed when the Activity page dropped `read_through` and `beyond_unseen` and the Host dropped the `mark_read` request, which Divyansh asked to remove on 2026-11-03 with the rest of the "new since you looked" feature.
 The Store records the wire label it was created with in `store_meta` and opens only at the current one.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
 Pre-provider captures are not accepted or defaulted to Codex.
@@ -3424,7 +3424,7 @@ State-changing core-command admission returns its committed acceptance or reject
 Workflow message Promises instead deliver the bound answer or reject with the recorded failure/cancellation under the workflow contract.
 These are distinct interfaces to the same authoritative facts.
 
-All five core mutation handlers report Store infrastructure failure, after unchanged fencing, as HTTP 500 `{"version":"4","type":"invocation_error","code":"canonical_store_failure"}`, the same format as canonical observation/read failure.
+All five core mutation handlers report Store infrastructure failure, after unchanged fencing, as HTTP 500 `{"version":"7","type":"invocation_error","code":"canonical_store_failure"}`, the same format as canonical observation/read failure.
 This diagnoses the invocation, not a saved operation answer: it establishes neither rejection nor absence nor whether commit succeeded.
 Ordinary accepted/rejected/replayed/conflict answers remain unchanged.
 The captured Store, target, inputs and original key remain recovery authority; any caller receipt is context, not an outcome.
