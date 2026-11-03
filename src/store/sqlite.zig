@@ -399,9 +399,11 @@ pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: 
 /// certificate, and a `protocol.Bounded` text.
 pub const max_copied_bytes = 256;
 
-/// SQLite copies a value bound with this destructor before the bind
-/// returns, so the caller's bytes may change at once.
-const transient: c.sqlite3_destructor_type = @ptrFromInt(std.math.maxInt(usize));
+/// SQLITE_TRANSIENT, the destructor -1: SQLite copies a value bound with
+/// it before the bind returns, so the caller's bytes may change at once.
+/// Read through an extern union, since -1 is no aligned function address
+/// and `@ptrFromInt` refuses it on targets that align functions.
+var transient: extern union { bits: usize, destructor: c.sqlite3_destructor_type } = .{ .bits = std.math.maxInt(usize) };
 
 /// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
 /// the text uses @now. Integers, `[n]u8` arrays, `protocol.Bounded` texts
@@ -442,9 +444,9 @@ pub fn borrowed(comptime T: type, value: T) ?[]const u8 {
 
 fn bindCopied(statement: *c.sqlite3_stmt, index: c_int, bytes: []const u8, comptime text: bool) !void {
     const result = if (text)
-        c.sqlite3_bind_text64(statement, index, bytes.ptr, bytes.len, transient, c.SQLITE_UTF8)
+        c.sqlite3_bind_text64(statement, index, bytes.ptr, bytes.len, transient.destructor, c.SQLITE_UTF8)
     else
-        c.sqlite3_bind_blob64(statement, index, bytes.ptr, bytes.len, transient);
+        c.sqlite3_bind_blob64(statement, index, bytes.ptr, bytes.len, transient.destructor);
     if (result != c.SQLITE_OK) return error.BindFailed;
 }
 
