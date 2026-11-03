@@ -657,7 +657,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .compaction = purpose == .compaction,
         .compaction_trigger = policy.compaction_trigger,
         .output_reservation = policy.output_reservation,
-        .reasoning_effort = facts.reasoning_effort orelse model_capability.defaultReasoningEffort(facts.model.slice()),
+        .reasoning_effort = configuration_domain.effectiveReasoningEffort(&facts),
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
