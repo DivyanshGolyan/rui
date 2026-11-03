@@ -1423,6 +1423,53 @@ test "an Access commits its writes, positions and identities together, or none o
     try std.testing.expect(before <= dated and dated <= after);
 }
 
+const counted_dating = rsql.Write(.{
+    .sql = "UPDATE session SET created_at=?2 WHERE session_ref=@session(?1) AND revision=?3",
+    .Args = struct { session: rsql.SessionHead, at: u64, revision: u64 },
+    .expect = .{ .counted = .{ .otherwise = error.TestingGuard } },
+});
+
+/// Dates `session` at `at` where its revision is `revision`, stating
+/// `rows` as the rows that write changes.
+fn countedDatingForTesting(storage: *Store, session: []const u8, at: u64, revision: u64, rows: u64) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    return entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, struct {
+        fn body(access: anytype, ref: []const u8, value: u64, current: u64, count: u64) !void {
+            var loaded: TestingRound.head.Result = undefined;
+            access.read(TestingRound.head, .{ .session_ref = ref }, &loaded);
+            try access.run();
+            access.writeCount(counted_dating, .{ .session = loaded.head, .at = value, .revision = current }, count);
+            try access.commit();
+        }
+    }.body(&a, session, at, revision, rows)));
+}
+
+test "a counted write commits only when it changes the rows its caller states" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "counted-config");
+    const dated = "SELECT created_at FROM session";
+    const created = try queryU64(storage.database, dated);
+    // One row changes: stating none or two fails before COMMIT.
+    for ([_]u64{ 0, 2 }) |rows| {
+        try std.testing.expectError(error.TestingGuard, countedDatingForTesting(&storage, session.slice(), 7, 1, rows));
+        try std.testing.expectEqual(created, try queryU64(storage.database, dated));
+    }
+    try std.testing.expect(!storage.isFenced());
+    try countedDatingForTesting(&storage, session.slice(), 7, 1, 1);
+    try std.testing.expectEqual(@as(u64, 7), try queryU64(storage.database, dated));
+    // No row changes: zero is checked like any count.
+    try std.testing.expectError(error.TestingGuard, countedDatingForTesting(&storage, session.slice(), 8, 2, 1));
+    try countedDatingForTesting(&storage, session.slice(), 8, 2, 0);
+    try std.testing.expectEqual(@as(u64, 7), try queryU64(storage.database, dated));
+}
+
 test "the touch oracle names a Session whose rows changed without a touch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -10459,7 +10506,7 @@ test "runnable discovery measures eligible ineligible and history populations in
             var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
             try sqlite.readText(statement, 0, &session_ref);
             if (!session_ref.eql("000000")) return error.RunnableSelectionFailed;
-            const first_admission = c.sqlite3_column_int64(statement, 1);
+            const first_admission = c.sqlite3_column_int64(statement, 3);
             if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.RunnableSelectionFailed;
             return .{
                 .steps = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0),
@@ -10475,7 +10522,7 @@ test "runnable discovery measures eligible ineligible and history populations in
                 const statement = try sqlite.prepare(database, runnable_selection_sql);
                 defer _ = c.sqlite3_finalize(statement);
                 if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.RunnableSelectionFailed;
-                const first_admission = c.sqlite3_column_int64(statement, 1);
+                const first_admission = c.sqlite3_column_int64(statement, 3);
                 if (first_admission != index + 1) return error.RunnableSelectionFailed;
                 if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.RunnableSelectionFailed;
                 total_steps += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
@@ -12995,4 +13042,34 @@ test "a web search call shows as its line, in the conversation and the activity,
     };
     try std.testing.expectEqual(@as(usize, 3), calls);
     try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
+}
+
+test "admission fails before COMMIT when a counted write changes other than its selection's rows" {
+    const Case = struct { trigger: [:0]const u8, expected: anyerror };
+    for ([_]Case{
+        .{ .trigger = "CREATE TEMP TRIGGER skip_bind BEFORE UPDATE OF turn_id ON main.message_admission BEGIN SELECT RAISE(IGNORE); END", .expected = error.SelectionChanged },
+        .{ .trigger = "CREATE TEMP TRIGGER skip_message BEFORE INSERT ON main.conversation_entry WHEN NEW.entry_kind=1 BEGIN SELECT RAISE(IGNORE); END", .expected = error.ProjectionFailed },
+        .{ .trigger = "CREATE TEMP TRIGGER skip_instruction BEFORE INSERT ON main.conversation_entry WHEN NEW.entry_kind=2 BEGIN SELECT RAISE(IGNORE); END", .expected = error.InstructionSelectionFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "counted-admission-config");
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("counted-admission-instructions");
+        try patch.session.set(session.slice());
+        patch.configuration.instructions = try testingBytesContent(&tmp, "counted-admission-instruction", "an instruction");
+        defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "counted-admission-input", "counted-admission-message", session.slice(), "work");
+        try sqlite.exec(storage.database, case.trigger);
+        try std.testing.expectError(case.expected, storage.admitModelAttempt(.message, .{}));
+        try std.testing.expect(storage.isFenced());
+        // The round failed before COMMIT: no Turn, entry or bound Message stays.
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM turn"));
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM conversation_entry"));
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM message_admission WHERE turn_id IS NOT NULL"));
+    }
 }

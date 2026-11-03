@@ -162,6 +162,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 /// An `.each` read's visitor, and how many rows it may step.
                 each: struct { visitor: *anyopaque, limit: u64 },
                 payload: struct { content_id: u64, bytes: []const u8 },
+                /// A `.counted` write's rows (`writeCount`).
+                counted: u64,
                 none: void,
             },
             /// The references a write's @session markers bind, in its
@@ -247,6 +249,20 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Queues a write, touching each Session its @session markers
         /// name. A failed guard fails the round that runs it.
         pub fn write(a: *Self, comptime S: type, args: S.Args) void {
+            if (S.expect == .counted) @compileError("rsql: a .counted write states its rows through writeCount: " ++ S.sql);
+            a.queueWrite(S, &args, .{ .none = {} });
+        }
+
+        /// Queues a `.counted` write, as `write` does, that must change
+        /// exactly `rows` rows, or the round that runs it fails with the
+        /// statement's `otherwise` before COMMIT. Zero is checked like any
+        /// count. The caller's doc names the read `rows` comes from.
+        pub fn writeCount(a: *Self, comptime S: type, args: S.Args, rows: u64) void {
+            if (S.expect != .counted) @compileError("rsql: writeCount queues only a .counted write: " ++ S.sql);
+            a.queueWrite(S, &args, .{ .counted = rows });
+        }
+
+        fn queueWrite(a: *Self, comptime S: type, args: *const S.Args, target: @FieldType(Queued, "target")) void {
             comptime std.debug.assert(S.kind == .write and mode != .read and S.session_fields.len <= max_sessions);
             var refs: [S.session_fields.len]change_ring.Id = undefined;
             inline for (S.session_fields, &refs) |field, *ref| {
@@ -254,7 +270,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.touch(head);
                 ref.* = head.ref;
             }
-            a.queueStatement(S, &args, runWrite(S), .{ .none = {} }, &refs);
+            a.queueStatement(S, args, runWrite(S), target, &refs);
         }
 
         /// The id of the content row this Access queued for (`digest`,
@@ -549,6 +565,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     switch (S.expect) {
                         .exact => |guard| if (changed != guard.rows) return comptime @as(Error, @errorCast(guard.otherwise)),
                         .at_most => |rows| if (changed > rows) return error.CorruptStore,
+                        .counted => |guard| if (changed != entry.target.counted) return comptime @as(Error, @errorCast(guard.otherwise)),
                     }
                 }
             }.run;
