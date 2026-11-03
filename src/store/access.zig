@@ -761,6 +761,19 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     };
 }
 
+/// Ends `a`'s round with `run`, answering a failed step with `failed`:
+/// how a converted read keeps the name main gave the statements of a
+/// round, when they shared one. A round whose statements main named apart
+/// tells them apart with `failedOn` instead.
+pub fn runAs(a: anytype, comptime failed: anytype) (RunError(@TypeOf(a.*)) || @TypeOf(failed))!void {
+    a.run() catch |err| return if (err == error.StatementFailed) failed else err;
+}
+
+/// The errors `A.run` returns.
+fn RunError(comptime A: type) type {
+    return @typeInfo(@typeInfo(@TypeOf(A.run)).@"fn".return_type.?).error_union.error_set;
+}
+
 /// Steps `statement`: true at a row, false at its end.
 fn nextRow(statement: *c.sqlite3_stmt) Failure!bool {
     return switch (c.sqlite3_step(statement)) {

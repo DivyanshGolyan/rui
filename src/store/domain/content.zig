@@ -338,24 +338,29 @@ pub fn publicMetadata(row: *const content_metadata.Row) error{CorruptStore}!Cont
     return metadataOf(row);
 }
 
-/// `content_metadata` for unconverted code, in a round of its own. A
-/// failed step is `CorruptStore`, main's answer for it. An id below 1 is
-/// `CorruptStore` without a read, where main read it and found no row
-/// unless one had that id.
+/// `content_metadata` for unconverted code, in a round of its own
+/// (`readContentRow`).
 pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
+    return metadataOf(&try readContentRow(self, content_id));
+}
+
+/// `readContentMetadata` of content a public route exposes.
+pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
+    return publicMetadata(&try readContentRow(self, content_id));
+}
+
+/// A failed step is `CorruptStore`, main's answer for it. An id below 1
+/// is `CorruptStore` without a read, where main read it and found no row
+/// unless one had that id. Not inlined, so its Access takes no slot in its
+/// callers' frames.
+noinline fn readContentRow(self: *Store, content_id: i64) !content_metadata.Row {
     if (content_id <= 0) return error.CorruptStore;
     var a = Access(.read, error{}).within(self);
     defer a.deinit();
     var row: content_metadata.Row = undefined;
     a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
-    return metadataOf(&row);
-}
-
-pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-    const metadata = try readContentMetadata(self, content_id);
-    if (metadata.private) return error.CorruptStore;
-    return metadata;
+    try store_access.runAs(&a, error.CorruptStore);
+    return row;
 }
 
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {

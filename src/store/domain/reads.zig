@@ -289,7 +289,7 @@ const next_position = rsql.Read(.{
 fn readNextPosition(a: *ReadAccess, session: []const u8) !?u64 {
     var row: next_position.Result = undefined;
     a.read(next_position, .{ .session = session }, &row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.SessionReadFailed else err;
+    try store_access.runAs(a, error.SessionReadFailed);
     return if (row) |found| found.next_position.get() else null;
 }
 
@@ -298,7 +298,7 @@ fn readNextPosition(a: *ReadAccess, session: []const u8) !?u64 {
 fn readPublicMetadata(a: *ReadAccess, content_id: u64) !ContentMetadata {
     var row: content_metadata.Row = undefined;
     a.read(content_metadata, .{ .content_id = content_id }, &row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     return content_domain.publicMetadata(&row);
 }
 
@@ -341,7 +341,7 @@ pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *Ses
     var output_schema: content_metadata.Row = undefined;
     a.read(content_metadata, .{ .content_id = @intCast(instructions_id) }, &instructions);
     if (current.output_schema_id) |content_id| a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &output_schema);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     observation.instructions = .{ .length = instructions.byte_length, .digest = instructions.digest };
     if (current.output_schema_id != null) observation.output_schema = .{ .length = output_schema.byte_length, .digest = output_schema.digest };
     observation.pending_messages = try command_domain.countPendingMessages(a.store, session_ref);
@@ -404,7 +404,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const protocol.Conversat
     if (end == 0) return;
     var rows: Collected(public_page.Row, PublicConversationPage.capacity + 1) = .{};
     a.readEach(public_page, .{ .session = session, .end = end, .before_position = request.before_position, .before_ordinal = request.before_ordinal }, rows.items.len, &rows);
-    a.run() catch |err| return if (err == error.StatementFailed) error.ConversationReadFailed else err;
+    try store_access.runAs(a, error.ConversationReadFailed);
     page.more = rows.len > page.items.len;
     for (rows.slice()[0..@min(rows.len, page.items.len)]) |row| {
         if (row.kind == 5) {
@@ -447,7 +447,7 @@ pub fn openPublicConversationContent(a: *ReadAccess, request: *const protocol.Co
 // would disappear from an inventory rooted in conversation_entry. Inspect
 // only the requested position interval through the existing history index.
 // Compaction messages deliberately have no Conversation certificate.
-const missing_assistant_entry = rsql.Read(.{
+pub const missing_assistant_entry = rsql.Read(.{
     .sql = "SELECT 1 AS missing FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
         "LEFT JOIN conversation_entry e ON e.session_ref=item.session_ref AND e.session_position=item.session_position " ++
         "WHERE item.session_ref=?1 AND item.session_position>=?2 AND item.session_position<=?3 AND item.item_kind=2 " ++
@@ -466,7 +466,7 @@ fn checkAssistantEntries(a: *ReadAccess, session: []const u8, lower: u64, upper:
     if (lower > upper) return;
     var missing: missing_assistant_entry.Result = undefined;
     a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
-    a.run() catch |err| return if (err == error.StatementFailed) error.ConversationReadFailed else err;
+    try store_access.runAs(a, error.ConversationReadFailed);
     if (missing != null) return error.CorruptStore;
 }
 
@@ -558,7 +558,7 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
         var row: public_entry.Result = undefined;
         a.read(missing_assistant_entry, .{ .session = session, .lower = position, .upper = position }, &missing);
         a.read(public_entry, .{ .session = session, .position = position }, &row);
-        a.run() catch |err| return if (err == error.StatementFailed) error.ConversationReadFailed else err;
+        try store_access.runAs(a, error.ConversationReadFailed);
         if (missing != null) return error.CorruptStore;
         const entry = row orelse return error.ContentNotFound;
         if (!entry.consistent) return error.CorruptStore;
@@ -566,7 +566,7 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     } else {
         var first: First(public_tool_result.Row) = .{};
         a.readEach(public_tool_result, .{ .session = session, .position = position, .ordinal = ordinal }, 1, &first);
-        a.run() catch |err| return if (err == error.StatementFailed) error.PublicContentReadFailed else err;
+        try store_access.runAs(a, error.PublicContentReadFailed);
         const result = first.row orelse return error.ContentNotFound;
         if (!result.consistent) return error.CorruptStore;
         _ = try report_domain.readToolOutcomeFacts(a.store, result.operation_id.get(), true);
@@ -689,7 +689,7 @@ const tool_presentation = rsql.Read(.{
 fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
     var row: tool_presentation.Row = undefined;
     a.read(tool_presentation, .{ .operation = operation, .ordinal = ordinal }, &row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     _ = try proposal(a, row.session_ref.slice(), row.session_position.get());
     var result: protocol.ToolPresentation = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
     if (row.description) |description| {
@@ -730,7 +730,7 @@ const hosted_call = rsql.Read(.{
 fn hostedCall(a: *ReadAccess, session: []const u8, position: u64) !struct { presentation: protocol.ToolPresentation, at: u64 } {
     var found: hosted_call.Result = undefined;
     a.read(hosted_call, .{ .session = session, .position = position }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.ActivityReadFailed else err;
+    try store_access.runAs(a, error.ActivityReadFailed);
     const row = found orelse return error.ContentNotFound;
     if (!row.consistent or !protocol.ToolPresentation.validDescription(row.description.slice())) return error.CorruptStore;
     return .{
@@ -815,7 +815,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
         a.readEach(activity_forward, .{ .session = session_ref, .end = end, .position = request.position, .ordinal = request.ordinal orelse whole }, rows.items.len, &rows)
     else
         a.readEach(activity_backward, .{ .session = session_ref, .position = if (request.position != 0) request.position else end, .ordinal = if (request.position == 0) whole else request.ordinal orelse 0 }, rows.items.len, &rows);
-    a.run() catch |err| return if (err == error.StatementFailed) error.ActivityReadFailed else err;
+    try store_access.runAs(a, error.ActivityReadFailed);
     for (rows.slice()) |row| {
         const position = row.position.get();
         if (page.count == page.items.len) {
@@ -928,7 +928,7 @@ pub fn personMessage(a: *ReadAccess, request: *const protocol.ReadPersonMessage)
     };
     var found: ?PersonMessageRow = undefined;
     if (backward) a.read(person_backward, bound, &found) else a.read(person_forward, bound, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.ActivityReadFailed else err;
+    try store_access.runAs(a, error.ActivityReadFailed);
     var reply: protocol.PersonMessage = .{ .end = end };
     const row = found orelse return reply;
     const metadata = try readPublicMetadata(a, row.content_id.get());
@@ -1028,7 +1028,7 @@ fn callActivity(a: *ReadAccess, rows: *CallRows, resume_from: CallArgs) !protoco
         rows.operation_count = 0;
         rows.full = false;
         a.readEach(call_activity_after, args, std.math.maxInt(u64), rows);
-        a.run() catch |err| return if (err == error.StatementFailed) error.CallReadFailed else err;
+        try store_access.runAs(a, error.CallReadFailed);
     }
     result.total = rows.total;
     return result;
@@ -1071,7 +1071,7 @@ const peer_label = rsql.Read(.{
 fn peerNamed(a: *ReadAccess, session: SessionText) !protocol.NamedPeer {
     var found: peer_label.Result = undefined;
     a.read(peer_label, .{ .session = session }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.SessionReadFailed else err;
+    try store_access.runAs(a, error.SessionReadFailed);
     return namedPeer(session, found);
 }
 
@@ -1121,7 +1121,7 @@ const Located = struct { id: i64, metadata: ContentMetadata };
 fn activityMessage(a: *ReadAccess, session: []const u8, end: u64, admission: u64) !struct { message: protocol.ActivityItem.Message, content: Located } {
     var row: activity_message.Row = undefined;
     a.read(activity_message, .{ .session = session, .end = end, .admission = admission }, &row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     if (!row.consistent) return error.CorruptStore;
     var metadata: content_metadata.Row = undefined;
     var label: peer_label.Result = undefined;
@@ -1264,7 +1264,7 @@ fn activityItem(a: *ReadAccess, session: []const u8, end: u64, position: u64, or
             result.item.value = .{ .call = call };
             var resolved: call_resolved.Row = undefined;
             a.read(call_resolved, .{ .operation = call.operation, .session = session }, &resolved);
-            a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+            try store_access.runAs(a, error.CorruptStore);
             result.item.at = resolved.resolved_at.get();
         },
         10 => {
@@ -1288,7 +1288,7 @@ noinline fn sentItem(a: *ReadAccess, session: []const u8, position: u64, row: *c
     const admission = row.id orelse return error.CorruptStore;
     var sent: sent_message.Row = undefined;
     a.read(sent_message, .{ .admission = admission.get(), .session = session, .position = position }, &sent);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     if (!sent.consistent) return error.CorruptStore;
     var metadata: content_metadata.Row = undefined;
     var label: peer_label.Result = undefined;
@@ -1311,7 +1311,7 @@ noinline fn sentItem(a: *ReadAccess, session: []const u8, position: u64, row: *c
 noinline fn sendFailureItem(a: *ReadAccess, session: []const u8, position: u64, result: *ActivityIdentity) !void {
     var failure: send_failure.Row = undefined;
     a.read(send_failure, .{ .session = session, .position = position }, &failure);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     if (!failure.consistent) return error.CorruptStore;
     result.item.value = .{ .send_failed = .{ .key = failure.command_key, .target = try peerNamed(a, failure.target), .code = failure.code } };
     result.item.at = failure.rejected_at.get();
@@ -1322,7 +1322,7 @@ noinline fn sendFailureItem(a: *ReadAccess, session: []const u8, position: u64, 
 noinline fn outcomeItem(a: *ReadAccess, session: []const u8, position: u64, result: *ActivityIdentity) !void {
     var first: First(turn_outcome.Row) = .{};
     a.readEach(turn_outcome, .{ .session = session, .position = position }, 1, &first);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     const turn = first.row orelse return error.CorruptStore;
     if (!turn.consistent) return error.CorruptStore;
     var outcome: protocol.ActivityItem.Outcome = .{ .turn = turn.turn_id.get(), .operation = turn.operation_id.get(), .code = turn.outcome_code, .content = null };
@@ -1346,7 +1346,7 @@ noinline fn outcomeItem(a: *ReadAccess, session: []const u8, position: u64, resu
 noinline fn stopItem(a: *ReadAccess, session: []const u8, end: u64, position: u64, result: *ActivityIdentity) !void {
     var first: First(session_stop.Row) = .{};
     a.readEach(session_stop, .{ .session = session, .position = position }, 1, &first);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     const stop_row = first.row orelse return error.CorruptStore;
     if (!stop_row.consistent) return error.CorruptStore;
     const turn: ?u64 = if (stop_row.selected_turn_id) |id| id.get() else null;
@@ -1411,7 +1411,7 @@ pub fn proposalPage(a: *ReadAccess, request: *const protocol.ProposalPage, page:
     page.* = .{ .end = end };
     var rows: Collected(proposal_positions.Row, protocol.proposal_page_items + 1) = .{};
     a.readEach(proposal_positions, .{ .session = session, .after = request.after, .end = end }, rows.items.len, &rows);
-    a.run() catch |err| return if (err == error.StatementFailed) error.ProposalReadFailed else err;
+    try store_access.runAs(a, error.ProposalReadFailed);
     page.more = rows.len > page.items.len;
     for (rows.slice()[0..@min(rows.len, page.items.len)]) |row| {
         page.items[page.count] = (try proposal(a, session, row.session_position.get())).metadata;

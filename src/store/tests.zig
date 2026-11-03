@@ -11499,6 +11499,12 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
 }
 
+test "the tool-group scan answers a missing Proposal as main did, before its outcome" {
+    // The scan reads a call's Proposal and outcome in one round; main read
+    // the Proposal first, so neither row answers ContentNotFound.
+    try std.testing.expectError(error.ContentNotFound, historical_domain.scannedCall(null, null, 7, 1, 0));
+}
+
 test "the touch oracle leaves unwatched exactly the columns the schema marks unlisted" {
     comptime var unlisted: []const []const u8 = &.{};
     inline for (store_schema.tables) |table| inline for (table.columns) |column| if (!column.listed) {

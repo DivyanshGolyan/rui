@@ -561,11 +561,11 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .message => reader.read(runnable_selection, .{}, &found),
         .tool_continuation => reader.read(tool_continuation_selection, .{}, &found),
     }
-    reader.run() catch |err| return if (err == error.StatementFailed) error.RunnableSelectionFailed else err;
+    try store_access.runAs(reader, error.RunnableSelectionFailed);
     const selection = found orelse {
         var disagreeing: disagreeing_continuation.Result = undefined;
         reader.read(disagreeing_continuation, .{}, &disagreeing);
-        reader.run() catch |err| return if (err == error.StatementFailed) error.TurnReadFailed else err;
+        try store_access.runAs(reader, error.TurnReadFailed);
         if (disagreeing != null) return error.CorruptStore;
         try validateBlockedToolCalls(reader.store);
         return null;
@@ -576,7 +576,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
 
     var facts: admission_facts.Result = undefined;
     writer.read(admission_facts, .{ .session = session_ref }, &facts);
-    writer.run() catch |err| return if (err == error.StatementFailed) error.SessionReadFailed else err;
+    try store_access.runAs(writer, error.SessionReadFailed);
     if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
 
     const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
@@ -601,7 +601,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
             .provider = facts.provider,
             .model = facts.model.slice(),
         }, &context);
-        writer.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+        try store_access.runAs(writer, error.CorruptStore);
         compaction.context_changed = context.changed;
         if (context.changed) {
             if (context.uncached) |uncached| {
@@ -723,7 +723,7 @@ pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active
     while (choice.chosen == null and choice.scanned < limit) {
         choice.page_rows = 0;
         candidate.readEach(due_retries, .{ .now_ms = now_ms, .after = choice.after }, limit - choice.scanned, &choice);
-        candidate.run() catch |err| return if (err == error.StatementFailed) error.RetrySelectionFailed else err;
+        try store_access.runAs(candidate, error.RetrySelectionFailed);
         if (choice.corrupt) return error.CorruptStore;
         if (choice.page_rows < retry_admission_page_rows) break;
     }

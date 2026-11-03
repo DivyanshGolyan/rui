@@ -428,7 +428,7 @@ fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalS
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, readHistoricalSettingsLocked(&access, view, out));
+    return entry.finish(Ordinary.none, settingsOf(&access, view, out));
 }
 
 /// The settings an Operation's request froze, with its Session's binding.
@@ -460,14 +460,14 @@ const historical_settings = rsql.Read(.{
 /// Round 1 reads the settings, the Operation's purpose with them; round 2
 /// the instructions' and output schema's metadata. A failed step is
 /// `CorruptStore`, main's answer for both.
-fn readHistoricalSettingsLocked(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !void {
+fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !void {
     var row: historical_settings.Row = undefined;
     row.model = &out.model;
     row.session_ref = &out.session;
     row.workspace = &out.workspace;
     var found: store_access.Found = undefined;
     a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, &row, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     if (!found.get()) return error.CorruptStore;
     if (row.tools_mask > tool_catalog.all_tools_mask) return error.CorruptStore;
     out.tools_mask = row.tools_mask;
@@ -475,7 +475,7 @@ fn readHistoricalSettingsLocked(a: *ReadAccess, view: *HistoricalView, out: *His
     var output_schema: content_metadata.Row = undefined;
     a.read(content_metadata, .{ .content_id = row.instructions_content_id.get() }, &instructions);
     if (row.output_schema_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &output_schema);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     out.baseline_instructions = try viewContent(view, row.instructions_content_id.get(), &instructions, false);
     out.output_schema = if (row.output_schema_content_id) |id| try viewContent(view, id.get(), &output_schema, false) else null;
     out.store = a.store.selector;
@@ -509,7 +509,7 @@ fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64)
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return .{ .ready = try entry.finish(Ordinary.historical_entry, readHistoricalEntryLocked(&access, view, after_position)) };
+    return .{ .ready = try entry.finish(Ordinary.historical_entry, entryAfter(&access, view, after_position)) };
 }
 
 fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
@@ -517,7 +517,7 @@ fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, validateHistoricalOutputsStepLocked(&access, view));
+    return entry.finish(Ordinary.none, checkOutputsStep(&access, view));
 }
 
 fn readPrefixSeal(self: *Store, binding: AttemptBinding) !?PrefixSeal {
@@ -541,7 +541,7 @@ const session_prefix_seal = rsql.Read(.{
 pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
     var row: session_prefix_seal.Row = undefined;
     a.read(session_prefix_seal, .{ .operation = binding.operation_id }, &row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     const bytes = row.prefix_seal orelse return null;
     return try PrefixSeal.decode(&bytes);
 }
@@ -570,7 +570,7 @@ fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, readCompactionAnchorLocked(&access, base_id));
+    return entry.finish(Ordinary.none, compactionAnchorOf(&access, base_id));
 }
 
 /// A compaction base's compaction item: its provider bag is the opaque
@@ -585,13 +585,13 @@ const compaction_anchor = rsql.Read(.{
 /// The position of the base's one compaction item. Round 1 reads the
 /// item, round 2 that its bag's row exists. A failed step is
 /// `CorruptStore`, main's answer for both.
-fn readCompactionAnchorLocked(a: *ReadAccess, base_id: u64) !u64 {
+fn compactionAnchorOf(a: *ReadAccess, base_id: u64) !u64 {
     var anchor: compaction_anchor.Row = undefined;
     a.read(compaction_anchor, .{ .base = base_id }, &anchor);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     var bag: content_metadata.Row = undefined;
     a.read(content_metadata, .{ .content_id = anchor.extras_content_id.get() }, &bag);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     return anchor.session_position.get();
 }
 
@@ -633,12 +633,12 @@ const output_source = rsql.Read(.{
 // statement. Its own item count detects even a completely missing output.
 // No statement or lock survives this one step. A failed step is
 // `CorruptStore`, main's answer for it.
-fn validateHistoricalOutputsStepLocked(a: *ReadAccess, view: *HistoricalView) !bool {
+fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
     if (view.outputs_validated) return true;
     if (view.output_frontier == null) {
         var first: reads_domain.First(output_boundary.Row) = .{};
         a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &first);
-        a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+        try store_access.runAs(a, error.CorruptStore);
         const row = first.row orelse return error.CorruptStore;
         view.output_boundary = row.admission_position.get();
         view.selected_base = if (row.operation_id) |id| id.get() else 0;
@@ -656,7 +656,7 @@ fn validateHistoricalOutputsStepLocked(a: *ReadAccess, view: *HistoricalView) !b
         .boundary = view.output_boundary,
         .after_operation = view.output_cursor_id,
     }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     const source = found orelse {
         view.outputs_validated = true;
         return true;
@@ -670,7 +670,7 @@ fn validateHistoricalOutputsStepLocked(a: *ReadAccess, view: *HistoricalView) !b
 
 /// The served entry lives in the view: in its read-ahead, its next tool
 /// group or its output check.
-fn readHistoricalEntryLocked(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
+fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
     std.debug.assert(view.outputs_validated);
     var scan_tool_groups = !view.tool_group_initialized;
     if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
@@ -777,7 +777,7 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_posi
     errdefer view.entries_end = 0;
     var batch: EntryBatch = .{ .view = view };
     a.readEach(historical_entries, .{ .operation = view.binding.operation_id, .after = after_position }, HistoricalView.entry_batch, &batch);
-    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    try store_access.runAs(a, error.HistoricalEntryReadFailed);
     if (batch.failure) |err| return err;
     return if (view.entries_end == 0) null else &view.entries[0];
 }
@@ -858,7 +858,9 @@ const extra_call = rsql.Read(.{
 });
 
 /// A call's accepted result, and whether its rejection or Action agrees.
-const call_outcome = rsql.Read(.{
+/// It shares its round with the call's Proposal, which main read first,
+/// so a missing row or column is checked after the Proposal is.
+pub const call_outcome = rsql.Read(.{
     .sql = "SELECT coalesce(tool_call.acceptance_position,action.acceptance_position) AS accepted_position," ++
         "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id," ++
         "CASE WHEN tool_call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
@@ -867,9 +869,24 @@ const call_outcome = rsql.Read(.{
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
     .Args = struct { operation: u64, ordinal: u64 },
-    .Row = struct { accepted_position: rsql.Positive, content_id: rsql.Positive, consistent: bool },
-    .cardinality = .one,
+    .Row = struct { accepted_position: ?rsql.Positive, content_id: ?rsql.Positive, consistent: bool },
+    .cardinality = .optional,
 });
+
+/// The scanned call `call` of Operation `source`, from the Proposal and
+/// outcome its round read together, decided in main's order: the
+/// Proposal first, so a missing one is `ContentNotFound` whatever the
+/// outcome holds. Returns where the call was accepted and its result.
+pub fn scannedCall(proposal: reads_domain.proposal_row.Result, found_outcome: call_outcome.Result, position: u64, source: u64, call: u64) error{ ContentNotFound, CorruptStore }!struct { accepted_position: u64, content_id: u64 } {
+    const identity = try reads_domain.proposalIdentity(proposal, position);
+    if (identity.metadata.operation != source or identity.metadata.call_ordinal != call) return error.CorruptStore;
+    const outcome = found_outcome orelse return error.CorruptStore;
+    if (!outcome.consistent) return error.CorruptStore;
+    return .{
+        .accepted_position = (outcome.accepted_position orelse return error.CorruptStore).get(),
+        .content_id = (outcome.content_id orelse return error.CorruptStore).get(),
+    };
+}
 
 /// The Session's next Operation after the scan cursor ?2 and before the
 /// view's own, and whether it proposed tools.
@@ -896,11 +913,11 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?Historic
     if (scan.source != 0) {
         var found: group_item.Result = undefined;
         a.read(group_item, .{ .operation = scan.source, .ordinal = scan.item }, &found);
-        a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+        try store_access.runAs(a, error.CorruptStore);
         const item = found orelse {
             var extra: extra_call.Result = undefined;
             a.read(extra_call, .{ .operation = scan.source, .ordinal = scan.calls }, &extra);
-            a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+            try store_access.runAs(a, error.CorruptStore);
             if (scan.item != scan.expected_items or scan.calls == 0 or scan.position == 0 or scan.position >= scan.boundary or extra != null)
                 return error.CorruptStore;
             const group = HistoricalToolGroup{ .position = scan.position, .source_operation_id = scan.source };
@@ -917,25 +934,23 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?Historic
         scan.item += 1;
         if (item.item_kind != 3) return error.HistoricalPending;
         var proposal: reads_domain.proposal_row.Result = undefined;
-        var outcome: call_outcome.Row = undefined;
+        var found_outcome: call_outcome.Result = undefined;
         reads_domain.readProposal(a, item.session_ref.slice(), position, &proposal);
-        a.read(call_outcome, .{ .operation = scan.source, .ordinal = scan.calls }, &outcome);
+        a.read(call_outcome, .{ .operation = scan.source, .ordinal = scan.calls }, &found_outcome);
         a.run() catch |err| return if (err == error.StatementFailed and a.failedOn(call_outcome)) error.CorruptStore else err;
-        const identity = try reads_domain.proposalIdentity(proposal, position);
-        if (identity.metadata.operation != scan.source or identity.metadata.call_ordinal != scan.calls) return error.CorruptStore;
-        if (!outcome.consistent) return error.CorruptStore;
+        const call = try scannedCall(proposal, found_outcome, position, scan.source, scan.calls);
         var result: content_metadata.Row = undefined;
-        a.read(content_metadata, .{ .content_id = outcome.content_id.get() }, &result);
-        a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+        a.read(content_metadata, .{ .content_id = call.content_id }, &result);
+        try store_access.runAs(a, error.CorruptStore);
         _ = try content_domain.publicMetadata(&result);
-        scan.position = @max(scan.position, outcome.accepted_position.get());
+        scan.position = @max(scan.position, call.accepted_position);
         // The call's bytes are authenticated when its entry is served.
         scan.calls += 1;
         return error.HistoricalPending;
     }
     var found: next_group_source.Result = undefined;
     a.read(next_group_source, .{ .operation = view.binding.operation_id, .after = view.tool_group_source_cursor }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    try store_access.runAs(a, error.HistoricalEntryReadFailed);
     const source = found orelse return null;
     if (source.proposes != true) {
         view.tool_group_source_cursor = source.operation_id.get();
@@ -958,7 +973,7 @@ fn readHistoricalOutput(self: *Store, view: *HistoricalView, position: u64) !His
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, readHistoricalOutputLocked(&access, view, position));
+    return entry.finish(Ordinary.none, outputAt(&access, view, position));
 }
 
 /// The output item at ?2 in the Operation's Session, with its call's
@@ -989,10 +1004,10 @@ const historical_output = rsql.Read(.{
 /// Round 1 reads the item; round 2 the metadata of its message text, its
 /// call's three fields and its bag together. A failed step is
 /// `CorruptStore`, main's answer for both.
-fn readHistoricalOutputLocked(a: *ReadAccess, view: *HistoricalView, position: u64) !HistoricalOutput {
+fn outputAt(a: *ReadAccess, view: *HistoricalView, position: u64) !HistoricalOutput {
     var row: historical_output.Row = undefined;
     a.read(historical_output, .{ .operation = view.binding.operation_id, .position = position }, &row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     const kind = std.enums.fromInt(OutputItemKind, row.item_kind) orelse return error.CorruptStore;
     const phase = std.enums.fromInt(output_format.NeutralPhase, row.phase) orelse return error.CorruptStore;
     if (row.part_count != 0 and kind != .reasoning and kind != .message) return error.CorruptStore;
@@ -1007,7 +1022,7 @@ fn readHistoricalOutputLocked(a: *ReadAccess, view: *HistoricalView, position: u
     if (row.message_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &text_row);
     if (has_call) for (&call_rows, call_ids) |*call_row, id| a.read(content_metadata, .{ .content_id = id }, call_row);
     a.read(content_metadata, .{ .content_id = row.extras_content_id.get() }, &bag_row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     var text: ?HistoricalView.MessageText = null;
     if (row.message_content_id) |id| {
         const content = try viewContent(view, id.get(), &text_row, false);
@@ -1037,7 +1052,7 @@ fn readHistoricalPart(self: *Store, view: *HistoricalView) !?HistoricalPart {
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, readHistoricalPartLocked(&access, view));
+    return entry.finish(Ordinary.none, nextPart(&access, view));
 }
 
 /// The open item's part at or after ordinal ?3.
@@ -1052,11 +1067,11 @@ const historical_part = rsql.Read(.{
 /// Round 1 reads the part; round 2 the metadata of its own text and its
 /// bag together. A failed step is main's name: `HistoricalEntryReadFailed`
 /// for the part, `CorruptStore` for the metadata.
-fn readHistoricalPartLocked(a: *ReadAccess, view: *HistoricalView) !?HistoricalPart {
+fn nextPart(a: *ReadAccess, view: *HistoricalView) !?HistoricalPart {
     const cursor = &view.output_parts.?;
     var found: historical_part.Result = undefined;
     a.read(historical_part, .{ .operation = cursor.operation_id, .item = cursor.item_ordinal, .part = cursor.next }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    try store_access.runAs(a, error.HistoricalEntryReadFailed);
     const row = found orelse {
         // A part missing from the end changes what the model saw,
         // and the text parts cover the whole message text.
@@ -1075,7 +1090,7 @@ fn readHistoricalPartLocked(a: *ReadAccess, view: *HistoricalView) !?HistoricalP
     var bag_row: content_metadata.Row = undefined;
     if (own_text and row.text_length == null) if (row.text_content_id) |id| a.read(content_metadata, .{ .content_id = id.get() }, &text_row);
     a.read(content_metadata, .{ .content_id = row.extras_content_id.get() }, &bag_row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     const text: ?HistoricalContent = switch (kind) {
         .opaque_block => if (row.text_length != null or row.text_content_id != null) return error.CorruptStore else null,
         .output_text, .refusal => ranged: {
@@ -1128,7 +1143,7 @@ fn readHistoricalToolResult(
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, readHistoricalToolResultLocked(&access, view));
+    return entry.finish(Ordinary.none, nextGroupResult(&access, view));
 }
 
 /// The active group's next call accepted before the Operation's admission:
@@ -1157,14 +1172,14 @@ const later_call = NextCall(true);
 /// metadata together. A failed step is main's name:
 /// `HistoricalEntryReadFailed` for the call, `CorruptStore` for the
 /// metadata.
-fn readHistoricalToolResultLocked(a: *ReadAccess, view: *HistoricalView) !?HistoricalToolResult {
+fn nextGroupResult(a: *ReadAccess, view: *HistoricalView) !?HistoricalToolResult {
     const source_operation_id = view.active_tool_group_source_id orelse unreachable;
     var found: ?NextCallRow = undefined;
     if (view.active_tool_group_after_ordinal) |ordinal|
         a.read(later_call, .{ .operation = view.binding.operation_id, .source = source_operation_id, .after = ordinal }, &found)
     else
         a.read(first_call, .{ .operation = view.binding.operation_id, .source = source_operation_id }, &found);
-    a.run() catch |err| return if (err == error.StatementFailed) error.HistoricalEntryReadFailed else err;
+    try store_access.runAs(a, error.HistoricalEntryReadFailed);
     const row = found orelse {
         if (view.active_tool_group_count != view.active_tool_group_expected) return error.CorruptStore;
         view.active_tool_group_source_id = null;
@@ -1178,7 +1193,7 @@ fn readHistoricalToolResultLocked(a: *ReadAccess, view: *HistoricalView) !?Histo
     var output_row: content_metadata.Row = undefined;
     a.read(content_metadata, .{ .content_id = row.call_id_content_id.get() }, &call_id_row);
     a.read(content_metadata, .{ .content_id = row.output_content_id.get() }, &output_row);
-    a.run() catch |err| return if (err == error.StatementFailed) error.CorruptStore else err;
+    try store_access.runAs(a, error.CorruptStore);
     const call_id = try viewContent(view, row.call_id_content_id.get(), &call_id_row, false);
     const output = try viewContent(view, row.output_content_id.get(), &output_row, false);
     view.active_tool_group_after_ordinal = row.call_ordinal;
