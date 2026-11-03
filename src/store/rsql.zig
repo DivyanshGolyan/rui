@@ -279,6 +279,10 @@ pub const Expect = union(enum) {
     exact: struct { rows: u32, otherwise: anyerror },
     /// More is `CorruptStore`.
     at_most: u32,
+    /// Exactly the count its caller states when it queues the write
+    /// (`Access.writeCount`), a count known only at run time; any other
+    /// is `otherwise`.
+    counted: struct { otherwise: anyerror },
 };
 
 pub const ReadSpec = struct {
@@ -324,6 +328,7 @@ pub fn Read(comptime spec: ReadSpec) type {
 
 pub fn Write(comptime spec: WriteSpec) type {
     const parsed = comptime accepted(.write, spec.sql, spec.Args, void, false);
+    comptime if (expectError(parsed.statement, spec.expect)) |message| @compileError(message ++ ": " ++ spec.sql);
     return struct {
         pub const kind: StatementKind = .write;
         pub const Args = spec.Args;
@@ -355,6 +360,33 @@ pub fn statementError(comptime kind: StatementKind, comptime sql: []const u8, co
         .refused => |message| message,
         .accepted => null,
     };
+}
+
+/// Why a write's text, or its `expect`, is refused, or null.
+fn writeError(comptime sql: []const u8, comptime Args: type, comptime expect: Expect) ?[]const u8 {
+    return switch (check(.write, sql, Args, void, false)) {
+        .refused => |message| message,
+        .accepted => |parsed| expectError(parsed.statement, expect),
+    };
+}
+
+/// Why a write's `expect` does not fit its text, or null. An INSERT ...
+/// SELECT inserts the rows its SELECT returns: one whose SELECT returns at
+/// most one row (`returnsOneRow`) declares `.exact` 1 or `.at_most` 1, and
+/// any other declares `.counted`, so its caller states the count. Any
+/// other write may declare any Expect. The guard checks the count again
+/// when the write runs.
+fn expectError(comptime statement: Statement, comptime expect: Expect) ?[]const u8 {
+    if (statement != .insert or statement.insert.values != .select) return null;
+    const declares_one = switch (expect) {
+        .exact => |guard| guard.rows == 1,
+        .at_most => |rows| rows == 1,
+        .counted => false,
+    };
+    if (returnsOneRow(statement.insert.values.select)) {
+        if (!declares_one) return "rsql: an INSERT ... SELECT of at most one row declares .exact or .at_most 1";
+    } else if (expect != .counted) return "rsql: an INSERT ... SELECT of more than one row declares .counted, so its caller states the count";
+    return null;
 }
 
 const Checked = union(enum) { refused: []const u8, accepted: Parsed };
@@ -535,7 +567,7 @@ const grammar_words = [_][]const u8{
     "DESC",   "LIMIT",    "OFFSET", "UNION", "EXCEPT",  "INTERSECT", "WITH",    "AS",        "JOIN",  "LEFT",
     "OUTER",  "INNER",    "CROSS",  "ON",    "AND",     "OR",        "NOT",     "IN",        "IS",    "NULL",
     "EXISTS", "CASE",     "WHEN",   "THEN",  "ELSE",    "END",       "CAST",    "INSERT",    "INTO",  "VALUES",
-    "UPDATE", "SET",      "DELETE", "LIKE",  "BETWEEN", "ESCAPE",    "COLLATE", "RECURSIVE",
+    "UPDATE", "SET",      "DELETE", "LIKE",  "BETWEEN", "ESCAPE",    "COLLATE", "RECURSIVE", "OVER",
 };
 
 fn isGrammarWord(text: []const u8) bool {
@@ -574,9 +606,11 @@ const Refused = error{Refused};
 /// `-`, `*`, `/`, `%`, unary `-` and `+`, at SQLite's precedence; and as
 /// operands columns, `?N`, numbers, string literals, NULL, markers,
 /// function calls, CAST, CASE, EXISTS and parenthesized expressions or
-/// subqueries. Anything else (a named parameter, `*` as a column, a
-/// comma join, an unknown table, LIKE, BETWEEN, COLLATE, a window) is
-/// refused with the token it stopped at.
+/// subqueries. The one window is `row_number() OVER (ORDER BY expr
+/// [ASC|DESC], ...)`, which every engine runs. Anything else (a named
+/// parameter, `*` as a column, a comma join, an unknown table, LIKE,
+/// BETWEEN, COLLATE, another window) is refused with the token it stopped
+/// at.
 const Parser = struct {
     tokens: []const Token,
     at: usize = 0,
@@ -945,15 +979,33 @@ const Parser = struct {
         }
         const first = try p.name();
         if (p.acceptSymbol("(")) {
-            if (!p.acceptSymbol("*") and !p.peek().isSymbol(")")) {
+            const arguments = !p.peek().isSymbol(")");
+            if (!p.acceptSymbol("*") and arguments) {
                 _ = p.accept("DISTINCT");
                 _ = try p.expressions();
             }
             try p.expectSymbol(")");
+            if (p.accept("OVER")) try p.window(std.ascii.eqlIgnoreCase(first, "row_number") and !arguments);
             return .other;
         }
         if (p.acceptSymbol(".")) return .{ .column = .{ .table = first, .name = try p.name() } };
         return .{ .column = .{ .table = null, .name = first } };
+    }
+
+    /// The `(ORDER BY expr [ASC|DESC], ...)` after `OVER`, which only
+    /// `row_number()` takes: no PARTITION BY, no frame.
+    fn window(p: *Parser, row_number: bool) Refused!void {
+        const refused = "rsql: the one window is row_number() OVER (ORDER BY ...), with no PARTITION BY or frame";
+        if (!row_number) return p.refuseWith(refused);
+        try p.expectSymbol("(");
+        if (!p.accept("ORDER")) return p.refuseWith(refused);
+        try p.expect("BY");
+        while (true) {
+            _ = try p.expr();
+            if (!p.accept("ASC")) _ = p.accept("DESC");
+            if (!p.acceptSymbol(",")) break;
+        }
+        if (!p.acceptSymbol(")")) return p.refuseWith(refused);
     }
 
     /// `?N`, N from 1 to 64; SQLite's other forms (`?`, `:name`, `@name`,
@@ -1088,7 +1140,8 @@ fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
 ///   column a lone marker, or NULL (written, or by leaving the column out)
 ///   where the column is nullable, and writes no marker in another column;
 /// - as an INSERT ... SELECT, writes to a table whose one Session column is
-///   session_ref, and copies one Session's row (`copyError`);
+///   session_ref, NOT NULL, and copies that value from a Session column of
+///   its source, tied there by the marker (`copyError`);
 /// - as an UPDATE, has the top-level WHERE conjunct `c=@session(?k)` for
 ///   the table's first Session column `c` (`ties`), and assigns no Session
 ///   column. In a table that names two Sessions, a second marker is the
@@ -1102,7 +1155,7 @@ fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
 /// No write holds a compound SELECT (`compoundError`). So an INSERT's or
 /// DELETE's row belongs to the Sessions its heads name, and an UPDATE
 /// changes only columns those Sessions read; the Access that queues it
-/// touches each.
+/// touches each. `expectError` holds a copy's Expect to its row count.
 fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
     comptime {
         const table = switch (parsed.statement) {
@@ -1135,10 +1188,9 @@ fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
             .insert => |insert| return switch (insert.values) {
                 .row => |row| insertSessionError(table, columns, insert.columns, row, markers.len),
                 .select => |select| copy: {
-                    if (columns.len != 1 or !std.mem.eql(u8, columns[0], "session_ref"))
+                    if (columns.len != 1 or !std.mem.eql(u8, columns[0], "session_ref") or schema.isNullable(table, "session_ref"))
                         break :copy "rsql: an INSERT ... SELECT copies one Session's row; " ++ table ++ " names its Sessions otherwise";
-                    const copied = "rsql: an INSERT ... SELECT names its Session by copying session_ref FROM session alone, WHERE session_ref=@session(?k)";
-                    const at = (sessionSlot(insert.columns, "session_ref") catch break :copy copied) orelse break :copy copied;
+                    const at = (sessionSlot(insert.columns, "session_ref") catch break :copy copied_message) orelse break :copy copied_message;
                     break :copy copyError(select, at, insert.columns.len);
                 },
             },
@@ -1203,28 +1255,43 @@ fn insertSessionError(
     }
 }
 
-/// See `sessionError`: the copy's one source is the `session` row its
-/// WHERE pins by key.
+const copied_message = "rsql: an INSERT ... SELECT copies session_ref as a Session column c of its one table, WHERE c=@session(?k)";
+
+/// See `sessionError`: an INSERT ... SELECT whose target's one Session
+/// column is session_ref. It checks exactly this:
+/// - the SELECT's FROM names one table, with no JOIN, that no WITH defined;
+/// - that table carries Sessions (`schema.carriesSessions`);
+/// - the value in session_ref's slot is a bare column `c` of that table's
+///   `schema.sessionColumns`, or `c` qualified by the table's alias;
+/// - the WHERE has the top-level conjunct `c=@session(?k)`, `c` bare or
+///   qualified by that alias (`ties`).
+/// A conjunct holds of every source row, so every copied `c` is the
+/// reference ?k binds; an aggregate's row over no source rows copies NULL,
+/// which session_ref refuses. So every inserted row belongs to the Session
+/// the Access touches for ?k, and the copy reads no other Session's rows.
 fn copyError(comptime select: Select, comptime column: usize, comptime columns: usize) ?[]const u8 {
-    const copied = "rsql: an INSERT ... SELECT names its Session by copying session_ref FROM session alone, WHERE session_ref=@session(?k)";
     const core = select.first;
-    if (core.sources.len != 1 or !std.mem.eql(u8, core.sources[0].table, "session") or !std.mem.eql(u8, core.sources[0].alias, "session")) return copied;
+    if (core.sources.len != 1 or core.sources[0].defined or !schema.carriesSessions(core.sources[0].table)) return copied_message;
+    const source = core.sources[0];
     if (core.results.len != columns) return "rsql: an INSERT gives one value per column";
     const value = core.results[column].value;
-    if (value != .column or !std.mem.eql(u8, value.column.name, "session_ref") or
-        (value.column.table != null and !std.mem.eql(u8, value.column.table.?, "session"))) return copied;
-    const where = core.where orelse return copied;
-    return if (ties(where, "session", "session_ref")) null else copied;
+    if (value != .column or (value.column.table != null and !std.mem.eql(u8, value.column.table.?, source.alias))) return copied_message;
+    const copied = for (schema.sessionColumns(source.table)) |candidate| {
+        if (std.mem.eql(u8, candidate, value.column.name)) break candidate;
+    } else return copied_message;
+    const where = core.where orelse return copied_message;
+    return if (ties(where, source.alias, copied)) null else copied_message;
 }
 
 /// Whether `where` has the conjunct `column=@session(?k)`, its column bare
-/// or qualified by `table`.
-fn ties(comptime where: Expr, comptime table: []const u8, comptime column: []const u8) bool {
+/// or qualified by `qualifier`: the written table's name, or a copy's
+/// source alias.
+fn ties(comptime where: Expr, comptime qualifier: []const u8, comptime column: []const u8) bool {
     for (conjuncts(where)) |term| {
         if (term != .equality) continue;
         const named = term.equality[0];
         if (named == .column and std.mem.eql(u8, named.column.name, column) and
-            (named.column.table == null or std.mem.eql(u8, named.column.table.?, table)) and term.equality[1] == .session) return true;
+            (named.column.table == null or std.mem.eql(u8, named.column.table.?, qualifier)) and term.equality[1] == .session) return true;
     }
     return false;
 }
@@ -1295,15 +1362,15 @@ fn pinsOneRow(comptime core: Core) bool {
 }
 
 /// Whether `condition` is `column = value` (either way round) for source
-/// `index`'s `column`, where the value is a parameter, a constant, or a
-/// column of another pinned source.
+/// `index`'s `column`, where the value is a parameter (`@session(?k)`
+/// binds one), a constant, or a column of another pinned source.
 fn fixes(comptime condition: Expr, comptime sources: []const Source, comptime pinned: []const bool, comptime index: usize, comptime column: []const u8) bool {
     if (condition != .equality) return false;
     const sides = condition.equality.*;
     for (sides, 0..) |side, which| {
         if (!names(side, sources, index, column)) continue;
         switch (sides[1 - which]) {
-            .parameter, .constant => return true,
+            .parameter, .session, .constant => return true,
             .column => |other| for (sources, pinned, 0..) |source, done, at| {
                 if (done and at != index and other.table != null and std.mem.eql(u8, other.table.?, source.alias)) return true;
             },
@@ -1653,15 +1720,16 @@ test "a write names its Session with @session on its table's own session_ref" {
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now)", Stop, void));
     try std.testing.expectEqualStrings(inserted, comptime statementError(.write, "INSERT INTO session_stop(session_ref,command_key,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,@session(?2),?3,0,@now)", Stop, void).?);
     try std.testing.expectEqualStrings(inserted, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES(?1,coalesce(@session(?2),'x'),?3,0,@now)", Stop, void).?);
-    const copied = "rsql: an INSERT ... SELECT names its Session by copying session_ref FROM session alone, WHERE session_ref=@session(?k)";
+    const copied = copied_message;
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT ?1,@session(?2),?3,0,@now", Stop, void).?);
 
     // A copy of one Session's row: its key pins the row the WHERE names.
     const Copy = struct { session: SessionHead, key: []const u8 };
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1)", Copy, void));
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT ?2,revision,?2 FROM session WHERE session_ref=@session(?1)", Copy, void).?);
-    try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT s.session_ref,revision,?2 FROM session s WHERE session_ref=@session(?1)", Copy, void).?);
-    try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM turn WHERE session_ref=@session(?1)", Copy, void).?);
+    // The source's alias qualifies its columns; a table with Sessions other than `session` is a source too.
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT s.session_ref,revision,?2 FROM session s WHERE session_ref=@session(?1)", Copy, void));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,turn_id,?2 FROM turn WHERE session_ref=@session(?1)", Copy, void));
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session JOIN turn ON turn.session_ref=session.session_ref WHERE session_ref=@session(?1)", Copy, void).?);
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1) OR revision=1", Copy, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT gives one value per column", comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision FROM session WHERE session_ref=@session(?1) AND ?2 IS NOT NULL", Copy, void).?);
@@ -1793,7 +1861,7 @@ test "the Session tie reads the WHERE's conjuncts, not the tokens around the mar
 }
 
 test "a copy's SELECT is one Session's row" {
-    const copied = "rsql: an INSERT ... SELECT names its Session by copying session_ref FROM session alone, WHERE session_ref=@session(?k)";
+    const copied = copied_message;
     const Copy = struct { session: SessionHead, key: []const u8 };
     try std.testing.expectEqualStrings(copied, comptime statementError(.write, "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE CASE WHEN revision=0 AND session_ref=@session(?1) AND revision=0 THEN 0 ELSE 1 END", Copy, void).?);
 }
@@ -1836,4 +1904,128 @@ test "text outside the grammar is refused at the token the parser stopped at" {
     try std.testing.expectEqualStrings("rsql: expected the end at 'turn_id'", comptime statementError(.read, "SELECT turn_id FROM turn t turn_id", struct {}, Turn).?);
     try std.testing.expectEqualStrings("rsql: a WITH name is never a table's: session", comptime statementError(.read, "WITH session AS (SELECT 1 AS turn_id) SELECT turn_id FROM session", struct {}, Turn).?);
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, "WITH recent(turn_id) AS (SELECT turn_id FROM turn) SELECT turn_id FROM recent WHERE turn_id=?1", Id, Turn));
+}
+
+test "row_number() OVER (ORDER BY ...) is the one window" {
+    const Turn = struct { session: []const u8 };
+    const Numbered = struct { turn_id: u64, n: u64 };
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, "SELECT turn_id,row_number() OVER (ORDER BY turn_id DESC,operation_id) AS n FROM turn WHERE session_ref=?1", Turn, Numbered));
+    const window = "rsql: the one window is row_number() OVER (ORDER BY ...), with no PARTITION BY or frame";
+    try std.testing.expectEqualStrings(window, comptime statementError(.read, "SELECT turn_id,row_number() OVER (PARTITION BY session_ref ORDER BY turn_id) AS n FROM turn WHERE session_ref=?1", Turn, Numbered).?);
+    try std.testing.expectEqualStrings(window, comptime statementError(.read, "SELECT turn_id,row_number() OVER (ORDER BY turn_id ROWS UNBOUNDED PRECEDING) AS n FROM turn WHERE session_ref=?1", Turn, Numbered).?);
+    try std.testing.expectEqualStrings(window, comptime statementError(.read, "SELECT turn_id,rank() OVER (ORDER BY turn_id) AS n FROM turn WHERE session_ref=?1", Turn, Numbered).?);
+    try std.testing.expectEqualStrings(window, comptime statementError(.read, "SELECT turn_id,row_number(turn_id) OVER (ORDER BY turn_id) AS n FROM turn WHERE session_ref=?1", Turn, Numbered).?);
+    try std.testing.expectEqualStrings(window, comptime statementError(.read, "SELECT turn_id,row_number() OVER () AS n FROM turn WHERE session_ref=?1", Turn, Numbered).?);
+}
+
+/// The Messages projection's text, as admission writes it, with `select`
+/// in place of its SELECT's session_ref value and `source` after its other
+/// values.
+fn messagesCopy(comptime select: []const u8, comptime source: []const u8) []const u8 {
+    return comptime entry_columns ++ messagesSelect(select, source);
+}
+
+const entry_columns = "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) ";
+
+fn messagesSelect(comptime select: []const u8, comptime source: []const u8) []const u8 {
+    return comptime "SELECT " ++ select ++ ",?3+row_number() OVER (ORDER BY admission_id),?4+row_number() OVER (ORDER BY admission_id)-1,1,?2,admission_id,NULL,NULL,content_id,@now " ++ source;
+}
+
+const MessagesCopy = struct { session: SessionHead, turn_id: u64, ordinal_base: u64, position_base: u64, first_admission: u64 };
+const counted_copy: Expect = .{ .counted = .{ .otherwise = error.ProjectionFailed } };
+
+test "a copy takes session_ref from a Session column of its one table, tied there" {
+    const tied = "FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?5 ORDER BY admission_id";
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(messagesCopy("session_ref", tied), MessagesCopy, counted_copy));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(messagesCopy("m.session_ref", "FROM message_admission m WHERE m.session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?5"), MessagesCopy, counted_copy));
+    // A sender-tied copy files the rows under the sender.
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(messagesCopy("sender_session_ref", "FROM message_admission WHERE sender_session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?5"), MessagesCopy, counted_copy));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(
+        entry_columns ++ "SELECT session_ref,?3+row_number() OVER (ORDER BY revision),?4+row_number() OVER (ORDER BY revision)-1,2,?2,NULL,revision,NULL,instructions_content_id,@now " ++
+            "FROM session_revision WHERE session_ref=@session(?1) AND revision>?5 AND revision<=?6 AND instructions_updated=1 ORDER BY revision",
+        struct { session: SessionHead, turn_id: u64, ordinal_base: u64, position_base: u64, frontier: u64, revision: u64 },
+        .{ .counted = .{ .otherwise = error.InstructionSelectionFailed } },
+    ));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(
+        "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1)",
+        struct { session: SessionHead, key: []const u8 },
+        .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    ));
+}
+
+test "a copy is refused unless every row it inserts carries the Session its marker names" {
+    const Text = struct { session: SessionHead, turn_id: u64, ordinal_base: u64, position_base: u64, first_admission: u64, text: []const u8 };
+    const Copy = struct { session: SessionHead, key: []const u8 };
+    const rest = " AND turn_id=?2 AND admission_id>=?5";
+    inline for (comptime .{
+        // 1. A text parameter in the session_ref slot.
+        .{ messagesCopy("?6", "FROM message_admission WHERE session_ref=@session(?1)" ++ rest), Text },
+        // 3, 4. The value and the tie on different Session columns.
+        .{ messagesCopy("session_ref", "FROM message_admission WHERE sender_session_ref=@session(?1)" ++ rest), MessagesCopy },
+        .{ messagesCopy("sender_session_ref", "FROM message_admission WHERE session_ref=@session(?1)" ++ rest), MessagesCopy },
+        // 5, 6. Two sources, the tie on either; a LEFT JOIN tied on its joined table.
+        .{ messagesCopy("m.session_ref", "FROM message_admission m JOIN turn t ON t.turn_id=m.turn_id WHERE m.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?5"), MessagesCopy },
+        .{ messagesCopy("m.session_ref", "FROM message_admission m JOIN turn t ON t.turn_id=m.turn_id WHERE t.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?5"), MessagesCopy },
+        .{ messagesCopy("m.session_ref", "FROM message_admission m LEFT JOIN turn t ON t.turn_id=m.turn_id AND t.session_ref=@session(?1) WHERE m.turn_id=?2 AND m.admission_id>=?5"), MessagesCopy },
+        // 7, 8, 9. The tie inside OR, only inside a subquery, under NOT.
+        .{ messagesCopy("session_ref", "FROM message_admission WHERE session_ref=@session(?1) OR turn_id=?2 AND admission_id>=?5"), MessagesCopy },
+        .{ messagesCopy("session_ref", "FROM message_admission WHERE admission_id IN (SELECT admission_id FROM message_admission WHERE session_ref=@session(?1))" ++ rest), MessagesCopy },
+        .{ messagesCopy("session_ref", "FROM message_admission WHERE NOT (session_ref<>@session(?1))" ++ rest), MessagesCopy },
+        // 11. A source a WITH defined.
+        .{ entry_columns ++ "WITH m AS (SELECT session_ref,turn_id,admission_id,content_id FROM message_admission) " ++ messagesSelect("session_ref", "FROM m WHERE session_ref=@session(?1)" ++ rest), MessagesCopy },
+        // 12. A source with no Session column.
+        .{ messagesCopy("session_ref", "FROM content WHERE session_ref=@session(?1)" ++ rest), MessagesCopy },
+        // 14. A qualifier that is not the source's alias.
+        .{ messagesCopy("x.session_ref", "FROM message_admission m WHERE m.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?5"), MessagesCopy },
+        // 15. An expression of the column.
+        .{ messagesCopy("coalesce(session_ref,'x')", "FROM message_admission WHERE session_ref=@session(?1)" ++ rest), MessagesCopy },
+        .{ messagesCopy("max(session_ref)", "FROM message_admission WHERE session_ref=@session(?1)" ++ rest), MessagesCopy },
+        // 2. The marker as the value, with no source.
+        .{ "INSERT INTO session_revision(session_ref,revision,command_key) SELECT @session(?1),1,?2", Copy },
+    }) |case| try std.testing.expectEqualStrings(copied_message, comptime statementError(.write, case[0], case[1], void).?);
+}
+
+test "a copy's other refusals come from the rule that owns each" {
+    const tied = "FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?5";
+    // 10. A compound source, 5a's failing input.
+    try std.testing.expectEqualStrings("rsql: a write holds no compound SELECT", comptime writeError(messagesCopy("session_ref", tied ++ " UNION ALL SELECT 'zzzzzz',1,1,1,?2,1,NULL,NULL,1,1"), MessagesCopy, counted_copy).?);
+    // 13. A target with two Session columns.
+    try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT copies one Session's row; message_admission names its Sessions otherwise", comptime writeError(
+        "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM message_admission WHERE session_ref=@session(?2)",
+        struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 },
+        counted_copy,
+    ).?);
+    // 16. The head's reference reused where main read the ordinal base.
+    try std.testing.expectEqualStrings("rsql: the SessionHead ?k binds is used only in @session(?k)", comptime writeError(
+        entry_columns ++ "SELECT session_ref,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0)+row_number() OVER (ORDER BY admission_id)," ++
+            "?3+row_number() OVER (ORDER BY admission_id)-1,1,?2,admission_id,NULL,NULL,content_id,@now FROM message_admission WHERE session_ref=@session(?1) AND turn_id=?2 AND admission_id>=?4",
+        struct { session: SessionHead, turn_id: u64, position_base: u64, first_admission: u64 },
+        counted_copy,
+    ).?);
+    // 17. Another window: PARTITION BY, a frame, another function.
+    const window = "rsql: the one window is row_number() OVER (ORDER BY ...), with no PARTITION BY or frame";
+    inline for (comptime .{
+        "row_number() OVER (PARTITION BY turn_id ORDER BY admission_id)",
+        "row_number() OVER (ORDER BY admission_id ROWS UNBOUNDED PRECEDING)",
+        "rank() OVER (ORDER BY admission_id)",
+    }) |numbered| try std.testing.expectEqualStrings(window, comptime writeError(
+        entry_columns ++ "SELECT session_ref,?3+" ++ numbered ++ ",?4,1,?2,admission_id,NULL,NULL,content_id,@now " ++ tied,
+        MessagesCopy,
+        counted_copy,
+    ).?);
+    // 18. A copy's Expect follows its row count.
+    try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT of more than one row declares .counted, so its caller states the count", comptime writeError(messagesCopy("session_ref", tied), MessagesCopy, .{ .exact = .{ .rows = 1, .otherwise = error.ProjectionFailed } }).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT of at most one row declares .exact or .at_most 1", comptime writeError(
+        "INSERT INTO session_revision(session_ref,revision,command_key) SELECT session_ref,revision,?2 FROM session WHERE session_ref=@session(?1)",
+        struct { session: SessionHead, key: []const u8 },
+        counted_copy,
+    ).?);
+    // 19. A counted bind that also assigns what the sender reads, with no sender tie.
+    const Bind = struct { turn_id: u64, session: SessionHead };
+    const counted_bind: Expect = .{ .counted = .{ .otherwise = error.SelectionChanged } };
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError("UPDATE message_admission SET turn_id=?1 WHERE session_ref=@session(?2) AND turn_id IS NULL", Bind, counted_bind));
+    try std.testing.expectEqualStrings(
+        "rsql: message_admission.admitted_at is read by its sender too; an UPDATE of it has the conjunct sender_session_ref=@session(?j) or sender_session_ref IS NULL",
+        comptime writeError("UPDATE message_admission SET turn_id=?1,admitted_at=@now WHERE session_ref=@session(?2) AND turn_id IS NULL", Bind, counted_bind).?,
+    );
 }
