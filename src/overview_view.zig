@@ -3207,8 +3207,10 @@ fn bandLine(painter: *Painter, text: []const u8) error{OutOfMemory}![]const Span
 fn providerBand(painter: *Painter, trouble: Band, now_ms: u64) error{OutOfMemory}![]const Span {
     var buffer: [8]u8 = undefined;
     return bandLine(painter, switch (trouble.trouble) {
-        .sign_in => "Sign-in expired. Run " ++ comptime Provider.codex.login() ++ ".",
-        .api_key => "OpenAI API key rejected. Run " ++ comptime Provider.openai.login() ++ ", then rui host pause.",
+        // A row does not carry its provider, so each names the one provider
+        // with that kind of credential.
+        .sign_in => "Sign-in expired. Run " ++ comptime Provider.onlyWith(.sign_in).login() ++ ".",
+        .api_key => comptime Provider.onlyWith(.api_key).shown() ++ " API key rejected. Run " ++ Provider.onlyWith(.api_key).login() ++ ", then rui host pause.",
         .quota => if (trouble.resets_at) |at|
             try std.fmt.allocPrint(painter.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else

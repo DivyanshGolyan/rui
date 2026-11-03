@@ -999,7 +999,7 @@ pub fn serve(
     host.started_at = @intCast(started_at);
     // Freed after intake and execution are joined: they read and fill it.
     // Pending from the start: execution launches the fetch, or settles it.
-    host.model_lists = .{ .io = io, .allocator = allocator, .providers = served, .openai = if (served.modelListKey() != null) .pending else .table };
+    host.model_lists = .{ .io = io, .allocator = allocator, .providers = served, .live = if (served.modelListKey() != null) .pending else .table };
     defer host.model_lists.deinit();
     var intake: Intake = undefined;
     try intake.init(&host);

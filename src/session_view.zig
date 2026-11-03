@@ -1260,19 +1260,36 @@ test "tool summary hides only complete routine metadata and retains warnings" {
 /// A reason of null shows the saved code itself.
 const Ending = struct { reason: ?[]const u8, next: []const u8 };
 
-fn ending(code: []const u8) Ending {
+comptime {
+    // `ending`'s buffers hold its longest words for every provider.
+    for (std.enums.values(protocol.Provider)) |provider| {
+        std.debug.assert("the  plan does not include this Session's model".len + provider.shown().len <= 128);
+        std.debug.assert("Save a new one with , run rui host pause, then send a message to continue on a new Host.".len + provider.login().len <= 192);
+    }
+}
+
+/// `provider` is the Session's, null until its settings are read; its
+/// buffers hold the provider's name and login when the words need them.
+fn ending(provider: ?protocol.Provider, code: []const u8, reason: *[128]u8, next: *[192]u8) Ending {
     const again = "Send a message to continue.";
+    const name = if (provider) |known| known.shown() else "the provider";
+    const owner = if (provider) |known| known.shown() else "provider";
+    const words = struct {
+        fn of(buffer: []u8, comptime format: []const u8, args: anytype) []const u8 {
+            return std.fmt.bufPrint(buffer, format, args) catch unreachable;
+        }
+    }.of;
     return switch (failure_class.of(code)) {
-        .policy => .{ .reason = "OpenAI refused this request", .next = "Rephrase it, or start a new Session; sending more here will likely be refused again." },
-        .quota => .{ .reason = "the OpenAI account is out of quota", .next = "Add credit or wait for the limit to reset, then send a message to continue." },
-        .plan => .{ .reason = "the OpenAI plan does not include this Session's model", .next = "Use /model in the overview to start a new Session." },
-        .model => .{ .reason = "OpenAI cannot serve this Session's model", .next = "Use /model in the overview to start a new Session." },
-        .sign_in => .{ .reason = "sign-in expired", .next = "Run " ++ comptime protocol.Provider.codex.login() ++ ", then send a message to continue." },
+        .policy => .{ .reason = words(reason, "{s} refused this request", .{name}), .next = "Rephrase it, or start a new Session; sending more here will likely be refused again." },
+        .quota => .{ .reason = words(reason, "the {s} account is out of quota", .{owner}), .next = "Add credit or wait for the limit to reset, then send a message to continue." },
+        .plan => .{ .reason = words(reason, "the {s} plan does not include this Session's model", .{owner}), .next = "Use /model in the overview to start a new Session." },
+        .model => .{ .reason = words(reason, "{s} cannot serve this Session's model", .{name}), .next = "Use /model in the overview to start a new Session." },
+        .sign_in => .{ .reason = "sign-in expired", .next = words(next, "Run {s}, then send a message to continue.", .{(provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()}) },
         // A running Host keeps the key it started with.
-        .api_key => .{ .reason = "the OpenAI API key was rejected", .next = "Save a new one with " ++ comptime protocol.Provider.openai.login() ++ ", run rui host pause, then send a message to continue on a new Host." },
+        .api_key => .{ .reason = words(reason, "the {s} API key was rejected", .{(provider orelse comptime protocol.Provider.onlyWith(.api_key)).shown()}), .next = words(next, "Save a new one with {s}, run rui host pause, then send a message to continue on a new Host.", .{(provider orelse comptime protocol.Provider.onlyWith(.api_key)).login()}) },
         .overflow => .{ .reason = "the conversation no longer fits the model's context", .next = "Start a new Session; more here will not fit either." },
         .refused => .{ .reason = null, .next = "Sending this again will likely fail the same way; change what the error names, or start a new Session." },
-        .unreachable_provider => .{ .reason = "OpenAI could not be reached", .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
+        .unreachable_provider => .{ .reason = words(reason, "{s} could not be reached", .{name}), .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
         .retries_exhausted => .{ .reason = "retries ran out", .next = again },
         .interrupted => .{ .reason = "it was interrupted", .next = again },
         .other => .{ .reason = null, .next = again },
@@ -1281,8 +1298,10 @@ fn ending(code: []const u8) Ending {
 
 /// `report` is the provider's own words, escaped: never trusted as
 /// terminal text.
-fn workEnded(sink: anytype, code: []const u8, report: ?[]const u8) !void {
-    const end = ending(code);
+fn workEnded(sink: anytype, provider: ?protocol.Provider, code: []const u8, report: ?[]const u8) !void {
+    var reason: [128]u8 = undefined;
+    var next: [192]u8 = undefined;
+    const end = ending(provider, code, &reason, &next);
     try sink.feed("\n! Work ended: ");
     try sink.feed(end.reason orelse code);
     if (report) |words| {
@@ -1317,13 +1336,19 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
             try self.out.writeAll(bytes);
         }
     };
-    const cases = [_]struct { code: []const u8, report: ?[]const u8, shown: []const u8 }{
+    const cases = [_]struct { provider: ?protocol.Provider = .openai, code: []const u8, report: ?[]const u8, shown: []const u8 }{
         // The captured cyber_policy refusal: resending is no next step.
         .{ .code = "provider_policy", .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity.", .shown = "\n! Work ended: OpenAI refused this request (cyber_policy: This request has been flagged for potentially high-risk cyber activity.).\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
         .{ .code = "provider_policy", .report = null, .shown = "\n! Work ended: OpenAI refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
         .{ .code = "provider_quota", .report = "insufficient_quota: You exceeded your current quota.", .shown = "\n! Work ended: the OpenAI account is out of quota (insufficient_quota: You exceeded your current quota.).\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
         .{ .code = "provider_model_unavailable", .report = "model_not_found: The model `gpt-x` does not exist.", .shown = "\n! Work ended: OpenAI cannot serve this Session's model (model_not_found: The model `gpt-x` does not exist.).\n  Use /model in the overview to start a new Session.\n" },
-        .{ .code = "provider_http_401", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
+        .{ .provider = .codex, .code = "provider_http_401", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
+        // Each names the Session's provider, or the provider before its
+        // settings are read; a sign-in then names the one that signs in.
+        .{ .provider = .codex, .code = "provider_quota", .report = null, .shown = "\n! Work ended: the ChatGPT account is out of quota.\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
+        .{ .provider = null, .code = "provider_policy", .report = null, .shown = "\n! Work ended: the provider refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
+        .{ .provider = null, .code = "provider_sign_in_required", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
+        .{ .provider = null, .code = "provider_api_key_rejected", .report = null, .shown = "\n! Work ended: the OpenAI API key was rejected.\n  Save a new one with rui auth login openai, run rui host pause, then send a message to continue on a new Host.\n" },
         .{ .code = "provider_api_key_rejected", .report = "Incorrect API key provided", .shown = "\n! Work ended: the OpenAI API key was rejected (Incorrect API key provided).\n  Save a new one with rui auth login openai, run rui host pause, then send a message to continue on a new Host.\n" },
         .{ .code = "ResourceExceeded", .report = null, .shown = "\n! Work ended: the conversation no longer fits the model's context.\n  Start a new Session; more here will not fit either.\n" },
         // Retries keep the last Attempt's words.
@@ -1341,7 +1366,7 @@ test "an ended Turn says why and the one next step that helps, where it ended" {
         var buffer: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try workEnded(&sink, case.code, case.report);
+        try workEnded(&sink, case.provider, case.code, case.report);
         try std.testing.expectEqualStrings(case.shown, out.buffered());
     }
 }
@@ -1389,7 +1414,9 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
 /// Writes a page and returns the newest Message a person or script sent
 /// that it or an earlier read showed while it waited (`Taking.drawn`). The
 /// sink learns each one as it shows (`drew`).
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !queued_line.Drawn {
+/// `provider` is the Session's, for the words of a failed Turn; null until
+/// its settings are read.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !queued_line.Drawn {
     const historical = page.facts.direction == .backward;
     var from = taking.from;
     var drawn = taking.drawn;
@@ -1468,7 +1495,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 var report: ReportBytes = undefined;
                 report.len = 0;
                 if (outcome.content) |reference| try content(requests, store, session, item, reference, &report);
-                try workEnded(sink, outcome.code.slice(), if (outcome.content != null) report.bytes[0..report.len] else null);
+                try workEnded(sink, provider, outcome.code.slice(), if (outcome.content != null) report.bytes[0..report.len] else null);
             },
             .stop => {
                 compact_tools.* = false;
