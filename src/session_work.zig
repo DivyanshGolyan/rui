@@ -489,20 +489,20 @@ test "a settled Session reports its latest outcome unless input came after it" {
 }
 
 test "a quota failure carries its saved reset time and nothing else does" {
-    var turn = endedTurn(.failed, "provider_usage_limit_reached");
-    turn.terminal.?.diagnostic = "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":1792940000}";
-    try expectState(.{ .failed = .{ .since = 500, .code = fixed(max_code_bytes, "provider_usage_limit_reached"), .resets_at = 1792940000 } }, .{ .now_ms = 0, .created_at = 1, .latest = turn });
+    var turn = endedTurn(.failed, "provider_quota");
+    turn.terminal.?.diagnostic = "{\"refusal\":\"quota\",\"resets_at\":1792940000}";
+    try expectState(.{ .failed = .{ .since = 500, .code = fixed(max_code_bytes, "provider_quota"), .resets_at = 1792940000 } }, .{ .now_ms = 0, .created_at = 1, .latest = turn });
     for ([_][]const u8{
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":null}",
-        "{\"provider_code\":\"insufficient_quota\",\"resets_at\":1792940000}",
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":1792940000} ",
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":01}",
+        "{\"refusal\":\"quota\",\"resets_at\":null}",
+        "{\"refusal\":\"plan\",\"resets_at\":1792940000}",
+        "{\"refusal\":\"quota\",\"resets_at\":1792940000} ",
+        "{\"refusal\":\"quota\",\"resets_at\":01}",
         "not json",
     }) |diagnostic| {
         turn.terminal.?.diagnostic = diagnostic;
         try std.testing.expectEqual(@as(?u64, null), (try derive(.{ .now_ms = 0, .created_at = 1, .latest = turn })).state.failed.resets_at);
     }
-    try std.testing.expectEqual(@as(?u64, null), quotaResetsAt("provider_http_401", "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":5}"));
+    try std.testing.expectEqual(@as(?u64, null), quotaResetsAt("provider_http_401", "{\"refusal\":\"quota\",\"resets_at\":5}"));
 }
 
 test "inputs no writer produces are corrupt" {

@@ -99,7 +99,7 @@ fn CloseTurn(comptime otherwise: anyerror) type {
 const record_continuation = rsql.Write(.{
     .sql = "UPDATE turn SET continuation_operation_id=operation_id WHERE turn_id=?1 AND session_ref=@session(?2) AND outcome_code IS NULL " ++
         "AND @distinct(continuation_operation_id,operation_id) AND EXISTS(SELECT 1 FROM model_operation current " ++
-        "WHERE current.operation_id=turn.operation_id AND " ++ continues_without_input_sql ++ ")",
+        "WHERE current.operation_id=turn.operation_id AND current.session_ref=turn.session_ref AND " ++ continues_without_input_sql ++ ")",
     .Args = struct { turn_id: u64, session: rsql.SessionHead },
     .expect = .{ .at_most = 1 },
 });

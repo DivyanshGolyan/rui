@@ -341,9 +341,9 @@ test "refresh rejection bodies preserve distinct safe failure codes" {
     try claimedRecord(policy.fixture_id_token, policy.fixture_access_token, &current);
     var replacement: policy.Record = undefined;
     inline for (.{
-        .{ "refresh_token_expired", error.RefreshTokenExpired, "provider_refresh_token_expired" },
-        .{ "refresh_token_reused", error.RefreshTokenReused, "provider_refresh_token_reused" },
-        .{ "refresh_token_invalidated", error.RefreshTokenInvalidated, "provider_refresh_token_invalidated" },
+        .{ "refresh_token_expired", error.RefreshTokenExpired, "provider_sign_in_refresh_token_expired" },
+        .{ "refresh_token_reused", error.RefreshTokenReused, "provider_sign_in_refresh_token_reused" },
+        .{ "refresh_token_invalidated", error.RefreshTokenInvalidated, "provider_sign_in_refresh_token_invalidated" },
     }) |case| {
         inline for (.{
             "{\"error\":\"" ++ case[0] ++ "\"}",
@@ -536,10 +536,10 @@ test "authentication failure classes name errors their producers raise" {
         try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));
         const failure: anyerror = @field(anyerror, name);
         const expected = switch (failure) {
-            error.RefreshTokenExpired => "provider_refresh_token_expired",
-            error.RefreshTokenReused => "provider_refresh_token_reused",
-            error.RefreshTokenInvalidated => "provider_refresh_token_invalidated",
-            else => "provider_authentication_failed",
+            error.RefreshTokenExpired => "provider_sign_in_refresh_token_expired",
+            error.RefreshTokenReused => "provider_sign_in_refresh_token_reused",
+            error.RefreshTokenInvalidated => "provider_sign_in_refresh_token_invalidated",
+            else => "provider_sign_in_required",
         };
         try std.testing.expectEqualStrings(expected, policy.failureCode(failure));
     }

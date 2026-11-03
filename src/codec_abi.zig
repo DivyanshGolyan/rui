@@ -244,29 +244,22 @@ pub const Headers = struct {
 // range of that slice. What it names can only narrow the failure the Host's
 // status rules give, and every narrowing settles the Attempt as a failure no
 // retry can fix, so a codec can never make a failure retryable. The Host
-// keeps every status rule, decides which narrowing applies, and maps each
-// code through its own closed sets, so a code it does not know narrows
-// nothing.
+// keeps every status rule and decides which narrowing applies; the codec
+// alone knows its provider's codes and names each one it knows as a
+// `Refusal`, so a code it does not know narrows nothing.
 
-/// The longest provider code an `ErrorBody` carries. Every code the Host
-/// knows is shorter, so a codec leaves a longer one out.
-pub const max_code_bytes = 64;
-
-/// A provider code, at least one byte.
-pub const Code = struct {
-    len: u8,
-    bytes: [max_code_bytes]u8 = undefined,
-
-    pub fn of(text: []const u8) Code {
-        std.debug.assert(text.len != 0 and text.len <= max_code_bytes);
-        var code: Code = .{ .len = @intCast(text.len) };
-        @memcpy(code.bytes[0..text.len], text);
-        return code;
-    }
-
-    pub fn slice(self: *const Code) []const u8 {
-        return self.bytes[0..self.len];
-    }
+/// What a provider's error code means for the person, which the Host saves
+/// as `provider_<tag>` whatever the provider called it. The provider's own
+/// code stays in the report.
+pub const Refusal = enum(u8) {
+    /// Out of quota or credit until it resets or is topped up.
+    quota = 0,
+    /// The account's plan does not include the model.
+    plan = 1,
+    /// The content was refused; resending it is refused again.
+    policy = 2,
+    /// The provider does not serve the model.
+    model_unavailable = 3,
 };
 
 /// Where one part of the report is, as a range of the body. With
@@ -283,10 +276,9 @@ pub const ReportRange = struct {
 pub const ErrorBody = struct {
     /// The request exceeds the model's context.
     context_overflow: bool,
-    /// Any other code the error names, which the Host reads as a quota or a
-    /// refusal if it knows it as one.
-    code: ?Code,
-    /// The Unix second a quota resets, when the provider gives one.
+    /// The refusal the error's code names, when the codec knows it as one.
+    refusal: ?Refusal,
+    /// The Unix second a refusal resets, when the provider gives one.
     resets_at: ?u64,
     /// The two parts of the report, `code: message`.
     report: struct { code: ?ReportRange, message: ?ReportRange },
@@ -333,8 +325,7 @@ pub const Reason = enum(u8) {
     incomplete_provider_output,
     temporary_provider_failure,
     context_overflow,
-    /// The provider reported a failure; a refusal code the Host knows makes
-    /// it permanent.
+    /// The provider reported a failure; a refusal makes it permanent.
     reported_provider_failure,
     unsupported_item_status,
     continuation_unavailable,
@@ -448,8 +439,9 @@ pub const Completed = struct {
 
 pub const Failed = struct {
     reason: Reason,
-    /// A reported failure's code, when it is at most `max_code_bytes`.
-    refusal: ?Code,
+    /// The refusal a reported failure's code names, when the codec knows
+    /// it as one.
+    refusal: ?Refusal,
     report: struct { code: ?ReportRange, message: ?ReportRange },
 };
 

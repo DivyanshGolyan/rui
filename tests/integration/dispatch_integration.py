@@ -584,7 +584,8 @@ def compaction_cases(state, processes, endpoints, releases):
 
 def http_quota_cases(state, processes, endpoints):
     """A quota refusal settles once and keeps its code/reset through reopen."""
-    for index, provider_code in enumerate(("usage_limit_reached", "insufficient_quota", "usage_not_included")):
+    for index, (provider_code, refusal) in enumerate((("usage_limit_reached", "quota"), ("insufficient_quota", "quota"),
+                                                     ("usage_not_included", "plan"))):
         reset = 1_800_000_123 + index
         body = json.dumps({"error": {"code": provider_code, "resets_at": reset,
                                     "message": "Provider prose\nstays out of the diagnostic."}}).encode()
@@ -605,7 +606,7 @@ def http_quota_cases(state, processes, endpoints):
         message(state, store, key, session, "do not retry quota failures")
         result = wait_for(lambda: (value := observe(store, key)).get("result") and value,
                           "permanent HTTP quota failure")
-        code = "provider_" + provider_code
+        code = "provider_" + refusal
         assert result["result"]["code"] == code, result
         assert result["processing"]["attempt"] == "1", result
         stop_host(host)
@@ -621,7 +622,7 @@ def http_quota_cases(state, processes, endpoints):
         assert operation["request_id"] == request_id, operation
         assert operation["resolution"]["code"] == code, operation
         diagnostic = operation["resolution"]["content"]["text"]
-        assert json.loads(diagnostic) == {"provider_code": provider_code, "resets_at": reset}, diagnostic
+        assert json.loads(diagnostic) == {"refusal": refusal, "resets_at": reset}, diagnostic
         # The Turn keeps the provider's words as its report instead.
         assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(
             f"{provider_code}: Provider prose stays out of the diagnostic."), report
@@ -657,8 +658,8 @@ def http_quota_cases(state, processes, endpoints):
     # its status code. Either way the Turn keeps the provider's words.
     for status, error, code, words in (
         (404, {"code": "model_not_found", "message": "The model `gpt-x` does not exist."},
-         "provider_model_not_found", "model_not_found: The model `gpt-x` does not exist."),
-        (503, {"code": "cyber_policy", "message": "Flagged."}, "provider_cyber_policy", "cyber_policy: Flagged."),
+         "provider_model_unavailable", "model_not_found: The model `gpt-x` does not exist."),
+        (503, {"code": "cyber_policy", "message": "Flagged."}, "provider_policy", "cyber_policy: Flagged."),
         (400, {"code": None, "type": "invalid_request_error", "message": "Unsupported parameter."},
          "provider_http_400", "invalid_request_error: Unsupported parameter."),
     ):
@@ -826,14 +827,15 @@ def stream_failure_cases(state, processes, endpoints):
                                     "content": [{"type": "output_text", "text": "not accepted"}]}}], done=False)
     cases = []
     for event_type in ("error", "response.failed"):
-        for code, temporary in (("server_is_overloaded", True), ("rate_limit_exceeded", True),
-                                ("future_error", True), ("insufficient_quota", False), ("bio_policy", False)):
+        for code, temporary, saved in (("server_is_overloaded", True, None), ("rate_limit_exceeded", True, None),
+                                       ("future_error", True, None), ("insufficient_quota", False, "provider_quota"),
+                                       ("bio_policy", False, "provider_policy")):
             failure = {"code": code, "message": f"Words for\n{code}."}
             event = {"type": event_type, **failure} if event_type == "error" else {
                 "type": event_type, "response": {"status": "failed", "error": failure}}
             body = partial + encode_sse([event])
             cases.append((event_type + "-" + code, [body, answer] if temporary else [body],
-                          "completed" if temporary else "provider_" + code, 2 if temporary else 1))
+                          "completed" if temporary else saved, 2 if temporary else 1))
     overloaded = encode_sse([{"type": "response.failed", "response": {
         "status": "failed", "error": {"code": "server_is_overloaded"}}}])
     nullable = answer.replace(b'"model":"model-a-served"', b'"model":null').replace(
@@ -874,7 +876,7 @@ def stream_failure_cases(state, processes, endpoints):
         # A failed Turn keeps the provider's own words as its report.
         outcome = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["turns"][0]["outcome"]
         if code.startswith("provider_"):
-            provider_code = code.removeprefix("provider_")
+            provider_code = label.split("-", 1)[1]
             assert outcome["content"] == content_reference(f"{provider_code}: Words for {provider_code}."), (label, outcome)
         elif code == "retry_exhausted":
             assert outcome["content"] == content_reference("server_is_overloaded"), (label, outcome)

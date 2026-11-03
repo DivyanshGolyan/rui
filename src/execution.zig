@@ -64,7 +64,7 @@ pub fn transferDecision(
         } },
         // The code decides, whatever the status: resending cannot fix it.
         .refusal => |refusal| return .{ .fail = .{
-            .code = .{ .named = refusal.failureCode() },
+            .code = .{ .named = transport_policy.refusalCode(refusal) },
             .answered = true,
         } },
         .unreadable => return .{ .fail = .{
@@ -110,17 +110,17 @@ test "only an answered model 401 can claim a forced credential refresh" {
     try std.testing.expect(!rejectsCredential(transferDecision(finished(.temporary_http, 503), .ordinary).fail));
 }
 
-const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .refusal = .model_not_found }, .{ .unreadable = error.TestUnreadable } };
+const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .refusal = .model_unavailable }, .{ .unreadable = error.TestUnreadable } };
 
 test "HTTP quota refusal overrides rate limit retry evidence and retains reset detail" {
-    const codes = [_][]const u8{ "provider_usage_limit_reached", "provider_insufficient_quota", "provider_usage_not_included" };
+    const refusals = [_]transport_policy.Refusal{ .quota, .plan };
+    const codes = [_][]const u8{ "provider_quota", "provider_plan" };
     const details = [_][]const u8{
-        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":1800000123}",
-        "{\"provider_code\":\"insufficient_quota\",\"resets_at\":1800000123}",
-        "{\"provider_code\":\"usage_not_included\",\"resets_at\":1800000123}",
+        "{\"refusal\":\"quota\",\"resets_at\":1800000123}",
+        "{\"refusal\":\"plan\",\"resets_at\":1800000123}",
     };
-    for (transport_policy.Quota.codes, codes, details) |code, expected, detail| {
-        const quota: transport_policy.Quota = .{ .code = code, .resets_at = 1_800_000_123 };
+    for (refusals, codes, details) |known, expected, detail| {
+        const quota: transport_policy.Quota = .{ .refusal = known, .resets_at = 1_800_000_123 };
         const refusal: ErrorResponse = .{ .quota = quota };
         const decision = transferDecision(.{ .transport_finished = .{
             .disposition = .temporary_http,
@@ -143,8 +143,8 @@ test "HTTP quota refusal overrides rate limit retry evidence and retains reset d
         try std.testing.expect(connection.quota == null);
     }
     var diagnostic: [512]u8 = undefined;
-    const absent: transport_policy.Quota = .{ .code = .usage_limit_reached };
-    try std.testing.expectEqualStrings("{\"provider_code\":\"usage_limit_reached\",\"resets_at\":null}", absent.format(&diagnostic));
+    const absent: transport_policy.Quota = .{ .refusal = .quota };
+    try std.testing.expectEqualStrings("{\"refusal\":\"quota\",\"resets_at\":null}", absent.format(&diagnostic));
 }
 
 test "transfer decisions exhaust transport dispositions and error response precedence" {
@@ -180,7 +180,7 @@ test "transfer decisions exhaust transport dispositions and error response prece
             const unreadable = case.answered and response == .unreadable;
             const refused = case.answered and response == .refusal;
             const temporary = case.temporary and !overflow and !unreadable and !refused;
-            const expected_code = if (overflow) "provider_context_overflow" else if (unreadable) "response_read_failed" else if (refused) "provider_model_not_found" else case.code;
+            const expected_code = if (overflow) "provider_context_overflow" else if (unreadable) "response_read_failed" else if (refused) "provider_model_unavailable" else case.code;
             try std.testing.expectEqualStrings(expected_code, failure.codeText(&buffer));
             try std.testing.expectEqual(case.answered, failure.answered);
             try std.testing.expectEqual(overflow, failure.kind == .context_overflow);

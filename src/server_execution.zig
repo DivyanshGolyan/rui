@@ -52,7 +52,7 @@ const traceActionControl = server_host.traceActionControl;
 const traceActionControlOutcome = server_host.traceActionControlOutcome;
 const traceActionDeadline = server_host.traceActionDeadline;
 const testTransition = server_host.testTransition;
-const traceCodexTransfer = server_host.traceCodexTransfer;
+const traceTransfer = server_host.traceTransfer;
 const pause = server_host.pause;
 const bashReclaimHeld = server_host.bashReclaimHeld;
 const retryRecoveryHeld = server_host.retryRecoveryHeld;
@@ -401,7 +401,7 @@ const ModelListWork = struct {
 
 /// The codec whose headers the Reactor observes: every provider's, so far.
 const observed_codec = blk: {
-    const codec = protocol.Provider.codex.codec();
+    const codec = std.enums.values(protocol.Provider)[0].codec();
     for (std.enums.values(protocol.Provider)) |served| {
         if (served.codec() != codec) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a second codec");
     }
@@ -1814,7 +1814,7 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
-    traceCodexTransfer(host, &active.transfer, owner.binding);
+    traceTransfer(host, &active.transfer, owner.binding);
     var error_response: execution.ErrorResponse = .ordinary;
     var answered_response: ?provider.SealedResponse = null;
     var http_status: ?u16 = null;
