@@ -1091,7 +1091,7 @@ const insert_command = rsql.Write(.{
         key: []const u8,
         kind: u8,
         target: []const u8,
-        digest: *const [32]u8,
+        digest: [32]u8,
         primary_content_id: ?u64,
         secondary_content_id: ?u64,
         accepted: bool,
@@ -1104,8 +1104,8 @@ const insert_command = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Queues saving the command `key` with its `answer`, which, like `key`,
-/// `target` and `digest`, must outlive the round.
+/// Queues saving the command `key` with its `answer`, which, like `key`
+/// and `target`, must outlive the round; `digest` is copied.
 pub fn queueCommand(
     a: anytype,
     key: []const u8,
@@ -1120,7 +1120,7 @@ pub fn queueCommand(
         .key = key,
         .kind = kindCode(kind),
         .target = target,
-        .digest = digest,
+        .digest = digest.*,
         .primary_content_id = primary_content_id,
         .secondary_content_id = secondary_content_id,
         .accepted = answer.accepted,

@@ -105,14 +105,14 @@ pub const ContentReader = struct {
 
 const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
-    .Args = struct { digest: *const [32]u8, length: u64, private: bool },
+    .Args = struct { digest: [32]u8, length: u64, private: bool },
     .Row = struct { content_id: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_content = rsql.Write(.{
     .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
-    .Args = struct { content_id: u64, digest: *const [32]u8, length: u64, private: bool },
+    .Args = struct { content_id: u64, digest: [32]u8, length: u64, private: bool },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -144,9 +144,9 @@ pub const empty_content: Import = blk: {
 };
 
 /// Queues the read that finds `value`'s row; `importSlot` follows its round.
-/// `value` must outlive the round, which reads its digest in place.
+/// `value` must outlive the round, which defines its `found`.
 pub fn lookup(a: anytype, value: *Import) void {
-    a.read(lookup_content, .{ .digest = &value.digest, .length = value.length, .private = value.private }, &value.found);
+    a.read(lookup_content, .{ .digest = value.digest, .length = value.length, .private = value.private }, &value.found);
 }
 
 /// Two values' rows in one statement, for a round that needs both, where
@@ -154,21 +154,21 @@ pub fn lookup(a: anytype, value: *Import) void {
 const lookup_pair = rsql.Read(.{
     .sql = "SELECT (SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3) AS first," ++
         "(SELECT content_id FROM content WHERE digest=?4 AND byte_length=?5 AND private=?6) AS second",
-    .Args = struct { first_digest: *const [32]u8, first_length: u64, first_private: bool, second_digest: *const [32]u8, second_length: u64, second_private: bool },
+    .Args = struct { first_digest: [32]u8, first_length: u64, first_private: bool, second_digest: [32]u8, second_length: u64, second_private: bool },
     .Row = struct { first: ?rsql.Positive, second: ?rsql.Positive },
     .cardinality = .one,
 });
 
 pub const Pair = lookup_pair.Result;
 
-/// `lookup` of two values at once; `foundPair` follows its round. Both
-/// values and `rows` must outlive the round.
+/// `lookup` of two values at once; `foundPair` follows its round. `rows`
+/// must outlive the round.
 pub fn lookupPair(a: anytype, first: *const Import, second: *const Import, rows: *Pair) void {
     a.read(lookup_pair, .{
-        .first_digest = &first.digest,
+        .first_digest = first.digest,
         .first_length = first.length,
         .first_private = first.private,
-        .second_digest = &second.digest,
+        .second_digest = second.digest,
         .second_length = second.length,
         .second_private = second.private,
     }, rows);
@@ -193,26 +193,26 @@ fn adoptInserted(a: anytype, value: *Import) void {
 /// After `lookup`'s round: the found row, the row this Access already
 /// queued for an equal identity through any value, or a new row queued
 /// with a Host identity and a zeroed payload of the right length, which
-/// the Access records. `value` must outlive the round that writes it.
+/// the Access records.
 pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
     adoptInserted(a, value);
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try a.identity(.content_id);
-    a.write(insert_content, .{ .content_id = id, .digest = &value.digest, .length = value.length, .private = value.private });
+    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
     a.recordInserted(&value.digest, value.length, value.private, id);
     value.found = .{ .content_id = .of(id) };
     return .{ .id = @intCast(id), .existing = false };
 }
 
-/// Queues a new row for (`digest`, `length`, `private`) with a Host
-/// identity and a zeroed payload, and returns its id. It records nothing
-/// on the Access: it is for a caller that keeps its own table of the
-/// identities it imports, as model settlement's batches do, where
-/// `importSlot` records each row in the Access's `max_inserted` table for
-/// an entry point's few values. `digest` must outlive the round.
-pub fn insertRow(a: anytype, digest: *const [32]u8, length: u64, private: bool) !u64 {
+/// Queues a new row for `value`'s identity with a Host identity and a
+/// zeroed payload, and returns its id. It records nothing on the Access:
+/// it is for a caller that keeps its own table of the identities it
+/// imports, as model settlement's batches do, where `importSlot` records
+/// each row in the Access's `max_inserted` table for an entry point's few
+/// values. Its `found` is not read.
+pub fn insertRow(a: anytype, value: *const Import) !u64 {
     const id = try a.identity(.content_id);
-    a.write(insert_content, .{ .content_id = id, .digest = digest, .length = length, .private = private });
+    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
     return id;
 }
 
@@ -339,7 +339,7 @@ pub fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata
 fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
     const statement = try store_core.cachedTyped(self, lookup_content);
     defer sqlite.resetCached(statement);
-    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = &reference.digest, .length = reference.length, .private = private }, 0, &.{});
+    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = reference.digest, .length = reference.length, .private = private }, 0);
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
     var row: lookup_content.Row = undefined;
     try sqlite.decodeRow(lookup_content.Row, statement, &row);

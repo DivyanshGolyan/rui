@@ -206,7 +206,8 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
 }
 
 /// Settles `binding` with `items`, raw provider items judged in order, of
-/// which the last is a message whose whole text is `answer`.
+/// which the last message's whole text is `answer`; its function calls
+/// count as the output's calls.
 pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, answer: []const u8) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const source = try tmp.dir.createFile(std.testing.io, "items-output", .{ .read = true, .truncate = true });
@@ -218,10 +219,14 @@ pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding:
     var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "items-metadata", .{ .used = &used, .limit = 1 << 20 }, false, &retained);
     defer metadata.deinit();
     var offset: u64 = 0;
+    var answer_item: ?u64 = null;
+    var calls: u64 = 0;
     for (items, 0..) |bytes, ordinal| {
         try source.writeStreamingAll(std.testing.io, bytes);
         try source.sync(std.testing.io);
-        _ = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
+        const record = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
+        if (record.kind == .message) answer_item = ordinal;
+        if (record.kind == .function_call) calls += 1;
         offset += bytes.len;
     }
     try metadata.sealForRead();
@@ -230,8 +235,8 @@ pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding:
         .source_length = offset,
         .metadata = metadata.file,
         .item_count = items.len,
-        .call_count = 0,
-        .answer_item_ordinal = items.len - 1,
+        .call_count = calls,
+        .answer_item_ordinal = answer_item,
         .answer_length = answer.len,
         .answer_digest = protocol.contentDigest(answer),
         .response_id = .{},

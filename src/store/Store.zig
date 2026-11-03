@@ -88,6 +88,8 @@ pub const Store = struct {
     // Entry.release closes the read transaction before unlocking, including
     // errors and yielded historical scans. Logical readers cannot pin the WAL.
     read_blob: ContentBlob = .{},
+    /// Which use holds the out-of-line scratch in this entry point.
+    scratch_use: ScratchUse = .none,
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) struct { read: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0), blob: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
 
@@ -322,21 +324,29 @@ pub const Store = struct {
         self.* = undefined;
     }
 
-    /// Model settlement's batch tables, at one address the Store owns
-    /// beside its change ring, so no frame on the engine thread holds
-    /// them. Only `settleModelSuccess` uses them, under the mutex.
-    pub fn settlementBatches(self: *Store) *model_settlement_domain.SettlementBatches {
-        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-        return &owned.settlement_batches;
+    /// Model settlement's batch table, in the Store's scratch beside its
+    /// change ring (`OutOfLine`), so no frame on the engine thread holds
+    /// it. Only `settleModelSuccess` uses it.
+    pub fn settlementBatch(self: *Store) *model_settlement_domain.Batch {
+        return @ptrCast(self.scratch(.settlement));
     }
 
-    /// What a configure reads, over 4.6 KB, at one address the Store owns
-    /// beside its change ring, so no Host stack frame holds it. A
-    /// configure or a creating Message uses it under the mutex, and no
-    /// entry point runs both.
+    /// What a configure reads, over 4.6 KB, in the Store's scratch beside
+    /// its change ring (`OutOfLine`), so no Host stack frame holds it. A
+    /// configure or a creating Message uses it.
     pub fn configurationReads(self: *Store) *configuration_domain.ConfigurationReads {
+        return @ptrCast(self.scratch(.configuration));
+    }
+
+    /// The scratch for `use`. Safe builds check that the caller holds the
+    /// mutex, and that no other use took the scratch in this entry point:
+    /// the two share its bytes. `Entry.release` frees it.
+    fn scratch(self: *Store, use: ScratchUse) *align(scratch_align) [scratch_bytes]u8 {
+        std.debug.assert(self.mutex.state.load(.monotonic) != .unlocked);
+        std.debug.assert(self.scratch_use == .none or self.scratch_use == use);
+        self.scratch_use = use;
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-        return &owned.configuration_reads;
+        return &owned.scratch;
     }
 
     pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
@@ -879,14 +889,31 @@ comptime {
 /// The Store's state too large for the frame that holds it.
 const OutOfLine = struct {
     ring: change_ring.Ring,
-    configuration_reads: configuration_domain.ConfigurationReads,
-    settlement_batches: model_settlement_domain.SettlementBatches,
+    scratch: Scratch align(scratch_align),
 };
 
-/// The change ring, and `Store.configurationReads` beside it, in pages of
-/// their own, which the kernel faults in only as they are written: an idle
-/// Host keeps none of the ring's 88 KiB resident. Not `Allocator.create`,
-/// whose ReleaseSafe 0xAA fill would write every page now.
+const ScratchUse = enum(u8) { none, configuration, settlement };
+
+/// One entry point's large state: a configure's reads or a settlement's
+/// batch, which no entry point holds at once (`Store.scratch` checks that
+/// in safe builds). Bytes, not a union, so it is no bigger than the larger
+/// use and needs no tag of its own: `Store.scratch_use` is its tag.
+const Scratch = [scratch_bytes]u8;
+const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
+const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
+
+comptime {
+    // Settlement's table shares the configure scratch, so it adds no byte.
+    std.debug.assert(@sizeOf(model_settlement_domain.Batch) <= @sizeOf(configuration_domain.ConfigurationReads));
+}
+
+/// The change ring, and the scratch beside it, in pages of their own,
+/// which the kernel faults in only as they are written: an idle Host keeps
+/// none of the ring's 88 KiB resident. A configure, a creating Message or
+/// a success settlement writes the scratch's pages once, and they stay
+/// resident for the Store's life: about 5 KiB, the configure reads' size.
+/// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
+/// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
     const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(OutOfLine), .of(OutOfLine), @returnAddress()) orelse return error.OutOfMemory;
     const ring: *change_ring.Ring = &@as(*OutOfLine, @ptrCast(@alignCast(bytes))).ring;
@@ -1017,6 +1044,7 @@ pub const Entry = struct {
     pub fn release(self: Entry) void {
         const store = self.store;
         store.read_blob.close();
+        store.scratch_use = .none;
         if (@import("builtin").is_test) store.statements.assertIdle();
         // Counts autocommit and explicit-transaction writes alike. A
         // rolled-back change touched everything: never a missed change.

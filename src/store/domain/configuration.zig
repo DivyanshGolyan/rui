@@ -354,7 +354,7 @@ const saved_session = rsql.Read(.{
 const creation_facts = rsql.Read(.{
     .sql = "SELECT (SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1) AS workspace_key," ++
         "EXISTS(SELECT 1 FROM session WHERE session_ref=?3) AS taken",
-    .Args = struct { digest: *const [32]u8, workspace: []const u8, session: []const u8 },
+    .Args = struct { digest: [32]u8, workspace: []const u8, session: []const u8 },
     .Row = struct { workspace_key: ?rsql.Positive, taken: bool },
     .cardinality = .one,
 });
@@ -379,7 +379,7 @@ const insert_session = rsql.Write(.{
         reasoning_effort: ?protocol.ReasoningEffort,
         label: ?[]const u8,
         codec: []const u8,
-        digest: *const [32]u8,
+        digest: [32]u8,
         created_seq: u64,
         workspace_key: u64,
     },
@@ -405,7 +405,7 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .reasoning_effort = next.reasoning_effort,
         .label = if (next.label) |*label| label.slice() else null,
         .codec = @tagName(next.provider.codec()),
-        .digest = workspace_digest,
+        .digest = workspace_digest.*,
         .created_seq = created_seq,
         .workspace_key = head.workspace_key.get(),
     });
@@ -508,7 +508,7 @@ pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *con
 }
 
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
-    a.read(creation_facts, .{ .digest = &reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
+    a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
 }
 
 /// After `prepareConfiguration`'s round: decides the configuration, and

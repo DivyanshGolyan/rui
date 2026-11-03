@@ -1193,7 +1193,7 @@ const TestingRound = struct {
     });
     const insert_content = rsql.Write(.{
         .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),0)",
-        .Args = struct { content_id: u64, digest: *const [32]u8, length: u64 },
+        .Args = struct { content_id: u64, digest: [32]u8, length: u64 },
         .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
     });
     const date_session = rsql.Write(.{
@@ -1220,7 +1220,7 @@ const TestingRound = struct {
         const first = try positions.take(2);
         const content_id = try a.identity(.content_id);
         const digest = protocol.contentDigest(text);
-        a.write(insert_content, .{ .content_id = content_id, .digest = &digest, .length = text.len });
+        a.write(insert_content, .{ .content_id = content_id, .digest = digest, .length = text.len });
         a.writeContent(content_id, text);
         a.write(date_session, .{ .session = loaded.head, .revision = revision });
         try a.commit();
@@ -1248,12 +1248,12 @@ test "a content sink opens only a content id its Access took, stepping its queue
     const before = try store_core.takeIdentity(&storage, .content_id);
     // Distinct identities, since content is unique by identity.
     const digests = [3][32]u8{ protocol.contentDigest("sink0"), protocol.contentDigest("sink1"), protocol.contentDigest("sink2") };
-    a.write(TestingRound.insert_content, .{ .content_id = before, .digest = &digests[0], .length = 4 });
+    a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
     const first = try a.identity(.content_id);
-    a.write(TestingRound.insert_content, .{ .content_id = first, .digest = &digests[1], .length = 4 });
+    a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
     const never = try a.identity(.content_id);
     const last = try a.identity(.content_id);
-    a.write(TestingRound.insert_content, .{ .content_id = last, .digest = &digests[2], .length = 4 });
+    a.write(TestingRound.insert_content, .{ .content_id = last, .digest = digests[2], .length = 4 });
     try std.testing.expectEqual(first + 2, last);
     // Refused: 0, a committed row, one taken in this transaction before
     // this Access's first, and one past its last.
@@ -1290,7 +1290,7 @@ test "a round queues one statement any number of times, an engine pass before ea
     for (&digests, &ids, 0..) |*digest, *id, index| {
         digest.* = protocol.contentDigest(&.{@intCast(index)});
         id.* = try a.identity(.content_id);
-        a.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = digest, .length = index + 1 });
+        a.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = digest.*, .length = index + 1 });
     }
     try a.run();
     try std.testing.expectEqual(1, a.rounds);
@@ -1317,7 +1317,7 @@ test "a full queue takes an engine pass and the round still counts once" {
     // Before engine passes the ninth entry was RoundFull.
     const digest = protocol.contentDigest("ninefold");
     const id = try a.identity(.content_id);
-    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 8 });
+    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 8 });
     for (0..8) |index| a.writeContent(id, "ninefold"[index..][0..1]);
     try a.run();
     try std.testing.expectEqual(1, a.rounds);
@@ -1395,7 +1395,7 @@ test "abandoning an Access that has ended runs nothing" {
         defer a.deinit();
         const id = try a.identity(.content_id);
         const digest = protocol.contentDigest("ended");
-        a.write(TestingRound.insert_content, .{ .content_id = id, .digest = &digest, .length = 5 });
+        a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 5 });
         if (committed) try a.commit() else {
             try a.run();
             try a.abandon(.{});
@@ -5389,6 +5389,44 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
         try std.testing.expectEqual(18, try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
         try expectDenseSessionPositions(&storage, session.slice());
     }
+}
+
+test "a full item batch followed by calls keeps every queued row's bound bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "full-batch-calls-config");
+    try submitTestMessage(&storage, &tmp, "full-batch-calls-input", "full-batch-calls-key", session.slice(), "full");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Sixteen function_call items fill the first item batch and no usage
+    // record follows, so the next item batch is empty and the call batch
+    // is collected before any round steps the last item's queued row.
+    var item_ids: [16][16]u8 = undefined;
+    var call_ids: [16][16]u8 = undefined;
+    var calls: [16]TestingCall = undefined;
+    for (&calls, &item_ids, &call_ids, 0..) |*call, *item_id, *call_id, index| {
+        const id = try std.fmt.bufPrint(call_id, "call-{d}", .{index});
+        call.* = .{
+            .item_id = try std.fmt.bufPrint(item_id, "item-{d}", .{index}),
+            .name = "bash",
+            .encoded_call_id = id,
+            .decoded_call_id = id,
+            .encoded_arguments = "{\\\"description\\\":\\\"Run it\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run it\",\"cmd\":\"true\",\"timeout_ms\":null}",
+        };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
+    const digest = protocol.contentDigest("item-15");
+    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=15 AND item_id_digest=?1");
+    defer sqlite.resetCached(statement);
+    try sqlite.bindBlob(statement, 1, &digest);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+    try std.testing.expectEqual(1, c.sqlite3_column_int64(statement, 0));
+    try std.testing.expectEqual(16, try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
+    try expectDenseSessionPositions(&storage, session.slice());
 }
 
 test "equal texts in many batches share one row, and entries keep item order" {

@@ -528,53 +528,30 @@ fn parameters(comptime first: usize, comptime count: usize) []const u8 {
     }
 }
 
-/// Sixteen digests, in the order an IN list binds them.
-const Digests = struct {
-    d1: *const [32]u8,
-    d2: *const [32]u8,
-    d3: *const [32]u8,
-    d4: *const [32]u8,
-    d5: *const [32]u8,
-    d6: *const [32]u8,
-    d7: *const [32]u8,
-    d8: *const [32]u8,
-    d9: *const [32]u8,
-    d10: *const [32]u8,
-    d11: *const [32]u8,
-    d12: *const [32]u8,
-    d13: *const [32]u8,
-    d14: *const [32]u8,
-    d15: *const [32]u8,
-    d16: *const [32]u8,
-};
-
-/// An Operation and sixteen digests.
-const OperationDigests = struct {
-    operation_id: u64,
-    d1: *const [32]u8,
-    d2: *const [32]u8,
-    d3: *const [32]u8,
-    d4: *const [32]u8,
-    d5: *const [32]u8,
-    d6: *const [32]u8,
-    d7: *const [32]u8,
-    d8: *const [32]u8,
-    d9: *const [32]u8,
-    d10: *const [32]u8,
-    d11: *const [32]u8,
-    d12: *const [32]u8,
-    d13: *const [32]u8,
-    d14: *const [32]u8,
-    d15: *const [32]u8,
-    d16: *const [32]u8,
-};
+/// Args of the `u64` fields `lead`, then sixteen digests `d1..d16`, bound
+/// by value in the order an IN list binds them.
+fn DigestArgs(comptime lead: []const [:0]const u8) type {
+    @setEvalBranchQuota(10_000);
+    const count = lead.len + lookup_width;
+    var names: [count][:0]const u8 = undefined;
+    var types: [count]type = undefined;
+    for (lead, 0..) |name, index| {
+        names[index] = name;
+        types[index] = u64;
+    }
+    for (0..lookup_width) |index| {
+        names[lead.len + index] = std.fmt.comptimePrint("d{d}", .{index + 1});
+        types[lead.len + index] = [32]u8;
+    }
+    return @Struct(.auto, null, &names, &types, &@splat(.{}));
+}
 
 /// Fills Args' `d1..d16` with `digests` in order, the first repeated in
 /// the slots it leaves: a repeated digest adds no row to an IN list.
 fn bindDigests(args: anytype, digests: []const *const [32]u8) void {
     std.debug.assert(digests.len != 0 and digests.len <= lookup_width);
     inline for (1..lookup_width + 1) |number| {
-        @field(args, std.fmt.comptimePrint("d{d}", .{number})) = if (number <= digests.len) digests[number - 1] else digests[0];
+        @field(args, std.fmt.comptimePrint("d{d}", .{number})) = (if (number <= digests.len) digests[number - 1] else digests[0]).*;
     }
 }
 
@@ -583,17 +560,19 @@ fn bindDigests(args: anytype, digests: []const *const [32]u8) void {
 /// row: `n` distinct digests return at most `2n` rows.
 const content_batch = rsql.Read(.{
     .sql = "SELECT content_id,digest,byte_length,private FROM content WHERE digest IN (" ++ parameters(1, lookup_width) ++ ")",
-    .Args = Digests,
+    .Args = DigestArgs(&.{}),
     .Row = struct { content_id: rsql.Positive, digest: [32]u8, byte_length: u64, private: bool },
     .cardinality = .each,
 });
 
 /// The item ids among sixteen that the Operation already saved: one row
-/// each at most, as `(operation_id, item_id_digest)` is unique.
+/// each at most, as `(operation_id, item_id_digest)` is unique. Read with
+/// `readEach`, so `DuplicateVisitor` keeps the lowest batch index any row
+/// names, which `.optional` could not.
 const duplicate_items = rsql.Read(.{
-    .sql = "SELECT item_id_digest FROM model_output_item WHERE operation_id=?1 AND item_id_digest IN (" ++ parameters(2, lookup_width) ++ ")",
-    .Args = OperationDigests,
-    .Row = struct { item_id_digest: [32]u8 },
+    .sql = "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1 AND item_id_digest IN (" ++ parameters(2, lookup_width) ++ ")",
+    .Args = DigestArgs(&.{"operation_id"}),
+    .Row = DuplicateRow,
     .cardinality = .each,
 });
 
@@ -603,10 +582,12 @@ const duplicate_items = rsql.Read(.{
 const duplicate_calls = rsql.Read(.{
     .sql = "SELECT c.digest FROM model_tool_call t JOIN content c ON c.content_id=t.call_id_content_id " ++
         "WHERE t.operation_id=?1 AND c.private=0 AND c.digest IN (" ++ parameters(2, lookup_width) ++ ")",
-    .Args = OperationDigests,
-    .Row = struct { digest: [32]u8 },
+    .Args = DigestArgs(&.{"operation_id"}),
+    .Row = DuplicateRow,
     .cardinality = .each,
 });
+
+const DuplicateRow = struct { digest: [32]u8 };
 
 const insert_part = rsql.Write(.{
     .sql = "INSERT INTO model_output_part(operation_id,item_ordinal,part_ordinal,part_array,part_kind,text_length,text_content_id,extras_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -625,13 +606,13 @@ const insert_item = rsql.Write(.{
         position: u64,
         kind: u64,
         attempt_ordinal: u64,
-        id_digest: *const [32]u8,
+        id_digest: [32]u8,
         omits_reasoning_text: bool,
         phase: u64,
         extras_content_id: u64,
         part_count: u64,
         message_content_id: ?u64,
-        description: ?[]const u8,
+        description: ?tool_catalog.Description,
         call_failed: bool,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -659,8 +640,8 @@ const insert_call = rsql.Write(.{
         rejection_content_id: ?u64,
         acceptance_position: ?u64,
         action_kind: ?u64,
-        description: ?[]const u8,
-        field_metadata: *const [120]u8,
+        description: ?tool_catalog.Description,
+        field_metadata: [120]u8,
         session: rsql.SessionHead,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -703,9 +684,10 @@ const resolve_success = rsql.Write(.{
 const batch_items = lookup_width;
 /// The digests one `content_batch` statement binds.
 const lookup_width = 16;
-/// The most distinct content identities one batch looks up, in three
-/// `content_batch` statements.
-const batch_identities = 3 * lookup_width;
+/// The most distinct content identities one batch looks up, in four
+/// `content_batch` statements: a call imports at most four (its name,
+/// call_id, arguments and rejection text), so sixteen calls always fit.
+const batch_identities = 4 * lookup_width;
 
 /// A content identity a batch imports, and its row: 0 until the lookup
 /// round found one or the batch inserted one.
@@ -713,6 +695,14 @@ const Identity = struct {
     digest: [32]u8,
     length: u64,
     row: packed struct(u64) { content_id: u63, private: bool },
+
+    fn of(value: *const content_domain.Import) Identity {
+        return .{ .digest = value.digest, .length = value.length, .row = .{ .content_id = 0, .private = value.private } };
+    }
+
+    fn names(identity: *const Identity, value: *const content_domain.Import) bool {
+        return identity.length == value.length and identity.row.private == value.private and std.mem.eql(u8, &identity.digest, &value.digest);
+    }
 };
 
 /// Matches one `content_batch` statement's rows to its batch's identities.
@@ -729,7 +719,7 @@ const LookupVisitor = struct {
             return false;
         }
         visitor.rows += 1;
-        if (visitor.batch.find(&row.digest, row.byte_length, row.private)) |identity| identity.row.content_id = @intCast(row.content_id.get());
+        if (visitor.batch.find(&.{ .digest = row.digest, .length = row.byte_length, .private = row.private })) |identity| identity.row.content_id = @intCast(row.content_id.get());
         return true;
     }
 };
@@ -741,15 +731,14 @@ const DuplicateVisitor = struct {
     overflow: bool = false,
     lowest: ?u8 = null,
 
-    pub fn visit(visitor: *DuplicateVisitor, row: anytype) bool {
+    pub fn visit(visitor: *DuplicateVisitor, row: *const DuplicateRow) bool {
         if (visitor.rows == batch_items) {
             visitor.overflow = true;
             return false;
         }
         visitor.rows += 1;
-        const digest: *const [32]u8 = &@field(row.*, @typeInfo(@TypeOf(row.*)).@"struct".field_names[0]);
         for (visitor.batch.digests[0..visitor.batch.digest_count], 0..) |*candidate, index| {
-            if (!std.mem.eql(u8, candidate, digest)) continue;
+            if (!std.mem.eql(u8, candidate, &row.digest)) continue;
             if (visitor.lowest == null or index < visitor.lowest.?) visitor.lowest = @intCast(index);
             break;
         }
@@ -759,7 +748,9 @@ const DuplicateVisitor = struct {
 
 /// One stretch of the output's metadata, imported in two rounds: the round
 /// that looks up its content and duplicates, then the round that writes it.
-const Batch = struct {
+/// Every row a batch writes binds its values by value, so the next batch is
+/// collected into the same table as soon as this one's rows are queued.
+pub const Batch = struct {
     kind: enum { items, calls },
     /// The metadata records it covers: `[start, end)`.
     start: u64,
@@ -774,8 +765,6 @@ const Batch = struct {
     /// Each item's id digest, or each call's call_id digest, in order.
     digests: [batch_items][32]u8,
     digest_count: u8,
-    /// Each call's catalog facts, inspected while collecting.
-    calls: [batch_items]anyerror!tool_catalog.CallFacts,
     lookups: [batch_identities / lookup_width]LookupVisitor,
     lookup_count: u8,
     duplicates: DuplicateVisitor,
@@ -801,18 +790,16 @@ const Batch = struct {
         batch.last = true;
     }
 
-    fn find(batch: *Batch, digest: *const [32]u8, length: u64, private: bool) ?*Identity {
-        for (batch.identities[0..batch.identity_count]) |*identity| {
-            if (identity.length == length and identity.row.private == private and std.mem.eql(u8, &identity.digest, digest)) return identity;
-        }
+    fn find(batch: *Batch, value: *const content_domain.Import) ?*Identity {
+        for (batch.identities[0..batch.identity_count]) |*identity| if (identity.names(value)) return identity;
         return null;
     }
 
     /// Adds an identity unless the batch has it; false when it is full.
-    fn add(batch: *Batch, digest: *const [32]u8, length: u64, private: bool) bool {
-        if (batch.find(digest, length, private) != null) return true;
+    fn add(batch: *Batch, value: content_domain.Import) bool {
+        if (batch.find(&value) != null) return true;
         if (batch.identity_count == batch_identities) return false;
-        batch.identities[batch.identity_count] = .{ .digest = digest.*, .length = length, .row = .{ .content_id = 0, .private = private } };
+        batch.identities[batch.identity_count] = .of(&value);
         batch.identity_count += 1;
         return true;
     }
@@ -822,7 +809,7 @@ const Batch = struct {
         var first: u8 = 0;
         while (first < batch.identity_count) : (first += lookup_width) {
             const count = @min(lookup_width, batch.identity_count - first);
-            var args: Digests = undefined;
+            var args: content_batch.Args = undefined;
             var pointers: [lookup_width]*const [32]u8 = undefined;
             var distinct: u8 = 0;
             for (batch.identities[first..][0..count], 0..) |*identity, index| {
@@ -840,7 +827,7 @@ const Batch = struct {
             a.readEach(content_batch, args, 2 * @as(u64, distinct) + 1, visitor);
         }
         if (batch.digest_count == 0) return;
-        var args: OperationDigests = undefined;
+        var args: duplicate_items.Args = undefined;
         args.operation_id = operation_id;
         var pointers: [batch_items]*const [32]u8 = undefined;
         for (batch.digests[0..batch.digest_count], 0..) |*digest, index| pointers[index] = digest;
@@ -867,37 +854,22 @@ const Batch = struct {
     }
 };
 
-/// What one batch's written rows bind beyond the batch: an item's or a
-/// call's description, and a call's field certificate. One set serves the
-/// batch being written; its round runs before the next batch writes.
-const WriteSlot = struct {
-    description: tool_catalog.Description,
-    field_metadata: [120]u8,
-};
-
-/// Settlement's batch storage, the Store's (`Store.settlementBatches`):
-/// two batches, since one round writes one batch and looks up the next,
-/// and the write slots of the batch being written.
-pub const SettlementBatches = struct {
-    batches: [2]Batch,
-    slots: [batch_items]WriteSlot,
-};
-
 /// The identity a metadata record imports, if any, as main imports it:
 /// a decoded part text, a bag, a message text, the usage record, and a
 /// call's name, call_id and arguments.
-fn recordIdentity(record: *const OutputMetadataRecord) ?struct { length: u64, private: bool } {
-    return switch (record.tag) {
+fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
+    const length: u64, const private = switch (record.tag) {
         .part => switch (record.part_kind) {
-            .summary_text, .reasoning_text => .{ .length = record.decoded_length, .private = true },
-            .opaque_block, .output_text, .refusal => null,
+            .summary_text, .reasoning_text => .{ record.decoded_length, true },
+            .opaque_block, .output_text, .refusal => return null,
         },
-        .extras => .{ .length = record.decoded_length, .private = true },
-        .text => .{ .length = record.decoded_length, .private = false },
-        .usage => .{ .length = record.length, .private = true },
-        .name, .call_id, .arguments => .{ .length = record.decoded_length, .private = false },
-        .item, .action, .pattern, .member => null,
+        .extras => .{ record.decoded_length, true },
+        .text => .{ record.decoded_length, false },
+        .usage => .{ record.length, true },
+        .name, .call_id, .arguments => .{ record.decoded_length, false },
+        .item, .action, .pattern, .member => return null,
     };
+    return .{ .digest = record.content_digest, .length = length, .private = private };
 }
 
 /// Collects the next items from `start`: whole items, at most
@@ -921,9 +893,9 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
             return;
         };
         if (record.tag == .item or record.tag == .usage) {
-            if (record.tag == .usage and !unfit and !batch.add(&record.content_digest, record.length, true)) unfit = true;
+            if (record.tag == .usage and !unfit and !batch.add(recordImport(&record).?)) unfit = true;
             if (record.tag == .item and !unfit and output.answer_length == 0 and output.answer_item_ordinal == record.ordinal and
-                !batch.add(&content_domain.empty_content.digest, 0, false)) unfit = true;
+                !batch.add(content_domain.empty_content)) unfit = true;
             if (unfit and batch.digest_count != 0) {
                 batch.identity_count = unit_identities;
                 batch.end = unit_start;
@@ -942,22 +914,21 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
             }
             continue;
         }
-        const identity = recordIdentity(&record) orelse continue;
         if (record.tag == .name or record.tag == .call_id or record.tag == .arguments) continue;
-        if (!unfit and !batch.add(&record.content_digest, identity.length, identity.private)) unfit = true;
+        const value = recordImport(&record) orelse continue;
+        if (!unfit and !batch.add(value)) unfit = true;
     }
 }
 
 /// Collects the next calls from `start`, as `collectItems` does items:
 /// each call's name, call_id and arguments, and, when the catalog rejects
-/// it, its rejection text. `calls` holds each call's catalog facts. A
-/// call whose three identities do not fit closes the batch before it is
-/// inspected, unless it is the batch's first call.
+/// it, its rejection text. A call imports at most four identities, so
+/// sixteen calls always fit `batch_identities`.
 fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, frozen_tools: tool_catalog.ToolSet) void {
+    comptime std.debug.assert(batch_identities >= 4 * batch_items);
     batch.reset(.calls, start);
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
     reader.offset = start;
-    var call_start = start;
     var name: ?OutputMetadataRecord = null;
     var call_id: ?OutputMetadataRecord = null;
     while (true) {
@@ -968,48 +939,33 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
             return;
         };
         switch (record.tag) {
-            .name => {
-                if (name == null and call_id == null) call_start = record_start;
-                name = record;
-            },
-            .call_id => {
-                if (name == null and call_id == null) call_start = record_start;
-                call_id = record;
-            },
+            .name => name = record,
+            .call_id => call_id = record,
             .arguments => {
                 // The write walk reports a malformed call where main does.
                 const name_record = name orelse return batch.stop(null, record_start);
                 const call_id_record = call_id orelse return batch.stop(null, record_start);
-                const before = batch.identity_count;
-                var fits = batch.add(&name_record.content_digest, name_record.decoded_length, false) and
-                    batch.add(&call_id_record.content_digest, call_id_record.decoded_length, false) and
-                    batch.add(&record.content_digest, record.decoded_length, false);
-                if (!fits and batch.digest_count != 0) {
-                    batch.identity_count = before;
-                    batch.end = call_start;
-                    return;
+                for ([_]*const OutputMetadataRecord{ &name_record, &call_id_record, &record }) |field| {
+                    const fits = batch.add(recordImport(field).?);
+                    std.debug.assert(fits);
                 }
-                const inspected = inspectOutputCall(io, output.source, name_record, record);
-                if (fits) if (inspected) |facts| {
+                // The write walk inspects the call again and returns a
+                // failure here, or of its rejection text, where main does;
+                // collecting only needs the text's identity.
+                if (inspectOutputCall(io, output.source, name_record, record)) |facts| {
                     if (tool_catalog.classifyCall(facts.name, facts.bash_arguments != null, frozen_tools)) |code| {
                         var buffer: [192]u8 = undefined;
                         if (rejectionText(io, output, code, name_record, &buffer)) |text| {
-                            const value: content_domain.Import = .ofBytes(text, false);
-                            fits = batch.add(&value.digest, value.length, false);
+                            const fits = batch.add(.ofBytes(text, false));
+                            std.debug.assert(fits);
                         } else |_| {}
                     }
-                } else |_| {};
-                if (!fits and batch.digest_count != 0) {
-                    batch.identity_count = before;
-                    batch.end = call_start;
-                    return;
-                }
-                batch.calls[batch.digest_count] = inspected;
+                } else |_| {}
                 batch.digests[batch.digest_count] = call_id_record.content_digest;
                 batch.digest_count += 1;
                 name = null;
                 call_id = null;
-                if (!fits or batch.digest_count == batch_items) {
+                if (batch.digest_count == batch_items) {
                     batch.end = reader.offset;
                     return;
                 }
@@ -1054,7 +1010,7 @@ fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelO
 /// batch did not collect adds a lookup round, and a second when it
 /// inserts.
 pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, output: *const ValidatedOutput, faults: Faults) !void {
-    const storage = a.store.settlementBatches();
+    const batch = a.store.settlementBatch();
     var facts: attempt_facts.Result = undefined;
     var success: success_facts.Result = undefined;
     a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = true }, &facts);
@@ -1064,12 +1020,12 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         std.debug.assert(c.sqlite3_txn_state(a.store.database, "main") == c.SQLITE_TXN_WRITE);
         trace.mark(.transaction_active);
     };
-    collectItems(&storage.batches[0], output, io, 0);
-    storage.batches[0].queueReads(a, binding.operation_id);
+    collectItems(batch, output, io, 0);
+    batch.queueReads(a, binding.operation_id);
     try runOperationRead(a);
     const row = try currentAttempt(&facts, binding);
     const settling = success orelse return error.CorruptStore;
-    try storage.batches[0].checkReads();
+    try batch.checkReads();
     const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
     try validateCandidate(io, output, purpose);
 
@@ -1086,11 +1042,10 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .purpose = purpose,
         .tools = try configuration_domain.toolSet(settling.tools_mask),
         .settling = settling,
-        .slots = &storage.slots,
         .call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count),
     };
     settlement.call_item = try settlement.call_items.nextItem();
-    try settlement.importBatches(storage);
+    try settlement.importBatches(batch);
 
     const output_fact = turn_policy.outputFact(purpose, output.call_count);
     const usage = settlement.usage;
@@ -1140,7 +1095,6 @@ fn Settlement(comptime A: type) type {
         purpose: ModelOperationKind,
         tools: tool_catalog.ToolSet,
         settling: success_facts.Row,
-        slots: *[batch_items]WriteSlot,
         imported_items: u64 = 0,
         imported_calls: u64 = 0,
         entries: u64 = 0,
@@ -1152,30 +1106,31 @@ fn Settlement(comptime A: type) type {
         call_item: ?OutputMetadataRecord = null,
 
         /// Writes each batch and reads the next in one round, the items
-        /// first, then the calls, as main's second pass imports them.
-        fn importBatches(s: *Self, storage: *SettlementBatches) !void {
-            var current = &storage.batches[0];
-            var next = &storage.batches[1];
+        /// first, then the calls, as main's second pass imports them. The
+        /// written batch's rows bind their values by value, so the next
+        /// batch is collected into the same table before they step.
+        fn importBatches(s: *Self, batch: *Batch) !void {
             while (true) {
-                switch (current.kind) {
-                    .items => try s.writeItems(current),
-                    .calls => try s.writeCalls(current),
+                switch (batch.kind) {
+                    .items => {
+                        try s.writeItems(batch);
+                        if (batch.last) {
+                            try s.itemsDone();
+                            collectCalls(batch, s.output, s.io, 0, s.tools);
+                        } else collectItems(batch, s.output, s.io, batch.end);
+                    },
+                    .calls => {
+                        try s.writeCalls(batch);
+                        if (batch.last) break;
+                        collectCalls(batch, s.output, s.io, batch.end, s.tools);
+                    },
                 }
-                switch (current.kind) {
-                    .items => if (current.last) {
-                        try s.itemsDone();
-                        collectCalls(next, s.output, s.io, 0, s.tools);
-                    } else collectItems(next, s.output, s.io, current.end),
-                    .calls => if (current.last) break else collectCalls(next, s.output, s.io, current.end, s.tools),
-                }
-                // A batch with nothing to read writes no row, so it uses
-                // no write slot the previous batch's queued rows bind.
-                if (next.identity_count != 0 or next.digest_count != 0) {
-                    next.queueReads(s.a, s.binding.operation_id);
+                // A batch with nothing to read has nothing to write.
+                if (batch.identity_count != 0 or batch.digest_count != 0) {
+                    batch.queueReads(s.a, s.binding.operation_id);
                     try s.a.run();
-                    try next.checkReads();
+                    try batch.checkReads();
                 }
-                std.mem.swap(*Batch, &current, &next);
             }
             if (s.imported_calls != s.output.call_count) return error.CorruptOutputMetadata;
         }
@@ -1189,18 +1144,18 @@ fn Settlement(comptime A: type) type {
         /// use when the lookup found none. An identity the batch did not
         /// collect (a first item too big for one) costs its own lookup
         /// round, and a second when it inserts.
-        fn content(s: *Self, batch: *Batch, digest: *const [32]u8, length: u64, private: bool) !ContentRow {
-            if (batch.find(digest, length, private)) |identity| {
+        fn content(s: *Self, batch: *Batch, imported: content_domain.Import) !ContentRow {
+            if (batch.find(&imported)) |identity| {
                 if (identity.row.content_id != 0) return .{ .id = identity.row.content_id, .fresh = false };
-                const id = try content_domain.insertRow(s.a, &identity.digest, length, private);
+                const id = try content_domain.insertRow(s.a, &imported);
                 identity.row.content_id = @intCast(id);
                 return .{ .id = id, .fresh = true };
             }
-            var value: content_domain.Import = .{ .digest = digest.*, .length = length, .private = private };
+            var value = imported;
             content_domain.lookup(s.a, &value);
             try s.a.run();
             if (value.found) |found| return .{ .id = found.content_id.get(), .fresh = false };
-            const id = try content_domain.insertRow(s.a, &value.digest, length, private);
+            const id = try content_domain.insertRow(s.a, &value);
             try s.a.run();
             return .{ .id = id, .fresh = true };
         }
@@ -1232,8 +1187,8 @@ fn Settlement(comptime A: type) type {
                 if (record.ordinal != s.imported_items) return error.CorruptOutputMetadata;
                 if (index == batch.digest_count) return error.CorruptOutputMetadata;
                 if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-                const slot = &s.slots[index];
-                const neutral = try s.importItem(batch, record, region_start, reader.offset, &slot.description);
+                var description: tool_catalog.Description = .{};
+                const neutral = try s.importItem(batch, record, region_start, reader.offset, &description);
                 s.a.write(insert_item, .{
                     .operation_id = s.binding.operation_id,
                     .item_ordinal = record.ordinal,
@@ -1241,13 +1196,13 @@ fn Settlement(comptime A: type) type {
                     .position = s.first_item_position + s.imported_items,
                     .kind = @backingInt(record.kind),
                     .attempt_ordinal = s.binding.attempt_ordinal,
-                    .id_digest = &batch.digests[index],
+                    .id_digest = batch.digests[index],
                     .omits_reasoning_text = record.omit_reasoning_text,
                     .phase = @backingInt(record.phase),
                     .extras_content_id = neutral.bag,
                     .part_count = neutral.part_count,
                     .message_content_id = neutral.text,
-                    .description = if (neutral.described) optionalText(slot.description.slice()) else null,
+                    .description = if (neutral.described and description.len != 0) description else null,
                     .call_failed = neutral.call_failed,
                 });
                 index += 1;
@@ -1262,7 +1217,7 @@ fn Settlement(comptime A: type) type {
                     // The selected result can be empty while the exact message
                     // text (including whitespace) remains in Conversation.
                     const empty = &content_domain.empty_content;
-                    const answer: ContentRow = if (s.output.answer_length == 0) try s.content(batch, &empty.digest, 0, false) else .{ .id = text, .fresh = false };
+                    const answer: ContentRow = if (s.output.answer_length == 0) try s.content(batch, empty.*) else .{ .id = text, .fresh = false };
                     const length, const digest = if (s.output.answer_length == 0) .{ empty.length, &empty.digest } else .{ neutral.text_length, &neutral.text_digest };
                     if (length != s.output.answer_length or !std.mem.eql(u8, digest, &s.output.answer_digest)) return error.OutputSourceChanged;
                     s.answer_id = answer.id;
@@ -1285,7 +1240,7 @@ fn Settlement(comptime A: type) type {
         fn importUsage(s: *Self, batch: *Batch, record: OutputMetadataRecord) !u64 {
             const end = try std.math.add(u64, record.start, record.length);
             if (end > s.output.source_length) return error.CorruptOutputMetadata;
-            const row = try s.content(batch, &record.content_digest, record.length, true);
+            const row = try s.content(batch, recordImport(&record).?);
             const sink = try s.sinkFor(row, record.length);
             defer if (sink) |value| value.close();
             try streamSourceRange(s.io, s.output.source, record.start, record.length, &record.content_digest, sink, s.faults);
@@ -1328,7 +1283,7 @@ fn Settlement(comptime A: type) type {
                             .summary_text, .reasoning_text => if (item.kind != .reasoning)
                                 return error.CorruptOutputMetadata
                             else
-                                try s.importDecoded(batch, record, true),
+                                try s.importDecoded(batch, record),
                         };
                         part = .{ .record = record, .start = metadata.offset, .text = own_text };
                     },
@@ -1393,7 +1348,7 @@ fn Settlement(comptime A: type) type {
         /// `[start, end)` into one public row, checked against the
         /// message's `text` record. A row with the same bytes is shared.
         fn importMessageText(s: *Self, batch: *Batch, text: OutputMetadataRecord, start: u64, end: u64) !u64 {
-            const row = try s.content(batch, &text.content_digest, text.decoded_length, false);
+            const row = try s.content(batch, recordImport(&text).?);
             const sink = try s.sinkFor(row, text.decoded_length) orelse return row.id;
             defer sink.close();
             try streamMessageText(s.io, s.output, text, start, end, sink, s.faults);
@@ -1404,7 +1359,7 @@ fn Settlement(comptime A: type) type {
         /// `[start, end)` joined by commas, into a private row, verifying
         /// a found one.
         fn importBag(s: *Self, batch: *Batch, trailer: OutputMetadataRecord, start: u64, end: u64) !u64 {
-            const row = try s.content(batch, &trailer.content_digest, trailer.decoded_length, true);
+            const row = try s.content(batch, recordImport(&trailer).?);
             const sink = try s.sinkFor(row, trailer.decoded_length);
             defer if (sink) |value| value.close();
             try streamBag(s.io, s.output, trailer, start, end, sink, s.faults);
@@ -1413,8 +1368,8 @@ fn Settlement(comptime A: type) type {
 
         /// Decodes one saved string (a part's text or a call field) into
         /// its own row. A row with the same bytes is shared.
-        fn importDecoded(s: *Self, batch: *Batch, part: OutputMetadataRecord, private: bool) !u64 {
-            const row = try s.content(batch, &part.content_digest, part.decoded_length, private);
+        fn importDecoded(s: *Self, batch: *Batch, part: OutputMetadataRecord) !u64 {
+            const row = try s.content(batch, recordImport(&part).?);
             const sink = try s.sinkFor(row, part.decoded_length) orelse return row.id;
             defer sink.close();
             try streamDecoded(s.io, s.output, part, sink, s.faults);
@@ -1463,33 +1418,33 @@ fn Settlement(comptime A: type) type {
         /// when it is runnable, its Action.
         fn importCall(s: *Self, batch: *Batch, index: u8, fields: [3]OutputMetadataRecord) !void {
             const name, const call_id, const record = fields;
-            const name_content_id = try s.importDecoded(batch, name, false);
-            const call_id_content_id = try s.importDecoded(batch, call_id, false);
-            const arguments_content_id = try s.importDecoded(batch, record, false);
+            const name_content_id = try s.importDecoded(batch, name);
+            const call_id_content_id = try s.importDecoded(batch, call_id);
+            const arguments_content_id = try s.importDecoded(batch, record);
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-            const call_facts = try batch.calls[index];
+            const call_facts = try inspectOutputCall(s.io, s.output.source, name, record);
             const rejection_code = tool_catalog.classifyCall(call_facts.name, call_facts.bash_arguments != null, s.tools);
             const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
                 var buffer: [192]u8 = undefined;
                 const text = try rejectionText(s.io, s.output, code, name, &buffer);
                 if (s.faults.output_import) return error.InjectedContentImportFailure;
                 const value: content_domain.Import = .ofBytes(text, false);
-                const row = try s.content(batch, &value.digest, value.length, false);
+                const row = try s.content(batch, value);
                 if (try s.sinkFor(row, value.length)) |sink| {
                     defer sink.close();
                     try sink.write(text, 0);
                 }
                 break :id row.id;
             } else null;
-            const slot = &s.slots[index];
             // The call's certificate: (little-endian length, SHA-256) for its
             // name, call_id and arguments, in ProposalField order.
+            var field_metadata: [120]u8 = undefined;
             for (fields, 0..) |field, at| {
-                std.mem.writeInt(u64, slot.field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
-                @memcpy(slot.field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
+                std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
+                @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
             // A call the catalog did not accept has no description.
-            if (call_facts.bash_arguments) |*arguments| slot.description = tool_catalog.describe(.{ .bash = arguments });
+            const description: ?tool_catalog.Description = if (call_facts.bash_arguments) |*arguments| tool_catalog.describe(.{ .bash = arguments }) else null;
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
@@ -1501,8 +1456,8 @@ fn Settlement(comptime A: type) type {
                 .rejection_content_id = rejection_content_id,
                 .acceptance_position = if (rejection_code != null) try s.positions.take(1) else null,
                 .action_kind = if (rejection_code == null) 1 else null,
-                .description = if (call_facts.bash_arguments != null) optionalText(slot.description.slice()) else null,
-                .field_metadata = &slot.field_metadata,
+                .description = if (description) |text| if (text.len != 0) text else null else null,
+                .field_metadata = field_metadata,
                 .session = s.session,
             });
             if (rejection_code != null) return;
