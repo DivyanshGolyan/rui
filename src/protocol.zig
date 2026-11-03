@@ -962,20 +962,57 @@ pub const SessionRow = struct {
         std.debug.assert(max_json_bytes <= budget_bytes);
     }
 
+    /// A row's fields borrowed from wherever they are held, such as a Store
+    /// read's row: the one place that orders them into `json_shape`.
+    pub const Fields = struct {
+        reference: []const u8,
+        workspace: []const u8,
+        provider: Provider,
+        model: []const u8,
+        bash: bool,
+        web_search: bool,
+        permission_mode: PermissionMode,
+        label: ?[]const u8,
+        created_at: u64,
+        revision: u64,
+        end: u64,
+        first_message: ?FirstMessage,
+        work: *const SessionWork,
+        peers: *const PeerFacts,
+
+        pub const max_json_bytes = SessionRow.max_json_bytes;
+
+        pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
+            try writeShape(out, json_shape, .{
+                f.reference,                 f.workspace,       f.provider,      f.model,
+                tools(f.bash, f.web_search), f.permission_mode, f.label,         f.created_at,
+                f.revision,                  f.end,             f.first_message, f.work,
+                f.peers,
+            });
+        }
+    };
+
     pub fn writeJson(self: *const SessionRow, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{
-            self.reference.slice(),                           self.workspace.slice(),
-            self.provider,                                    self.model.slice(),
-            tools(self.bash, self.web_search),                self.permission_mode,
-            if (self.label) |*label| label.slice() else null, self.created_at,
-            self.revision,                                    self.end,
-            self.first_message,                               &self.work,
-            &self.peers,
-        });
+        const fields: Fields = .{
+            .reference = self.reference.slice(),
+            .workspace = self.workspace.slice(),
+            .provider = self.provider,
+            .model = self.model.slice(),
+            .bash = self.bash,
+            .web_search = self.web_search,
+            .permission_mode = self.permission_mode,
+            .label = if (self.label) |*label| label.slice() else null,
+            .created_at = self.created_at,
+            .revision = self.revision,
+            .end = self.end,
+            .first_message = self.first_message,
+            .work = &self.work,
+            .peers = &self.peers,
+        };
+        try fields.writeJson(out);
     }
 
-    /// The `tools` field's text for a row's two tool settings.
-    pub fn tools(bash: bool, web_search: bool) []const u8 {
+    fn tools(bash: bool, web_search: bool) []const u8 {
         if (bash) return if (web_search) "[\"bash\",\"web_search\"]" else "[\"bash\"]";
         return if (web_search) "[\"web_search\"]" else "[]";
     }

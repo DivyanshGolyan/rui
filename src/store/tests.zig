@@ -13674,3 +13674,239 @@ test "a list row's failed Actions read answers main's ActionReadFailed" {
     try std.testing.expectError(error.ActionReadFailed, testingSessionList(&storage, &tmp, .{}, &used, 5));
     try std.testing.expect(storage.isFenced());
 }
+
+test "an .each visitor owns a big Row only through a decoded field of the Row's type" {
+    const Big = struct { bytes: [1025]u8 };
+    const Small = struct { id: u64 };
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Small, struct { count: u8 }));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Big, struct { decoded: Big }));
+    try std.testing.expectEqualStrings("rsql: an .each Row over 1 KiB decodes into its visitor's own decoded field", comptime store_access.eachVisitorError(Big, struct { count: u8 }).?);
+    try std.testing.expectEqualStrings("rsql: a visitor's decoded field is the Row its .each read decodes, " ++ @typeName(Small), comptime store_access.eachVisitorError(Small, struct { decoded: Big }).?);
+}
+
+test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "diagnostic-bytes");
+    try submitTestMessage(&storage, &tmp, "diagnostic-bytes-input", "diagnostic-bytes-message", session.slice(), "q");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":5}", .request_id = .{}, .report = "" } }, .ordinary, .{});
+    // The saved record's first byte made one no UTF-8 decoder accepts.
+    try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(X'FF'||substr(payload,2) AS BLOB) WHERE payload=CAST('{\"refusal\":\"quota\",\"resets_at\":5}' AS BLOB)");
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT changes()"));
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const failed = (try store_core.activityPageForTesting(&storage, request)).work.work.state.failed;
+    try std.testing.expectEqualStrings("provider_quota", failed.code.slice());
+    try std.testing.expectEqual(@as(?u64, null), failed.resets_at);
+    var listed = try testingListRow(&storage, &tmp, session.slice());
+    defer listed.deinit();
+    try std.testing.expectEqualStrings("failed", listed.get(&.{ "work", "state", "kind" }).string);
+    try std.testing.expect(!storage.isFenced());
+}
+
+/// The rendered text of the one statement `report_domain.report_failures`
+/// names `failed` whose text holds `fragment`.
+fn reportStatementForTesting(comptime failed: anyerror, comptime fragment: []const u8) [:0]const u8 {
+    @setEvalBranchQuota(100_000);
+    comptime var found: ?[:0]const u8 = null;
+    inline for (report_domain.report_failures) |pair| {
+        if (comptime pair[1] == failed and std.mem.indexOf(u8, pair[0].sql, fragment) != null) {
+            if (found != null) @compileError("two statements hold " ++ fragment);
+            found = pair[0].sql;
+        }
+    }
+    return found orelse @compileError("no statement holds " ++ fragment);
+}
+
+/// Fails the statement whose text is `sql` as a one-row list page reads
+/// it, and expects `expected`: main's name for that read's failed step.
+fn expectListStepFailure(sql: [:0]const u8, expected: anyerror) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    // A queued Message: the work reads its latest Turn, then the queue.
+    const session = try configureTestSession(&storage, "list-names-config");
+    try submitTestMessage(&storage, &tmp, "list-names-input", "list-names-message", session.slice(), "q");
+    var used = std.atomic.Value(u64).init(0);
+    var fault: TestingStatementFault = .{ .sql = sql };
+    fault.arm(storage.database);
+    defer fault.disarm(storage.database);
+    try std.testing.expectError(expected, testingSessionList(&storage, &tmp, .{}, &used, 5));
+    try std.testing.expect(fault.failed > 0);
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a list page whose page read fails answers main's SessionReadFailed" {
+    try expectListStepFailure(reportStatementForTesting(error.SessionReadFailed, "FROM session WHERE created_seq>?1"), error.SessionReadFailed);
+}
+
+test "a list row whose latest Turn read fails answers main's TurnReadFailed" {
+    try expectListStepFailure(reportStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed);
+}
+
+test "a list row whose queue read fails answers main's MessageAdmissionReadFailed" {
+    try expectListStepFailure(reportStatementForTesting(error.MessageAdmissionReadFailed, "admission_id>?2"), error.MessageAdmissionReadFailed);
+}
+
+test "a list row whose settings read fails answers SessionReadFailed" {
+    // Main named a failed settings step so, and a failed first Message
+    // step CorruptStore; this one read holds both.
+    try expectListStepFailure(reportStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed);
+}
+
+test "a list row that fails to render reports its error before a later row's failed step" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    // The first row has no Message and a label no Session may hold; the
+    // second has a first Message, so its settings step is `list_row`'s.
+    const first = try configureTestSession(&storage, "render-order-first");
+    const second = try configureTestSession(&storage, "render-order-second");
+    try submitTestMessage(&storage, &tmp, "render-order-input", "render-order-message", second.slice(), "q");
+    var update: [160]u8 = undefined;
+    try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON");
+    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
+    try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=OFF");
+    var used = std.atomic.Value(u64).init(0);
+    var fault: TestingStatementFault = .{ .sql = reportStatementForTesting(error.SessionReadFailed, "JOIN message_admission m") };
+    fault.arm(storage.database);
+    defer fault.disarm(storage.database);
+    // Main read and rendered the first row before the second's step.
+    try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
+    try std.testing.expect(fault.failed > 0);
+}
+
+test "a list row whose first Message is missing is CorruptStore" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "missing-first-config");
+    try submitTestMessage(&storage, &tmp, "missing-first-input", "missing-first-message", session.slice(), "q");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    // The first Turn still names the admission, whose content is gone, so
+    // the row's settings read finds no row.
+    var delete: [200]u8 = undefined;
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&delete, "DELETE FROM content WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref='{s}')", .{session.slice()}, 0));
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    var used = std.atomic.Value(u64).init(0);
+    try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
+}
+
+/// A Session in each work shape the list and report read: no Message, a
+/// finished Turn, a queued Message a stop excluded, and a Turn awaiting
+/// a permission decision.
+const TestingWorkShape = enum {
+    idle,
+    finished,
+    stopped,
+    awaiting,
+
+    fn make(shape: TestingWorkShape, storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+        const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+        switch (shape) {
+            .idle => return configureTestSession(storage, name),
+            .finished, .stopped => {
+                const session = try configureTestSession(storage, name);
+                try answerTestTurn(storage, tmp, session.slice(), name ++ "-answer", &answer);
+                if (shape == .stopped) {
+                    try submitTestMessage(storage, tmp, name ++ "-queued-file", name ++ "-queued", session.slice(), "excluded");
+                    var stop = try completeSessionStop(name ++ "-stop", session.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                }
+                return session;
+            },
+            .awaiting => {
+                const session = try configureTestSessionAsk(storage, name);
+                try submitTestMessage(storage, tmp, name ++ "-message-file", name ++ "-message", session.slice(), "call");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const call = [_]TestingCall{.{ .item_id = name ++ "-item", .name = "bash", .encoded_call_id = name ++ "-call", .decoded_call_id = name ++ "-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
+                try settleCallsForTesting(storage, tmp, binding, name ++ "-metadata", &call);
+                return session;
+            },
+        }
+    }
+};
+
+test "a list page of mixed work takes its deepest row's rounds, and a pass per row a statement repeats for" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    inline for (0..protocol.session_list_page_size) |index| {
+        const shape: TestingWorkShape = @fromBackingInt(@intCast(index % 4));
+        _ = try shape.make(&storage, &tmp, std.fmt.comptimePrint("mixed-rounds-{d}", .{index}));
+    }
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+    try capture.create(root[0..length], 1, false);
+    defer capture.deinit();
+    var a = reads_domain.ReadAccess.within(&storage);
+    defer a.deinit();
+    try report_domain.renderSessionList(&a, &.{}, &capture);
+    var report = try capture.seal();
+    defer report.deinit();
+    var bytes: [8192]u8 = undefined;
+    const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
+    for ([_][]const u8{ "\"kind\":\"idle\"", "\"kind\":\"finished\"", "\"kind\":\"stopped\"", "\"kind\":\"approval\"" }) |kind|
+        std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bytes[0..read], kind)) catch |err| {
+            std.debug.print("{s}\n", .{bytes[0..read]});
+            return err;
+        };
+    // The stopped rows' seven: the page; the latest Turns and first-Message
+    // seeks; the cutoff, the queue after it, the excluded Message and its
+    // stop; the rows' settings. The awaiting rows end after their Actions.
+    try std.testing.expectEqual(7, a.rounds);
+    // A pass ends where a round queues a statement again, so a round takes
+    // as many as its most repeated statement's rows: 1 for the page, 8 for
+    // the rows' first reads, 6 cutoffs, 6 queue seeks, 2 excluded seeks, 2
+    // stops, and 6 settings reads of a row with a first Message.
+    try std.testing.expectEqual(1 + 8 + 6 + 6 + 2 + 2 + 6, a.passes);
+}
+
+/// The rounds a Current report's work, peer facts and first Message take
+/// for a Session of `shape`.
+fn reportFactsRoundsForTesting(shape: TestingWorkShape) !u32 {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try shape.make(&storage, &tmp, "report-rounds");
+    var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
+    try std.testing.expect(try configuration_domain.readSession(&storage, session.slice(), &current));
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+    try capture.create(root[0..length], 1, false);
+    defer capture.deinit();
+    var a = reads_domain.ReadAccess.within(&storage);
+    defer a.deinit();
+    try report_domain.renderWorkAndRowFacts(&a, session.slice(), current.created_at, &capture);
+    try std.testing.expectEqual(a.rounds, a.passes);
+    return a.rounds;
+}
+
+test "a report's row facts share its work's rounds" {
+    // The work's latest Turn with the peer and first-Message seeks; the
+    // cutoff or Actions with the first Message's row; then the rest of
+    // the work.
+    try std.testing.expectEqual(@as(u32, 3), try reportFactsRoundsForTesting(.idle));
+    try std.testing.expectEqual(@as(u32, 3), try reportFactsRoundsForTesting(.finished));
+    try std.testing.expectEqual(@as(u32, 5), try reportFactsRoundsForTesting(.stopped));
+    try std.testing.expectEqual(@as(u32, 2), try reportFactsRoundsForTesting(.awaiting));
+}

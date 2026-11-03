@@ -1035,8 +1035,7 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     session.workspace = &page.work.workspace;
     var found: store_access.Found = undefined;
     var guard: activity_sequence_guard.Result = undefined;
-    // The work footer reads only the Session's own seeks, so each of its
-    // stages shares one of the page's rounds.
+    // The work footer's first two stages share the page's first two rounds.
     var work: report_domain.WorkRead = .{ .session = session_ref };
     a.readInto(page_session, .{ .session = session_ref }, &session, &found);
     a.read(activity_sequence_guard, .{ .session = session_ref }, &guard);
@@ -1430,9 +1429,10 @@ const LabelRead = struct {
     }
 
     fn keep(read: *LabelRead, row: *const peer_label.Row) error{CorruptStore}!void {
-        const label = row.label orelse return;
-        if (!protocol.validLabel(label.slice())) return error.CorruptStore;
-        read.peer.label = label;
+        if (row.label) |*label| {
+            try configuration_domain.checkLabel(label.slice());
+            read.peer.label = label.*;
+        }
     }
 
     fn found(read: *const LabelRead) !void {

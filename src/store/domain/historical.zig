@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const tool_catalog = @import("../../tools.zig");
+const configuration_domain = @import("configuration.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
 const store_core = @import("../Store.zig");
@@ -469,7 +469,7 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, &row, &found);
     try store_access.runAs(a, error.CorruptStore);
     if (!found.get()) return error.CorruptStore;
-    if (row.tools_mask > tool_catalog.all_tools_mask) return error.CorruptStore;
+    _ = try configuration_domain.toolSet(row.tools_mask);
     out.tools_mask = row.tools_mask;
     var instructions: content_metadata.Row = undefined;
     var output_schema: content_metadata.Row = undefined;

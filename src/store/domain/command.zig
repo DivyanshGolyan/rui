@@ -1081,7 +1081,7 @@ pub const stop_cutoff = rsql.Read(.{
 /// `stop_cutoff` for unconverted code (`countPendingMessages`, the
 /// report's selected Message), in a round of its own; 0 without a stop.
 pub fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
-    var a = store_access.Access(.read, error{}).within(self);
+    var a = reads_domain.ReadAccess.within(self);
     defer a.deinit();
     var cutoff: reads_domain.First(stop_cutoff.Row) = .{};
     a.readEach(stop_cutoff, .{ .session = session_ref }, 1, &cutoff);

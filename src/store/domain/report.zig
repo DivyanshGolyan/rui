@@ -8,6 +8,7 @@ const model_capability = @import("../../model_capability.zig");
 const tool_catalog = @import("../../tools.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const session_work = @import("../../session_work.zig");
+const Quota = @import("../../transport_policy.zig").Quota;
 const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
@@ -230,10 +231,10 @@ pub const SessionReportCapture = struct {
     }
 
     fn appendTools(self: *SessionReportCapture, tools_mask: u8) !void {
-        if (tools_mask > tool_catalog.all_tools_mask) return error.CorruptStore;
+        const tools = try configuration_domain.toolSet(tools_mask);
         try self.append("[");
         var first = true;
-        for (std.enums.values(tool_catalog.Tool)) |tool| if (tools_mask & tool_catalog.toolBit(tool) != 0) {
+        for (std.enums.values(tool_catalog.Tool)) |tool| if (tools.contains(tool)) {
             if (!first) try self.append(",");
             first = false;
             try self.append("\"");
@@ -244,11 +245,7 @@ pub const SessionReportCapture = struct {
     }
 
     fn appendPermissionMode(self: *SessionReportCapture, permission_mode: u8) !void {
-        try self.appendJsonString(switch (permission_mode) {
-            0 => "ask",
-            1 => "bypass",
-            else => return error.CorruptStore,
-        });
+        try self.appendJsonString(@tagName(try configuration_domain.permissionMode(permission_mode)));
     }
 
     fn flush(self: *SessionReportCapture) !void {
@@ -332,10 +329,14 @@ const list_ceiling = rsql.Read(.{
     .cardinality = .each,
 });
 
+/// A page and one Session more, which says whether there are more: the
+/// `LIMIT` of each page read and its `readEach` bound.
+const list_limit = protocol.session_list_page_size + 1;
+
 /// A full traversal's page of Sessions in creation order, with the one
-/// after it, which says whether there are more.
+/// after it.
 const list_page = rsql.Read(.{
-    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT 9",
+    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
     .Args = struct { after: u64, ceiling: u64 },
     .Row = ListPage.Row,
     .cardinality = .each,
@@ -344,7 +345,7 @@ const list_page = rsql.Read(.{
 /// `list_page` within one Workspace.
 const workspace_list_page = rsql.Read(.{
     .sql = "SELECT created_seq,session_ref FROM session @index(session_workspace_list) " ++
-        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT 9",
+        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
     .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8 },
     .Row = ListPage.Row,
     .cardinality = .each,
@@ -360,8 +361,7 @@ const workspace_key = rsql.Read(.{
 });
 
 /// A page of a full traversal: its Sessions' references, up to a page,
-/// and whether a Session follows them. Its read's `LIMIT 9` and its
-/// `readEach` bound are the page and one more.
+/// and whether a Session follows them (`list_limit`).
 const ListPage = struct {
     const Row = struct { created_seq: rsql.Positive, session_ref: SessionText };
 
@@ -377,6 +377,8 @@ const ListPage = struct {
             return false;
         }
         const ref = row.session_ref.slice();
+        // The session table's CHECK (schema.zig) holds every stored
+        // reference to `id_bytes`; main read any up to 128 bytes.
         if (ref.len != change_ring.id_bytes) {
             page.failure = error.CorruptStore;
             return false;
@@ -412,9 +414,9 @@ fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, gene
     const bound: u64 = if (request.after == 0) std.math.maxInt(i64) else request.ceiling;
     var page: ListPage = .{};
     if (request.workspace) |*workspace|
-        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice() }, page.refs.len + 1, &page)
+        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice() }, list_limit, &page)
     else
-        a.readEach(list_page, .{ .after = request.after, .ceiling = bound }, page.refs.len + 1, &page);
+        a.readEach(list_page, .{ .after = request.after, .ceiling = bound }, list_limit, &page);
     try store_access.runAs(a, error.SessionReadFailed);
     if (page.failure) |err| return err;
     const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
@@ -599,10 +601,15 @@ noinline fn appendSessionRows(a: *ReadAccess, references: []const change_ring.Id
     try capture.appendShape(protocol.session_list_reply.head, .{});
     var firsts: [protocol.session_list_page_size]FirstCandidates = undefined;
     var works: [protocol.session_list_page_size]WorkRead = undefined;
+    // Each row's reads queued together: a pass ends where a statement is
+    // queued again, so the round takes one pass per row, not two.
     for (references, firsts[0..references.len], works[0..references.len]) |*reference, *first, *work| {
         first.queue(a, reference);
         work.* = .{ .session = reference };
+        _ = work.queue(a);
     }
+    try runReport(a);
+    for (works[0..references.len]) |*work| try work.advance();
     try readWorks(a, works[0..references.len]);
     var shown: [protocol.session_list_page_size]ShownRow = undefined;
     for (references, firsts[0..references.len], works[0..references.len], shown[0..references.len]) |*reference, *first, *work, *row|
@@ -625,8 +632,11 @@ noinline fn renderRows(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, capt
         else
             a.readEach(list_row, .{ .session = row.reference, .first = row.first }, 1, &render);
     }
-    try runReport(a);
+    const ran = runReport(a);
+    // A pass stops at a failed step, so a row that failed to render did
+    // before any later row's step failed: its error is main's first.
     if (render.failure) |err| return err;
+    try ran;
     if (render.shown != rows.len) return error.CorruptStore;
 }
 
@@ -656,48 +666,77 @@ const RowsRender = struct {
 
 fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow) !void {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
-    if (row.tools_mask > tool_catalog.all_tools_mask or row.permission_mode > 1) return error.CorruptStore;
-    if (row.label) |*label| if (!protocol.validLabel(label.slice())) return error.CorruptStore;
-    const first = try firstMessage(row, rows[index].first);
+    const tools = try configuration_domain.toolSet(row.tools_mask);
+    if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
     const work: protocol.SessionWork = .fromCore(try rows[index].work.work(row.created_at.get(), now_ms));
     const peers: protocol.PeerFacts = .{ .from_person_at = optional(row.from_person_at) };
+    const fields: protocol.SessionRow.Fields = .{
+        .reference = row.session_ref.slice(),
+        .workspace = row.workspace.slice(),
+        .provider = row.provider,
+        .model = row.model.slice(),
+        .bash = tools.contains(.bash),
+        .web_search = tools.contains(.web_search),
+        .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
+        .label = if (row.label) |*label| label.slice() else null,
+        .created_at = row.created_at.get(),
+        .revision = row.revision.get(),
+        .end = row.next_position.get() - 1,
+        .first_message = try firstMessage(row, rows[index].first),
+        .work = &work,
+        .peers = &peers,
+    };
     if (index != 0) try capture.append(",");
-    try capture.appendShape(protocol.SessionRow.json_shape, .{
-        row.session_ref.slice(),
-        row.workspace.slice(),
-        row.provider,
-        row.model.slice(),
-        protocol.SessionRow.tools(row.tools_mask & tool_catalog.toolBit(.bash) != 0, row.tools_mask & tool_catalog.toolBit(.web_search) != 0),
-        if (row.permission_mode == 0) protocol.PermissionMode.ask else protocol.PermissionMode.bypass,
-        if (row.label) |*label| label.slice() else null,
-        row.created_at.get(),
-        row.revision.get(),
-        row.next_position.get() - 1,
-        first,
-        &work,
-        &peers,
-    });
+    try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow.Fields }}, .{&fields});
 }
 
-/// A Session report's peer facts and first Message: the latest Message
-/// from no Session and both first-Message seeks, then, only when one
-/// found an admission, its row. Not inlined, so its Access takes no slot
-/// in the report's frame.
-noinline fn appendRowFacts(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+/// A Session report's work, peer facts and first Message, in one Access.
+/// Not inlined, so the Access and the reads' rows take no slot in the
+/// report's frame, which every report appender shares.
+noinline fn appendWorkAndRowFacts(self: *Store, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
     var a = ReadAccess.within(self);
     defer a.deinit();
+    try renderWorkAndRowFacts(&a, session_ref, created_at, capture);
+}
+
+/// `appendWorkAndRowFacts` within `a`, whose rounds tests count. Its rounds
+/// are its reads' dependency depth: round 1 reads the work's latest Turn,
+/// the latest Message from no Session and both first-Message seeks; round
+/// 2 the work's second stage and, when a seek found one, the first
+/// admission's row; the work's later stages follow (`readWorks`). Inline,
+/// so it adds no frame to `appendWorkAndRowFacts`.
+pub inline fn renderWorkAndRowFacts(a: *ReadAccess, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
     var person: person_message.Result = undefined;
     var first: FirstCandidates = undefined;
+    var read: WorkRead = .{ .session = session_ref };
+    // Main read the work first, so a round queues it first.
+    _ = read.queue(a);
     a.read(person_message, .{ .session = session_ref }, &person);
-    first.queue(&a, session_ref);
-    try runReport(&a);
+    first.queue(a, session_ref);
+    try runReport(a);
+    try read.advance();
     const admission = first.admission();
     var row: first_message.Result = null;
-    if (admission != 0) {
-        a.read(first_message, .{ .session = session_ref, .first = admission }, &row);
-        try runReport(&a);
-        if (row == null) return error.CorruptStore;
-    }
+    if (admission != 0) a.read(first_message, .{ .session = session_ref, .first = admission }, &row);
+    const more = read.queue(a);
+    if (more or admission != 0) try runReport(a);
+    if (more) try read.advance();
+    if (admission != 0 and row == null) return error.CorruptStore;
+    try readWorks(a, (&read)[0..1]);
+    const work: protocol.SessionWork = .fromCore(try read.work(created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange));
+    try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
+    if (read.outcome()) |outcome| {
+        try capture.append(",\"latest_outcome\":{\"code\":");
+        try capture.appendJsonString(outcome.code);
+        try capture.append(",\"content\":");
+        if (outcome.content_id) |content_id| {
+            const metadata = try content_domain.readContentMetadata(a.store, @intCast(content_id));
+            try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
+        } else {
+            try capture.append("null");
+        }
+        try capture.append("}}");
+    } else try capture.append(",\"latest_outcome\":null}");
     try capture.append(",\"peers\":");
     const peers: protocol.PeerFacts = .{ .from_person_at = if (person) |found| found.admitted_at.get() else null };
     try capture.appendShape(.{protocol.Hole{ .json = protocol.PeerFacts }}, .{peers});
@@ -768,8 +807,7 @@ pub fn renderSessionReportLocked(
     try capture.append(",\"label\":");
     if (current.label) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
     try capture.appendFmt(",\"created_at\":\"{d}\"}},\"pending_messages\":\"{d}\",\"work\":", .{ current.created_at, pending_messages });
-    try appendCurrentWork(self, session_ref, current.created_at, capture);
-    try appendRowFacts(self, session_ref, capture);
+    try appendWorkAndRowFacts(self, session_ref, current.created_at, capture);
     try capture.append(",\"selected_message\":");
     try appendSelectedMessage(self, session_ref, capture);
     try capture.append(",\"recent_messages\":[");
@@ -818,33 +856,14 @@ pub fn renderSessionReportLocked(
     });
 }
 
-noinline fn appendCurrentWork(self: *Store, session_ref: []const u8, created_at: u64, capture: *SessionReportCapture) !void {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    var read: WorkRead = .{ .session = session_ref };
-    try readWorks(&a, (&read)[0..1]);
-    const work: protocol.SessionWork = .fromCore(try read.work(created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(self.io)) orelse return error.IntegerOutOfRange));
-    try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
-    if (read.inputs.latest == null or read.inputs.latest.?.terminal == null) return capture.append(",\"latest_outcome\":null}");
-    try capture.append(",\"latest_outcome\":{\"code\":");
-    try capture.appendJsonString(read.code.slice());
-    try capture.append(",\"content\":");
-    if (read.outcome_content_id) |content_id| {
-        const metadata = try content_domain.readContentMetadata(self, @intCast(content_id));
-        try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
-    } else {
-        try capture.append("null");
-    }
-    try capture.append("}}");
-}
-
 /// The Session's latest Turn and its current Operation. The quota
 /// diagnostic is read only for a failed outcome, and only while it is
-/// small enough to be one.
+/// small enough to be one (`Quota.max_bytes`).
 const work_latest = rsql.Read(.{
     .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
         "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
-        "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=512 AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
+        "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
+        " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
         "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
         "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
         "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1",
@@ -865,32 +884,32 @@ const work_latest = rsql.Read(.{
         attempt_at: ?rsql.Positive,
         retry_scheduled_at: ?rsql.Positive,
         resolved_at: ?rsql.Positive,
-        diagnostic: ?protocol.Bounded(512),
+        /// Bytes `quotaResetsAt` parses; ones that are not UTF-8 give
+        /// no reset time, as on main.
+        diagnostic: ?rsql.Blob(Quota.max_bytes),
         stopped_at: ?rsql.Positive,
     },
     .cardinality = .each,
 });
 
 /// One aggregate over an active Turn's Operation's Actions, bounded by
-/// its calls. Each count is a portable `count(CASE ...)` where main's was
-/// SQLite's `FILTER`, which MySQL lacks; the unresolved count is the
-/// total less `count(resolution_code)`, which needs no CASE.
+/// its calls. On SQLite it renders as main's text, with column names.
 const work_actions = rsql.Read(.{
-    .sql = "SELECT count(*) AS total,count(a.resolution_code) AS resolved," ++
-        "count(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN 1 END) AS awaiting," ++
+    .sql = "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
+        "@count_where(a.resolution_code IS NULL AND a.authorized=0) AS awaiting," ++
         "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END) AS first_awaiting," ++
-        "count(CASE WHEN a.resolution_code IS NULL AND a.attempt_ordinal=1 THEN 1 END) AS running," ++
+        "@count_where(a.resolution_code IS NULL AND a.attempt_ordinal=1) AS running," ++
         // The last resolution is the one at the greatest position.
         "(SELECT resolved_at FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
         // Under an `ask` revision only an `allow_once` decision
         // authorizes; under `bypass` the proposal did.
-        "max(CASE WHEN a.resolution_code IS NULL AND r.permission_mode=0 THEN a.decided_at END) AS latest_decision_at " ++
+        "@max_where(a.decided_at,a.resolution_code IS NULL AND r.permission_mode=0) AS latest_decision_at " ++
         "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
         "WHERE a.parent_operation_id=?1",
     .Args = struct { operation: u64 },
     .Row = struct {
         total: u64,
-        resolved: u64,
+        unresolved: u64,
         awaiting: u64,
         first_awaiting: ?rsql.Positive,
         running: u64,
@@ -973,10 +992,11 @@ fn runReport(a: *ReadAccess) !void {
 /// and, only while one runs, the oldest running one; or else the latest
 /// stop's cutoff, the oldest Message queued after it and, only when none
 /// is but a stop cut off, the newest Message it excluded and that stop.
-/// Each is main's statement, and many reads share each round
-/// (`readWorks`). List rows, activity pages, Message progress and the
-/// Current report read work here. Each stage reads one row, stepped
-/// once, as main did.
+/// On SQLite each stage renders as main's statement with its columns
+/// named, but `work_latest`, which folds main's two code columns into one
+/// (`operation_code`). Many reads share each round (`readWorks`). List
+/// rows, activity pages, Message progress and the Current report read
+/// work here. Each stage reads one row, stepped once, as main did.
 pub const WorkRead = struct {
     /// Read in place when each stage's pass steps it.
     session: []const u8,
@@ -1037,7 +1057,7 @@ pub const WorkRead = struct {
             const turn = &w.inputs.latest.?;
             turn.actions = .{
                 .total = row.total,
-                .unresolved = std.math.sub(u64, row.total, row.resolved) catch return error.CorruptStore,
+                .unresolved = row.unresolved,
                 .awaiting = row.awaiting,
                 .first_awaiting = optional(row.first_awaiting),
                 .running = row.running,
@@ -1101,6 +1121,13 @@ pub const WorkRead = struct {
         w.inputs.latest = turn;
     }
 
+    /// The latest Turn's outcome code and content, once it has one.
+    pub fn outcome(w: *const WorkRead) ?struct { code: []const u8, content_id: ?u64 } {
+        const turn = w.inputs.latest orelse return null;
+        if (turn.terminal == null) return null;
+        return .{ .code = w.code.slice(), .content_id = w.outcome_content_id };
+    }
+
     /// The work these reads describe, for a Session created at
     /// `created_at`, as of `now_ms`.
     pub fn work(w: *const WorkRead, created_at: u64, now_ms: u64) error{CorruptStore}!session_work.Work {
@@ -1127,7 +1154,7 @@ fn optional(value: ?rsql.Positive) ?u64 {
 /// Reads every `works` to its end, each stage of every one in a shared
 /// round, so the rounds are the deepest work's stages, not the count.
 /// Reads its caller queued before it share its first round, which runs
-/// whenever `works` is not empty.
+/// only while some work is not `.done`; with none, it runs no round.
 pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
     while (true) {
         var queued = false;
@@ -1406,6 +1433,9 @@ fn appendRejectedCalls(
     }
 }
 
+/// Inline, as main's compiler chose: outlined, its 968-byte frame sits
+/// between the report's frame and `appendRevisionContent` on the intake
+/// worker's and main thread's deepest chains.
 inline fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
     const statement = try store_core.cached(
         self,
@@ -1436,7 +1466,8 @@ inline fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture:
         try capture.append(",\"workspace\":");
         try appendColumnString(statement, 2, protocol.max_workspace_bytes, capture);
         try capture.append(",\"provider\":");
-        try capture.appendJsonString(@tagName(try sqlite.readProvider(statement, 12)));
+        const provider = try sqlite.boundedColumnText(statement, 12, protocol.max_provider_bytes);
+        try capture.appendJsonString(@tagName(std.meta.stringToEnum(protocol.Provider, provider) orelse return error.CorruptStore));
         try capture.append(",\"model\":");
         try appendColumnString(statement, 3, protocol.max_model_bytes, capture);
         try capture.append(",\"compaction_trigger\":");
@@ -1446,7 +1477,14 @@ inline fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture:
         try capture.append(",\"reasoning_effort\":");
         try appendNullableEffort(try sqlite.readNullableEffort(statement, 15), capture);
         try capture.append(",\"label\":");
-        if (try sqlite.readNullableLabel(statement, 16)) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
+        if (c.sqlite3_column_type(statement, 16) == c.SQLITE_NULL) {
+            try capture.append("null");
+        } else {
+            // Read in place: a label buffer would take a slot in the report's frame.
+            const label = try sqlite.boundedColumnText(statement, 16, protocol.max_label_bytes);
+            try configuration_domain.checkLabel(label);
+            try capture.appendJsonString(label);
+        }
         try capture.append(",\"tools\":");
         try capture.appendTools(@intCast(tools));
         try capture.append(",\"permission_mode\":");

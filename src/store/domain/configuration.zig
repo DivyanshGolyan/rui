@@ -63,6 +63,21 @@ fn permissionModeCode(mode: []const u8) u8 {
     return if (std.mem.eql(u8, mode, "ask")) 0 else 1;
 }
 
+/// Decodes a persisted permission_mode: 0 asks, 1 bypasses, and any other
+/// value is `CorruptStore`.
+pub fn permissionMode(code: u8) error{CorruptStore}!protocol.PermissionMode {
+    return switch (code) {
+        0 => .ask,
+        1 => .bypass,
+        else => error.CorruptStore,
+    };
+}
+
+/// Refuses a persisted label that `protocol.validLabel` does not accept.
+pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
+    if (!protocol.validLabel(label)) return error.CorruptStore;
+}
+
 /// A created Session's tools when configuration omits them.
 pub const default_tools_mask: u8 = blk: {
     var mask: u8 = 0;
@@ -461,10 +476,11 @@ pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfigura
 /// Refuses a saved configuration that breaks what its columns may hold.
 pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void {
     const instructions = current.instructions_id orelse return error.CorruptStore;
-    if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.tools_mask > tool_catalog.all_tools_mask or
-        current.permission_mode > 1 or current.revision == 0 or current.next_position == 0 or current.compaction_trigger == @as(?u64, 0) or
-        current.created_at == 0 or current.workspace_key == 0) return error.CorruptStore;
-    if (current.label) |*label| if (!protocol.validLabel(label.slice())) return error.CorruptStore;
+    if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.revision == 0 or current.next_position == 0 or
+        current.compaction_trigger == @as(?u64, 0) or current.created_at == 0 or current.workspace_key == 0) return error.CorruptStore;
+    _ = try toolSet(current.tools_mask);
+    _ = try permissionMode(current.permission_mode);
+    if (current.label) |*label| try checkLabel(label.slice());
 }
 
 /// `readSaved` and `checkSaved` for unconverted code: whether the Session
