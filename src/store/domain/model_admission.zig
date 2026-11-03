@@ -17,7 +17,7 @@ const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const historical_domain = @import("historical.zig");
 const model_settlement_domain = @import("model_settlement.zig");
-const report_domain = @import("report.zig");
+const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
 const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
@@ -567,7 +567,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         reader.read(disagreeing_continuation, .{}, &disagreeing);
         try store_access.runAs(reader, error.TurnReadFailed);
         if (disagreeing != null) return error.CorruptStore;
-        try validateBlockedToolCalls(reader.store);
+        try validateBlockedToolCalls(reader);
         return null;
     };
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
@@ -750,24 +750,20 @@ pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active
     } } };
 }
 
+/// Every active Turn's current Operation that proposed tool calls, the
+/// Operations that can be blocking successor discovery: the scope of the
+/// tool outcome rule (`reads.ToolOutcome`), with main's text for it.
+const blocked_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operation.operation_id,NULL AS group_position," ++ reads_domain.expectedCallsSql("operation.operation_id") ++ " " ++
+    "FROM turn active JOIN model_operation operation ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
+    "AND " ++ store_schema.resolutionIs("operation.resolution_code", .tool_proposals), struct {}, false);
+
 /// Before declaring the Store idle, distinguish valid permission waits
-/// from malformed canonical classification. Only each active Turn's
-/// current Operation can be blocking successor discovery.
-fn validateBlockedToolCalls(self: *Store) !void {
-    const statement = try store_core.cached(
-        self,
-        "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
-            "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
-            "AND " ++ store_schema.resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
-    );
-    defer sqlite.resetCached(statement);
-    while (true) switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {
-            const operation_id = c.sqlite3_column_int64(statement, 0);
-            if (operation_id <= 0) return error.CorruptStore;
-            _ = try report_domain.readToolOutcomeFacts(self, @intCast(operation_id), false);
-        },
-        c.SQLITE_DONE => return,
-        else => return error.CallReadFailed,
-    };
+/// from malformed canonical classification: the tool outcome rule over
+/// `blocked_tool_calls`, in a round of its own. A failed step is
+/// `CallReadFailed`, main's name for each of its statements.
+fn validateBlockedToolCalls(reader: anytype) !void {
+    var check: reads_domain.ToolOutcomeCheck = .{};
+    reader.readEach(blocked_tool_calls, .{}, std.math.maxInt(u64), &check);
+    try store_access.runAs(reader, error.CallReadFailed);
+    try check.finish();
 }
