@@ -560,9 +560,10 @@ const record_prefix_seal = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Round 1 reads the Attempt and its Session; the seal is written only
-/// while the binding is current.
-fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+/// Round 1 reads the Attempt and its Session; the seal is written, in
+/// round 2 with the commit, only while the binding is current. Public so a
+/// test counts its rounds.
+pub fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !void {
     const session = try model_settlement_domain.currentAttemptSession(a, binding);
     a.write(record_prefix_seal, .{ .session = session, .seal = seal.encode() });
     try a.commit();

@@ -241,8 +241,8 @@ noinline fn readContentId(entry: *const store_core.Entry, reference: ContentRefe
 
 /// The id of the row `reference` and `private` name, in one round. A
 /// reference names a row, so a missing one is `CorruptStore`, and so is a
-/// failed step, main's name for both.
-fn contentIdOf(a: anytype, reference: ContentReference, private: bool) !i64 {
+/// failed step, main's name for both. Public so a test counts its rounds.
+pub fn contentIdOf(a: anytype, reference: ContentReference, private: bool) !i64 {
     var found: lookup_content.Result = undefined;
     a.read(lookup_content, .{ .digest = reference.digest, .length = reference.length, .private = private }, &found);
     try store_access.runAs(a, error.CorruptStore);

@@ -14539,12 +14539,12 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
         _ = statementWorkSince(storage.database);
         var view: HistoricalView = undefined;
         try storage.openHistoricalView(attempt.binding, &view);
+        defer view.close();
         work[0] = statementWorkSince(storage.database);
         try view.checkAttempt();
         work[1] = statementWorkSince(storage.database);
         try view.recordPrefixSeal(&TestingAttempt.seal);
         work[2] = statementWorkSince(storage.database);
-        view.close();
         _ = try storage.modelOperationKind(attempt.binding);
         work[3] = statementWorkSince(storage.database);
         try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
@@ -14556,6 +14556,29 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
             try std.testing.expect(measured[0] <= main[0]);
             try std.testing.expect(measured[1] <= main[1]);
         }
+    }
+    // Rounds, where main took 2 for a view, a check or a handoff, 3 for
+    // the Operation's kind, 5 for a seal and 1 for a content lookup: each
+    // Attempt check is one read, a seal one read and its commit.
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    {
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        _ = try model_settlement_domain.attemptKind(&a, attempt.binding);
+        try std.testing.expectEqual(1, a.rounds);
+    }
+    {
+        var a: store_access.Access(.write, error{}) = .open(&entry);
+        defer a.deinit();
+        try historical_domain.sealOn(&a, attempt.binding, &TestingAttempt.seal);
+        try std.testing.expectEqual(2, a.rounds);
+    }
+    {
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        _ = try content_domain.contentIdOf(&a, attempt.content, false);
+        try std.testing.expectEqual(1, a.rounds);
     }
 }
 
@@ -14597,6 +14620,28 @@ test "an Attempt check reads no Session, and a prefix seal's Session read answer
     try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
     try std.testing.expect(!storage.isFenced());
     try std.testing.expectError(error.OperationReadFailed, view.recordPrefixSeal(&TestingAttempt.seal));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    // The seal rewrites a few bytes of one Session row in place, which a
+    // capped file still holds, so a trigger grows the file as it writes.
+    try sqlite.exec(storage.database, "CREATE TABLE ballast(b BLOB)");
+    const page_count = try sqlite.pragmaInt(storage.database, "PRAGMA page_count");
+    var limit_buffer: [64:0]u8 = undefined;
+    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count}, 0));
+    try sqlite.exec(storage.database, "CREATE TEMP TRIGGER seal_grows AFTER UPDATE OF prefix_seal ON main.session BEGIN INSERT INTO main.ballast VALUES(zeroblob(65536)); END");
+    try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     try std.testing.expect(storage.isFenced());
 }
 

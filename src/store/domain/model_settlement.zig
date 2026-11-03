@@ -158,8 +158,8 @@ const attempt_standing = rsql.Read(.{
 /// The purpose of the Operation `binding` names, in one round, while
 /// `attemptStanding` finds the binding current; a missing Operation is
 /// `StaleAttemptBinding`. A failed step is `OperationReadFailed`, main's
-/// name for its Attempt read.
-fn attemptKind(a: anytype, binding: AttemptBinding) !ModelOperationKind {
+/// name for its Attempt read. Public so a test counts its rounds.
+pub fn attemptKind(a: anytype, binding: AttemptBinding) !ModelOperationKind {
     var found: attempt_standing.Result = undefined;
     a.read(attempt_standing, .{ .operation_id = binding.operation_id }, &found);
     try runOperationRead(a);
