@@ -345,9 +345,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// `visitor.visit(*const S.Row) bool`, until it returns false, the
         /// rows end, or `limit` rows were stepped. `visitor` must outlive
         /// the round. Nothing is poisoned: the visitor holds the read's
-        /// results, and what they mean before the pass is its own.
+        /// results, and what they mean before the pass is its own. A row
+        /// decodes into the pass's frame, unless the visitor has a field
+        /// `decoded: S.Row`, which it then decodes into, so its size is
+        /// the visitor's own; a Row over 1 KiB needs one.
         pub fn readEach(a: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
+            if (comptime @sizeOf(S.Row) > 1024 and !@hasField(@TypeOf(visitor.*), "decoded"))
+                @compileError("rsql: an .each Row over 1 KiB decodes into its visitor's own decoded field: " ++ S.sql);
             _ = a.queueStatement(S, &args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } });
         }
 
@@ -724,12 +729,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     const statement = entry.statement.?;
                     const each = entry.target.each;
                     const visitor: *Visitor = @ptrCast(@alignCast(each.visitor));
-                    // At most 1 KiB (`rsql.Read`).
-                    var row: S.Row = undefined;
+                    // At most 1 KiB, unless the visitor owns its row (`readEach`).
+                    const owned = comptime @hasField(Visitor, "decoded");
+                    var local: if (owned) void else S.Row = undefined;
+                    const row: *S.Row = if (owned) &visitor.decoded else &local;
                     var stepped: u64 = 0;
                     while (stepped < each.limit and try nextRow(statement)) : (stepped += 1) {
-                        try sqlite.decodeRow(S.Row, statement, &row);
-                        if (!visitor.visit(&row)) break;
+                        try sqlite.decodeRow(S.Row, statement, row);
+                        if (!visitor.visit(row)) break;
                     }
                 }
             }.run;

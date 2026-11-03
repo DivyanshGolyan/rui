@@ -307,10 +307,9 @@ pub const WriteSpec = struct { sql: []const u8, Args: type, expect: Expect };
 pub fn Read(comptime spec: ReadSpec) type {
     const parsed = comptime accepted(.read, spec.sql, spec.Args, spec.Row, spec.compound);
     comptime {
-        // `.one` and `.at_most` decode in place; an `.each` Row is decoded
-        // into the round's frame. `Access.read` refuses a big `.optional`.
-        if (spec.cardinality == .each and @sizeOf(spec.Row) > 1024)
-            @compileError("rsql: a Row over 1 KiB is never copied; read it .one or .at_most(1): " ++ spec.sql);
+        // `.one` and `.at_most` decode in place. `Access.readEach` refuses
+        // an `.each` Row over 1 KiB unless its visitor owns the decoded row, and
+        // `Access.read` a big `.optional`.
         if (fillsInPlace(spec.Row) and spec.cardinality != .optional)
             @compileError("rsql: a Row that points into its caller's memory is read .optional, with Access.readInto: " ++ spec.sql);
     }
