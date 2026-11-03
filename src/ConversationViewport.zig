@@ -594,8 +594,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         /// Where each collapsed block's summary starts within text bytes
-        /// `[from, to)`: a user block's `┄` row, or a peer Message's line
-        /// (`←` or `→`) ending in `…`, both drawn dim and quiet. Returns
+        /// `[from, to)`: a user block's `┄` row, drawn dim and quiet. Returns
         /// their count, and the last one's offset.
         pub fn collapsed(self: *const Self, from: usize, to: usize) Summaries {
             comptime std.debug.assert(styled);
@@ -604,17 +603,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             var result: Summaries = .{};
             var index = from;
             const end = @min(to, bytes.len);
-            // `┄`, `←` and `→` all start with this byte.
-            while (std.mem.indexOfScalarPos(u8, bytes[0..end], index, 0xe2)) |found| : (index = found + 1) {
+            while (std.mem.indexOfPos(u8, bytes[0..end], index, "┄")) |found| : (index = found + 1) {
                 if (self.styles[found] & run != run) continue;
                 if (found != 0 and self.styles[found - 1] & run == run) continue;
-                const rest = bytes[found..];
-                if (!std.mem.startsWith(u8, rest, "┄")) {
-                    if (!std.mem.startsWith(u8, rest, "← ") and !std.mem.startsWith(u8, rest, "→ ")) continue;
-                    var stop = found;
-                    while (stop < bytes.len and self.styles[stop] & run == run) stop += 1;
-                    if (!std.mem.endsWith(u8, bytes[found..stop], "…")) continue;
-                }
                 result.count += 1;
                 result.last = found;
             }
@@ -962,22 +953,19 @@ test "a peer line keeps one row with its time in the right margin, as a user blo
     _ = view.draw(test_screen.window(80, 2), .{}, true, true, .{});
     const style = test_screen.screen.readCell(0, 0).?.style;
     try std.testing.expect(style.dim and !style.italic);
-    // A peer line ending in `…` is a collapsed block for Ctrl-O, like a `┄`
-    // row; the clipping `…` drawn above is not. Nor are a typed arrow, a
-    // failed send, or a `┄` or `…` within a peer line's text.
+    // Only a `┄` row is a collapsed block for Ctrl-O: never a peer line, even
+    // one whose name ends in `…`, nor a `┄` within a peer's name.
     var blocks: Sized(512, true) = .{};
-    try blocks.append("\x1b[2;8m← a · x ┄ y\x1b[8m08:00\x1b[0m\n" ++
-        "\x1b[2;8m→ b · first…\x1b[8m08:00\x1b[0m\n" ++
-        "› \x1b[2m← typed…\x1b[0m\n" ++
-        "\x1b[2;8m! → c — Failed\x1b[0m\n" ++
-        "\x1b[2;8m← d · …x\x1b[0m\n" ++
+    try blocks.append("\x1b[2;8m← Received message from x ┄ y\x1b[8m08:00\x1b[0m\n" ++
+        "\x1b[2;8m→ Messaged Plan…\x1b[8m08:00\x1b[0m\n" ++
+        "› \x1b[2m┄ typed\x1b[0m\n" ++
         "  \x1b[2;8m┄ 2 more lines\x1b[0m\n" ++
-        "\x1b[2;8m← e · …\x1b[0m\n");
+        "  \x1b[2;8m┄ 3 more lines\x1b[0m\n");
     const text = blocks.text();
     const found = blocks.collapsed(0, text.len);
-    try std.testing.expectEqual(@as(usize, 3), found.count);
-    try std.testing.expectEqual(std.mem.indexOf(u8, text, "← e").?, found.last.?);
-    try std.testing.expectEqual(@as(usize, 2), blocks.collapsed(std.mem.indexOf(u8, text, "→ b").? + 1, text.len).count);
+    try std.testing.expectEqual(@as(usize, 2), found.count);
+    try std.testing.expectEqual(std.mem.indexOf(u8, text, "┄ 3").?, found.last.?);
+    try std.testing.expectEqual(@as(usize, 1), blocks.collapsed(std.mem.indexOf(u8, text, "┄ 2").? + 1, text.len).count);
 }
 
 test "a peer line's wide last cluster yields to the ellipsis instead of crossing the edge" {
