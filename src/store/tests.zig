@@ -1742,26 +1742,31 @@ test "a list row reads the same steps however long its Session's history" {
             try std.testing.expect(store.stopSession(&stop, .{}) == .accepted);
         }
     };
+    // The Session is the list's only row, so the page's steps are its row's.
     const Counter = struct {
-        fn rowSteps(store: *Store, session: []const u8) !u64 {
-            var row: protocol.SessionRow = .{};
-            try report_domain.readSessionRowLocked(store, session, try store_core.readUnixMilliseconds(std.testing.io), &row);
+        fn rowSteps(store: *Store, dir: *std.testing.TmpDir, session: []const u8) !u64 {
+            var used = std.atomic.Value(u64).init(0);
+            std.testing.allocator.free(try testingSessionList(store, dir, .{}, &used, 78));
             var counter: TestingSteps = .{};
             counter.begin(store.database);
-            defer counter.end(store.database);
-            try report_domain.readSessionRowLocked(store, session, try store_core.readUnixMilliseconds(std.testing.io), &row);
-            try std.testing.expect(row.work.state == .finished and row.first_message != null);
+            const bytes = testingSessionList(store, dir, .{}, &used, 79);
+            counter.end(store.database);
+            std.testing.allocator.free(try bytes);
+            var listed = try testingListRow(store, dir, session);
+            defer listed.deinit();
+            try std.testing.expectEqualStrings("finished", listed.get(&.{ "work", "state", "kind" }).string);
+            try std.testing.expect(listed.get(&.{"first_message"}) != .null);
             return counter.steps;
         }
     };
     const session = try configureTestSession(&storage, "row-steps");
     try Round.run(&storage, &tmp, session.slice(), "row-steps-0");
     try answerTestTurn(&storage, &tmp, session.slice(), "row-steps-short", &Round.answer);
-    const short = try Counter.rowSteps(&storage, session.slice());
+    const short = try Counter.rowSteps(&storage, &tmp, session.slice());
     inline for (1..33) |round| try Round.run(&storage, &tmp, session.slice(), std.fmt.comptimePrint("row-steps-{d}", .{round}));
     try answerTestTurn(&storage, &tmp, session.slice(), "row-steps-long", &Round.answer);
     try std.testing.expect(short > 0);
-    try std.testing.expectEqual(short, try Counter.rowSteps(&storage, session.slice()));
+    try std.testing.expectEqual(short, try Counter.rowSteps(&storage, &tmp, session.slice()));
 }
 
 test "a list row carries its Session's Label, times, first Message, work and peers" {
@@ -13607,4 +13612,65 @@ test "admission fails before COMMIT when a counted write changes other than its 
         try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM conversation_entry"));
         try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM message_admission WHERE turn_id IS NOT NULL"));
     }
+}
+
+/// The rounds one list page takes over a Store of `count` Sessions, each
+/// whose work reads its deepest stages: an answered Turn, then a queued
+/// Message a stop excluded.
+fn listRoundsForTesting(count: usize) !u32 {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    inline for (0..protocol.session_list_page_size) |index| if (index < count) {
+        const name = std.fmt.comptimePrint("list-rounds-{d}", .{index});
+        const session = try configureTestSession(&storage, name);
+        try answerTestTurn(&storage, &tmp, session.slice(), name ++ "-answer", &answer);
+        try submitTestMessage(&storage, &tmp, name ++ "-queued-file", name ++ "-queued", session.slice(), "excluded");
+        var stop = try completeSessionStop(name ++ "-stop", session.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    };
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+    try capture.create(root[0..length], 1, false);
+    defer capture.deinit();
+    var a = reads_domain.ReadAccess.within(&storage);
+    defer a.deinit();
+    try report_domain.renderSessionList(&a, &.{}, &capture);
+    var report = try capture.seal();
+    defer report.deinit();
+    var bytes: [8192]u8 = undefined;
+    const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
+    // Every shown row's work went through its stop.
+    try std.testing.expectEqual(count, std.mem.count(u8, bytes[0..read], "\"kind\":\"stopped\""));
+    return a.rounds;
+}
+
+test "a list page's rows share their rounds, so eight rows take as many as one" {
+    // The page; its rows' latest Turns and first-Message seeks; then the
+    // stop cutoff, the queue after it, the excluded Message and its stop;
+    // then the rows themselves.
+    try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(1));
+    try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(protocol.session_list_page_size));
+}
+
+test "a list row's failed Actions read answers main's ActionReadFailed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "list-actions-config");
+    try submitTestMessage(&storage, &tmp, "list-actions-input", "list-actions-message", session.slice(), "call");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const call = [_]TestingCall{.{ .item_id = "list-actions-item", .name = "bash", .encoded_call_id = "list-actions-call", .decoded_call_id = "list-actions-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
+    try settleCallsForTesting(&storage, &tmp, binding, "list-actions-output", &call);
+    try failAtStepForTesting(storage.database, "action_operation");
+    var used = std.atomic.Value(u64).init(0);
+    try std.testing.expectError(error.ActionReadFailed, testingSessionList(&storage, &tmp, .{}, &used, 5));
+    try std.testing.expect(storage.isFenced());
 }
