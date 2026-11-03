@@ -1203,14 +1203,18 @@ const call_outcomes = ToolOutcome(call_candidates_sql ++ ", ", "SELECT DISTINCT 
 /// Operations by the tool outcome rule before any presentation is taken:
 /// each by itself (`operation_outcome`) while they are at most
 /// `max_operations`, which `operations` holds, and else all of them in
-/// one read (`call_outcomes`), whose search for them costs more than one
-/// Operation's own read. Main's equality holds by the schema's CHECKs,
-/// not the rule: a call has an acceptance exactly when it is rejected
-/// (`model_tool_call`'s) or its Action resolved (`action_operation`'s),
-/// and then has its rejection's or result's content, so an Operation the
-/// rule passes is a group, at its largest acceptance, exactly when every
-/// call has one, and its publication is then that acceptance. It keeps no row, so its read
-/// steps every row the statement returns: a count has no smaller bound.
+/// one read (`call_outcomes`). One read repeats the candidates' search,
+/// so it steps more than the reads one per Operation at every count
+/// measured, and more than main (3 Operations: 13026 steps against
+/// 12368 and main's 12613; 33: 29520 against 25022 and 26497); only the
+/// frame bounds `max_operations`. Main's equality holds by the schema's
+/// CHECKs, not the rule: a call has an acceptance exactly when it is
+/// rejected (`model_tool_call`'s) or its Action resolved
+/// (`action_operation`'s), and then has its rejection's or result's
+/// content, so an Operation the rule passes is a group, at its largest
+/// acceptance, exactly when every call has one, and its publication is
+/// then that acceptance. It keeps no row, so its read steps every row the
+/// statement returns: a count has no smaller bound.
 const CallRows = struct {
     activity: *protocol.CallActivity,
     args: CallArgs,
@@ -1221,7 +1225,7 @@ const CallRows = struct {
     check: ToolOutcomeCheck = .{},
     presentations: [@typeInfo(@FieldType(protocol.CallActivity, "entries")).array.len]PresentationRead = undefined,
 
-    const max_operations = 4;
+    const max_operations = 32;
 
     pub fn visit(rows: *CallRows, row: *const CallRow) bool {
         const operation = row.operation_id.get();
