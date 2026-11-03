@@ -14100,6 +14100,107 @@ fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     return a.rounds;
 }
 
+/// The statements the Store's cached statements ran and the VM steps they
+/// took since the last call, which resets them.
+fn cachedWorkForTesting(storage: *Store) struct { statements: i64, steps: i64 } {
+    var statements: i64 = 0;
+    var steps: i64 = 0;
+    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+        statements += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
+        steps += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+    };
+    return .{ .statements = statements, .steps = steps };
+}
+
+/// One tool cycle of the cost fixture: a Message whose Operation proposes
+/// two Bash calls and an unknown one; one call is allowed and runs, one
+/// denied, the unknown one rejected; the continuation answers.
+fn costCycleForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, index: usize) !void {
+    var name: [64]u8 = undefined;
+    var key: [64]u8 = undefined;
+    try submitTestMessage(storage, tmp, try std.fmt.bufPrint(&name, "cycle-{d}-input", .{index}), try std.fmt.bufPrint(&key, "cycle-{d}-key", .{index}), session, "list the files, then summarize");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-a", .name = "bash", .encoded_call_id = "call-a", .decoded_call_id = "call-a", .encoded_arguments = "{\\\"description\\\":\\\"List files\\\",\\\"cmd\\\":\\\"ls -la\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"List files\",\"cmd\":\"ls -la\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-b", .name = "bash", .encoded_call_id = "call-b", .decoded_call_id = "call-b", .encoded_arguments = "{\\\"description\\\":\\\"Remove files\\\",\\\"cmd\\\":\\\"rm -rf x\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Remove files\",\"cmd\":\"rm -rf x\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-c", .name = "unknown", .encoded_call_id = "call-c", .decoded_call_id = "call-c", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(storage, tmp, binding, try std.fmt.bufPrint(&name, "cycle-{d}-calls", .{index}), &calls);
+    const first_action = try queryU64(storage.database, "SELECT max(action_id)-1 FROM action_operation");
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = first_action, .decision = .allow_once };
+    try allow.key.set(try std.fmt.bufPrint(&key, "cycle-{d}-allow", .{index}));
+    try allow.session.set(session);
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try denyForTesting(storage, session, try std.fmt.bufPrint(&key, "cycle-{d}-deny", .{index}), first_action + 1);
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    _ = try storage.settleActionAttempt(action, .succeeded, "total 8\ndrwxr-xr-x 2 user user 4096 a\n-rw-r--r-- 1 user user 120 b\n", .{});
+    const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Two files; the removal was denied.\"}]}"};
+    try settleItemsForTesting(storage, tmp, continued, &items, "Two files; the removal was denied.");
+}
+
+/// The cost fixture: an answered greeting, a reconfigure, `cycles` tool
+/// cycles, a stopped Turn with a Message the stop excluded, and a Turn
+/// awaiting one asked Bash call beside a rejected unknown one.
+fn costFixtureForTesting(storage: *Store, tmp: *std.testing.TmpDir, cycles: usize) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSessionAsk(storage, "probe-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "hello there", .decoded = "hello there" }};
+    try answerTestTurn(storage, tmp, session.slice(), "probe-greeting", &answer);
+    var reconfigure: protocol.ConfigureCommand = .{};
+    try reconfigure.key.set("probe-reconfigure");
+    try reconfigure.session.set(session.slice());
+    reconfigure.configuration.instructions = try testingBytesContent(tmp, "probe-instructions", "Be brief and careful.");
+    reconfigure.configuration.label.state = .value;
+    try reconfigure.configuration.label.value.set("probe label");
+    try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
+    for (0..cycles) |index| try costCycleForTesting(storage, tmp, session.slice(), index);
+    try submitTestMessage(storage, tmp, "probe-stopped-input", "probe-stopped-key", session.slice(), "start something long");
+    _ = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try submitTestMessage(storage, tmp, "probe-excluded-input", "probe-excluded-key", session.slice(), "and then this");
+    var stop = try completeSessionStop("probe-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    var late_stop = try completeSessionStop("probe-stop-idle", session.slice());
+    _ = storage.stopSession(&late_stop, .{});
+    try submitTestMessage(storage, tmp, "probe-awaiting-input", "probe-awaiting-key", session.slice(), "check the disk");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-d", .name = "bash", .encoded_call_id = "call-d", .decoded_call_id = "call-d", .encoded_arguments = "{\\\"description\\\":\\\"Disk usage\\\",\\\"cmd\\\":\\\"df -h\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Disk usage\",\"cmd\":\"df -h\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-e", .name = "unknown", .encoded_call_id = "call-e", .decoded_call_id = "call-e", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(storage, tmp, binding, "probe-awaiting-calls", &calls);
+    return session;
+}
+
+test "a Current report and inspection do no more work than main at the cost fixture" {
+    // Main's counts at 72db6de9, each the second, cached, run on this
+    // fixture: statements run and VM steps, the report then inspection.
+    inline for (.{
+        .{ 1, [4]i64{ 37, 2954, 12, 633 } },
+        .{ 8, [4]i64{ 37, 5674, 12, 633 } },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try costFixtureForTesting(&storage, &tmp, case[0]);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        _ = cachedWorkForTesting(&storage);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        const report = cachedWorkForTesting(&storage);
+        _ = try storage.inspectSessionForTesting(session.slice());
+        _ = cachedWorkForTesting(&storage);
+        _ = try storage.inspectSessionForTesting(session.slice());
+        const inspection = cachedWorkForTesting(&storage);
+        const main = case[1];
+        try std.testing.expect(report.statements > 0 and inspection.statements > 0);
+        std.testing.expect(report.statements <= main[0] and report.steps <= main[1] and inspection.statements <= main[2] and inspection.steps <= main[3]) catch |err| {
+            std.debug.print("report {d} statements, {d} steps; inspection {d}, {d}\n", .{ report.statements, report.steps, inspection.statements, inspection.steps });
+            return err;
+        };
+    }
+}
+
 test "a Current report takes its reads' dependency depth in rounds, not its rows" {
     // Every shape: the saved Session; the facts' first round, with the
     // work's and compaction facts' latest Turn; the pending count with
