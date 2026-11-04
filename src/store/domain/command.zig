@@ -14,7 +14,6 @@ const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const sqlite = @import("../sqlite.zig");
-const c = sqlite.c;
 const turn_domain = @import("turn.zig");
 const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 const AttemptBinding = store_core.AttemptBinding;
@@ -117,7 +116,6 @@ pub const max_permission_decision_bytes = sqlite.maxEnumTagBytes(protocol.Permis
 const MessageProjection = struct {
     admission_id: u64,
     command_key: protocol.Bounded(128),
-    session: protocol.Bounded(protocol.max_session_bytes),
     content_id: i64,
     state: union(enum) {
         pending,
@@ -1301,34 +1299,14 @@ pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
     }
 }
 
-/// The columns a Message's projection reads, in a report's order.
-const MessageColumns = struct {
-    session_ref: protocol.Bounded(protocol.max_session_bytes),
-    content_id: rsql.Positive,
-    admission_id: rsql.Positive,
-    command_key: protocol.Bounded(128),
-    turn_id: ?rsql.Positive,
-    operation_id: ?rsql.Positive,
-    attempt_ordinal: ?rsql.Positive,
-    outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
-    outcome_content_id: ?rsql.Positive,
-};
-
-/// `projectMessage` for a report's unconverted statement, whose columns
-/// are `MessageColumns`.
-pub fn readMessageProjectionRow(statement: *c.sqlite3_stmt, excluding_stop: ?[]const u8) !MessageProjection {
-    var row: MessageColumns = undefined;
-    try sqlite.decodeRow(MessageColumns, statement, &row);
-    return projectMessage(&row, excluding_stop);
-}
-
-/// Where a Message stands, from `row`'s `MessageColumns` fields:
-/// applied by a Turn, excluded by the stop `excluding_stop`, or pending.
-fn projectMessage(row: anytype, excluding_stop: ?[]const u8) !MessageProjection {
+/// Where a Message stands, from `row`'s admission_id, command_key,
+/// content_id, turn_id, operation_id, attempt_ordinal, outcome_code and
+/// outcome_content_id: applied by a Turn, excluded by the stop
+/// `excluding_stop`, or pending.
+pub fn projectMessage(row: anytype, excluding_stop: ?[]const u8) !MessageProjection {
     var projection: MessageProjection = .{
         .admission_id = row.admission_id.get(),
         .command_key = row.command_key,
-        .session = row.session_ref,
         .content_id = @intCast(row.content_id.get()),
         .state = .pending,
     };
