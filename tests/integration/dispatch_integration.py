@@ -1720,7 +1720,7 @@ def main(mode="all", correlation_case="all"):
         assert [item["output"] for item in output_items] == [
             "Permission denied.",
             "Unknown tool: missing-tool.",
-            "Invalid arguments for tool 'bash'.",
+            "Invalid arguments for tool 'bash': the arguments are not one well-formed JSON object.",
             "Permission denied.",
         ], output_items
         assert [
@@ -3566,20 +3566,20 @@ def main(mode="all", correlation_case="all"):
                 {
                     "type": "function",
                     "name": "bash",
-                    "strict": True,
+                    "strict": False,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "cmd": {"type": "string"},
-                            "stdin": {"type": ["string", "null"]},
+                            "stdin": {"type": "string"},
                             "description": {"type": "string"},
                             "timeout_ms": {
-                                "type": ["integer", "null"],
+                                "type": "integer",
                                 "minimum": 1,
                                 "maximum": 9223372036854775807,
                             },
                         },
-                        "required": ["cmd", "stdin", "description", "timeout_ms"],
+                        "required": ["cmd", "description"],
                         "additionalProperties": False,
                     },
                 },

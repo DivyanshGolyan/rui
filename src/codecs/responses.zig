@@ -149,7 +149,9 @@ pub const Encoder = struct {
                 out.content(0, .json_string_v1);
                 out.literal("\",\"description\":\"");
                 out.content(1, .json_string_v1);
-                out.literal("\",\"strict\":true,\"parameters\":");
+                // Explicit: an omitted `strict` lets the provider make the
+                // schema strict, requiring every field; Rui checks calls.
+                out.literal("\",\"strict\":false,\"parameters\":");
                 out.content(2, .verbatim);
                 out.literal("}");
             },

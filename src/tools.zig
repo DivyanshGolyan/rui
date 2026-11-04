@@ -14,10 +14,10 @@ pub const bash_definition: codec_abi.ToolDefinition = .{
     .name = "bash",
     .description = "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd. Bash has no terminal: no one can type into a running call, so password prompts (sudo, including installers that run it) and interactive programs fail. When flags or stdin cannot answer a prompt, give the command to the user to run in their own terminal: before running it when you can tell it will prompt, otherwise after its first such failure. Do not retry it here.",
     .parameters_json = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
-        std.fmt.comptimePrint("\"stdin\":{{\"type\":[\"string\",\"null\"],\"description\":\"Stdin is empty unless set. Supply literal UTF-8 text, at most {d} decoded bytes, read exactly then EOF. Missing or null uses /dev/null.\"}},", .{bash_max_stdin_bytes}) ++
+        std.fmt.comptimePrint("\"stdin\":{{\"type\":\"string\",\"description\":\"Optional. Literal UTF-8 text, at most {d} decoded bytes, read exactly then EOF. Omitted, stdin is /dev/null.\"}},", .{bash_max_stdin_bytes}) ++
         "\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"}," ++
-        "\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
-        "\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}",
+        "\"timeout_ms\":{\"type\":\"integer\",\"description\":\"Optional. Omit it for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
+        "\"required\":[\"cmd\",\"description\"],\"additionalProperties\":false}",
 };
 
 /// How the model is told about a tool: a function Rui runs, described in
@@ -261,7 +261,46 @@ pub const all_tools_mask: u8 = blk: {
 
 pub const CallFacts = struct {
     name: CallName,
-    bash_arguments: ?BashArguments,
+    /// A bash call's checked arguments; null for any other name.
+    bash: ?BashCheck,
+
+    /// The arguments of a bash call the parser accepted.
+    pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
+        const check = &(self.bash orelse return null);
+        return switch (check.*) {
+            .accepted => |*accepted| accepted,
+            .rejected => null,
+        };
+    }
+};
+
+/// Why a Bash call's arguments were rejected. Its text goes back to the
+/// model as the call's result, so the model can correct the call: the
+/// provider does not check arguments against the schema, Rui does.
+pub const BashProblem = enum {
+    malformed_json,
+    unknown_field,
+    duplicate_field,
+    missing_cmd,
+    missing_description,
+    cmd_invalid,
+    description_invalid,
+    stdin_invalid,
+    timeout_invalid,
+
+    pub fn text(self: BashProblem) []const u8 {
+        return switch (self) {
+            .malformed_json => "the arguments are not one well-formed JSON object",
+            .unknown_field => "only cmd, description, stdin and timeout_ms are accepted",
+            .duplicate_field => "a field appears more than once",
+            .missing_cmd => "cmd is required",
+            .missing_description => "description is required",
+            .cmd_invalid => "cmd must be a string of UTF-8 text with no NUL characters",
+            .description_invalid => std.fmt.comptimePrint("description must be a nonblank, single-line string of UTF-8 text, at most {d} bytes", .{protocol.max_tool_description_bytes}),
+            .stdin_invalid => "stdin must be a string of UTF-8 text",
+            .timeout_invalid => std.fmt.comptimePrint("timeout_ms must be an integer from 1 to {d}", .{std.math.maxInt(i64)}),
+        };
+    }
 };
 
 /// Inspect certified decoded sources; the caller retains their storage and
@@ -276,12 +315,15 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype) !
         if (std.mem.eql(u8, &name, "bash")) .bash else .unknown
     else
         .unknown;
-    return .{ .name = kind, .bash_arguments = if (kind == .bash) try inspectBashArguments(arguments) else null };
+    return .{ .name = kind, .bash = if (kind == .bash) try checkBashArguments(arguments) else null };
 }
 
-pub fn rejectionResult(code: protocol.ProposalRejection, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
+/// A rejected call's result text, from `classifyCall`'s code for `facts`.
+pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
-        .invalid_arguments => return "Invalid arguments for tool 'bash'.",
+        .invalid_arguments => return switch (facts.bash.?.rejected) {
+            inline else => |value| "Invalid arguments for tool 'bash': " ++ comptime value.text() ++ ".",
+        },
         .unknown_tool => {
             var prefix: [32]u8 = undefined;
             var prefix_length: usize = 0;
@@ -299,7 +341,11 @@ pub fn rejectionResult(code: protocol.ProposalRejection, name: anytype, name_len
 
 /// Admission policy over adapter-certified descriptor facts and frozen tools.
 /// Call this under the transaction that publishes the proposal and Action.
-pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {
+pub fn classifyCall(facts: *const CallFacts, frozen: ToolSet) ?protocol.ProposalRejection {
+    return classifyName(facts.name, facts.bashArguments() != null, frozen);
+}
+
+fn classifyName(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {
     return switch (name) {
         .bash => if (!frozen.contains(.bash)) .unknown_tool else if (!valid_arguments) .invalid_arguments else null,
         .unknown => .unknown_tool,
@@ -309,11 +355,11 @@ pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?pro
 test "tool classification uses frozen availability before argument validity" {
     const none: ToolSet = .empty;
     const bash_only = ToolSet.initOne(.bash);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, false, none).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, true, none).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.invalid_arguments, classifyCall(.bash, false, bash_only).?);
-    try std.testing.expect(classifyCall(.bash, true, bash_only) == null);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.unknown, true, .full).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.bash, false, none).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.bash, true, none).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.invalid_arguments, classifyName(.bash, false, bash_only).?);
+    try std.testing.expect(classifyName(.bash, true, bash_only) == null);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.unknown, true, .full).?);
 }
 
 pub fn validBashArguments(source: anytype) !bool {
@@ -336,24 +382,42 @@ pub fn writeBashStdin(source: anytype, writer: anytype) !bool {
     return try parseBashArguments(source, &discard, writer) != null;
 }
 
+pub const BashCheck = union(enum) {
+    accepted: BashArguments,
+    rejected: BashProblem,
+};
+
+pub fn checkBashArguments(source: anytype) !BashCheck {
+    var discard: Discard = .{};
+    return checkBash(source, &discard, &discard);
+}
+
 fn parseBashArguments(source: anytype, writer: anytype, input: anytype) !?BashArguments {
+    return switch (try checkBash(source, writer, input)) {
+        .accepted => |accepted| accepted,
+        .rejected => null,
+    };
+}
+
+fn checkBash(source: anytype, writer: anytype, input: anytype) !BashCheck {
     var parser: BashParser = .{};
     while (true) {
         const progress = parser.advance(source, writer, input, 4096) catch |err| {
-            if (isBashDescriptorError(err)) return null;
+            // A decoding failure outside a string's bytes.
+            if (isBashDescriptorError(err)) return .{ .rejected = .malformed_json };
             return err;
         };
         switch (progress) {
             .pending => {},
-            .invalid => return null,
-            .complete => |result| return result,
+            .invalid => |problem| return .{ .rejected = problem },
+            .complete => |result| return .{ .accepted = result },
         }
     }
 }
 
 pub const BashParseProgress = union(enum) {
     pending,
-    invalid,
+    invalid: BashProblem,
     complete: BashArguments,
 };
 
@@ -398,6 +462,7 @@ pub const BashParser = struct {
         var consumed: usize = 0;
         while (consumed < maximum_bytes) {
             const next = try source.peek() orelse return self.finishAtEof();
+            if (self.phase == .timeout_digits and (next == '.' or next == 'e' or next == 'E')) return .{ .invalid = .timeout_invalid };
             if (self.phase == .timeout_digits and (next < '0' or next > '9')) {
                 self.result.timeout_ms = self.timeout_value;
                 self.has_timeout = true;
@@ -409,12 +474,12 @@ pub const BashParser = struct {
             switch (self.phase) {
                 .object_start => {
                     if (isSpace(next)) continue;
-                    if (next != '{') return .invalid;
+                    if (next != '{') return .{ .invalid = .malformed_json };
                     self.phase = .key_start;
                 },
                 .key_start => {
                     if (isSpace(next)) continue;
-                    if (next != '"') return .invalid;
+                    if (next != '"') return .{ .invalid = .malformed_json };
                     self.key.len = 0;
                     self.string_target = .key;
                     self.phase = .string;
@@ -432,7 +497,7 @@ pub const BashParser = struct {
                                 else if (self.key.eql("stdin"))
                                     .stdin
                                 else
-                                    return .invalid;
+                                    return .{ .invalid = .unknown_field };
                                 self.phase = .colon;
                             },
                             .command => {
@@ -440,23 +505,23 @@ pub const BashParser = struct {
                                 self.phase = .after_value;
                             },
                             .stdin => {
-                                if (!self.stdin_utf8.complete()) return .invalid;
+                                if (!self.stdin_utf8.complete()) return .{ .invalid = .stdin_invalid };
                                 self.has_stdin = true;
                                 self.result.stdin_present = true;
                                 self.phase = .after_value;
                             },
                             .description => {
-                                if (!protocol.ToolPresentation.validDescription(self.result.description.slice())) return .invalid;
+                                if (!protocol.ToolPresentation.validDescription(self.result.description.slice())) return .{ .invalid = .description_invalid };
                                 self.has_description = true;
                                 self.phase = .after_value;
                             },
                         }
                     } else if (next < 0x20) {
-                        return .invalid;
+                        return .{ .invalid = .malformed_json };
                     } else if (next == '\\') {
                         self.phase = .escape;
                     } else {
-                        try self.emitString(writer, input, &.{next});
+                        self.emitString(writer, input, &.{next}) catch |err| return self.emitFailure(err);
                     }
                 },
                 .escape => {
@@ -470,10 +535,10 @@ pub const BashParser = struct {
                         'r' => '\r',
                         't' => '\t',
                         'u' => null,
-                        else => return .invalid,
+                        else => return .{ .invalid = .malformed_json },
                     };
                     if (decoded) |byte| {
-                        try self.emitString(writer, input, &.{byte});
+                        self.emitString(writer, input, &.{byte}) catch |err| return self.emitFailure(err);
                         self.phase = .string;
                     } else {
                         self.unicode_value = 0;
@@ -482,43 +547,43 @@ pub const BashParser = struct {
                     }
                 },
                 .unicode => {
-                    self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .invalid);
+                    self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .{ .invalid = .malformed_json });
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
                         if (self.unicode_value >= 0xd800 and self.unicode_value <= 0xdbff) {
                             self.high_surrogate = self.unicode_value;
                             self.phase = .surrogate_backslash;
                         } else {
-                            if (self.unicode_value >= 0xdc00 and self.unicode_value <= 0xdfff) return .invalid;
-                            if (!(try self.emitScalar(writer, input, self.unicode_value))) return .invalid;
+                            if (self.unicode_value >= 0xdc00 and self.unicode_value <= 0xdfff) return .{ .invalid = self.stringProblem() };
+                            if (!(self.emitScalar(writer, input, self.unicode_value) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
                             self.phase = .string;
                         }
                     }
                 },
                 .surrogate_backslash => {
-                    if (next != '\\') return .invalid;
+                    if (next != '\\') return .{ .invalid = self.stringProblem() };
                     self.phase = .surrogate_u;
                 },
                 .surrogate_u => {
-                    if (next != 'u') return .invalid;
+                    if (next != 'u') return .{ .invalid = if (std.mem.indexOfScalar(u8, "\"\\/bfnrt", next) != null) self.stringProblem() else .malformed_json };
                     self.unicode_value = 0;
                     self.unicode_digits = 0;
                     self.phase = .low_unicode;
                 },
                 .low_unicode => {
-                    self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .invalid);
+                    self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .{ .invalid = .malformed_json });
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
-                        if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) return .invalid;
+                        if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) return .{ .invalid = self.stringProblem() };
                         const scalar = 0x10000 + ((self.high_surrogate - 0xd800) << 10) +
                             (self.unicode_value - 0xdc00);
-                        if (!(try self.emitScalar(writer, input, scalar))) return .invalid;
+                        if (!(self.emitScalar(writer, input, scalar) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
                         self.phase = .string;
                     }
                 },
                 .colon => {
                     if (isSpace(next)) continue;
-                    if (next != ':') return .invalid;
+                    if (next != ':') return .{ .invalid = .malformed_json };
                     self.phase = .value_start;
                 },
                 .value_start => {
@@ -526,32 +591,34 @@ pub const BashParser = struct {
                     switch (self.value_target) {
                         .none => unreachable,
                         .command => {
-                            if (self.has_command or next != '"') return .invalid;
+                            if (self.has_command) return .{ .invalid = .duplicate_field };
+                            if (next != '"') return .{ .invalid = .cmd_invalid };
                             self.string_target = .command;
                             self.phase = .string;
                         },
                         .description => {
-                            if (self.has_description or next != '"') return .invalid;
+                            if (self.has_description) return .{ .invalid = .duplicate_field };
+                            if (next != '"') return .{ .invalid = .description_invalid };
                             self.string_target = .description;
                             self.phase = .string;
                         },
                         .stdin => {
-                            if (self.has_stdin) return .invalid;
+                            if (self.has_stdin) return .{ .invalid = .duplicate_field };
                             if (next == '"') {
                                 self.string_target = .stdin;
                                 self.phase = .string;
                             } else if (next == 'n') {
                                 self.null_index = 1;
                                 self.phase = .timeout_null;
-                            } else return .invalid;
+                            } else return .{ .invalid = .stdin_invalid };
                         },
                         .timeout => {
-                            if (self.has_timeout) return .invalid;
+                            if (self.has_timeout) return .{ .invalid = .duplicate_field };
                             if (next == 'n') {
                                 self.null_index = 1;
                                 self.phase = .timeout_null;
                             } else {
-                                if (next < '1' or next > '9') return .invalid;
+                                if (next < '1' or next > '9') return .{ .invalid = .timeout_invalid };
                                 self.timeout_value = next - '0';
                                 self.phase = .timeout_digits;
                             }
@@ -559,12 +626,12 @@ pub const BashParser = struct {
                     }
                 },
                 .timeout_digits => {
-                    self.timeout_value = std.math.mul(u64, self.timeout_value, 10) catch return .invalid;
-                    self.timeout_value = std.math.add(u64, self.timeout_value, next - '0') catch return .invalid;
-                    if (self.timeout_value > std.math.maxInt(i64)) return .invalid;
+                    self.timeout_value = std.math.mul(u64, self.timeout_value, 10) catch return .{ .invalid = .timeout_invalid };
+                    self.timeout_value = std.math.add(u64, self.timeout_value, next - '0') catch return .{ .invalid = .timeout_invalid };
+                    if (self.timeout_value > std.math.maxInt(i64)) return .{ .invalid = .timeout_invalid };
                 },
                 .timeout_null => {
-                    if (next != "null"[self.null_index]) return .invalid;
+                    if (next != "null"[self.null_index]) return .{ .invalid = if (self.value_target == .stdin) .stdin_invalid else .timeout_invalid };
                     self.null_index += 1;
                     if (self.null_index == "null".len) {
                         if (self.value_target == .stdin) {
@@ -582,17 +649,37 @@ pub const BashParser = struct {
                         self.phase = .key_start;
                     } else if (next == '}') {
                         self.phase = .after_object;
-                    } else return .invalid;
+                    } else return .{ .invalid = .malformed_json };
                 },
-                .after_object => if (!isSpace(next)) return .invalid,
+                .after_object => if (!isSpace(next)) return .{ .invalid = .malformed_json },
             }
         }
         return .pending;
     }
 
     fn finishAtEof(self: *const BashParser) BashParseProgress {
-        if (self.phase != .after_object or !self.has_command or !self.has_timeout or !self.has_description) return .invalid;
+        if (self.phase != .after_object) return .{ .invalid = .malformed_json };
+        if (!self.has_command) return .{ .invalid = .missing_cmd };
+        if (!self.has_description) return .{ .invalid = .missing_description };
         return .{ .complete = self.result };
+    }
+
+    /// A string's bytes that cannot be held or are not UTF-8 reject the
+    /// call as that string's problem; any other failure is the caller's.
+    fn emitFailure(self: *const BashParser, err: anyerror) !BashParseProgress {
+        if (isBashDescriptorError(err)) return .{ .invalid = self.stringProblem() };
+        return err;
+    }
+
+    /// What is wrong when the string being read cannot be decoded or held.
+    fn stringProblem(self: *const BashParser) BashProblem {
+        return switch (self.string_target) {
+            // No accepted key is longer than a few bytes or needs escapes.
+            .key => .unknown_field,
+            .command => .cmd_invalid,
+            .description => .description_invalid,
+            .stdin => .stdin_invalid,
+        };
     }
 
     fn emitString(self: *BashParser, writer: anytype, input: anytype, bytes: []const u8) !void {
@@ -749,6 +836,73 @@ test "Bash stdin rejects invalid UTF-8 without coercion" {
         var buffer: [256]u8 = undefined;
         var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"description\":\"Read input\",\"cmd\":\"cat\",\"stdin\":\"{s}\",\"timeout_ms\":null}}", .{invalid}) };
         try std.testing.expect(!try validBashArguments(&source));
+    }
+}
+
+test "rejected Bash arguments name what is wrong" {
+    const cases = [_]struct { []const u8, BashProblem }{
+        .{ "", .malformed_json },
+        .{ "{", .malformed_json },
+        .{ "[]", .malformed_json },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\"} x", .malformed_json },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",}", .malformed_json },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"cwd\":\"/\"}", .unknown_field },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"a_field_name_longer_than_sixteen\":1}", .unknown_field },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"cmd\":\"false\"}", .duplicate_field },
+        .{ "{\"description\":\"Run tests\"}", .missing_cmd },
+        .{ "{\"cmd\":\"true\"}", .missing_description },
+        .{ "{\"description\":\"Run tests\",\"cmd\":7}", .cmd_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"a\\u0000b\"}", .cmd_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\n\"}", .cmd_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\q\"}", .malformed_json },
+        .{ "{\"description\":\"\",\"cmd\":\"true\"}", .description_invalid },
+        .{ "{\"description\":\"" ++ @as([101]u8, @splat('a')) ++ "\",\"cmd\":\"true\"}", .description_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":42}", .stdin_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":\"\xff\"}", .stdin_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"timeout_ms\":0}", .timeout_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"timeout_ms\":1.5}", .timeout_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"timeout_ms\":\"5\"}", .timeout_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"timeout_ms\":9223372036854775808}", .timeout_invalid },
+    };
+    for (cases) |case| {
+        var source = TestSource{ .bytes = case[0] };
+        const check = try checkBashArguments(&source);
+        errdefer std.debug.print("arguments: {s}\n", .{case[0]});
+        try std.testing.expectEqual(BashCheck{ .rejected = case[1] }, check);
+    }
+    // Optional fields may be omitted or null.
+    for ([_][]const u8{
+        "{\"description\":\"Run tests\",\"cmd\":\"true\"}",
+        "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":null,\"timeout_ms\":null}",
+    }) |arguments| {
+        var source = TestSource{ .bytes = arguments };
+        try std.testing.expect(try checkBashArguments(&source) == .accepted);
+    }
+}
+
+test "an invalid-arguments result tells the model what was wrong" {
+    var buffer: [192]u8 = undefined;
+    // The name is read only for an unknown tool.
+    var name = struct {
+        fn next(_: *@This()) !?u8 {
+            return error.TestUnexpectedNameRead;
+        }
+    }{};
+    const cases = [_]struct { BashProblem, []const u8 }{
+        .{ .malformed_json, "Invalid arguments for tool 'bash': the arguments are not one well-formed JSON object." },
+        .{ .unknown_field, "Invalid arguments for tool 'bash': only cmd, description, stdin and timeout_ms are accepted." },
+        .{ .duplicate_field, "Invalid arguments for tool 'bash': a field appears more than once." },
+        .{ .missing_cmd, "Invalid arguments for tool 'bash': cmd is required." },
+        .{ .missing_description, "Invalid arguments for tool 'bash': description is required." },
+        .{ .cmd_invalid, "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters." },
+        .{ .description_invalid, "Invalid arguments for tool 'bash': description must be a nonblank, single-line string of UTF-8 text, at most 100 bytes." },
+        .{ .stdin_invalid, "Invalid arguments for tool 'bash': stdin must be a string of UTF-8 text." },
+        .{ .timeout_invalid, "Invalid arguments for tool 'bash': timeout_ms must be an integer from 1 to 9223372036854775807." },
+    };
+    comptime std.debug.assert(cases.len == std.enums.values(BashProblem).len);
+    for (cases) |case| {
+        const facts: CallFacts = .{ .name = .bash, .bash = .{ .rejected = case[0] } };
+        try std.testing.expectEqualStrings(case[1], try rejectionResult(.invalid_arguments, &facts, &name, 4, @splat(0), &buffer));
     }
 }
 
