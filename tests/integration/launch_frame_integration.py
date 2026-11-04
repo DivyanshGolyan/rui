@@ -57,9 +57,12 @@ def post(path, route, request, extra=b""):
     return json.loads(payload)
 
 
-def output(process):
-    """What the Host wrote, without communicate(): the test may have closed stdin already."""
-    return process.stdout.read(), process.stderr.read()
+def output(process, timeout=20):
+    """What the Host wrote, within `timeout`. communicate() flushes stdin, so a closed stdin is dropped first."""
+    if process.stdin is not None:
+        process.stdin.close()
+        process.stdin = None
+    return process.communicate(timeout=timeout)
 
 
 def wait_for_socket(path, process):
@@ -71,7 +74,6 @@ def wait_for_socket(path, process):
 
 def refusal(process):
     out, err = output(process)
-    process.wait(timeout=20)
     assert process.returncode != 0, (out, err)
     lines = out.decode().splitlines()
     assert len(lines) == 1, (out, err)
