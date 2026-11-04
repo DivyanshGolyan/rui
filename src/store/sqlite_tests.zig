@@ -1283,6 +1283,23 @@ fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
     return if (c.sqlite3_extended_errcode(database) == c.SQLITE_CONSTRAINT_CHECK) .check_violation else .other_failure;
 }
 
+test "a fresh Store creates a Session with instructions, an output schema and the default tools" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration("fresh-tool-texts", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
+    command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    // Five new content rows in one transaction: both values, Bash's two
+    // texts and web search's empty text.
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 5), try queryU64(storage.database, "SELECT count(*) FROM content"));
+}
+
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

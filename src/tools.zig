@@ -85,6 +85,23 @@ comptime {
     }
 }
 
+/// The most content rows a new tool set of built-ins adds to a
+/// transaction: its records' distinct nonempty texts. Empty text is the
+/// configuration's empty default, already counted by the Store.
+pub const max_new_texts = blk: {
+    var texts: []const []const u8 = &.{};
+    for (std.enums.values(Tool)) |tool| {
+        const r = record(tool);
+        for ([_][]const u8{ r.description, r.input_schema }) |text| {
+            if (text.len == 0) continue;
+            for (texts) |seen| {
+                if (std.mem.eql(u8, seen, text)) break;
+            } else texts = texts ++ .{text};
+        }
+    }
+    break :blk texts.len;
+};
+
 /// The records a request offers, in a fixed order.
 pub const Offered = struct {
     records: [std.enums.values(Tool).len]*const Record = undefined,
@@ -345,7 +362,9 @@ pub const CallFacts = struct {
 
     /// The arguments of a bash call the parser accepted.
     pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
-        const check = &(self.bash orelse return null);
+        // Captured by pointer: `&(self.bash orelse ...)` would point at a copy
+        // that ends with this call.
+        const check = if (self.bash) |*bash| bash else return null;
         return switch (check.*) {
             .accepted => |*accepted| accepted,
             .rejected => null,
