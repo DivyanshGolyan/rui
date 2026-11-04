@@ -142,7 +142,7 @@ process.on("SIGTERM", () => rui.close());
 
 ### Call reference
 
-Rui generates the TypeScript types from its wire definitions. Only a thin ergonomic layer above them is hand-written, and the package exports no transport types [D19]. The package shape follows the Azure TypeScript SDK guidelines, Temporal's client, Stripe's idempotency rules and the Codex SDK. The notes are in the project notes [D2]. The working npm name is `rui`, and the final name is set at publish [D127].
+Rui's Zig request and reply types are the one source of truth. The build emits `openapi.json` from them, the file is checked in, and CI fails when it differs. Clients in every language are generated from that file, TypeScript first, then Python and Go. A thin hand-written layer per language adds the child launch and stdin frame, `listActivity` follow polling, request-key building and the Unix-socket transport. The package exports no transport types [D19, D172]. The package shape follows the Azure TypeScript SDK guidelines, Temporal's client, Stripe's idempotency rules and the Codex SDK. The notes are in the project notes [D2]. The working npm name is `rui`, and the final name is set at publish [D127].
 
 | Call | Route | Returns | Request key | Ledger |
 | --- | --- | --- | --- | --- |

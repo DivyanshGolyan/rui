@@ -32,7 +32,7 @@ D15. The TS client has `session.decide(requestId, "allow" | "deny")` for approva
 D16. `rui.getSession(id)` returns a handle and does no I/O. (source: #849)
 D17. Request keys are required on every write. The client builds them as `kind:driftId` (`chat:42`, `msg:42`). Core is unchanged: keys are already required (ARCHITECTURE.md:210), a resend after a crash returns the original answer, and a reused key with different inputs is rejected with `idempotency_key_conflict` (Rui's semantic digest). Drift's `drift` and `drift_rui` databases sit on one MySQL server and restore together. Review #4 (a UUIDv4 stored in Drift's row) was dropped. (source: 11-04 03:26Z, 04:40Z; #849)
 D18. Errors are typed: `RuiRequestError.code` is Rui's rejection enum, and a failed turn carries an `ending` such as `context_full`, `provider_refused` or `stopped` (design doc: `TurnFailedError.ending`). (source: #849; #851)
-D19. TS types are generated from Rui's wire definitions; only the thin ergonomic layer above them is hand-written. No transport types are exported. (source: #849)
+D19. Replaced by D172. No transport types are exported. (source: #849)
 D20. One public interface: the TUI and CLI use the same routes and get nothing the TS package cannot call. The TUI is a plain consumer of it. (source: #851; 11-03 16:20Z)
 D21. `tools` is required in every preset. `[]` means no tools, and there is no Host default. (source: 11-04 04:40Z; review #11)
 D22. Presets are named agent specs in Drift's code (for example one per Drift ticket type), passed to Rui at connect and not stored in the database. A caller can name a preset and override fields. The resolved spec is copied into the Session at start, so editing a preset never changes a running agent. (source: #845; #846)
@@ -248,7 +248,11 @@ D169. A child Session started by `start_agent` inherits its parent's saved Bash 
 D170. Each feed entry carries its own cursor as `entry.cursor` [D168]; pass the last one as `after`.
 D171. `session.interrupt()` when no model call is current is a no-op that resolves without sending anything.
 
+D172. Rui's Zig request and reply types are the one source of truth. The build emits `openapi.json` from them, the file is checked in, and CI fails when it differs from what the code emits. Clients in every language are generated from that file (Stainless, or openapi-generator as the free fallback), TypeScript first and then Python and Go. A thin hand-written layer per language adds the child launch and stdin frame, `listActivity` follow polling, request-key building and a Unix-socket transport. Basis: Divyansh 06:16Z "Sure".
+
 ## Replaced
+
+R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
 
 R1. `idempotentHint: true` means safe to rerun after a crash, and only anything else is "outcome unknown"; the core's never-repeat rule resends a call safe to rerun with the same call id. (source: #838 map; design doc core table) -> replaced by D32
 R2. Every MCP call carries a stable Rui call id in `_meta` (for example `dev.rui/callId`), the same on retry, as Drift's dedupe key for its receipts; after a broken stream the client re-issues the call with a new JSON-RPC id. (source: #838 map; #842; #844) -> replaced by D61
