@@ -16,6 +16,7 @@ const store_access = @import("../access.zig");
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const historical_domain = @import("historical.zig");
+const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
@@ -320,17 +321,7 @@ fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []c
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
     return "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
         "WHERE e.session_ref=?1 AND e.entry_kind IN (1,2) AND e.session_position>" ++ usage_position ++ ") + " ++
-        // An output item's bytes are its bag, its parts' text and bags,
-        // and a call's three fields. A message part's text is a length
-        // of its message text.
-        "(SELECT coalesce(sum(coalesce((SELECT bag.byte_length FROM content bag WHERE bag.content_id=i.extras_content_id),0) + " ++
-        "(SELECT coalesce(sum(coalesce(p.text_length,text.byte_length,0)+coalesce(bag.byte_length,0)),0) FROM model_output_part p " ++
-        "LEFT JOIN content text ON text.content_id=p.text_content_id LEFT JOIN content bag ON bag.content_id=p.extras_content_id " ++
-        "WHERE p.operation_id=i.operation_id AND p.item_ordinal=i.item_ordinal) + " ++
-        "coalesce((SELECT name.byte_length+call_id.byte_length+arguments.byte_length FROM model_tool_call tool_call " ++
-        "JOIN content name ON name.content_id=tool_call.name_content_id JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
-        "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-        "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal),0)),0) FROM model_output_item i " ++
+        "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
         "WHERE i.session_ref=?1 AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
         "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
         "WHERE b.session_ref=?1 AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0))) + " ++
@@ -525,8 +516,8 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,1,0,@now)",
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
+        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,1,0,@now)",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -538,6 +529,8 @@ const insert_operation = rsql.Write(.{
         compaction_trigger: ?u64,
         output_reservation: u64,
         reasoning_effort: ?protocol.ReasoningEffort,
+        history_floor: ?u64,
+        history_level: ?u8,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -607,6 +600,18 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         try takeContext(&compaction, &context);
     }
     const purpose = turn_policy.nextPurpose(compaction);
+    // A compaction after one that overflowed makes room: settlement let
+    // the Turn go on only because a deeper floor exists (D217).
+    const room: ?history_floor_domain.Choice = if (compaction.previous) |previous| room: {
+        if (purpose != .compaction or previous.purpose != .compaction or !previous.context_overflow or !previous.turn_active) break :room null;
+        const latest = facts.latest_operation orelse return error.CorruptStore;
+        break :room try history_floor_domain.deeperFloor(writer, latest.get()) orelse return error.CorruptStore;
+    } else null;
+    // A compaction that makes no room keeps its base's floor (D217).
+    const floor: ?u64 = if (room) |choice| choice.floor else if (purpose == .compaction)
+        try history_floor_domain.inheritedFloor(writer, session_ref, selection.session.next_position.get())
+    else
+        null;
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
     const instructions: u64 = if (purpose == .compaction) 0 else facts.instructions;
 
@@ -647,6 +652,8 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .compaction_trigger = policy.compaction_trigger,
         .output_reservation = policy.output_reservation,
         .reasoning_effort = configuration_domain.effectiveReasoningEffort(&facts),
+        .history_floor = floor,
+        .history_level = if (room) |choice| choice.level else null,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
