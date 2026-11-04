@@ -123,7 +123,7 @@ pub const runnable_selection_sql = runnable_selection.sql;
 // continuation predicates share complete_tool_results_sql and turn_policy keeps
 // continues_without_input inside continues_with_input. It also trusts the stored
 // column, which `disagreeing_continuation` fences.
-const tool_continuation_selection = rsql.Read(.{
+pub const tool_continuation_selection = rsql.Read(.{
     .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,active.turn_id " ++
         "FROM turn active @index(turn_tool_continuation) JOIN session s ON s.session_ref=active.session_ref " ++
         "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ configuration_domain.servedProviderSql("s.provider") ++
@@ -134,8 +134,6 @@ const tool_continuation_selection = rsql.Read(.{
     .Row = Selection,
     .cardinality = .optional,
 });
-/// `tool_continuation_selection` as SQLite runs it.
-pub const tool_continuation_selection_sql = tool_continuation_selection.sql;
 
 /// Matches the partial retry indexes' text, which the schema fixes.
 pub const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});

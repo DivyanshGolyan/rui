@@ -38,6 +38,15 @@ runs:
       with:
         go-version: '1.27.1'
         cache: false
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      if: ${{ steps.requirements.outputs.node == 'true' }}
+      with:
+        node-version: '22'
+    - name: Install the TypeScript client's dependencies
+      if: ${{ steps.requirements.outputs.node == 'true' }}
+      shell: bash
+      working-directory: clients/ts
+      run: npm ci --ignore-scripts --no-audit --no-fund
     - name: Identify the actual native build tools
       id: tools
       shell: bash

@@ -773,13 +773,14 @@ def store_read_cases(state):
         before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         assert content_failure(before)["error"]["code"] == "result_not_ready", before
         # The Host holds its Store exclusively, so corrupt the stopped file:
-        # startup validation never reads core_command, and the keyed read then
-        # fails at its first step with SQLITE_CORRUPT.
+        # startup reads core_command only for its greatest command_seq, its
+        # rowid, never its command_key index, and the keyed read then fails
+        # at its first step with SQLITE_CORRUPT.
         fixture.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             page_size = database.execute("PRAGMA page_size").fetchone()[0]
-            root = database.execute("SELECT rootpage FROM sqlite_schema WHERE name='core_command'").fetchone()[0]
+            root = database.execute("SELECT rootpage FROM sqlite_schema WHERE name='sqlite_autoindex_core_command_1'").fetchone()[0]
         assert not (store / "rui.sqlite3-wal").exists()
         with open(store / "rui.sqlite3", "r+b") as file:
             file.seek((root - 1) * page_size)

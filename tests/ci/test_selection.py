@@ -547,9 +547,10 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
 
     def test_setup_installs_fixture_packages_for_any_target(self):
-        self.assertEqual(setup_requirements([]), {"go": False, "python": False})
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "python": True})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "python": True})
+        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True})
+        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True})
         imported = set()
         for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
             imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))

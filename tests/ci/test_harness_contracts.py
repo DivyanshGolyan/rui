@@ -306,7 +306,7 @@ SLEEP_ORDERED = {
         (1, "pump: the peer thread services its sockets every 1 ms until the test stops it"),
     ("src/server.zig", "reply delivery interrupted poll consumes the existing inactivity budget"):
         (1, "pump: the interrupter signals the blocked writer every 5 ms until the test stops it"),
-    ("src/store/tests.zig", "temporary model failures conserve allowance and exhaust after four Attempts"):
+    ("src/store/sqlite_tests.zig", "temporary model failures conserve allowance and exhaust after four Attempts"):
         (2, "sleeps out a 5 ms retry wait on the real clock"),
     ("tests/ci/test_selection.py", "FullCheckPartitionTest.run_part"):
         (1, "samples for 0.1 s that held authority starts no isolated work"),

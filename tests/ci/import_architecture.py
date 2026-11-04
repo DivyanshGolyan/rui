@@ -29,7 +29,11 @@ STORE_FACADE = "src/store.zig"
 # and they import nothing else of the Store.
 STORE_WIRE = "src/store/wire/"
 STORE_TESTS = "src/store/tests.zig"
-ACCESS_TEST = re.compile(r'^test "Store entry points lock and fence only through canonical access" \{\n(.*?)^\}$', re.M | re.S)
+# Test files hold no entry point, so the lock-and-fence test does not read them.
+STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig")
+# The tests that scan every Store file's source, each by its own embed list.
+SOURCE_SCAN_TESTS = ("Store entry points lock and fence only through canonical access",
+                     "every function that enters the Store has a round budget")
 BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
 # Preserve strings as tokens so braces/import spellings inside them are inert.
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
@@ -165,23 +169,27 @@ def store_boundary(root):
 
 
 def store_access_sources(root):
-    """The lock-and-fence test reads every Store file but its tests and the
-    wire clients, which hold no Store state.
+    """Each source-scan test (`SOURCE_SCAN_TESTS`) reads every Store file
+    but its test files (`STORE_TEST_FILES`) and the wire clients, which
+    hold no Store state.
 
     The facade holds only re-exports, so it has no entry point to check; a
-    function there must join the test's sources.
+    function there must join the tests' sources.
     """
     directory = root / STORE_DIRECTORY
     expected = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*.zig")
-                      if path != root / STORE_TESTS and not path.is_relative_to(root / STORE_WIRE))
-    test = ACCESS_TEST.search((root / STORE_TESTS).read_text())
-    if not test:
-        raise ValueError(f"{STORE_TESTS} has no lock-and-fence source test")
-    listed = sorted(re.findall(r'@embedFile\("([^"]+)"\)', test[1]))
-    if listed != expected:
-        raise ValueError(f"lock-and-fence test reads {listed}; the Store's files are {expected}")
+                      if path.relative_to(root).as_posix() not in STORE_TEST_FILES
+                      and not path.is_relative_to(root / STORE_WIRE))
+    text = (root / STORE_TESTS).read_text()
+    for name in SOURCE_SCAN_TESTS:
+        test = re.search(rf'^test "{re.escape(name)}" \{{\n(.*?)^\}}$', text, re.M | re.S)
+        if not test:
+            raise ValueError(f'{STORE_TESTS} has no test "{name}"')
+        listed = sorted(re.findall(r'@embedFile\("([^"]+)"\)', test[1]))
+        if listed != expected:
+            raise ValueError(f'"{name}" reads {listed}; the Store\'s files are {expected}')
     if "fn" in TOKEN.findall((root / STORE_FACADE).read_text()):
-        raise ValueError(f"{STORE_FACADE} declares a function; add it to the lock-and-fence test's sources")
+        raise ValueError(f"{STORE_FACADE} declares a function; add it to the source-scan tests' sources")
 
 
 def store_unit(dependencies):

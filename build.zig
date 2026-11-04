@@ -490,6 +490,15 @@ pub fn build(b: *std.Build) void {
     launch_frame_integration.addFileArg(ci.path(release_safe));
     b.step("launch-frame-integration", "Run a Host started from a launch frame on stdin: readiness, refusals and stop on close").dependOn(&launch_frame_integration.step);
 
+    // The TypeScript client against the Rui this build makes; Node strips the types.
+    const ts_client = b.addSystemCommand(&.{"python3"});
+    ts_client.addFileArg(b.path("tests/integration/host_process.py"));
+    ts_client.addArgs(&.{ "exec", "env" });
+    ts_client.addPrefixedFileArg("RUI_BINARY=", ci.path(release_safe));
+    ts_client.addArgs(&.{ "node", "--experimental-strip-types", "--test", "--test-concurrency=1", "test/*.test.ts" });
+    ts_client.setCwd(b.path("clients/ts"));
+    b.step("ts-client", "Run the TypeScript client against a built Rui (needs Node 22.6 or later)").dependOn(&ts_client.step);
+
     const host_stop_integration = b.addSystemCommand(&.{"python3"});
     host_stop_integration.addFileArg(b.path("tests/integration/host_stop_integration.py"));
     host_stop_integration.addFileArg(ci.path(release_safe));

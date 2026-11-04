@@ -328,13 +328,6 @@ pub fn columnBytes(statement: *c.sqlite3_stmt, index: c_int) []const u8 {
     return @as([*]const u8, @ptrCast(pointer))[0..length];
 }
 
-pub fn readNullablePositiveI64(statement: *c.sqlite3_stmt, index: c_int) !?i64 {
-    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
-    const value = c.sqlite3_column_int64(statement, index);
-    if (value <= 0) return error.InvalidIdentity;
-    return value;
-}
-
 /// The persisted closed grammar is the corruption boundary; a saved effort is
 /// trusted after it parses and is never checked against the catalog again.
 pub fn readNullableEffort(statement: *c.sqlite3_stmt, index: c_int) !?protocol.ReasoningEffort {
