@@ -3335,6 +3335,12 @@ Restart then uses committed uncertainty and owned-leftover cleanup; it preserves
 Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
+A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
+The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
+The key stays in memory only, never on disk, in argv or in the environment.
+stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
+A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `launch_frame_invalid` or `store_locked`, then exit status 1.
+
 `rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.
 A lost reply prints an exact retry command retaining that instance.

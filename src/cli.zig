@@ -16,6 +16,7 @@ const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
 const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
+const launch_frame = @import("launch_frame.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
@@ -1419,7 +1420,17 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
 
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    const store_path = parsed.get("store");
+    // A launched Host reads its Store, key and runtime directory from stdin,
+    // and holds the frame for its life: the provider borrows the key.
+    const launched: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
+    defer if (launched) |frame| {
+        frame.wipe();
+        std.heap.c_allocator.destroy(frame);
+    };
+    var launch_socket: [platform.max_launch_socket_path_bytes]u8 = undefined;
+    const store_path = if (launched) |frame| switch (frame.store) {
+        .sqlite_dir => |*directory| directory.slice(),
+    } else parsed.get("store");
     const provider_endpoint = parsed.get("provider-endpoint");
     const provider_ca_file = parsed.get("provider-ca-file");
     const fixture_endpoint = parsed.get("test-codex-fixture-endpoint");
@@ -1427,7 +1438,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (bash_path.len == 0) return error.InvalidBashPath;
     const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
     if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-    const active_capacity = try parsed.number(usize, "active-capacity") orelse product_defaults.active_capacity;
+    const active_capacity = (if (launched) |frame| frame.active_capacity else try parsed.number(usize, "active-capacity")) orelse product_defaults.active_capacity;
     var limits: server.Limits = .{};
     var hooks: server.Hooks = .{};
     if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
@@ -1534,6 +1545,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             }, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key) } } },
         });
     }
+    if (launched) |frame| {
+        const endpoint = providers.endpointUnder(init.arena.allocator(), frame.base_url.slice()) catch |err| {
+            if (err == error.InvalidBaseUrl) launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "provider.baseUrl must be an https URL with a host and no query" });
+            return err;
+        };
+        served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = frame.key.slice() } } });
+    }
     if (openai_fixture) |endpoint| {
         if (served.serves(.openai)) return error.ConflictingArguments;
         served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key), .fixture = true } } });
@@ -1552,7 +1570,31 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         bash_path,
         bash_timeout_ms,
         init.environ_map.get("HOME"),
-    );
+        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0 } else null,
+    ) catch |err| {
+        // A launched Host stops when its stdin closes; that is its clean end.
+        if (launched != null and err == error.EffectAwareShutdown) return;
+        if (launched != null and err == error.StoreAlreadyOwned)
+            launch_frame.writeRefusal(io, .{ .code = .store_locked, .message = "another Host owns this Store" });
+        if (launched != null and err == error.RuntimeDirectoryInUse)
+            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "another Host owns this runtimeDir" });
+        if (launched != null and err == error.RuntimeDirectoryUnusable)
+            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be a private (mode 0700) directory this Host can lock" });
+        return err;
+    };
+}
+
+/// Reads the launch frame from stdin, or reports its refusal on stdout.
+noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
+    const frame = try std.heap.c_allocator.create(launch_frame.Frame);
+    errdefer std.heap.c_allocator.destroy(frame);
+    frame.* = .{};
+    var refusal: launch_frame.Refusal = undefined;
+    launch_frame.read(init.io, .stdin(), std.heap.c_allocator, frame, &refusal) catch |err| {
+        if (err == error.LaunchFrameInvalid) launch_frame.writeRefusal(init.io, refusal);
+        return err;
+    };
+    return frame;
 }
 
 fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
