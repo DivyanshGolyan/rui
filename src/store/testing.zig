@@ -108,13 +108,12 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
     }
 }
 
-/// `text`, once it passes `fixtureTextError`. Each call also hands its
-/// MySQL spelling to the live MySQL check
+/// Fails the build when `text` fails `fixtureTextError`. Each call hands
+/// its MySQL spelling to the live MySQL check
 /// (`mysql_dialect_check.shadowPrepareFixture`).
-fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
+fn checkFixture(comptime text: [:0]const u8) void {
     if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
     mysql_dialect_check.shadowPrepareFixture(text);
-    return text;
 }
 
 /// Runs `sql` on `storage`'s engine outside any entry point, so no entry
@@ -122,32 +121,52 @@ fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
 /// statements; otherwise it is one statement whose `?1`, `?2`... take
 /// `args` in order: integers, and byte slices as text.
 pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
-    if (args.len == 0) return sqlite.exec(storage.database, fixtureText(sql));
-    const statement = try sqlite.prepare(storage.database, fixtureText(sql));
-    defer _ = sqlite.c.sqlite3_finalize(statement);
-    try bindFixtureArgs(statement, args);
-    try sqlite.expectDone(statement);
+    checkFixture(sql);
+    return sqlite_only.exec(storage, sql, args);
 }
 
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
 /// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
-    const statement = try sqlite.prepare(storage.database, fixtureText(sql));
-    defer _ = sqlite.c.sqlite3_finalize(statement);
-    try bindFixtureArgs(statement, args);
-    if (sqlite.c.sqlite3_step(statement) != sqlite.c.SQLITE_ROW) return error.QueryFailed;
-    const value = sqlite.c.sqlite3_column_int64(statement, 0);
-    if (value < 0) return error.CorruptStore;
-    return @intCast(value);
+    checkFixture(sql);
+    return sqlite_only.queryU64(storage, sql, args);
 }
 
 /// `exec` with foreign keys unchecked for `sql` alone. On SQLite,
 /// PRAGMA foreign_keys is OFF around it and ON after it, also when it fails.
 pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
-    try exec(storage, sql, args);
+    checkFixture(sql);
+    return sqlite_only.withoutForeignKeys(storage, sql, args);
 }
+
+/// The same fixtures for tests that run only on SQLite
+/// (sqlite_tests.zig): `sql` is SQLite's text, held to no portability
+/// rule and never handed to the live MySQL check.
+pub const sqlite_only = struct {
+    pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
+        if (args.len == 0) return sqlite.exec(storage.database, sql);
+        const statement = try sqlite.prepare(storage.database, sql);
+        defer _ = sqlite.c.sqlite3_finalize(statement);
+        try bindFixtureArgs(statement, args);
+        try sqlite.expectDone(statement);
+    }
+
+    pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
+        const statement = try sqlite.prepare(storage.database, sql);
+        defer _ = sqlite.c.sqlite3_finalize(statement);
+        try bindFixtureArgs(statement, args);
+        if (sqlite.c.sqlite3_step(statement) != sqlite.c.SQLITE_ROW) return error.QueryFailed;
+        const value = sqlite.c.sqlite3_column_int64(statement, 0);
+        if (value < 0) return error.CorruptStore;
+        return @intCast(value);
+    }
+
+    pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
+        try sqlite_only.exec(storage, sql, args);
+    }
+};
 
 /// Leaves `table` preparing normally but failing at the first step of a
 /// statement that reads it, the shape of an I/O or corruption fault after
