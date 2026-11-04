@@ -1075,7 +1075,7 @@ test "replies the Host renders conform to their schemas" {
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
 
     out.clearRetainingCapacity();
-    const row: protocol.SessionRow = .{ .bash = true, .label = .{} };
+    const row: protocol.SessionRow = .{ .tools = .initOne(.bash), .label = .{} };
     try protocol.writeShape(&out.writer, protocol.session_list_reply.head, .{});
     try row.writeJson(&out.writer);
     try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });

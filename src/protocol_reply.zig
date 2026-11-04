@@ -151,8 +151,9 @@ pub const ActivityPage = struct {
         const TurnEnded = struct { turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField };
+        const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -224,6 +225,7 @@ pub const ActivityPage = struct {
                 },
                 .approval_requested => |request| fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .call_ordinal = try id(request.call_ordinal, true) } },
                 .session_changed => |change| fact.value = .{ .session_changed = .{ .revision = try id(change.revision, false), .field = change.field } },
+                .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .send_failed => |failed| {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = try failed.target.peer(), .code = failed.code.value } };
@@ -910,19 +912,14 @@ fn ReportNumber(comptime allow_zero: bool) type {
 }
 
 const ReportTools = struct {
-    bash: bool = false,
-    web_search: bool = false,
+    set: protocol.ToolSelection = .empty,
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ReportTools {
         if (try source.next() != .array_begin) return error.UnexpectedToken;
         var result: ReportTools = .{};
         while (try source.peekNextTokenType() != .array_end) {
-            const tool = try std.json.innerParse(JsonEnum(enum { bash, web_search }), allocator, source, options);
-            switch (tool.value) {
-                inline else => |name| {
-                    if (@field(result, @tagName(name))) return error.DuplicateField;
-                    @field(result, @tagName(name)) = true;
-                },
-            }
+            const tool = try std.json.innerParse(JsonEnum(protocol.BuiltInTool), allocator, source, options);
+            if (result.set.contains(tool.value)) return error.DuplicateField;
+            result.set.insert(tool.value);
         }
         _ = try source.next();
         return result;
@@ -930,8 +927,7 @@ const ReportTools = struct {
 
     pub fn jsonStringify(self: ReportTools, jw: anytype) !void {
         try jw.beginArray();
-        if (self.bash) try jw.write("bash");
-        if (self.web_search) try jw.write("web_search");
+        for (std.enums.values(protocol.BuiltInTool)) |tool| if (self.set.contains(tool)) try jw.write(@tagName(tool));
         try jw.endArray();
     }
 };
@@ -1100,8 +1096,7 @@ pub const SessionListPage = struct {
                 .workspace = wire.workspace.value,
                 .provider = wire.provider.value,
                 .model = wire.model.value,
-                .bash = wire.tools.bash,
-                .web_search = wire.tools.web_search,
+                .tools = wire.tools.set,
                 .permission_mode = wire.permission_mode.value,
                 .label = if (wire.label) |label| label.value else null,
                 .created_at = try ActivityPage.id(wire.created_at, false),
@@ -2889,7 +2884,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     // Every row escapes every byte of its longest texts.
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .provider = .codex, .bash = true, .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .provider = .codex, .tools = .initOne(.bash), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
     try maximal.workspace.set(&workspace);
     try maximal.model.set(&model);
     try maximal.label.?.set(&text);
@@ -2922,7 +2917,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try std.testing.expectEqual(protocol.session_id_bytes, row.reference.len);
         try std.testing.expectEqualStrings(&workspace, row.workspace.slice());
         try std.testing.expectEqualStrings(&model, row.model.slice());
-        try std.testing.expect(row.bash and row.permission_mode == .bypass);
+        try std.testing.expect(row.tools.contains(.bash) and row.permission_mode == .bypass);
         try std.testing.expectEqualStrings(&text, row.label.?.slice());
         try std.testing.expectEqualStrings(&text, row.work.state.bash.description.?.slice());
     }
@@ -3214,7 +3209,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     const facts = &reply.current;
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
-    try std.testing.expect(!facts.settings.tools.bash);
+    try std.testing.expect(!facts.settings.tools.set.contains(.bash));
     try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
     try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());

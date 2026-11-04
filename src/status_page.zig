@@ -6,6 +6,7 @@ const Bounded = @import("bounded.zig").Bounded;
 const command_value = @import("command_value.zig");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
+const protocol = @import("protocol.zig");
 const Provider = @import("provider_name.zig").Provider;
 const TerminalText = @import("TerminalText.zig");
 const shortPath = @import("home_path.zig").shortPath;
@@ -110,8 +111,7 @@ pub const Session = struct {
     effort: ?ReasoningEffort,
     effort_override: bool,
     permission: enum { ask, bypass },
-    bash: bool,
-    web_search: bool,
+    tools: protocol.ToolSelection,
     /// The Session was configured with instructions.
     instructions: bool,
     /// Null when the Host sets no automatic threshold.
@@ -291,7 +291,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
             .bypass => "bypass · Bash runs without asking",
             .ask => "ask · Bash asks first",
         }),
-        .tools => try out.writeAll(if (session.bash and session.web_search) "bash, web search" else if (session.bash) "bash" else if (session.web_search) "web search" else "none"),
+        .tools => try writeTools(out, session.tools),
         .name => if (session.label.len != 0) try writeText(out, session.label.slice()) else try out.writeAll("not set"),
         .folder => try writePath(out, facts.home, session.workspace.slice()),
         .compact_at => {
@@ -348,6 +348,17 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
 fn unreadable(out: *std.Io.Writer, err: anyerror) !?[]const u8 {
     try out.print("unreadable · {s}", .{@errorName(err)});
     return null;
+}
+
+/// Names `tools` in catalog order, with spaces for underscores, or "none".
+fn writeTools(out: *std.Io.Writer, tools: protocol.ToolSelection) !void {
+    if (tools.count() == 0) return out.writeAll("none");
+    var named = false;
+    for (std.enums.values(protocol.BuiltInTool)) |tool| if (tools.contains(tool)) {
+        if (named) try out.writeAll(", ");
+        named = true;
+        for (@tagName(tool)) |byte| try out.writeByte(if (byte == '_') ' ' else byte);
+    };
 }
 
 fn writeText(out: *std.Io.Writer, value: []const u8) !void {
@@ -426,8 +437,7 @@ pub fn sample(session: *Session) void {
         .effort = .high,
         .effort_override = false,
         .permission = .bypass,
-        .bash = true,
-        .web_search = true,
+        .tools = .initMany(&.{ .bash, .web_search }),
         .instructions = true,
         .compaction_trigger = 245_000,
         .compaction_override = false,
@@ -557,7 +567,7 @@ test "each value stays on its row and says where it came from" {
     try session.label.set("a\nb");
     session.effort = null;
     session.permission = .ask;
-    session.web_search = false;
+    session.tools.remove(.web_search);
     session.instructions = false;
     session.compaction_trigger = 1_234_567;
     session.context_estimate = null;

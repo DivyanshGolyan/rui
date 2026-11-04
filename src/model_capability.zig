@@ -104,7 +104,7 @@ pub fn startEffort(saved: ?ReasoningEffort, model: []const u8) ?ReasoningEffort 
 }
 
 /// A model's context window: its row's, else the product's unlisted default.
-fn contextWindow(model: []const u8) u64 {
+pub fn contextWindow(model: []const u8) u64 {
     return if (find(model)) |row| row.context_window else product_defaults.unlisted_context_window;
 }
 

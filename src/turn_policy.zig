@@ -60,6 +60,8 @@ pub fn completesTurn(output: OutputFact, pending_messages: u64) bool {
     return output == .answer and pending_messages == 0;
 }
 
+/// Whether an overflowing call's Turn goes on to compact. A compaction's
+/// own overflow goes on only to a deeper floor (store/domain/history_floor.zig).
 pub fn recoversOverflow(purpose: Purpose, context_changed: bool) bool {
     return purpose == .assistant_response and context_changed;
 }

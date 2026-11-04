@@ -1983,8 +1983,7 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
         .ask => .ask,
         .bypass => .bypass,
     };
-    taken.bash = settings.tools.bash;
-    taken.web_search = settings.tools.web_search;
+    taken.tools = settings.tools.set;
     taken.instructions = settings.instructions.bytes.value != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;

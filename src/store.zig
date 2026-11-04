@@ -54,12 +54,16 @@ pub const SessionReport = report_domain.SessionReport;
 pub const SessionReportExecution = report_domain.SessionReportExecution;
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const settleCompactionForTesting = store_testing.settleCompactionForTesting;
+pub const setHistoryFloorForTesting = store_testing.setHistoryFloorForTesting;
+pub const settleAnswerItemsForTesting = store_testing.settleItemsForTesting;
+pub const turnEndedForTesting = store_testing.turnEndedForTesting;
 pub const SettlementTrace = store_core.SettlementTrace;
 pub const SettlementTracePhase = store_core.SettlementTracePhase;
 pub const testingPublicProjection = store_testing.testingPublicProjection;
 pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 test {
+    _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/mysql_dialect_check.zig");
