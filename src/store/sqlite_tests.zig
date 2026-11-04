@@ -1738,7 +1738,7 @@ test "tool continuation admission runs its selection once" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "output", &calls);
 
-    const selection = try store_core.cachedTyped(&storage, tool_continuation_selection);
+    const selection = try storage.engine.sqlite.cachedTyped(tool_continuation_selection);
     const runs_before = c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0);
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
@@ -2534,7 +2534,7 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
 /// statement.
 fn digestReadsForTesting(storage: *Store) [4]i64 {
     var reads: [4]i64 = @splat(0);
-    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+    for (storage.engine.sqlite.statements.slots) |slot| if (slot.statement) |statement| {
         const sql = std.mem.span(slot.sql.?);
         const kind: usize = if (std.mem.startsWith(u8, sql, "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1"))
             0
@@ -4637,13 +4637,13 @@ test "a warm Turn prepares no statement" {
             return 0;
         }
     };
-    var steps = Steps{ .cache = &storage.statements };
-    const prepared = storage.statements.count;
+    var steps = Steps{ .cache = &storage.engine.sqlite.statements };
+    const prepared = storage.engine.sqlite.statements.count;
     _ = c.sqlite3_trace_v2(storage.sqliteDatabase(), c.SQLITE_TRACE_STMT, Steps.traced, &steps);
     defer _ = c.sqlite3_trace_v2(storage.sqliteDatabase(), 0, null, null);
     try answerTestTurn(&storage, &tmp, session.slice(), "warm", &answer);
     try std.testing.expectEqual(@as(usize, 0), steps.uncached);
-    try std.testing.expectEqual(prepared, storage.statements.count);
+    try std.testing.expectEqual(prepared, storage.engine.sqlite.statements.count);
 }
 
 test "public assistant message provenance binds the exact accepted item" {
@@ -6121,7 +6121,7 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         );
         defer std.testing.allocator.free(insert);
         try sqlite.exec(storage.sqliteDatabase(), insert);
-        const statement = try store_core.cachedTyped(&storage, reads_domain.queued);
+        const statement = try storage.engine.sqlite.cachedTyped(reads_domain.queued);
         for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
             _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
             const entry = try store_core.enter(&storage, .none);
@@ -7359,6 +7359,48 @@ test "admission's context read answers CorruptStore, as admission names it" {
     }
 }
 
+test "a round's failed step is named by the statement that failed" {
+    // `failedOn` records the failed runner's text; each pair of a round
+    // names its own failure, and a statement that did not fail names none.
+    const Pair = struct {
+        const first = rsql.Read(.{
+            .sql = "SELECT count(*) AS sessions FROM session WHERE session_ref<>?1",
+            .Args = struct { session_ref: []const u8 },
+            .Row = struct { sessions: u64 },
+            .cardinality = .one,
+        });
+        const second = rsql.Read(.{
+            .sql = "SELECT count(*) AS revisions FROM session_revision WHERE session_ref<>?1",
+            .Args = struct { session_ref: []const u8 },
+            .Row = struct { revisions: u64 },
+            .cardinality = .one,
+        });
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    _ = try configureTestSession(&storage, "failed-on");
+    inline for (.{ .{ Pair.first, error.FirstFailed }, .{ Pair.second, error.SecondFailed } }) |case| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
+        defer a.deinit();
+        var first: Pair.first.Result = undefined;
+        var second: Pair.second.Result = undefined;
+        a.read(Pair.first, .{ .session_ref = "" }, &first);
+        a.read(Pair.second, .{ .session_ref = "" }, &second);
+        var fault: TestingStatementFault = .{ .sql = case[0].sql };
+        fault.arm(storage.sqliteDatabase());
+        defer fault.disarm(storage.sqliteDatabase());
+        try std.testing.expectError(case[1], store_access.runNamed(&a, .{ .{ Pair.first, error.FirstFailed }, .{ Pair.second, error.SecondFailed } }, error.OtherFailed));
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(a.failedOn(case[0]));
+        try std.testing.expect(a.failedOn(Pair.first) != a.failedOn(Pair.second));
+    }
+}
+
 test "Session inspection's count reads answer main's names" {
     // Inspection reads the Current report's counts and the rule in the
     // same rounds, under main's names.
@@ -7386,7 +7428,7 @@ test "Session inspection's count reads answer main's names" {
 fn cachedWorkForTesting(storage: *Store) struct { statements: i64, steps: i64 } {
     var statements: i64 = 0;
     var steps: i64 = 0;
-    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+    for (storage.engine.sqlite.statements.slots) |slot| if (slot.statement) |statement| {
         statements += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
         steps += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
     };
@@ -7485,13 +7527,13 @@ test "a Current report's work grows linearly in one Operation's calls, as main's
 
 /// How many times `S` ran since the last call for it.
 fn testingRuns(storage: *Store, comptime S: type) i64 {
-    const statement = storage.statements.find(S.sql.ptr) orelse return 0;
+    const statement = storage.engine.sqlite.statements.find(S.sql.ptr) orelse return 0;
     return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
 }
 
 /// How many VM steps `S` took since the last call for it.
 fn testingSteps(storage: *Store, comptime S: type) i64 {
-    const statement = storage.statements.find(S.sql.ptr) orelse return 0;
+    const statement = storage.engine.sqlite.statements.find(S.sql.ptr) orelse return 0;
     return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
 }
 

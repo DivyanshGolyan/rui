@@ -981,21 +981,21 @@ test "a content sink opens only a content id its Access itself took, stepping it
             // this Access's first, one other code took between its own, and one
             // past its last. A check of the range from its first id to its last
             // accepted `between`.
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1, 4));
             // The old rule took only the last id, with nothing queued: here the
             // first id opens while inserts are queued, and the pass steps them.
-            const sink = try a.contentSink(first);
+            const sink = try a.contentSink(first, 4);
             try sink.write("sink", 0);
             sink.close();
             try std.testing.expectEqual(0, a.queued);
-            const again = try a.contentSink(last);
+            const again = try a.contentSink(last, 4);
             again.close();
             // Taken but never inserted: there is no row to open.
-            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never));
+            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never, 4));
             try a.abandon(.{});
         }
     }.run);
@@ -2317,7 +2317,7 @@ test "the Store prepares only typed statements, its transaction control and test
     // Open text cannot reach SQLite beside `rsql`: the one prepare is
     // `cachedStatic`, called only by these three, and `cachedTyped` takes
     // only a type `rsql.Read` or `rsql.Write` made (`rsql.isStatement`).
-    const source = @embedFile("Store.zig");
+    const source = @embedFile("engine/Sqlite.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "sqlite3_" ++ "prepare"));
     const callers = [_][]const u8{ "controlStatement", "cachedTyped", "fixtureStatement" };
     var calls = std.mem.splitSequence(u8, source, "cachedStatic" ++ "(self, ");
@@ -2351,6 +2351,8 @@ test "Store entry points queue and fence only through canonical access" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8404,6 +8406,8 @@ test "every function that enters the Store has a round budget" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
