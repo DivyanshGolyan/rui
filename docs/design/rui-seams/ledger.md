@@ -313,6 +313,8 @@ D213. Corrects lane-briefs.md: A2 does no memory measurement. The per-waiting-Tu
 D214. (lane T calls, accepted) T1b splits: T1b-1 is the format change (tool_record, tool_set and tool_set_member tables; session, session_revision and model_operation reference a tool set; forward migration maps masks 0-3), landing after 6d with the wire unchanged. T1b-2 parses `tools` as names in protocol.zig after F1. A tool name is 1-64 bytes of [A-Za-z0-9_-]; a `tools` list holds at most 128 names and 4,096 name bytes, sorted by bytes, no duplicates. P1 passed (lane T, 09:13Z); T2 is #879.
 D215. Schema numbers after 6d go to format PRs in landing order, whichever merges first; the next one re-bumps (D173). T1b-1 and the Store thread's PR 8 (Store id) both expect 52.
 
+D216. (lane K P2 premise, accepted) Word search (F3): SQL only narrows candidates, and the Host matches by streaming content with an n-1 byte carry across chunk edges, so SQLite and MySQL give the same answers. Folding is ASCII case-insensitive, defined once in Zig. Each request has a fixed scan budget and returns a cursor to continue. Full-text indexes are deferred until measured. Premise: /mnt/project-files/rui-seams/spec/p2-word-search-premise.md.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
