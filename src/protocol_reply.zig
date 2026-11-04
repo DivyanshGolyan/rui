@@ -148,9 +148,9 @@ pub const ActivityPage = struct {
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
-        const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(protocol.max_code_bytes), content: ?Ref };
+        const TurnEnded = struct { turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -217,7 +217,7 @@ pub const ActivityPage = struct {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = try failed.target.peer(), .code = failed.code.value } };
                 },
-                .assistant => |reference| fact.value = .{ .assistant = try content(reference) },
+                .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try content(assistant.content), .final = assistant.final } },
                 .tool_result => |result| {
                     if (result.presentation.value.publication_position != fact.position) return error.InvalidActivityPage;
                     fact.value = .{ .tool_result = .{ .content = try content(result.content), .presentation = result.presentation.value } };
@@ -235,12 +235,16 @@ pub const ActivityPage = struct {
                     }
                     fact.value = .{ .call = value };
                 },
-                .outcome => |outcome| {
-                    // A completed Turn has its answer and a failed one may
-                    // have its report; a cancelled one has neither.
-                    if (outcome.code.slice().len == 0 or (outcome.code.eql("completed") and outcome.content == null) or
-                        (outcome.code.eql("cancelled") and outcome.content != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .outcome = .{ .turn = try id(outcome.turn, false), .operation = try id(outcome.operation, false), .code = outcome.code.value, .content = if (outcome.content) |reference| try content(reference) else null } };
+                .turn_ended => |ended| {
+                    // A done Turn has its answer and a failed one may have
+                    // its report; a stopped or interrupted one has neither,
+                    // and each was judged from its own saved code.
+                    const ending = ended.ending.value;
+                    const done = ending == .done;
+                    const cancelled = ending == .stopped or ending == .interrupted;
+                    if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
+                        (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
+                    fact.value = .{ .turn_ended = .{ .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
                 },
                 .stop => |stop| {
                     if (stop.turn == null and stop.completion.value == .pending) return error.InvalidActivityPage;
@@ -1836,6 +1840,39 @@ test "an activity page's queued Messages are none or a span at its boundary" {
     }
 }
 
+test "a turn_ended row's ending agrees with its saved code and content, and a final answer crosses" {
+    const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(1) };
+    const Case = struct { ending: protocol.TurnEnding, code: []const u8, content: ?protocol.ActivityItem.Content, valid: bool };
+    for ([_]Case{
+        .{ .ending = .done, .code = "completed", .content = content, .valid = true },
+        .{ .ending = .done, .code = "completed", .content = null, .valid = false },
+        .{ .ending = .done, .code = "provider_policy", .content = content, .valid = false },
+        .{ .ending = .stopped, .code = "cancelled", .content = null, .valid = true },
+        .{ .ending = .interrupted, .code = "cancelled", .content = null, .valid = true },
+        .{ .ending = .interrupted, .code = "cancelled", .content = content, .valid = false },
+        .{ .ending = .failed, .code = "cancelled", .content = null, .valid = false },
+        .{ .ending = .provider_refused, .code = "provider_policy", .content = content, .valid = true },
+        .{ .ending = .context_full, .code = "ResourceExceeded", .content = null, .valid = true },
+    }) |case| {
+        var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+        try code.set(case.code);
+        var facts: protocol.ActivityFacts = .{ .end = 2, .count = 2, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .assistant = .{ .content = content, .final = case.ending == .done } } };
+        facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
+        try facts.work.workspace.set("/w");
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        if (!case.valid) {
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+            continue;
+        }
+        const page = try ActivityPage.parse(writer.buffered(), .{});
+        try std.testing.expectEqual(case.ending == .done, page.facts.items[0].value.assistant.final);
+        try std.testing.expectEqual(case.ending, page.facts.items[1].value.turn_ended.ending);
+    }
+}
+
 test "an activity row carries its time, and a Message's rows carry its admission time" {
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
@@ -1848,7 +1885,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         .{ .value = .{ .sent = sent }, .at = 1792925000 },
         .{ .value = .{ .sent = sent }, .at = 1, .failure = error.InvalidActivityPage },
         // Like every ID and time on a page, zero is no time.
-        .{ .value = .{ .assistant = content }, .at = 0, .failure = error.InvalidResponse },
+        .{ .value = .{ .assistant = .{ .content = content } }, .at = 0, .failure = error.InvalidResponse },
     }) |case| {
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = case.at, .value = case.value };
@@ -1876,7 +1913,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
     }
     // A row without its time is refused.
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
-    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = content } };
+    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content } } };
     try facts.work.workspace.set("/w");
     var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);

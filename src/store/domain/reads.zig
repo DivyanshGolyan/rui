@@ -123,6 +123,7 @@ pub const read_failures = .{
     .{ public_tool_result, error.PublicContentReadFailed },
     .{ hosted_call, error.ActivityReadFailed },
     .{ activity_item, error.ActivityReadFailed },
+    .{ answer_entry, error.ActivityReadFailed },
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
@@ -216,7 +217,7 @@ fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
         .assistant => 3,
         .call => 4,
         .tool_result => 5,
-        .outcome => 6,
+        .turn_ended => 6,
         .stop => 7,
         .sent => 8,
         .send_failed => 9,
@@ -643,6 +644,21 @@ pub fn openPublicConversationContent(a: *ReadAccess, request: *const protocol.Co
 // would disappear from an inventory rooted in conversation_entry. Inspect
 // only the requested position interval through the existing history index.
 // Compaction messages deliberately have no Conversation certificate.
+/// A row exactly when the assistant entry at position ?2 is the answer of
+/// a Turn that completed at or before end ?3: its causing Operation's
+/// selected message, the last of that Operation's messages with its text.
+const answer_entry = rsql.Read(.{
+    .sql = "SELECT 1 AS final FROM conversation_entry e JOIN turn t ON t.turn_id=e.turn_id " ++
+        "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind=3 AND t.session_ref=e.session_ref " ++
+        "AND t.outcome_code='" ++ TurnOutcome.completed_code ++ "' AND t.outcome_position<=?3 " ++
+        "AND e.source_operation_id=t.operation_id AND e.content_id=t.outcome_content_id " ++
+        "AND NOT EXISTS(SELECT 1 FROM model_output_item later WHERE later.operation_id=e.source_operation_id " ++
+        "AND later.item_ordinal>e.source_item_ordinal AND later.item_kind=2 AND later.message_content_id=e.content_id)",
+    .Args = struct { session: []const u8, position: u64, end: u64 },
+    .Row = struct { final: bool },
+    .cardinality = .optional,
+});
+
 pub const missing_assistant_entry = rsql.Read(.{
     .sql = "SELECT 1 AS missing FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
         "LEFT JOIN conversation_entry e ON e.session_ref=item.session_ref AND e.session_position=item.session_position " ++
@@ -1382,10 +1398,13 @@ const send_failure = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// A Turn's outcome at position ?2, with its causing Operation's.
+/// A Turn's outcome at position ?2, with its causing Operation's, and
+/// whether a Session stop selected the Turn.
 const turn_outcome = rsql.Read(.{
     .sql = "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
-        "AND o.resolution_code IS NOT NULL AS consistent,o.resolution_content_id,t.outcome_at FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+        "AND o.resolution_code IS NOT NULL AS consistent,o.resolution_content_id,t.outcome_at," ++
+        "EXISTS(SELECT 1 FROM session_stop stop @index(session_stop_turn) WHERE stop.selected_turn_id=t.turn_id) AS stopped " ++
+        "FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
         "WHERE t.session_ref=?1 AND t.outcome_position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
@@ -1396,6 +1415,7 @@ const turn_outcome = rsql.Read(.{
         consistent: bool,
         resolution_content_id: ?rsql.Positive,
         outcome_at: rsql.Positive,
+        stopped: bool,
     },
     .cardinality = .each,
 });
@@ -1523,7 +1543,7 @@ const FailureRead = struct {
 /// `outcome`; its content, if any, is the next round's.
 const OutcomeRead = struct {
     position: u64,
-    outcome: *protocol.ActivityItem.Outcome,
+    outcome: *protocol.ActivityItem.TurnEnded,
     content_id: ?u64 = null,
     at: u64 = 0,
     count: RowCount = .{},
@@ -1538,13 +1558,14 @@ const OutcomeRead = struct {
 
     fn keep(read: *OutcomeRead, row: *const turn_outcome.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
-        read.outcome.* = .{ .turn = row.turn_id.get(), .operation = row.operation_id.get(), .code = row.outcome_code, .content = null };
         read.content_id = if (row.outcome_content_id) |id| id.get() else null;
-        switch (try TurnOutcome.decode(read.outcome.code.slice(), if (read.content_id) |id| @intCast(id) else null)) {
+        const outcome = try TurnOutcome.decode(row.outcome_code.slice(), if (read.content_id) |id| @intCast(id) else null);
+        switch (outcome) {
             // A completed Turn answers with its causing Operation's Resolution.
             .completed => |answer| if (row.resolution_content_id == null or row.resolution_content_id.?.get() != answer) return error.CorruptStore,
             .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
         }
+        read.outcome.* = .{ .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = row.outcome_code, .content = null };
         read.at = row.outcome_at.get();
     }
 };
@@ -1594,7 +1615,7 @@ const ItemRead = struct {
     state: union {
         first: struct { missing: missing_assistant_entry.Result, row: activity_item.Result },
         message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
-        content: struct { read: PublicContentRead, presentation: PresentationRead = undefined },
+        content: struct { read: PublicContentRead, presentation: PresentationRead = undefined, answer: answer_entry.Result = null },
         call: struct { proposal: ProposalRead, resolved: call_resolved.Row = undefined },
         hosted: HostedRead,
         sent: struct { read: SentRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined },
@@ -1633,6 +1654,7 @@ const ItemRead = struct {
                     1 => content.read.queue(a, session),
                     2 => {
                         content.read.queueMetadata(a);
+                        if (read.kind == 3) a.read(answer_entry, .{ .session = session, .position = read.position, .end = end }, &content.answer);
                         if (read.kind == 5) {
                             item.value = .{ .tool_result = undefined };
                             content.presentation = .init(content.read.content.tool_operation.?, read.ordinal - 1, read.position, &item.value.tool_result.presentation);
@@ -1708,8 +1730,8 @@ const ItemRead = struct {
                         item.at = found.at;
                         const value: protocol.ActivityItem.Content = .{ .length = found.metadata.length, .digest = found.metadata.digest };
                         if (read.kind == 3) {
-                            item.value = .{ .assistant = value };
-                            read.exposes(@intCast(found.id), &item.value.assistant);
+                            item.value = .{ .assistant = .{ .content = value, .final = content.answer != null } };
+                            read.exposes(@intCast(found.id), &item.value.assistant.content);
                             read.done = true;
                             return;
                         }
@@ -1759,8 +1781,8 @@ const ItemRead = struct {
                     if (outcome.read.content_id != null) return;
                 } else {
                     const content = try content_domain.publicMetadata(&outcome.metadata);
-                    item.value.outcome.content = .{ .length = content.length, .digest = content.digest };
-                    read.exposes(outcome.read.content_id.?, &item.value.outcome.content.?);
+                    item.value.turn_ended.content = .{ .length = content.length, .digest = content.digest };
+                    read.exposes(outcome.read.content_id.?, &item.value.turn_ended.content.?);
                 }
             },
             7 => {
@@ -1815,8 +1837,8 @@ const ItemRead = struct {
                 read.state = .{ .failure = .{ .read = .{ .position = read.position, .failed = &item.value.send_failed } } };
             },
             6 => {
-                item.value = .{ .outcome = undefined };
-                read.state = .{ .outcome = .{ .read = .{ .position = read.position, .outcome = &item.value.outcome } } };
+                item.value = .{ .turn_ended = undefined };
+                read.state = .{ .outcome = .{ .read = .{ .position = read.position, .outcome = &item.value.turn_ended } } };
             },
             7 => {
                 item.value = .{ .stop = undefined };
