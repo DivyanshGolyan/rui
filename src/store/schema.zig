@@ -127,7 +127,7 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session ADD COLUMN tool_set_id BIGINT AFTER instructions_content_id",
             "UPDATE session SET tool_set_id=tools_mask+1",
             "ALTER TABLE session MODIFY tool_set_id BIGINT NOT NULL, ADD CHECK(tool_set_id>0), ADD FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id), DROP COLUMN tools_mask",
-            "ALTER TABLE session_revision ADD COLUMN tool_set_id BIGINT AFTER instructions_content_id",
+            "ALTER TABLE session_revision ADD COLUMN tool_set_id BIGINT AFTER instructions_updated",
             "UPDATE session_revision SET tool_set_id=tools_mask+1",
             "ALTER TABLE session_revision MODIFY tool_set_id BIGINT NOT NULL, ADD CHECK(tool_set_id>0), ADD FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id), DROP COLUMN tools_mask",
             "CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position)",
