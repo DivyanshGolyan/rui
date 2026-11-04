@@ -3223,16 +3223,18 @@ test "every replayed output item parses equal to the item the provider sent" {
     const arena = arena_state.allocator();
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
     const input = parsed.object.get("input").?.array.items;
-    // The user input, every item in order, then the rejected call's result.
-    try std.testing.expectEqual(cases.len + 2, input.len);
-    for (cases, input[1 .. 1 + cases.len], 0..) |case, actual, index| {
+    // The user input, the Operation's declared tools, every item in order,
+    // then the rejected call's result.
+    try std.testing.expectEqual(cases.len + 3, input.len);
+    try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
+    for (cases, input[2 .. 2 + cases.len], 0..) |case, actual, index| {
         const expected = try std.json.parseFromSliceLeaky(std.json.Value, arena, case.replayed orelse case.sent, .{});
         if (!jsonEqualForTesting(expected, actual)) {
             std.debug.print("item {d} sent: {s}\nrequest: {s}\n", .{ index, case.sent, request.bytes });
             return error.TestExpectedEqual;
         }
     }
-    try std.testing.expectEqualStrings("function_call_output", input[cases.len + 1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("function_call_output", input[cases.len + 2].object.get("type").?.string);
 }
 
 test "request preparation replays reasoning continuation without its private reasoning text" {
@@ -3715,8 +3717,10 @@ test "request N+1 begins with request N's history span" {
         const start = std.mem.indexOf(u8, request.bytes, "\"input\":[").? + "\"input\":[".len;
         const span = request.bytes[start..][0..heldMemoLength(&table, session.slice())];
         // The span ends where the history does: what depends on being
-        // last follows it.
-        try std.testing.expectStringStartsWith(request.bytes[start + span.len ..], "],\"tools\":[");
+        // last follows it, the current Operation's declared tools first.
+        const after = request.bytes[start + span.len ..];
+        const between = after[0 .. std.mem.indexOf(u8, after, "],\"tools\":[") orelse return error.TestUnexpectedResult];
+        if (between.len != 0) try std.testing.expectStringStartsWith(between, ",{\"type\":\"additional_tools\"");
         if (previous) |earlier| {
             try std.testing.expect(span.len > earlier.len);
             try std.testing.expectStringStartsWith(span, earlier);
