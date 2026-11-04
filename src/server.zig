@@ -831,6 +831,7 @@ extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) 
 /// A Host started with a launch frame: its socket path, in the caller's
 /// runtime directory, and the stdin whose close stops it.
 pub const Launch = struct {
+    runtime_dir: []const u8,
     socket_path: []const u8,
     stdin: std.posix.fd_t,
 };
@@ -914,7 +915,7 @@ pub fn serve(
         "unlimited";
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
-    if (launch) |value| try lease.paths.socket.set(value.socket_path);
+    if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
     // startup diagnostic, through readiness delivery and failed unwind.
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;

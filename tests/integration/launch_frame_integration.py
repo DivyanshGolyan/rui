@@ -88,6 +88,22 @@ def main():
     second = launch(frame(dict(good, runtimeDir=str(other))))
     assert refusal(second)["code"] == "store_locked"
 
+    # Another Store may not share the runtime directory: the first Host keeps
+    # its socket.
+    shared = launch(frame(dict(good, store=str(root / "store2"))))
+    refused = refusal(shared)
+    assert refused["code"] == "runtime_dir_unusable", refused
+    assert info == host_info(sock, str(store))
+
+    # A runtime directory others can write to is refused before any bind.
+    open_dir = root / "open"
+    open_dir.mkdir()
+    open_dir.chmod(0o777)
+    insecure = launch(frame(dict(good, store=str(root / "store3"), runtimeDir=str(open_dir))))
+    refused = refusal(insecure)
+    assert refused["code"] == "runtime_dir_unusable", refused
+    assert not (open_dir / "rui.sock").exists()
+
     # Closing stdin stops the Host; its socket goes with it.
     started = time.monotonic()
     host.stdin.close()
@@ -107,7 +123,7 @@ def main():
         refused = refusal(process)
         assert refused["code"] == "launch_frame_invalid", refused
         assert message in refused["message"], refused
-    print(f"launch frame: ready, store_locked, stdin close stopped the Host in {elapsed:.2f} s, four refusals")
+    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, four refusals")
 
 
 if __name__ == "__main__":

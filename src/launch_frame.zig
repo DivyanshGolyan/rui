@@ -22,6 +22,7 @@ pub const max_runtime_dir_bytes = platform.max_launch_socket_path_bytes - "/".le
 pub const StartError = enum {
     launch_frame_invalid,
     store_locked,
+    runtime_dir_unusable,
 };
 
 pub const Frame = struct {

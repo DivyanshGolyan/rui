@@ -28,6 +28,10 @@ pub const StoreLease = struct {
     paths: Paths,
     store_dir: std.Io.Dir,
     lock_file: std.Io.File,
+    /// A launched Host's own runtime directory and the lock that makes it
+    /// the only owner of the socket inside (`useRuntimeDirectory`).
+    runtime_dir: ?std.Io.Dir = null,
+    runtime_lock: ?std.Io.File = null,
 
     pub const Observation = union(enum) { owned: Paths, unowned, access_failure };
 
@@ -105,18 +109,47 @@ pub const StoreLease = struct {
         try validatePrivateDirectory(scratch, self.io);
         try cleanupOwnedIngress(&scratch, self.io, fault_cleanup);
 
-        var runtime_dir_path: [max_runtime_directory_bytes]u8 = undefined;
-        const runtime_path = try runtimeDirectory(&runtime_dir_path);
-        var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(self.io, runtime_path, .{
-            .permissions = .fromMode(0o700),
-        });
-        defer runtime_dir.close(self.io);
-        try validatePrivateDirectory(runtime_dir, self.io);
+        if (self.runtime_dir == null) {
+            var runtime_dir_path: [max_runtime_directory_bytes]u8 = undefined;
+            const runtime_path = try runtimeDirectory(&runtime_dir_path);
+            var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(self.io, runtime_path, .{
+                .permissions = .fromMode(0o700),
+            });
+            defer runtime_dir.close(self.io);
+            try validatePrivateDirectory(runtime_dir, self.io);
+        }
 
         try reclaimStaleSocket(self.io, self.paths.socket.slice());
     }
 
+    /// A launched Host binds in the caller's directory instead of the
+    /// default one. The directory must be private, and an exclusive lock in
+    /// it makes this Host the only owner of the socket there: reclaiming a
+    /// stale socket is safe only while that lock is held.
+    pub fn useRuntimeDirectory(self: *StoreLease, runtime_path: []const u8, socket_path: []const u8) !void {
+        var dir = try std.Io.Dir.cwd().createDirPathOpen(self.io, runtime_path, .{
+            .permissions = .fromMode(0o700),
+        });
+        errdefer dir.close(self.io);
+        try validatePrivateDirectory(dir, self.io);
+        const lock = dir.createFile(self.io, "rui.lock", .{
+            .truncate = false,
+            .lock = .exclusive,
+            .lock_nonblocking = true,
+            .permissions = .fromMode(0o600),
+        }) catch |err| switch (err) {
+            error.WouldBlock => return error.RuntimeDirectoryInUse,
+            else => return err,
+        };
+        errdefer lock.close(self.io);
+        try self.paths.socket.set(socket_path);
+        self.runtime_dir = dir;
+        self.runtime_lock = lock;
+    }
+
     pub fn release(self: *StoreLease) void {
+        if (self.runtime_lock) |lock| lock.close(self.io);
+        if (self.runtime_dir) |dir| dir.close(self.io);
         self.lock_file.close(self.io);
         self.store_dir.close(self.io);
         self.* = undefined;
