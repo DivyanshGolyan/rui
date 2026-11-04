@@ -11988,6 +11988,11 @@ test "a call made while the Session asks follows with its approval request, and 
         request.kinds = .initOne(.approval_requested);
         const only = try store_core.activityPageForTesting(&storage, request);
         try std.testing.expectEqual(approvals, only.count);
+        // Backward, from the end, the same rows come in reverse.
+        request.kinds = .full;
+        request.direction = .backward;
+        const backward = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(page.count, backward.count);
         try std.testing.expect(!storage.isFenced());
     }
 }

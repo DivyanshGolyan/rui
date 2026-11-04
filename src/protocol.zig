@@ -1928,7 +1928,7 @@ const Parser = struct {
                 out.kinds = .empty;
                 var last: ?ActivityItem.Kind = null;
                 if (!try self.consumeIf(']')) while (true) {
-                    var name: Bounded(16) = .{};
+                    var name: Bounded(32) = .{};
                     try self.readSmallString(&name);
                     const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
                     if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
@@ -3281,6 +3281,8 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
     const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
         .{ .body = "[\"admission\"],\"limit\":\"1\"" },
         .{ .body = "[\"admission\",\"received\"],\"limit\":\"16\"" },
+        // The longest kind name.
+        .{ .body = "[\"received\",\"approval_requested\"],\"limit\":\"1\"" },
         .{ .body = "[\"received\",\"admission\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
         .{ .body = "[\"user\",\"user\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
         .{ .body = "[\"unknown\"],\"limit\":\"1\"", .failure = error.InvalidCursor },
