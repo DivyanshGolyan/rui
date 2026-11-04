@@ -740,9 +740,11 @@ const NativeTurn = struct {
         };
     }
 
-    /// While new Turns are held, waiting input only joins open Turns.
-    pub fn admitNewModel(self: *NativeTurn) execution_turn.Admission {
-        return self.admitModel(if (self.turnsPaused()) .open_turn_message else .message);
+    /// While new Turns are held, waiting input only joins open Turns. The
+    /// pause is the snapshot the run's admission key took, so the scan and
+    /// its cached empty result agree.
+    pub fn admitNewModel(self: *NativeTurn, paused: bool) execution_turn.Admission {
+        return self.admitModel(if (paused) .open_turn_message else .message);
     }
 
     pub fn turnsPaused(self: *const NativeTurn) bool {
