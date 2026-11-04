@@ -1597,7 +1597,7 @@ fn beginningBefore(first: protocol.ActivityItem, end: u64) ?protocol_reply.Conve
 fn conversationItem(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
         .user, .assistant, .tool_result, .hosted_call => true,
-        .admission, .received, .call, .turn_ended, .stop, .sent, .send_failed => false,
+        .admission, .received, .call, .turn_ended, .stop, .sent, .send_failed, .approval_requested => false,
     };
 }
 

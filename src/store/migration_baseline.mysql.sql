@@ -436,6 +436,7 @@ CREATE TABLE action_operation(
  attempt_at BIGINT,
  decided_at BIGINT,
  resolved_at BIGINT,
+ approval_position BIGINT,
  PRIMARY KEY(action_id),
  UNIQUE(parent_operation_id,call_ordinal),
  FOREIGN KEY(parent_operation_id) REFERENCES model_operation(operation_id),
@@ -458,6 +459,7 @@ CREATE TABLE action_operation(
  CHECK(attempt_at IS NULL OR attempt_at>0),
  CHECK(decided_at IS NULL OR decided_at>0),
  CHECK(resolved_at IS NULL OR resolved_at>0),
+ CHECK(approval_position IS NULL OR approval_position>0),
  CHECK((NOT (resolution_code <=> 'denied')) OR (authorized=0 AND attempt_ordinal=0)),
  CHECK((attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),
  CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)),
@@ -495,6 +497,7 @@ CREATE INDEX action_operation_session_order ON action_operation(session_ref,acti
 CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle);
 CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
 CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position);
+CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position);
 CREATE INDEX action_operation_executable ON action_operation(action_id);
 CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id);
 CREATE INDEX model_tool_call_session_order ON model_tool_call(session_ref,operation_id,call_ordinal);

@@ -257,6 +257,7 @@ CREATE TABLE action_operation(
  attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),
  decided_at INTEGER CHECK(decided_at IS NULL OR decided_at>0),
  resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),
+ approval_position INTEGER CHECK(approval_position IS NULL OR approval_position>0),
  UNIQUE(parent_operation_id,call_ordinal),
  FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),
  FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),
@@ -294,6 +295,7 @@ CREATE INDEX action_operation_session_order ON action_operation(session_ref,acti
 CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle) WHERE sender_handle IS NOT NULL;
 CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
 CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL;
+CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position) WHERE approval_position IS NOT NULL;
 CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0;
 CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
 CREATE INDEX model_tool_call_session_order ON model_tool_call(session_ref,operation_id,call_ordinal);

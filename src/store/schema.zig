@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x3774614c40fc9070 },
+    .{ .schema_version = 51, .digest = 0x9dc0d23fd8743bd4 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -704,6 +704,10 @@ pub const tables = [_]Table{
             .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
             .{ .name = "decided_at", .type = .int, .nullable = true, .check = "decided_at IS NULL OR decided_at>0" },
             .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
+            // The position of the call that asked a person, written by the
+            // insert under an `ask` revision and never changed. Stored
+            // because the feed seeks it and no index can see the revision.
+            .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},
@@ -764,6 +768,7 @@ pub const indexes = [_]Index{
     // Results walk it (`report.full_results`): the predicate holds exactly
     // for a resolved Action (action_operation's CHECK).
     .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
+    .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     // Calls walk it (`report.full_calls`).

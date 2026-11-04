@@ -8370,3 +8370,50 @@ test "a migration that leaves other text than bootstrap's, or a broken reference
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
     }
 }
+
+test "a page of approval requests costs the same however many calls ran without asking" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionAsk(&storage, "approval-steps-config");
+    try submitTestMessage(&storage, &tmp, "approval-steps-input", "approval-steps-input", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try tests.settleTwoActionsForTesting(&storage, &tmp, binding, "approval-steps-calls");
+    var request: protocol.ActivityPage = .{ .kinds = .initOne(.approval_requested) };
+    try request.session.set(session.slice());
+    const Page = struct {
+        fn steps(store: *Store, page_request: protocol.ActivityPage) !u64 {
+            // The first read prepares the page's statements.
+            _ = try store_core.activityPageForTesting(store, page_request);
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
+            const page = try store_core.activityPageForTesting(store, page_request);
+            try std.testing.expectEqual(@as(usize, 2), page.count);
+            return counter.steps;
+        }
+        /// `copies` more of the Session's calls and Actions that never
+        /// asked: copies of its own, without an approval position.
+        fn addBypassed(store: *Store, ref: []const u8, comptime first: u64) !void {
+            const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) " ++
+                "SELECT operation_id+value*1000,item_ordinal,session_ref,session_position+value*10+1000000,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed " ++
+                "FROM model_output_item CROSS JOIN sequence WHERE session_ref=?1 AND item_kind=3 AND operation_id<1000", .{ref});
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,decided_at) " ++
+                "SELECT action_id+value*1000,parent_operation_id+value*1000,call_ordinal,session_ref,tool_kind,permission_revision,1,1 FROM action_operation CROSS JOIN sequence WHERE session_ref=?1 AND action_id<1000", .{ref});
+        }
+    };
+    const few = try Page.steps(&storage, request);
+    try Page.addBypassed(&storage, session.slice(), 1);
+    const thousand = try Page.steps(&storage, request);
+    try Page.addBypassed(&storage, session.slice(), 1001);
+    try std.testing.expectEqual(@as(u64, 4002), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM action_operation", .{}));
+    // A fixed cost: the seek past the bypassed rows is one step, whatever
+    // their number.
+    try std.testing.expect(thousand - few <= 1);
+    try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
+}

@@ -129,6 +129,13 @@ def main():
             calls = [r for r in pending if kind(r) == "call"]
             assert calls[0]["value"]["call"]["action"] is not None
             assert all(r["value"]["call"]["rejection"] == "unknown_tool" for r in calls[1:])
+            # The one Action, made while the Session asks, follows its call
+            # with its approval request at ordinal 1.
+            approvals = [(i, r) for i, r in enumerate(pending) if kind(r) == "approval_requested"]
+            assert len(approvals) == 1, approvals
+            index, approval = approvals[0]
+            assert pending[index - 1] is calls[0] and approval["position"] == calls[0]["position"] and approval["ordinal"] == "1", approval
+            assert approval["value"]["approval_requested"]["action"] == calls[0]["value"]["call"]["action"]
             live = page(store)["page"]["call_activity"]
             assert live["total"] == "18" and [int(e["ordinal"]) for e in live["entries"]] == [0, 1, 2], live
             assert live["entries"][0]["presentation"]["code"] == "pending_permission", live
@@ -184,14 +191,14 @@ def main():
             stop_session(state, store, "stop", SESSION)
             stopped_end, stopped = wait_for(lambda: (h := history(store)) and (h if any(kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "stopped" for r in h[1]) else None), "stopped outcome")
             assert history(store, third[0])[1] == third[1]
-            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "tool_result", "turn_ended", "stop"}
+            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "approval_requested", "tool_result", "turn_ended", "stop"}
             excluded = next(r["value"]["admission"] for r in stopped if kind(r) == "admission" and r["value"]["admission"]["key"] == "excluded")
             assert excluded["state"] == "excluded" and excluded["turn"] is None
             assert all(r["value"]["stop"]["completion"] == "completed" for r in stopped if kind(r) == "stop")
             stop_row = next(r for r in stopped if kind(r) == "stop")
             assert history(store, stop_row["position"])[1][-1]["value"]["stop"]["completion"] == "pending"
             assert history(store, empty_end)[1] == [] and history(store, complete_end)[1] == complete
-            for args in ((stopped_end, 2**63, "null"), (str(int(stopped_end)+1), 0, "null"), (stopped_end, calls[0]["position"], 1)):
+            for args in ((stopped_end, 2**63, "null"), (str(int(stopped_end)+1), 0, "null"), (stopped_end, calls[0]["position"], 2)):
                 caller(store, "page", *args, "forward", ok=False)
             before_reads = host_resources(process.pid)
             for _ in range(4): assert caller(store, "content", pending[0]["position"], 0) == TEXT.encode()
