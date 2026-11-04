@@ -77,7 +77,10 @@ pub const Migration = struct {
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
 /// chain grows. Only the last step, whose schema_version is unreleased
 /// (tests/ci/test_store_schema_version.py), may change, with its digest.
-pub const migrations = [_]Migration{};
+pub const migrations = [_]Migration{
+    .{ .from = 51, .sqlite = &migration_52.sqlite, .mysql = &migration_52.mysql, .digest = 0x35fd755402981d0e },
+};
+const migration_52 = @import("migration_52.zig");
 comptime {
     if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
     for (migrations, 0..) |step, position| {

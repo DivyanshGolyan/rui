@@ -8115,9 +8115,9 @@ fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
     }
 }
 
-/// A fresh Store at `path` that then gets `baseline_rows` and opens once
-/// more, as a migrated Store did.
-fn freshStoreWithBaselineRows(path: []const u8, root: []const u8) !void {
+/// A fresh Store at `path` that then gets `expected_rows`, which must meet
+/// its foreign keys, and opens once more.
+fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     try storage.close();
@@ -8125,7 +8125,10 @@ fn freshStoreWithBaselineRows(path: []const u8, root: []const u8) !void {
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
-        try sqlite.exec(raw, store_testing.baseline_rows);
+        try sqlite.exec(raw, store_testing.expected_rows);
+        const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
+        defer _ = c.sqlite3_finalize(violations);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(violations));
     }
     try storage.open(std.testing.io, path, root);
     try storage.close();
@@ -8159,7 +8162,7 @@ test "a Store at the migration baseline with its rows takes every migration at o
         return err;
     };
     try storage.close();
-    try freshStoreWithBaselineRows(fresh, root);
+    try freshStoreWithExpectedRows(fresh, root);
 
     var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer migrated_rows.deinit();

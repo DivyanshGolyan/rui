@@ -115,8 +115,15 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
 pub const baseline_sqlite_ddl: [:0]const u8 = @embedFile("migration_baseline.sqlite.sql");
 pub const baseline_mysql_ddl: [:0]const u8 = @embedFile("migration_baseline.mysql.sql");
 pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql");
+/// The rows a Store at the current schema holds once every migration ran
+/// on `baseline_rows`: the oracle each engine's migration test compares a
+/// migrated Store with. Written by hand from what each step should do, never
+/// read back from a migrated Store; each format change edits it, and its
+/// diff against `baseline_rows` shows every row the chain changes.
+pub const expected_rows: [:0]const u8 = @embedFile("migration_expected_rows.sql");
 comptime {
     if (fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
+    if (fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
 }
 
 /// Fails the build when `text` fails `fixtureTextError`. Each call hands
