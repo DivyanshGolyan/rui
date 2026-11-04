@@ -338,7 +338,8 @@ pub fn submitMessage(
 /// Round 1 reads the saved answer, the sender's Action, the Session and
 /// the text's content row. The decision is plain; the write round imports
 /// the text and saves the command and the admission, then commits.
-fn submitTo(
+/// noinline: its reads stay out of the frame a creation's chain runs under.
+noinline fn submitTo(
     a: anytype,
     io: std.Io,
     served: anytype,

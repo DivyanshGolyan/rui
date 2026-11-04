@@ -1135,8 +1135,10 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 /// Runs the next core tool call (D24) to its resolution: it reads the
 /// call's arguments, which settlement already checked, and one Store
 /// command does what they ask. Nothing is written before that command, so
-/// a call this stops short of is simply run again.
-fn runNextCoreAction(host: *Host) execution_turn.Admission {
+/// a call this stops short of is simply run again. The arguments are read
+/// whole onto the heap, so its frame stays small: every Store call may run
+/// other threads' queued writes on this stack.
+noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
     const input = (host.store.nextCoreAction() catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
@@ -1147,14 +1149,14 @@ fn runNextCoreAction(host: *Host) execution_turn.Admission {
     };
 }
 
-fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
-    const location = host.store.openContent(input.arguments) catch |err| {
+noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    const arguments_bytes = host.allocator.alloc(u8, std.math.cast(usize, input.arguments.length) orelse return .retry_later) catch return .retry_later;
+    defer host.allocator.free(arguments_bytes);
+    readCoreArguments(host, input, arguments_bytes) catch |err| {
         fenceDispatch(host, "core tool input", err);
         return .retry_later;
     };
-    var source: bash.ContentSource = .{ .length = input.arguments.length };
-    source.reader.open(location);
-    defer source.reader.close();
+    var source: tools.core_tools.SliceSource = .{ .bytes = arguments_bytes };
     const Text = struct {
         list: std.ArrayList(u8) = .empty,
         allocator: std.mem.Allocator,
@@ -1196,10 +1198,12 @@ fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) exec
 /// here, since a refusal is the call's own failed result (D140), and one
 /// Store command starts the agent. An attached or standalone agent starts
 /// from its caller's client environment, installed as the task commits.
-fn runStartAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    // The spec's Configuration is kilobytes, so it lives in the arena.
+    const start = arena.create(tools.core_tools.StartAgent) catch return .retry_later;
     const check: tools.core_tools.StartAgentCheck = if (input.arguments.length > tools.core_tools.start_agent_max_argument_bytes)
         .{ .rejected = std.fmt.comptimePrint("the arguments take more than {d} bytes", .{tools.core_tools.start_agent_max_argument_bytes}) }
     else check: {
@@ -1208,10 +1212,10 @@ fn runStartAgent(host: *Host, input: *const store_module.CoreActionInput) execut
             fenceDispatch(host, "core tool input", err);
             return .retry_later;
         };
-        break :check tools.core_tools.checkStartAgent(arena, bytes) catch return .retry_later;
+        break :check tools.core_tools.checkStartAgent(arena, bytes, start) catch return .retry_later;
     };
-    var start = switch (check) {
-        .accepted => |accepted| accepted,
+    switch (check) {
+        .accepted => {},
         .rejected => |reason| {
             const result = std.fmt.allocPrint(arena, "Rui could not start the agent: {s}. Nothing was started.", .{reason}) catch return .retry_later;
             _ = host.store.failCoreCall(input.binding, result, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
@@ -1220,7 +1224,7 @@ fn runStartAgent(host: *Host, input: *const store_module.CoreActionInput) execut
             };
             return .admitted;
         },
-    };
+    }
     var offer: SessionEnvironments.Offer = .{};
     defer offer.deinit(host.allocator);
     const Install = struct {

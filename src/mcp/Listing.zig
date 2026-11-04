@@ -14,7 +14,7 @@
 const std = @import("std");
 const http1 = @import("../http1/request.zig");
 const Request = @import("Request.zig");
-const request = @import("request.zig");
+const post = @import("post.zig");
 const reply = @import("reply.zig");
 const shape = @import("shape.zig");
 const document = @import("document.zig");
@@ -45,7 +45,7 @@ pub const Storage = struct {
     request: []u8,
 };
 
-pub const Error = Request.Error || request.Error || error{
+pub const Error = Request.Error || post.Error || error{
     /// More tools than `Storage.entries` holds, or more pages than `max_pages`.
     TooMany,
     /// The tools outgrew `Storage.arena`, or a request outgrew its buffer.
@@ -66,8 +66,8 @@ pub const Outcome = union(enum) {
     unavailable,
 };
 
-server: request.Server,
-client: request.Client,
+server: post.Server,
+client: post.Client,
 storage: Storage,
 current: Request,
 page_open: bool,
@@ -80,7 +80,7 @@ arena_used: usize,
 left_out: usize,
 collision: ?[]const u8,
 
-pub fn init(self: *Listing, server: request.Server, client: request.Client, storage: Storage) Error!void {
+pub fn init(self: *Listing, server: post.Server, client: post.Client, storage: Storage) Error!void {
     self.* = .{
         .server = server,
         .client = client,
@@ -128,7 +128,7 @@ fn openPage(self: *Listing) Error!void {
     const id: u64 = self.pages;
     var writer: std.Io.Writer = .fixed(self.storage.request);
     const cursor: ?[]const u8 = if (self.cursor_len) |length| self.cursor_bytes[0..length] else null;
-    request.writeList(&writer, self.server, self.client, id, cursor) catch |err| switch (err) {
+    post.writeList(&writer, self.server, self.client, id, cursor) catch |err| switch (err) {
         error.WriteFailed => return error.NoRoom,
         else => |other| return other,
     };

@@ -479,7 +479,7 @@ const insert_session = rsql.Write(.{
         digest: [32]u8,
         created_seq: u64,
         workspace_key: u64,
-        parent: ?protocol.Bounded(protocol.max_session_bytes),
+        parent: ?protocol.Bounded(protocol.session_id_bytes),
     },
     // Its round read the reference free, under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -489,7 +489,7 @@ const insert_session = rsql.Write(.{
 /// as the child of `parent` when one is named. `configure` calls it, and a
 /// test drives it with references the schema refuses.
 pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [protocol.session_id_bytes]u8) void {
-    var parent_ref: ?protocol.Bounded(protocol.max_session_bytes) = null;
+    var parent_ref: ?protocol.Bounded(protocol.session_id_bytes) = null;
     if (parent) |reference| {
         parent_ref = .{};
         parent_ref.?.set(reference) catch unreachable;

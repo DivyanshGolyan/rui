@@ -204,12 +204,23 @@ def host_physical_peak(pid):
     return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
 
 
+# SQLite names its temp files etilqs_*. A Store write's statement journal
+# that spilled to one stays open for the life of the EXCLUSIVE connection,
+# and descriptor_capacity budgets it among SQLite's four, so counts that
+# compare rounds leave it out.
 def open_descriptors(pid):
     if os.path.isdir(f"/proc/{pid}/fd"):
-        return len(os.listdir(f"/proc/{pid}/fd"))
+        names = []
+        for fd in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                names.append(os.readlink(f"/proc/{pid}/fd/{fd}"))
+            except FileNotFoundError:
+                pass
+        return sum("etilqs_" not in name for name in names)
     rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)],
                                    text=True).splitlines()
-    return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) for row in rows[1:])
+    return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) and "etilqs_" not in row
+               for row in rows[1:])
 
 
 class StreamHandler(socketserver.BaseRequestHandler):
@@ -448,7 +459,7 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             text = f"h2-{capacity}-{wave}-{index}"
             stream, body = requests[text]
             expected.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
-            assert json.loads(body)["input"] == expected, f"complete request history for {text}"
+            assert [item for item in json.loads(body)["input"] if item.get("type") != "additional_tools"] == expected, f"complete request history for {text}"
             # Reconstruct fixture emissions, never expectations from Host input.
             _, reasoning, message = dispatch.sse_answer(
                 f"response-{stream}", f"reasoning-{stream}", f"message-{stream}", answers[text].decode(),

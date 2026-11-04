@@ -46,14 +46,17 @@ pub const StartAgent = struct {
 };
 
 pub const StartAgentCheck = union(enum) {
-    accepted: StartAgent,
+    /// The call's `out` holds its checked arguments.
+    accepted,
     /// Why the call's arguments were refused, naming the field (D140).
     rejected: []const u8,
 };
 
 /// Checks a `start_agent` call's decoded arguments. Parsed values live in
 /// `arena`; `task` points into it.
-pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!StartAgentCheck {
+/// An accepted call fills `out`, whose Configuration, kilobytes, is
+/// written in place and never held in a frame.
+pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartAgent) error{OutOfMemory}!StartAgentCheck {
     if (bytes.len > start_agent_max_argument_bytes) return refused(std.fmt.comptimePrint("the arguments take more than {d} bytes", .{start_agent_max_argument_bytes}));
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -84,7 +87,8 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8) error{OutOfM
     if (spec.get("provider") != null) return refused("spec.provider: an agent always uses your provider");
     if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label" })) |name|
         return refusedField(arena, name, "is not a spec field");
-    var configuration: protocol.Configuration = .{};
+    out.configuration = .{};
+    const configuration = &out.configuration;
     configuration.model = stringField(spec, "model", @TypeOf(configuration.model)) orelse return refused("spec.model must be a model name");
     configuration.reasoning_effort = stringField(spec, "effort", @TypeOf(configuration.reasoning_effort)) orelse
         return refused("spec.effort must be none, low, medium, high, xhigh or max");
@@ -116,7 +120,9 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8) error{OutOfM
         },
         else => return refused("spec.label must be a string or null"),
     }
-    return .{ .accepted = .{ .task = task, .attached = attached, .configuration = configuration } };
+    out.task = task;
+    out.attached = attached;
+    return .accepted;
 }
 
 fn refused(comptime text: []const u8) StartAgentCheck {
@@ -168,7 +174,7 @@ fn toolsField(arena: std.mem.Allocator, value: std.json.Value, unknown: *[]const
             return error.UnknownTool;
         }
     }
-    std.mem.sort([]const u8, names, {}, struct {
+    std.sort.insertion([]const u8, names, {}, struct {
         fn less(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.order(u8, a, b) == .lt;
         }
@@ -306,7 +312,9 @@ fn Reader(comptime Source: type) type {
     return struct {
         source: Source,
         scanner: std.json.Scanner,
-        chunk: [4096]u8 = undefined,
+        /// Small: the source buffers its own reads, and this lives in the
+        /// settlement scan's and the engine's frames.
+        chunk: [256]u8 = undefined,
         ended: bool = false,
 
         fn next(self: *@This()) !std.json.Token {
@@ -342,20 +350,23 @@ fn isDecodeError(err: anyerror) bool {
     };
 }
 
-const TestSource = struct {
+/// A call's arguments already in memory, as the checks read them.
+pub const SliceSource = struct {
     bytes: []const u8,
     position: usize = 0,
 
-    fn peek(self: *TestSource) !?u8 {
+    pub fn peek(self: *SliceSource) !?u8 {
         return if (self.position == self.bytes.len) null else self.bytes[self.position];
     }
 
-    fn take(self: *TestSource) !u8 {
+    pub fn take(self: *SliceSource) !u8 {
         const byte = (try self.peek()) orelse return error.ShortCanonicalRead;
         self.position += 1;
         return byte;
     }
 };
+
+const TestSource = SliceSource;
 
 const TestText = struct {
     bytes: [256]u8 = undefined,
@@ -444,11 +455,12 @@ test "a start_agent call's arguments carry a task and a whole spec, never a Work
     }) |case| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const check = try checkStartAgent(arena.allocator(), case.arguments);
+        const start = try arena.allocator().create(StartAgent);
+        const check = try checkStartAgent(arena.allocator(), case.arguments, start);
         if (case.refusal) |expected| {
             try std.testing.expectEqualStrings(expected, check.rejected);
         } else {
-            const start = check.accepted;
+            try std.testing.expect(check == .accepted);
             try std.testing.expectEqualStrings("read", start.task);
             try std.testing.expect(start.attached);
             try std.testing.expectEqualStrings("gpt-6.1-sol", start.configuration.model.value.slice());

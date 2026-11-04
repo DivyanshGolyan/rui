@@ -135,6 +135,9 @@ pub const max_new_texts = blk: {
 pub const Offered = struct {
     records: [std.enums.values(Tool).len]*const Record = undefined,
     len: usize = 0,
+    /// The tools the Session offered at an earlier revision and this
+    /// request does not: a call to one gets "This tool was removed." (D54).
+    withdrawn: ToolSet = .empty,
 
     pub fn of(set: ToolSet) Offered {
         var out: Offered = .{};
@@ -154,6 +157,13 @@ pub const Offered = struct {
 
     pub fn slice(self: *const Offered) []const *const Record {
         return self.records[0..self.len];
+    }
+
+    /// `set`, with the tools of `ever` it lacks withdrawn.
+    pub fn since(set: ToolSet, ever: ToolSet) Offered {
+        var out = of(set);
+        out.withdrawn = ever.differenceWith(set);
+        return out;
     }
 };
 
@@ -410,6 +420,8 @@ pub const CallFacts = struct {
     /// A call named message_agent's checked arguments, offered or not; null
     /// for any other name.
     message_agent: ?core_tools.MessageAgentCheck = null,
+    /// Whether an unknown call names a tool the Session withdrew.
+    removed: bool = false,
 
     /// The arguments of a bash call the parser accepted.
     pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
@@ -472,7 +484,7 @@ pub const BashProblem = enum {
 /// Inspect certified decoded sources against the records the request
 /// offered (D49). The caller retains the sources' storage and calls this
 /// under the transaction that publishes the proposal and Action.
-pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, offered: []const *const Record) !CallFacts {
+pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, offered: *const Offered) !CallFacts {
     var name: [max_name_bytes]u8 = undefined;
     var length: usize = 0;
     if (name_length <= name.len) {
@@ -481,7 +493,8 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
     const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
-    const tool = if (complete) offeredFunction(offered, name[0..length]) else null;
+    const tool = if (complete) offeredFunction(offered.slice(), name[0..length]) else null;
+    const removed = tool == null and complete and withdrawnFunction(offered.withdrawn, name[0..length]);
     // A call's arguments are read whether or not it was offered, so a
     // rejected call keeps its description for presentation.
     var discard: Discard = .{};
@@ -489,6 +502,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
         .tool = tool,
         .bash = if (named) try checkBashArguments(arguments) else null,
         .message_agent = if (messaging) try core_tools.checkMessageAgent(arguments, &discard) else null,
+        .removed = removed,
     };
 }
 
@@ -502,6 +516,18 @@ fn offeredFunction(offered: []const *const Record, name: []const u8) ?*const Rec
     return null;
 }
 
+/// Whether `name` is a function tool in `withdrawn`.
+fn withdrawnFunction(withdrawn: ToolSet, name: []const u8) bool {
+    var tools = withdrawn.iterator();
+    while (tools.next()) |tool| {
+        const candidate = record(tool);
+        if (candidate.owner == .rui and std.mem.eql(u8, candidate.name, name)) return true;
+    }
+    return false;
+}
+
+pub const removed_tool_result = "This tool was removed.";
+
 /// A rejected call's result text, from `classifyCall`'s code for `facts`.
 pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
@@ -511,6 +537,7 @@ pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts
             inline else => |value| "Invalid arguments for tool 'bash': " ++ comptime value.text() ++ ".",
         },
         .unknown_tool => {
+            if (facts.removed) return removed_tool_result;
             var prefix: [32]u8 = undefined;
             var prefix_length: usize = 0;
             while (prefix_length < prefix.len) {
@@ -545,7 +572,7 @@ test "a call is checked against the offered records before its arguments" {
             return self.bytes[self.index];
         }
     };
-    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection, described: bool = false };
+    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection, described: bool = false, ever: ToolSet = .empty, removed: bool = false };
     const valid = "{\"cmd\":\"true\",\"description\":\"Run true\"}";
     const bash_only = ToolSet.initOne(.bash);
     for ([_]Case{
@@ -559,13 +586,18 @@ test "a call is checked against the offered records before its arguments" {
         .{ .name = "bas", .arguments = valid, .offered = .full, .expected = .unknown_tool },
         .{ .name = "bashx", .arguments = valid, .offered = .full, .expected = .unknown_tool },
         .{ .name = &(@as([max_name_bytes + 1]u8, @splat('b'))), .arguments = valid, .offered = .full, .expected = .unknown_tool },
+        // A tool the Session offered before and withdrew is removed, not
+        // unknown; a provider-run one never runs as a call either way.
+        .{ .name = "bash", .arguments = valid, .offered = .empty, .ever = .full, .expected = .unknown_tool, .described = true, .removed = true },
+        .{ .name = "web_search", .arguments = "{}", .offered = .empty, .ever = .full, .expected = .unknown_tool },
     }) |case| {
         var name: Source = .{ .bytes = case.name };
         var arguments: TestSource = .{ .bytes = case.arguments };
-        const offered = Offered.of(case.offered);
-        const facts = try inspectCall(&name, case.name.len, &arguments, offered.slice());
+        const offered = Offered.since(case.offered, case.ever);
+        const facts = try inspectCall(&name, case.name.len, &arguments, &offered);
         try std.testing.expectEqual(case.expected, classifyCall(&facts));
         try std.testing.expectEqual(case.described, facts.bashArguments() != null);
+        try std.testing.expectEqual(case.removed, facts.removed);
     }
 }
 

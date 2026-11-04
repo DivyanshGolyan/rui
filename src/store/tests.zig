@@ -8332,6 +8332,8 @@ const EntryPoint = enum {
     readHistoricalPart,
     readHistoricalToolResult,
     readHistoricalTool,
+    readDeclaredTool,
+    readProviderTool,
     checkAttempt,
 };
 
@@ -8387,6 +8389,8 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readHistoricalPart = 1,
     .readHistoricalToolResult = 2,
     .readHistoricalTool = 1,
+    .readDeclaredTool = 1,
+    .readProviderTool = 1,
     .checkAttempt = 1,
 });
 
@@ -8724,6 +8728,14 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(!try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
             meter.stop(.recoverOneUncertainAction);
 
+            // The continuation also offers web search, so its tools stage
+            // reads a provider-run member.
+            var add_search: protocol.ConfigureCommand = .{};
+            try add_search.key.set("budget-add-search");
+            try add_search.session.set(session.slice());
+            add_search.configuration.tools = try .of(&.{ "bash", "web_search" });
+            add_search.configuration.tools.state = .value;
+            try std.testing.expect(storage.configure(&add_search, .{}) == .accepted);
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
                 var view: HistoricalView = undefined;
@@ -8741,6 +8753,17 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 try std.testing.expect(try view.nextTool(&tool));
                 meter.stop(.readHistoricalTool);
+                // Web search, past Bash.
+                meter.start();
+                try std.testing.expect(try view.nextProviderTool(&tool));
+                meter.stop(.readProviderTool);
+                // Bash was declared at the first Operation already, so the
+                // one read finds nothing to declare.
+                _ = try view.coverage();
+                var declaration = view.currentDeclaration();
+                meter.start();
+                try std.testing.expect(!try view.nextDeclaredTool(&declaration, &tool));
+                meter.stop(.readDeclaredTool);
                 meter.start();
                 var entry = (try view.nextEntry(0)).?;
                 meter.stop(.readHistoricalEntry);

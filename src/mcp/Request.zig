@@ -49,7 +49,7 @@ answer: std.Io.Writer,
 overflowed: bool,
 
 /// Opens the connection and starts sending `bytes`, a request that
-/// `request.writeList` or `request.writeCall` wrote with id `id`.
+/// `post.writeList` or `post.writeCall` wrote with id `id`.
 pub fn init(self: *Request, target: http1.Target, bytes: []const u8, id: u64, buffer: []u8) error{ LocalFailure, ConnectFailed }!void {
     self.id = id;
     self.reading = .head;
@@ -147,7 +147,7 @@ fn ended(self: *Request) Error!Outcome {
 
 const Script = @import("test_server.zig");
 
-const request = @import("request.zig");
+const post = @import("post.zig");
 
 /// Sends a tools/list to `script` and drives the reply to its outcome.
 fn run(script: *Script, buffer: []u8) !Outcome {
@@ -157,7 +157,7 @@ fn run(script: *Script, buffer: []u8) !Outcome {
     const target = http1.parseTarget(std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}) catch unreachable) catch unreachable;
     var bytes: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&bytes);
-    request.writeList(&writer, .{ .target = target, .bearer_token = "t" }, .{ .name = "rui", .version = "test" }, 5, null) catch unreachable;
+    post.writeList(&writer, .{ .target = target, .bearer_token = "t" }, .{ .name = "rui", .version = "test" }, 5, null) catch unreachable;
     const self = std.testing.allocator.create(Request) catch unreachable;
     defer std.testing.allocator.destroy(self);
     try self.init(target, writer.buffered(), 5, buffer);
