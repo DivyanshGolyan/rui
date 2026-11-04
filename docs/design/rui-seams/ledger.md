@@ -319,6 +319,8 @@ D217. (lane K K6 premise, accepted) D191's drop is a history floor: a nullable `
 
 D218. (lane K calls, accepted) A revision takes its feed position at acceptance: `session_revision.position` and `revised_at` are written by `configure` and by core-made revisions (D174). `session_changed {revision, field}` rows are stored: one `session_change` row per changed field (session_ref, position, ordinal, revision, field, changed_at), written in the same commit as the revision and never edited. Events that change no setting (D137's refused effort change) are rows too. Stored, not derived, because those events have no revision diff and the Store caps a compound query at 4 terms. Creation emits none. Revisions saved before format 52 have a NULL position and no rows.
 
+D219. (lane K call, accepted) D179's `model_call` is one feed row per resolved model Operation, at its admission position. `latency_ms` (request sent to resolution) and `first_event_ms` (request sent to first response event) are measured on the final attempt and saved as two nullable `model_operation` columns. The served model comes from the stored model evidence, tokens from the usage columns, status from the resolution code, and `attempts` from the attempt ordinal. There is no per-attempt history. The row says its timings are the final attempt's.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
