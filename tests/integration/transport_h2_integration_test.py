@@ -199,7 +199,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                                b"content-type": b"application/json", b"accept": b"text/event-stream", b"session-id": b"a" * 32,
                                b"originator": b"rui", b"authorization": ("Bearer " + codex_h2.codex.ACCESS).encode(),
                                b"chatgpt-account-id": codex_h2.codex.ACCOUNT.encode(), b"user-agent": b"rui/test-revision"}
-                    body = json.dumps({"text": {"verbosity": "low"}, "parallel_tool_calls": False}).encode()
+                    body = json.dumps({"text": {"verbosity": "low"}, "parallel_tool_calls": True}).encode()
                     endpoint = SimpleNamespace(server_address=("localhost", 1), serve_forever=lambda: None,
                         shutdown=lambda: None, server_close=lambda: None,
                         streams=[("connection", index, None, body) for index in (1, 3, 5)], connections=["connection"],

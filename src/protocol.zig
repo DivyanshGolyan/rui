@@ -17,6 +17,9 @@ pub const max_session_bytes = 128;
 // within its compiled 512-byte pathname limit.
 pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
+/// Content strings one request carries at most: a configure command's
+/// instructions and output schema.
+const max_request_contents = 2;
 pub const max_sender_handle_bytes = 32;
 /// Most bytes of client environment entries one Message carries.
 pub const max_environment_bytes = 64 * 1024;
@@ -113,7 +116,7 @@ pub fn OptionalBounded(comptime capacity: usize) type {
 }
 
 pub const ContentField = struct {
-    state: enum { omitted, value, explicit_null } = .omitted,
+    state: FieldState = .omitted,
     // A parsed request owns an unlinked file descriptor. The Store imports
     // through this sealed custody; no pathname can be swapped after capture.
     file: ?std.Io.File = null,
@@ -121,6 +124,9 @@ pub const ContentField = struct {
     charged: u64 = 0,
     length: u64 = 0,
     digest: [32]u8 = @splat(0),
+    /// While a request is parsed, which Ingress capture holds this value,
+    /// counted from 1 in arrival order; 0 once it holds its own file.
+    capture: u8 = 0,
 
     pub fn hasFile(self: *const ContentField) bool {
         return self.file != null;
@@ -164,6 +170,7 @@ pub const Configuration = struct {
 pub const Kind = enum {
     host_info,
     host_stop,
+    host_pause,
     configure,
     message,
     session_stop,
@@ -361,6 +368,24 @@ pub const CommandKind = enum {
 };
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
 pub const SessionStopCompletion = enum { pending, completed };
+
+/// How a Turn ended, as its `turn_ended` Activity row names it.
+pub const TurnEnding = enum {
+    /// The Turn's answer is its `final` assistant row.
+    done,
+    /// The conversation no longer fits the model's context, even after compaction.
+    context_full,
+    /// The provider answered with a refusal that resending will meet again.
+    provider_refused,
+    /// The provider could not be reached, or retries ran out.
+    provider_unavailable,
+    /// A Session stop ended it.
+    stopped,
+    /// A Model Interruption ended it.
+    interrupted,
+    /// Any other failure, which the row's `code` names.
+    failed,
+};
 pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
 pub const ModelInterruptionRejection = enum {
     invalid_session_reference,
@@ -459,6 +484,8 @@ pub const HostInfo = struct {
     /// Slots in use: held custody records, including detached cleanup. The
     /// value Current reports as `execution.custody_occupied`.
     custody_occupied: []const u8,
+    /// Whether the Host holds every new Turn until resumed (D193).
+    paused: bool,
     capabilities: struct {
         bash: bool,
         providers: Routes,
@@ -621,7 +648,7 @@ pub const ActivityItem = struct {
     value: Value,
     /// `admission` is a Message a person or script sent; `received` one
     /// another Session sent, which always names it as `sender`.
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message };
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
@@ -636,7 +663,12 @@ pub const ActivityItem = struct {
     // A null `sender` means a human or script sent the Message.
     pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?NamedPeer = null };
     pub const Call = ProposalMetadata;
-    pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(max_code_bytes), content: ?Content };
+    /// `final` marks the Turn's answer: the assistant row a `done` Turn
+    /// ended with, once its `turn_ended` row is within the page's end.
+    pub const Assistant = struct { content: Content, final: bool = false };
+    /// `code` is the saved code the ending was judged from; `content` a
+    /// done Turn's answer or a failed one's report.
+    pub const TurnEnded = struct { turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
@@ -654,16 +686,16 @@ pub const ActivityItem = struct {
         pub const admission = message;
         pub const user = message;
         pub const received = message;
-        /// Hole: content.
-        pub const assistant = .{Hole{ .json = Content }};
+        /// Holes: content, final.
+        pub const assistant = .{ "{\"content\":", Hole{ .json = Content }, ",\"final\":", Hole.boolean, "}" };
         /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
         pub const call = .{ "{\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":[", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, "]}" };
         /// Holes: content, presentation.
         pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
         /// A call the provider ran, shown by its line alone. Hole: presentation.
         pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
-        /// Holes: turn, operation, code, content.
-        pub const outcome = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
+        /// Holes: turn, operation, ending, code, content.
+        pub const turn_ended = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
         /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
         /// Holes: admission, admitted at, target, content.
@@ -689,7 +721,7 @@ pub const ActivityItem = struct {
             }),
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
-            .assistant => |content| try writeShape(out, value_shapes.assistant, .{content}),
+            .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{presentation}),
             .call => |call| {
@@ -698,7 +730,7 @@ pub const ActivityItem = struct {
                 for (call.fields, &fields) |field, *content| content.* = .{ .length = field.length, .digest = field.digest };
                 try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2] });
             },
-            .outcome => |outcome| try writeShape(out, value_shapes.outcome, .{ outcome.turn, outcome.operation, outcome.code.slice(), outcome.content }),
+            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
         try writeShape(out, tail, .{});
@@ -1014,6 +1046,8 @@ pub const ActivityFacts = struct {
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
     host_stop: struct { store: Bounded(max_store_bytes) = .{} },
+    /// Sets whether the Host holds every new Turn (D193).
+    host_pause: struct { store: Bounded(max_store_bytes) = .{}, paused: bool = false },
     configure: ConfigureCommand,
     message: MessageCommand,
     session_stop: SessionStopCommand,
@@ -1035,7 +1069,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
+            .host_info, .host_stop, .host_pause, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
         }
     }
 
@@ -1122,7 +1156,7 @@ pub const Ingress = struct {
     /// Live while `content_state` is `.capturing`.
     capture: ContentCapture = undefined,
     decoder: StringDecoder = .{},
-    contents: [2]ContentField = .{ .{}, .{} },
+    contents: [max_request_contents]ContentField = @splat(.{}),
     content_count: usize = 0,
     complete: bool = false,
     /// The one home of the parsed Request: preview and finish parse into it.
@@ -1248,27 +1282,33 @@ pub const Ingress = struct {
         };
         const request = &self.request;
         // All fallible validation precedes this non-failing custody transfer.
-        var index: usize = 0;
+        // Each value takes the capture its string arrived in, whatever the
+        // members' order.
+        var moved: usize = 0;
         switch (request.*) {
             .configure => |*command| {
                 for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema }) |field| {
                     if (field.state != .value) continue;
-                    field.* = self.contents[index];
-                    self.contents[index] = .{};
-                    index += 1;
+                    self.take(field);
+                    moved += 1;
                 }
             },
             .message => |*command| {
-                command.text = self.contents[0];
-                self.contents[0] = .{};
-                index = 1;
+                self.take(&command.text);
+                moved = 1;
             },
             else => {},
         }
-        std.debug.assert(index == self.content_count);
+        std.debug.assert(moved == self.content_count);
         self.metadata.deinit(self.allocator);
         self.metadata = .empty;
         return request;
+    }
+
+    fn take(self: *Ingress, field: *ContentField) void {
+        const index = field.capture - 1;
+        field.* = self.contents[index];
+        self.contents[index] = .{};
     }
 };
 
@@ -1321,314 +1361,424 @@ const Parser = struct {
     content_ordinal: u8 = 0,
     captured: []const ContentField = &.{},
 
-    /// Sets the command's arm in `out`, then fills that arm in place.
+    /// Members of every request object may come in any order, as JSON
+    /// allows, so a client generated in any language can build one (D212).
+    /// The first pass reads `version`, `kind` and `store` wherever they sit
+    /// and counts content strings as they arrive; the second sets the
+    /// command's arm in `out` and fills it in place, meeting the content
+    /// strings in the same order.
     fn parse(self: *Parser, out: *Request) !void {
+        const start = self.source.start;
+        const header = try self.scanHeader();
+        self.source.start = start;
+        self.content_ordinal = 0;
         try self.expectByte('{');
-        try self.expectKey("version");
-        var version: Bounded(8) = .{};
-        try self.readSmallString(&version);
-        if (!version.eql(wire_version)) return error.WrongWireVersion;
-        try self.expectByte(',');
-        try self.expectKey("kind");
-        var kind_text: Bounded(32) = .{};
-        try self.readSmallString(&kind_text);
-        const kind: Kind = if (kind_text.eql("host_info"))
-            .host_info
-        else if (kind_text.eql("host_stop"))
-            .host_stop
-        else if (kind_text.eql("configure"))
-            .configure
-        else if (kind_text.eql("message"))
-            .message
-        else if (kind_text.eql("session_stop"))
-            .session_stop
-        else if (kind_text.eql("model_interruption"))
-            .model_interruption
-        else if (kind_text.eql("permission_decision"))
-            .permission_decision
-        else if (kind_text.eql("observe_command"))
-            .observe_command
-        else if (kind_text.eql("read_result"))
-            .read_result
-        else if (kind_text.eql("read_action_call_id"))
-            .read_action_call_id
-        else if (kind_text.eql("read_action_arguments"))
-            .read_action_arguments
-        else if (kind_text.eql("inspect_session"))
-            .inspect_session
-        else if (kind_text.eql("list_sessions"))
-            .list_sessions
-        else if (kind_text.eql("conversation_page"))
-            .conversation_page
-        else if (kind_text.eql("conversation_content"))
-            .conversation_content
-        else if (kind_text.eql("activity_page"))
-            .activity_page
-        else if (kind_text.eql("activity_content"))
-            .activity_content
-        else if (kind_text.eql("model_list"))
-            .model_list
-        else
-            return error.UnknownCommand;
-
-        if (self.options.expected_kind) |expected| {
-            if (kind != expected) return error.RouteKindMismatch;
-        }
-        try self.expectByte(',');
-        try self.expectKey("store");
-        var store: Bounded(max_store_bytes) = .{};
-        try self.readSmallString(&store);
-
+        var members: Members = .{};
+        const store = header.store;
         // Each arm is a literal written straight into `out`, then filled in
         // place: @unionInit would build a whole Request on the stack first.
-        switch (kind) {
-            .host_info => out.* = .{ .host_info = .{ .store = store } },
-            .host_stop => out.* = .{ .host_stop = .{ .store = store } },
-            .model_list => out.* = .{ .model_list = .{ .store = store } },
+        switch (header.kind) {
+            .host_info => {
+                out.* = .{ .host_info = .{ .store = store } };
+                try self.endCommand(&members);
+            },
+            .host_stop => {
+                out.* = .{ .host_stop = .{ .store = store } };
+                try self.endCommand(&members);
+            },
+            .host_pause => {
+                out.* = .{ .host_pause = .{ .store = store } };
+                try self.parseHostPause(&out.host_pause, &members);
+            },
+            .model_list => {
+                out.* = .{ .model_list = .{ .store = store } };
+                try self.endCommand(&members);
+            },
             .configure => {
                 out.* = .{ .configure = .{ .store = store, .configuration = .{ .workspace = .{ .value = .{ .len = 0 } } } } };
-                try self.parseConfigure(&out.configure);
+                try self.parseConfigure(&out.configure, &members);
             },
             .message => {
                 out.* = .{ .message = .{ .store = store } };
-                try self.parseMessage(&out.message);
+                try self.parseMessage(&out.message, &members);
             },
             .session_stop => {
                 out.* = .{ .session_stop = .{ .store = store } };
-                try self.parseSessionStop(&out.session_stop);
+                try self.parseSessionStop(&out.session_stop, &members);
             },
             .model_interruption => {
                 out.* = .{ .model_interruption = .{ .store = store } };
-                try self.parseModelInterruption(&out.model_interruption);
+                try self.parseModelInterruption(&out.model_interruption, &members);
             },
             .permission_decision => {
                 out.* = .{ .permission_decision = .{ .store = store } };
-                try self.parsePermissionDecision(&out.permission_decision);
+                try self.parsePermissionDecision(&out.permission_decision, &members);
             },
             .observe_command => {
                 out.* = .{ .observe_command = .{ .store = store } };
-                try self.parseObserve(&out.observe_command);
+                try self.parseKeyOnly(&out.observe_command.key, &members);
             },
             .read_result => {
                 out.* = .{ .read_result = .{ .store = store } };
-                try self.parseReadResult(&out.read_result);
+                try self.parseKeyOnly(&out.read_result.key, &members);
             },
             .read_action_call_id => {
                 out.* = .{ .read_action_call_id = .{ .store = store } };
-                try self.parseReadActionArguments(&out.read_action_call_id);
+                try self.parseReadActionArguments(&out.read_action_call_id, &members);
             },
             .read_action_arguments => {
                 out.* = .{ .read_action_arguments = .{ .store = store } };
-                try self.parseReadActionArguments(&out.read_action_arguments);
+                try self.parseReadActionArguments(&out.read_action_arguments, &members);
             },
             .inspect_session => {
                 out.* = .{ .inspect_session = .{ .store = store } };
-                try self.parseInspect(&out.inspect_session);
+                try self.parseInspect(&out.inspect_session, &members);
             },
             .list_sessions => {
                 out.* = .{ .list_sessions = .{ .store = store } };
-                try self.parseListSessions(&out.list_sessions);
+                try self.parseListSessions(&out.list_sessions, &members);
             },
             .conversation_page => {
                 out.* = .{ .conversation_page = .{ .store = store } };
-                try self.parseConversationPage(&out.conversation_page);
+                try self.parseConversationPage(&out.conversation_page, &members);
             },
             .conversation_content => {
                 out.* = .{ .conversation_content = .{ .store = store } };
-                try self.parseConversationContent(&out.conversation_content);
+                try self.parseConversationContent(&out.conversation_content, &members);
             },
             .activity_page => {
                 out.* = .{ .activity_page = .{ .store = store } };
-                try self.parseActivityPage(&out.activity_page);
+                try self.parseActivityPage(&out.activity_page, &members);
             },
             .activity_content => {
                 out.* = .{ .activity_content = .{ .store = store } };
-                try self.parseActivityContent(&out.activity_content);
+                try self.parseActivityContent(&out.activity_content, &members);
             },
         }
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        try self.expectByte('}');
         if (!self.source.atEnd()) {
             return error.TrailingInput;
         }
     }
 
-    /// Each parser fills its command `out`, whose Store is already set.
-    fn parseConfigure(self: *Parser, out: *ConfigureCommand) !void {
-        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        try self.expectByte(',');
-        try self.expectKey("key");
-        try self.readSmallString(&out.key);
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("configuration");
-        try self.parseConfiguration(true, &out.configuration);
-        if (try self.consumeIf(',')) {
-            try self.expectKey("require_model");
-            out.require_model = try self.readBoolean();
+    const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
+
+    /// The first pass. It passes over every member but the header, except
+    /// that it counts a content string where a Message's text or a
+    /// configuration's instructions or output schema holds one, so the
+    /// Ingress captures it whatever the order. Once `kind` is known, content
+    /// the kind cannot carry fails before any capture.
+    fn scanHeader(self: *Parser) !Header {
+        const Field = enum { version, kind, store, text, configuration };
+        try self.expectByte('{');
+        var members: Members = .{};
+        var seen: std.EnumSet(Field) = .empty;
+        var kind: ?Kind = null;
+        var store: Bounded(max_store_bytes) = .{};
+        var key: Bounded(32) = .{};
+        while (try members.next(self, &key)) {
+            const field = std.meta.stringToEnum(Field, key.slice()) orelse {
+                try self.skipValue();
+                continue;
+            };
+            if (seen.contains(field)) return error.UnexpectedField;
+            seen.insert(field);
+            switch (field) {
+                .version => {
+                    var version: Bounded(8) = .{};
+                    try self.readSmallString(&version);
+                    if (!version.eql(wire_version)) return error.WrongWireVersion;
+                },
+                .kind => {
+                    var text: Bounded(32) = .{};
+                    try self.readSmallString(&text);
+                    const named = std.meta.stringToEnum(Kind, text.slice()) orelse return error.UnknownCommand;
+                    if (self.options.expected_kind) |expected| {
+                        if (named != expected) return error.RouteKindMismatch;
+                    }
+                    kind = named;
+                },
+                .store => try self.readSmallString(&store),
+                .text => {
+                    if (kind) |named| if (named != .message) return error.UnexpectedField;
+                    try self.scanContentEnvelope(true);
+                },
+                .configuration => {
+                    if (kind) |named| if (named != .configure and named != .message) return error.UnexpectedField;
+                    // Only a configure command's configuration carries content.
+                    try self.scanConfiguration(if (kind) |named| named == .configure else true);
+                },
+            }
         }
+        if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
+        return .{ .kind = kind orelse return error.MissingField, .store = store };
+    }
+
+    fn scanConfiguration(self: *Parser, content: bool) !void {
+        try self.expectByte('{');
+        var members: Members = .{};
+        var instructions = false;
+        var output_schema = false;
+        var key: Bounded(32) = .{};
+        while (try members.next(self, &key)) {
+            const seen = if (key.eql("instructions"))
+                &instructions
+            else if (key.eql("output_schema"))
+                &output_schema
+            else {
+                try self.skipValue();
+                continue;
+            };
+            if (seen.*) return error.UnexpectedField;
+            seen.* = true;
+            try self.scanContentEnvelope(content);
+        }
+    }
+
+    fn scanContentEnvelope(self: *Parser, content: bool) !void {
+        try self.expectByte('{');
+        var members: Members = .{};
+        var value = false;
+        var key: Bounded(32) = .{};
+        while (try members.next(self, &key)) {
+            if (!key.eql("value")) {
+                try self.skipValue();
+                continue;
+            }
+            if (value) return error.UnexpectedField;
+            if (!content) return error.InvalidFieldState;
+            value = true;
+            // A third content string has no capture to go to.
+            if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
+            var counted: ContentField = .{};
+            try self.readContentString(&counted);
+        }
+    }
+
+    /// Walks one object's members after its opening brace.
+    const Members = struct {
+        started: bool = false,
+
+        /// Reads the next member's key and colon, or the closing brace.
+        fn next(self: *Members, parser: *Parser, key: *Bounded(32)) !bool {
+            if (try parser.consumeIf('}')) return false;
+            if (self.started) try parser.expectByte(',');
+            self.started = true;
+            key.* = .{};
+            parser.readSmallString(key) catch |err| return switch (err) {
+                error.ValueTooLong => error.UnexpectedField,
+                else => err,
+            };
+            try parser.expectByte(':');
+            return true;
+        }
+    };
+
+    /// The next member of an object whose keys are `Field`'s names, each at
+    /// most once, in any order.
+    fn nextField(self: *Parser, comptime Field: type, members: *Members, seen: *std.EnumSet(Field)) !?Field {
+        var key: Bounded(32) = .{};
+        if (!try members.next(self, &key)) return null;
+        return try fieldOf(Field, &key, seen);
+    }
+
+    /// The command's next member, passing over the header the first pass read.
+    fn nextCommandField(self: *Parser, comptime Field: type, members: *Members, seen: *std.EnumSet(Field)) !?Field {
+        var key: Bounded(32) = .{};
+        while (try members.next(self, &key)) {
+            if (isHeader(&key)) {
+                try self.skipValue();
+                continue;
+            }
+            return try fieldOf(Field, &key, seen);
+        }
+        return null;
+    }
+
+    /// Finishes a command that has no members beyond its header.
+    fn endCommand(self: *Parser, members: *Members) !void {
+        var key: Bounded(32) = .{};
+        while (try members.next(self, &key)) {
+            if (!isHeader(&key)) return error.UnexpectedField;
+            try self.skipValue();
+        }
+    }
+
+    fn isHeader(key: *const Bounded(32)) bool {
+        return key.eql("version") or key.eql("kind") or key.eql("store");
+    }
+
+    fn fieldOf(comptime Field: type, key: *const Bounded(32), seen: *std.EnumSet(Field)) !Field {
+        const field = std.meta.stringToEnum(Field, key.slice()) orelse return error.UnexpectedField;
+        if (seen.contains(field)) return error.UnexpectedField;
+        seen.insert(field);
+        return field;
+    }
+
+    fn require(comptime Field: type, seen: std.EnumSet(Field), required: []const Field) !void {
+        for (required) |field| if (!seen.contains(field)) return error.MissingField;
+    }
+
+    fn parseHostPause(self: *Parser, out: *@FieldType(Request, "host_pause"), members: *Members) !void {
+        const Field = enum { paused };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .paused => out.paused = try self.readBoolean(),
+        };
+        try require(Field, seen, &.{.paused});
+    }
+
+    fn parseKeyOnly(self: *Parser, key: *Bounded(max_key_bytes), members: *Members) !void {
+        const Field = enum { key };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .key => try self.readSmallString(key),
+        };
+        try require(Field, seen, &.{.key});
+    }
+
+    /// Each parser fills its command `out`, whose Store is already set.
+    fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
+        errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
+        const Field = enum { key, session, configuration, require_model };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .key => try self.readSmallString(&out.key),
+            .session => try self.readSmallString(&out.session),
+            .configuration => try self.parseConfiguration(true, &out.configuration),
+            .require_model => out.require_model = try self.readBoolean(),
+        };
+        try require(Field, seen, &.{ .key, .session, .configuration });
     }
 
     /// Fills `out`, which holds its defaults.
     fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
+        const Field = enum { workspace, provider, model, instructions, tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
         try self.expectByte('{');
-        try self.expectKey("workspace");
-        try self.readOptionalSmall(max_workspace_bytes, &out.workspace);
-        try self.expectByte(',');
-        try self.expectKey("provider");
-        try self.readOptionalSmall(max_provider_bytes, &out.provider);
-        try self.expectByte(',');
-        try self.expectKey("model");
-        try self.readOptionalSmall(max_model_bytes, &out.model);
-        try self.expectByte(',');
-        try self.expectKey("instructions");
-        try self.readContent(&out.instructions, false, allow_content);
-        try self.expectByte(',');
-        try self.expectKey("tools");
-        try self.readTools(&out.tools);
-        try self.expectByte(',');
-        try self.expectKey("permission_mode");
-        try self.readOptionalSmall(16, &out.permission_mode);
-        try self.expectByte(',');
-        try self.expectKey("output_schema");
-        try self.readContent(&out.output_schema, true, allow_content);
-        var trigger_seen = false;
-        var reservation_seen = false;
-        var effort_seen = false;
-        var label_seen = false;
-        while (try self.consumeIf(',')) {
-            var key: Bounded(32) = .{};
-            try self.readSmallString(&key);
-            try self.expectByte(':');
-            if (key.eql("compaction_trigger") and !trigger_seen) {
-                trigger_seen = true;
-                try self.readOptionalPolicy(&out.compaction_trigger);
-            } else if (key.eql("output_reservation") and !reservation_seen) {
-                reservation_seen = true;
-                try self.readOptionalPolicy(&out.output_reservation);
-            } else if (key.eql("reasoning_effort") and !effort_seen) {
-                effort_seen = true;
-                try self.readOptionalSmallNullable(16, &out.reasoning_effort, true);
-            } else if (key.eql("label") and !label_seen) {
-                label_seen = true;
-                try self.readOptionalSmallNullable(max_label_bytes, &out.label, true);
-            } else return error.UnexpectedField;
-        }
-        try self.expectByte('}');
+        var members: Members = .{};
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
+            .workspace => try self.readOptionalSmall(max_workspace_bytes, &out.workspace),
+            .provider => try self.readOptionalSmall(max_provider_bytes, &out.provider),
+            .model => try self.readOptionalSmall(max_model_bytes, &out.model),
+            .instructions => try self.readContent(&out.instructions, false, allow_content),
+            .tools => try self.readTools(&out.tools),
+            .permission_mode => try self.readOptionalSmall(16, &out.permission_mode),
+            .output_schema => try self.readContent(&out.output_schema, true, allow_content),
+            .compaction_trigger => try self.readOptionalPolicy(&out.compaction_trigger),
+            .output_reservation => try self.readOptionalPolicy(&out.output_reservation),
+            .reasoning_effort => try self.readOptionalSmallNullable(16, &out.reasoning_effort, true),
+            .label => try self.readOptionalSmallNullable(max_label_bytes, &out.label, true),
+        };
+        try require(Field, seen, &.{ .workspace, .provider, .model, .instructions, .tools, .permission_mode, .output_schema });
     }
 
-    fn parseMessage(self: *Parser, out: *MessageCommand) !void {
+    fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        try self.expectByte(',');
-        try self.expectKey("key");
-        try self.readSmallString(&out.key);
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("sender");
-        try self.skipWhitespace();
-        if (try self.source.readByte() == 'n') {
-            for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-        } else {
-            self.source.start -= 1;
-            out.sender = .{};
-            try self.expectByte('{');
-            try self.expectKey("store");
-            try self.readSmallString(&out.sender.?.store);
-            try self.expectByte(',');
-            try self.expectKey("session");
-            try self.readSmallString(&out.sender.?.session);
-            try self.expectByte('}');
-            try out.sender.?.validate();
-        }
-        try self.expectByte(',');
-        try self.expectKey("sender_handle");
-        try self.skipWhitespace();
-        if (try self.source.readByte() == 'n') {
-            for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-        } else {
-            self.source.start -= 1;
-            out.sender_handle = .{};
-            try self.readSmallString(&out.sender_handle.?);
-        }
-        try self.expectByte(',');
-        if (out.session.len == 0) {
-            try self.expectKey("configuration");
-            out.configuration = .{ .workspace = .{ .value = .{ .len = 0 } } };
-            try self.parseConfiguration(false, &out.configuration.?);
-            try self.expectByte(',');
-        }
-        try self.expectKey("text");
-        try self.readContent(&out.text, false, true);
+        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .key => try self.readSmallString(&out.key),
+            .session => try self.readSmallString(&out.session),
+            .sender => if (!try self.readNull()) {
+                out.sender = .{};
+                try self.parseAddress(&out.sender.?);
+                try out.sender.?.validate();
+            },
+            .sender_handle => if (!try self.readNull()) {
+                out.sender_handle = .{};
+                try self.readSmallString(&out.sender_handle.?);
+            },
+            .configuration => {
+                out.configuration = .{ .workspace = .{ .value = .{ .len = 0 } } };
+                try self.parseConfiguration(false, &out.configuration.?);
+            },
+            .text => try self.readContent(&out.text, false, true),
+            .require_model => out.require_model = try self.readBoolean(),
+        };
+        try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
+        // Only a creating Message, one with no Session yet, carries a
+        // configuration and a capability condition, and it must carry the
+        // configuration.
+        if (out.session.len == 0 and out.configuration == null) return error.MissingField;
+        if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
         if (out.text.state != .value) return error.InvalidMessage;
-        if (try self.consumeIf(',')) {
-            // Only a creating Message carries a capability condition.
-            if (out.configuration == null) return error.InvalidMessage;
-            try self.expectKey("require_model");
-            out.require_model = try self.readBoolean();
-        }
+        if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
     }
 
-    fn parseSessionStop(self: *Parser, out: *SessionStopCommand) !void {
-        try self.expectByte(',');
-        try self.expectKey("key");
-        try self.readSmallString(&out.key);
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-    }
-
-    fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand) !void {
-        try self.expectByte(',');
-        try self.expectKey("key");
-        try self.readSmallString(&out.key);
-        try self.expectByte(',');
-        try self.expectKey("target");
+    fn parseAddress(self: *Parser, out: *Address) !void {
+        const Field = enum { store, session };
         try self.expectByte('{');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("turn");
-        out.turn_id = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("operation");
-        out.operation_id = try self.readCanonicalU64();
-        try self.expectByte('}');
+        var members: Members = .{};
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
+            .store => try self.readSmallString(&out.store),
+            .session => try self.readSmallString(&out.session),
+        };
+        try require(Field, seen, &.{ .store, .session });
     }
 
-    fn parsePermissionDecision(self: *Parser, out: *PermissionDecisionCommand) !void {
-        try self.expectByte(',');
-        try self.expectKey("key");
-        try self.readSmallString(&out.key);
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("action");
-        out.action_id = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("decision");
-        var decision: Bounded(16) = .{};
-        try self.readSmallString(&decision);
-        out.decision = if (decision.eql("deny"))
-            .deny
-        else if (decision.eql("allow_once"))
-            .allow_once
-        else
-            return error.UnsupportedPermissionDecision;
+    fn parseSessionStop(self: *Parser, out: *SessionStopCommand, members: *Members) !void {
+        const Field = enum { key, session };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .key => try self.readSmallString(&out.key),
+            .session => try self.readSmallString(&out.session),
+        };
+        try require(Field, seen, &.{ .key, .session });
     }
 
-    fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("action");
-        out.action_id = try self.readCanonicalU64();
+    fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand, members: *Members) !void {
+        const Field = enum { key, target };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .key => try self.readSmallString(&out.key),
+            .target => {
+                const Target = enum { session, turn, operation };
+                try self.expectByte('{');
+                var target_members: Members = .{};
+                var target_seen: std.EnumSet(Target) = .empty;
+                while (try self.nextField(Target, &target_members, &target_seen)) |member| switch (member) {
+                    .session => try self.readSmallString(&out.session),
+                    .turn => out.turn_id = try self.readCanonicalU64(),
+                    .operation => out.operation_id = try self.readCanonicalU64(),
+                };
+                try require(Target, target_seen, &.{ .session, .turn, .operation });
+            },
+        };
+        try require(Field, seen, &.{ .key, .target });
+    }
+
+    fn parsePermissionDecision(self: *Parser, out: *PermissionDecisionCommand, members: *Members) !void {
+        const Field = enum { key, session, action, decision };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .key => try self.readSmallString(&out.key),
+            .session => try self.readSmallString(&out.session),
+            .action => out.action_id = try self.readCanonicalU64(),
+            .decision => {
+                var decision: Bounded(16) = .{};
+                try self.readSmallString(&decision);
+                out.decision = if (decision.eql("deny"))
+                    .deny
+                else if (decision.eql("allow_once"))
+                    .allow_once
+                else
+                    return error.UnsupportedPermissionDecision;
+            },
+        };
+        try require(Field, seen, &.{ .key, .session, .action, .decision });
+    }
+
+    fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments, members: *Members) !void {
+        const Field = enum { session, action };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .action => out.action_id = try self.readCanonicalU64(),
+        };
+        try require(Field, seen, &.{ .session, .action });
     }
 
     fn readCanonicalU64(self: *Parser) !u64 {
@@ -1646,89 +1796,83 @@ const Parser = struct {
         return std.fmt.parseInt(u64, digits[0..used], 10) catch error.InvalidIdentity;
     }
 
-    fn parseObserve(self: *Parser, out: *ObserveCommand) !void {
-        try self.expectByte(',');
-        try self.expectKey("key");
-        try self.readSmallString(&out.key);
-    }
-
-    fn parseInspect(self: *Parser, out: *InspectSession) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        if (try self.consumeIf(',')) {
-            var key: Bounded(32) = .{};
-            try self.readSmallString(&key);
-            try self.expectByte(':');
-            if (key.eql("profile")) {
+    fn parseInspect(self: *Parser, out: *InspectSession, members: *Members) !void {
+        const Field = enum { session, profile, failed_response, operation, attempt };
+        var seen: std.EnumSet(Field) = .empty;
+        var part: ?FailedResponsePart = null;
+        var operation: u64 = 0;
+        var attempt: u64 = 0;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .profile => {
                 var profile: Bounded(16) = .{};
                 try self.readSmallString(&profile);
                 out.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
-            } else if (key.eql("failed_response")) {
-                var part: Bounded(16) = .{};
-                try self.readSmallString(&part);
-                const selected = std.meta.stringToEnum(FailedResponsePart, part.slice()) orelse return error.InvalidTarget;
-                try self.expectByte(',');
-                try self.expectKey("operation");
-                const operation = try self.readCanonicalU64();
-                try self.expectByte(',');
-                try self.expectKey("attempt");
-                const ordinal = try self.readCanonicalU64();
-                if (operation == 0 or operation > std.math.maxInt(i64) or ordinal == 0 or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
-                out.failed_response = .{ .operation = operation, .attempt = ordinal, .part = selected };
-            } else return error.UnexpectedKey;
-        }
+            },
+            .failed_response => {
+                var text: Bounded(16) = .{};
+                try self.readSmallString(&text);
+                part = std.meta.stringToEnum(FailedResponsePart, text.slice()) orelse return error.InvalidTarget;
+            },
+            .operation => operation = try self.readCanonicalU64(),
+            .attempt => attempt = try self.readCanonicalU64(),
+        };
+        try require(Field, seen, &.{.session});
+        // A report profile or one failed response stream, never both; the
+        // stream is named by its Operation and attempt.
+        const selected = part orelse {
+            if (seen.contains(.operation) or seen.contains(.attempt)) return error.UnexpectedField;
+            return;
+        };
+        if (seen.contains(.profile)) return error.UnexpectedField;
+        try require(Field, seen, &.{ .operation, .attempt });
+        if (operation == 0 or operation > std.math.maxInt(i64) or attempt == 0 or attempt > std.math.maxInt(i64)) return error.InvalidTarget;
+        out.failed_response = .{ .operation = operation, .attempt = attempt, .part = selected };
     }
 
-    fn parseListSessions(self: *Parser, out: *ListSessions) !void {
-        try self.expectByte(',');
-        try self.expectKey("workspace");
-        if (!try self.consumeIf('n')) {
-            out.workspace = .{ .len = 0 };
-            try self.readSmallString(&out.workspace.?);
-        } else {
-            try self.expectByte('u');
-            try self.expectByte('l');
-            try self.expectByte('l');
-        }
-        try self.expectByte(',');
-        try self.expectKey("after");
-        out.after = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("ceiling");
-        out.ceiling = try self.readCanonicalU64();
-        if (try self.consumeIf(',')) {
-            try self.expectKey("since");
-            var token: Bounded(SinceToken.max_bytes) = .{};
-            try self.readSmallString(&token);
-            out.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
-            if (try self.consumeIf(',')) {
-                try self.expectKey("through");
-                const through = try self.readCanonicalU64();
-                try self.expectByte(',');
-                try self.expectKey("after_reference");
-                var reference: Bounded(session_id_bytes) = .{};
+    fn parseListSessions(self: *Parser, out: *ListSessions, members: *Members) !void {
+        const Field = enum { workspace, after, ceiling, since, through, after_reference };
+        var seen: std.EnumSet(Field) = .empty;
+        var through: u64 = 0;
+        var reference: Bounded(session_id_bytes) = .{};
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .workspace => if (!try self.readNull()) {
+                out.workspace = .{ .len = 0 };
+                try self.readSmallString(&out.workspace.?);
+            },
+            .after => out.after = try self.readCanonicalU64(),
+            .ceiling => out.ceiling = try self.readCanonicalU64(),
+            .since => {
+                var token: Bounded(SinceToken.max_bytes) = .{};
+                try self.readSmallString(&token);
+                out.since = SinceToken.parse(token.slice()) catch return error.InvalidCursor;
+            },
+            .through => through = try self.readCanonicalU64(),
+            .after_reference => {
                 try self.readSmallString(&reference);
                 if (reference.len != session_id_bytes) return error.InvalidCursor;
-                out.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
-            }
+            },
+        };
+        try require(Field, seen, &.{ .workspace, .after, .ceiling });
+        // A changed continuation names both its generation and its last
+        // Session, and only follows a `since` token.
+        if (seen.contains(.through) or seen.contains(.after_reference)) {
+            if (!seen.contains(.through) or !seen.contains(.after_reference) or out.since == null) return error.InvalidCursor;
+            out.changed = .{ .through = through, .after_reference = reference.bytes[0..session_id_bytes].* };
         }
         try out.validate();
     }
 
-    fn parseConversationPage(self: *Parser, out: *ConversationPage) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("end");
-        out.end = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("before_position");
-        out.before_position = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("before_ordinal");
-        out.before_ordinal = try self.readCanonicalU64();
+    fn parseConversationPage(self: *Parser, out: *ConversationPage, members: *Members) !void {
+        const Field = enum { session, end, before_position, before_ordinal };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .end => out.end = try self.readCanonicalU64(),
+            .before_position => out.before_position = try self.readCanonicalU64(),
+            .before_ordinal => out.before_ordinal = try self.readCanonicalU64(),
+        };
+        try require(Field, seen, &.{ .session, .end, .before_position, .before_ordinal });
         if (out.end > std.math.maxInt(i64) or out.before_position > std.math.maxInt(i64) or
             out.before_ordinal > std.math.maxInt(i64) or
             (out.end == 0 and out.before_position != 0) or
@@ -1736,89 +1880,73 @@ const Parser = struct {
             (out.end != 0 and out.before_position > out.end)) return error.InvalidCursor;
     }
 
-    fn parseConversationContent(self: *Parser, out: *ConversationContent) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("ordinal");
-        out.ordinal = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("start");
-        out.start = try self.readCanonicalU64();
-        if (try self.consumeIf(',')) {
-            try self.expectKey("stream");
-            for ("true") |byte| try self.expectByte(byte);
-            out.stream = true;
-        }
+    fn parseConversationContent(self: *Parser, out: *ConversationContent, members: *Members) !void {
+        const Field = enum { session, position, ordinal, start, stream };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .position => out.position = try self.readCanonicalU64(),
+            .ordinal => out.ordinal = try self.readCanonicalU64(),
+            .start => out.start = try self.readCanonicalU64(),
+            .stream => {
+                for ("true") |byte| try self.expectByte(byte);
+                out.stream = true;
+            },
+        };
+        try require(Field, seen, &.{ .session, .position, .ordinal, .start });
         if (out.position == 0 or out.position > std.math.maxInt(i64) or
             out.ordinal > std.math.maxInt(i64) or (out.stream and out.start != 0)) return error.InvalidCursor;
     }
 
-    fn parseActivityPage(self: *Parser, out: *ActivityPage) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("end");
-        if (try self.consumeIf('n')) {
-            for ("ull") |byte| try self.expectByte(byte);
-        } else out.end = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("ordinal");
-        if (try self.consumeIf('n')) {
-            for ("ull") |byte| try self.expectByte(byte);
-        } else out.ordinal = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("direction");
-        var direction: Bounded(8) = .{};
-        try self.readSmallString(&direction);
-        out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
-        try self.expectByte(',');
-        try self.expectKey("kinds");
-        try self.expectByte('[');
-        // Each kind at most once, in tag order, so one set has one spelling.
-        out.kinds = .empty;
-        var last: ?ActivityItem.Kind = null;
-        if (!try self.consumeIf(']')) while (true) {
-            var name: Bounded(16) = .{};
-            try self.readSmallString(&name);
-            const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
-            if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
-            out.kinds.insert(kind);
-            last = kind;
-            if (try self.consumeIf(']')) break;
-            try self.expectByte(',');
+    fn parseActivityPage(self: *Parser, out: *ActivityPage, members: *Members) !void {
+        const Field = enum { session, end, position, ordinal, direction, kinds, limit };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .end => if (!try self.readNull()) {
+                out.end = try self.readCanonicalU64();
+            },
+            .position => out.position = try self.readCanonicalU64(),
+            .ordinal => if (!try self.readNull()) {
+                out.ordinal = try self.readCanonicalU64();
+            },
+            .direction => {
+                var direction: Bounded(8) = .{};
+                try self.readSmallString(&direction);
+                out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
+            },
+            .kinds => {
+                try self.expectByte('[');
+                // Each kind at most once, in tag order, so one set has one spelling.
+                out.kinds = .empty;
+                var last: ?ActivityItem.Kind = null;
+                if (!try self.consumeIf(']')) while (true) {
+                    var name: Bounded(16) = .{};
+                    try self.readSmallString(&name);
+                    const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
+                    if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
+                    out.kinds.insert(kind);
+                    last = kind;
+                    if (try self.consumeIf(']')) break;
+                    try self.expectByte(',');
+                };
+            },
+            .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
         };
-        try self.expectByte(',');
-        try self.expectKey("limit");
-        out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor;
+        try require(Field, seen, &.{ .session, .end, .position, .ordinal, .direction, .kinds, .limit });
         try out.validate();
     }
 
-    fn parseActivityContent(self: *Parser, out: *ReadActivityContent) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("ordinal");
-        out.ordinal = try self.readCanonicalU64();
+    fn parseActivityContent(self: *Parser, out: *ReadActivityContent, members: *Members) !void {
+        const Field = enum { session, position, ordinal };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .position => out.position = try self.readCanonicalU64(),
+            .ordinal => out.ordinal = try self.readCanonicalU64(),
+        };
+        try require(Field, seen, &.{ .session, .position, .ordinal });
         if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
-    }
-
-    fn parseReadResult(self: *Parser, out: *ReadResult) !void {
-        try self.expectByte(',');
-        try self.expectKey("key");
-        try self.readSmallString(&out.key);
     }
 
     fn readOptionalPolicy(self: *Parser, field: *OptionalBounded(20)) !void {
@@ -1829,72 +1957,141 @@ const Parser = struct {
         try self.readOptionalSmallNullable(capacity, field, false);
     }
 
+    /// The members of a `{"state":…,"value":…}` envelope.
+    const Envelope = enum { state, value };
+
+    /// An envelope's state, once its members are read: a value is present
+    /// exactly when the state says so.
+    fn envelopeState(state: *const Bounded(16), seen: std.EnumSet(Envelope), allow_null: bool) !FieldState {
+        if (!seen.contains(.state)) return error.MissingField;
+        const result: FieldState = if (state.eql("omitted"))
+            .omitted
+        else if (allow_null and state.eql("null"))
+            .explicit_null
+        else if (state.eql("value"))
+            .value
+        else
+            return error.InvalidFieldState;
+        if (seen.contains(.value) != (result == .value)) return error.InvalidFieldState;
+        return result;
+    }
+
     fn readOptionalSmallNullable(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity), allow_null: bool) !void {
         try self.expectByte('{');
-        try self.expectKey("state");
+        var members: Members = .{};
+        var seen: std.EnumSet(Envelope) = .empty;
         var state: Bounded(16) = .{};
-        try self.readSmallString(&state);
-        if (state.eql("omitted")) {
-            field.state = .omitted;
-        } else if (allow_null and state.eql("null")) {
-            field.state = .explicit_null;
-        } else if (state.eql("value")) {
-            field.state = .value;
-            try self.expectByte(',');
-            try self.expectKey("value");
-            try self.readSmallString(&field.value);
-        } else return error.InvalidFieldState;
-        try self.expectByte('}');
+        while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
+            .state => try self.readSmallString(&state),
+            .value => try self.readSmallString(&field.value),
+        };
+        field.state = try envelopeState(&state, seen, allow_null);
     }
 
     fn readContent(self: *Parser, field: *ContentField, allow_null: bool, allow_value: bool) !void {
         try self.expectByte('{');
-        try self.expectKey("state");
+        var members: Members = .{};
+        var seen: std.EnumSet(Envelope) = .empty;
         var state: Bounded(16) = .{};
-        try self.readSmallString(&state);
-        if (state.eql("omitted")) {
-            field.state = .omitted;
-        } else if (allow_null and state.eql("null")) {
-            field.state = .explicit_null;
-        } else if (state.eql("value")) {
-            if (!allow_value) return error.InvalidFieldState;
-            field.state = .value;
-            try self.expectByte(',');
-            try self.expectKey("value");
-            try self.readContentString(field);
-        } else return error.InvalidFieldState;
-        try self.expectByte('}');
+        while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
+            .state => try self.readSmallString(&state),
+            .value => {
+                if (!allow_value) return error.InvalidFieldState;
+                try self.readContentString(field);
+            },
+        };
+        field.state = try envelopeState(&state, seen, allow_null);
     }
 
     fn readTools(self: *Parser, tools: *ToolsField) !void {
         try self.expectByte('{');
-        try self.expectKey("state");
+        var members: Members = .{};
+        var seen: std.EnumSet(Envelope) = .empty;
         var state: Bounded(16) = .{};
-        try self.readSmallString(&state);
-        if (state.eql("omitted")) {
-            tools.state = .omitted;
-        } else if (state.eql("value")) {
-            tools.state = .value;
-            try self.expectByte(',');
-            try self.expectKey("value");
-            try self.expectByte('[');
-            // Each tool at most once, in catalog order, so one catalog has
-            // one spelling and one digest.
-            tools.count = 0;
-            if (!try self.consumeIf(']')) while (true) {
-                var value: Bounded(16) = .{};
-                try self.readSmallString(&value);
-                const Tool = @typeInfo(@FieldType(ToolsField, "values")).array.child;
-                const tool = std.meta.stringToEnum(Tool, value.slice()) orelse return error.UnknownTool;
-                if (tools.count != 0 and @backingInt(tool) <= @backingInt(tools.values[tools.count - 1])) return error.InvalidJsonShape;
-                tools.values[tools.count] = tool;
-                tools.count += 1;
-                if (try self.consumeIf(']')) break;
-                if (tools.count == tools.values.len) return error.InvalidJsonShape;
+        while (try self.nextField(Envelope, &members, &seen)) |member| switch (member) {
+            .state => try self.readSmallString(&state),
+            .value => {
+                try self.expectByte('[');
+                // Each tool at most once, in catalog order, so one catalog has
+                // one spelling and one digest.
+                tools.count = 0;
+                if (!try self.consumeIf(']')) while (true) {
+                    var value: Bounded(16) = .{};
+                    try self.readSmallString(&value);
+                    const Tool = @typeInfo(@FieldType(ToolsField, "values")).array.child;
+                    const tool = std.meta.stringToEnum(Tool, value.slice()) orelse return error.UnknownTool;
+                    if (tools.count != 0 and @backingInt(tool) <= @backingInt(tools.values[tools.count - 1])) return error.InvalidJsonShape;
+                    tools.values[tools.count] = tool;
+                    tools.count += 1;
+                    if (try self.consumeIf(']')) break;
+                    if (tools.count == tools.values.len) return error.InvalidJsonShape;
+                    try self.expectByte(',');
+                };
+            },
+        };
+        tools.state = try envelopeState(&state, seen, false);
+    }
+
+    /// Reads a literal null, or leaves the input where it was.
+    fn readNull(self: *Parser) !bool {
+        if (!try self.consumeIf('n')) return false;
+        for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+        return true;
+    }
+
+    /// Passes over one value nested at most `max_skipped_depth` objects or
+    /// arrays deep, without recursion.
+    fn skipValue(self: *Parser) !void {
+        const max_skipped_depth = 4;
+        var closers: [max_skipped_depth]u8 = undefined;
+        var depth: usize = 0;
+        var discard: DiscardSink = .{};
+        while (true) {
+            try self.skipWhitespace();
+            const first = try self.source.readByte();
+            switch (first) {
+                '"' => {
+                    self.source.start -= 1;
+                    try self.readJsonString(&discard);
+                },
+                't', 'f', 'n' => {
+                    const rest: []const u8 = switch (first) {
+                        't' => "rue",
+                        'f' => "alse",
+                        else => "ull",
+                    };
+                    for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+                },
+                '{', '[' => {
+                    const closer: u8 = if (first == '{') '}' else ']';
+                    if (!try self.consumeIf(closer)) {
+                        if (depth == closers.len) return error.InvalidJsonShape;
+                        closers[depth] = closer;
+                        depth += 1;
+                        if (closer == '}') try self.skipKey(&discard);
+                        continue;
+                    }
+                },
+                else => return error.InvalidJsonShape,
+            }
+            // A value ended: close each container it finished, then step to
+            // the next element of the innermost open one.
+            while (depth > 0) {
+                if (try self.consumeIf(closers[depth - 1])) {
+                    depth -= 1;
+                    continue;
+                }
                 try self.expectByte(',');
-            };
-        } else return error.InvalidFieldState;
-        try self.expectByte('}');
+                if (closers[depth - 1] == '}') try self.skipKey(&discard);
+                break;
+            }
+            if (depth == 0) return;
+        }
+    }
+
+    fn skipKey(self: *Parser, discard: *DiscardSink) !void {
+        try self.readJsonString(discard);
+        try self.expectByte(':');
     }
 
     fn readSmallString(self: *Parser, destination: anytype) !void {
@@ -1913,6 +2110,7 @@ const Parser = struct {
         // Speculative request disposal has no resource authority.
         field.length = original.length;
         field.digest = original.digest;
+        field.capture = self.content_ordinal;
     }
 
     fn readJsonString(self: *Parser, sink: anytype) !void {
@@ -2116,6 +2314,11 @@ const ContentCapture = struct {
         }
         self.transferred = true;
     }
+};
+
+const DiscardSink = struct {
+    fn write(_: *DiscardSink, _: []const u8) !void {}
+    fn endString(_: *DiscardSink) !void {}
 };
 
 fn SmallSink(comptime T: type) type {
@@ -2357,6 +2560,8 @@ pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
 /// Holes: Store.
 pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
+/// Holes: Store, paused.
+pub const host_pause_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_pause\",\"store\":", store_hole, ",\"paused\":", Hole.boolean, "}" };
 /// Holes: Store.
 pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, "}" };
 /// Holes: Store, key.
@@ -2419,6 +2624,7 @@ pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, mod
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
+pub const max_host_pause_request_bytes = shapeBytes(host_pause_request);
 pub const max_model_list_request_bytes = shapeBytes(model_list_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
@@ -2432,10 +2638,11 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request,     host_info_request,             host_stop_request,
-    read_result_request,         list_sessions_changed_request, read_action_arguments_request,
-    read_action_call_id_request, conversation_content_request,  conversation_page_request,
-    activity_page_request,       activity_content_request,      model_list_request,
+    observe_command_request,       host_info_request,           host_stop_request,
+    host_pause_request,            read_result_request,         list_sessions_changed_request,
+    read_action_arguments_request, read_action_call_id_request, conversation_content_request,
+    conversation_page_request,     activity_page_request,       activity_content_request,
+    model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2580,9 +2787,9 @@ pub const max_control_response_bytes = @max(
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
-/// (decimal or `unlimited`), start time, slots in use, and each provider's
-/// Route.
-pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+/// (decimal or `unlimited`), start time, slots in use, whether new Turns
+/// are paused, and each provider's Route.
+pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
 comptime {
     const names = @typeInfo(Provider).@"enum".field_names;
     if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
@@ -2598,9 +2805,11 @@ pub const model_list_reply = struct {
     pub const max_bytes = head.len + model_list.max_providers_bytes + tail.len;
 };
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
+/// Hole: whether new Turns are now paused.
+pub const host_pause_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_pause_reply\",\"paused\":", Hole.boolean, "}" };
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
 
 pub const conversation_page_reply = struct {
     /// Hole: the page end.
@@ -3016,7 +3225,7 @@ test "Conversation content stream wire requires start zero and literal true" {
         .{ .suffix = "\"1\",\"stream\":true}", .failure = error.InvalidCursor },
         .{ .suffix = "\"0\",\"stream\":false}", .failure = error.InvalidJsonShape },
         .{ .suffix = "\"0\",\"stream\":\"true\"}", .failure = error.InvalidJsonShape },
-        .{ .suffix = "\"0\",\"stream\":true,\"stream\":true}", .failure = error.InvalidJsonShape },
+        .{ .suffix = "\"0\",\"stream\":true,\"stream\":true}", .failure = error.UnexpectedField },
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
@@ -3346,11 +3555,12 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
 
 test "peer wire rejects old sender strings, malformed addresses and missing handles" {
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
+    const text = ",\"text\":{\"state\":\"omitted\"}}";
     const cases = [_]struct { json: []const u8, failure: anyerror }{
-        .{ .json = prefix ++ "\"peer\",\"sender_handle\":null", .failure = error.InvalidJsonShape },
-        .{ .json = prefix ++ "{\"store\":\"/s\"},\"sender_handle\":null", .failure = error.InvalidJsonShape },
-        .{ .json = prefix ++ "{\"store\":\"relative\",\"session\":\"peer\"},\"sender_handle\":null", .failure = error.InvalidRuiAddress },
-        .{ .json = prefix ++ "null,\"text\":{}", .failure = error.UnexpectedField },
+        .{ .json = prefix ++ "\"peer\",\"sender_handle\":null" ++ text, .failure = error.InvalidJsonShape },
+        .{ .json = prefix ++ "{\"store\":\"/s\"},\"sender_handle\":null" ++ text, .failure = error.MissingField },
+        .{ .json = prefix ++ "{\"store\":\"relative\",\"session\":\"peer\"},\"sender_handle\":null" ++ text, .failure = error.InvalidRuiAddress },
+        .{ .json = prefix ++ "null" ++ text, .failure = error.MissingField },
     };
     for (cases) |case| {
         var source: MetadataSource = .{ .input = case.json };
@@ -3576,4 +3786,123 @@ test "incremental ingress preserves grammar and releases both captures after lat
             try std.testing.expect(retained == null);
         }
     }
+}
+
+test "a request's members may come in any order, and its content lands in its own field" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    // The output schema arrives before the instructions, values before
+    // states, and the header last.
+    const reordered = "{\"configuration\":{\"output_schema\":{\"value\":\"{}\",\"state\":\"value\"},\"label\":{\"value\":\"Map\",\"state\":\"value\"}," ++
+        "\"tools\":{\"value\":[\"bash\"],\"state\":\"value\"},\"permission_mode\":{\"state\":\"omitted\"},\"instructions\":{\"value\":\"first\\n\",\"state\":\"value\"}," ++
+        "\"model\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"workspace\":{\"state\":\"omitted\"}}," ++
+        "\"require_model\":true,\"session\":\"peer\",\"key\":\"k\",\"store\":\"s\",\"kind\":\"configure\",\"version\":\"" ++ wire_version ++ "\"}";
+    const ordered = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"}," ++
+        "\"instructions\":{\"state\":\"value\",\"value\":\"first\\n\"},\"tools\":{\"state\":\"value\",\"value\":[\"bash\"]}," ++
+        "\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"value\",\"value\":\"{}\"},\"label\":{\"state\":\"value\",\"value\":\"Map\"}},\"require_model\":true}";
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    var digests: [2][32]u8 = undefined;
+    for ([_][]const u8{ ordered, reordered }, 0..) |bytes, index| {
+        // Every split suspends capture at a different byte.
+        for (0..bytes.len + 1) |split| {
+            var ingress: Ingress = undefined;
+            ingress.init(std.testing.allocator, .{
+                .io = io,
+                .content_length = bytes.len,
+                .scratch_path = root[0..root_len],
+                .request_number = index,
+                .retained_scratch = &retained,
+                .scratch_budget = .{ .used = &used, .limit = 8 },
+                .expected_kind = .configure,
+            });
+            defer ingress.deinit();
+            try ingress.feed(bytes[0..split]);
+            try ingress.feed(bytes[split..]);
+            const request = try ingress.finish();
+            defer request.removeTemporaryContent(io) catch unreachable;
+            const configuration = request.configure.configuration;
+            try std.testing.expect(request.configure.require_model);
+            try std.testing.expectEqualStrings("Map", configuration.label.value.slice());
+            try std.testing.expectEqual(@as(u2, 1), configuration.tools.count);
+            const fields = [_]ContentField{ configuration.instructions, configuration.output_schema };
+            for (fields, [_][]const u8{ "first\n", "{}" }) |field, expected| {
+                var buffer: [8]u8 = undefined;
+                const count = try field.file.?.readPositionalAll(io, &buffer, 0);
+                try std.testing.expectEqualStrings(expected, buffer[0..count]);
+            }
+            digests[index] = request.configure.semanticDigest();
+        }
+    }
+    try std.testing.expectEqualSlices(u8, &digests[0], &digests[1]);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "an order-free request still names each member once, carries every required one, and holds content only where its kind allows" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const header = "\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\"";
+    const omitted = "{\"state\":\"omitted\"}";
+    const value = "{\"value\":\"x\",\"state\":\"value\"}";
+    const configuration = "{\"workspace\":" ++ omitted ++ ",\"provider\":" ++ omitted ++ ",\"model\":" ++ omitted ++ ",\"tools\":" ++ omitted ++
+        ",\"permission_mode\":" ++ omitted;
+    const cases = [_]struct { json: []const u8, failure: ?anyerror = null }{
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\"," ++ header ++ "}" },
+        .{ .json = "{\"target\":{\"operation\":\"2\",\"turn\":\"1\",\"session\":\"x\"},\"key\":\"k\"," ++ header ++ ",\"kind\":\"model_interruption\"}" },
+        .{ .json = "{\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":{\"session\":\"k7m2qx\",\"store\":\"/s\"},\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}" },
+        .{ .json = "{\"attempt\":\"1\",\"operation\":\"2\",\"failed_response\":\"body\",\"session\":\"x\",\"kind\":\"inspect_session\"," ++ header ++ "}" },
+        .{ .json = "{\"session\":\"x\",\"kind\":\"session_stop\"," ++ header ++ "}", .failure = error.MissingField },
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"store\":\"s\"}", .failure = error.MissingField },
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"kind\":\"session_stop\"," ++ header ++ "}", .failure = error.UnexpectedField },
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"session\":\"y\",\"kind\":\"session_stop\"," ++ header ++ "}", .failure = error.UnexpectedField },
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":[[[[[\"deep\"]]]]]," ++ header ++ "}", .failure = error.InvalidJsonShape },
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[1]}," ++ header ++ "}", .failure = error.InvalidJsonShape },
+        .{ .json = "{\"session\":\"x\",\"key\":\"k\",\"kind\":\"session_stop\",\"extra\":{\"a\":[true,null]}," ++ header ++ "}", .failure = error.UnexpectedField },
+        .{ .json = "{\"kind\":\"session_stop\",\"text\":" ++ value ++ ",\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.UnexpectedField },
+        // A value with no state, or a state with no value.
+        .{ .json = "{\"kind\":\"message\",\"text\":{\"value\":\"x\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.MissingField },
+        .{ .json = "{\"kind\":\"message\",\"text\":{\"state\":\"value\"},\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
+        // A Message's configuration holds no content; once the kind is
+        // known that fails before capture, otherwise after it.
+        .{ .json = "{\"kind\":\"message\",\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ omitted ++ ",\"instructions\":" ++ value ++ "}," ++
+            "\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ "}", .failure = error.InvalidFieldState },
+        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ omitted ++ ",\"instructions\":" ++ value ++ "}," ++
+            "\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.InvalidFieldState },
+        // Three content strings before the kind: no capture is left.
+        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ value ++ ",\"instructions\":" ++ value ++ "}," ++
+            "\"text\":" ++ value ++ ",\"key\":\"k\",\"session\":\"x\"," ++ header ++ ",\"kind\":\"configure\"}", .failure = error.UnexpectedField },
+        .{ .json = "{\"configuration\":" ++ configuration ++ ",\"output_schema\":" ++ omitted ++ ",\"instructions\":" ++ omitted ++ "}," ++
+            "\"text\":" ++ value ++ ",\"sender_handle\":null,\"sender\":null,\"session\":\"x\",\"key\":\"k\"," ++ header ++ ",\"kind\":\"message\"}", .failure = error.UnexpectedField },
+    };
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    for (cases, 0..) |case, index| {
+        var ingress: Ingress = undefined;
+        ingress.init(std.testing.allocator, .{
+            .io = io,
+            .content_length = case.json.len,
+            .scratch_path = root[0..root_len],
+            .request_number = index,
+            .retained_scratch = &retained,
+            .scratch_budget = .{ .used = &used, .limit = 8 },
+        });
+        defer ingress.deinit();
+        const result = if (ingress.feed(case.json)) |_| ingress.finish() else |err| err;
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, result);
+            continue;
+        }
+        const request = try result;
+        try request.removeTemporaryContent(io);
+    }
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(retained == null);
 }

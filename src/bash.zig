@@ -1902,9 +1902,10 @@ test "Bash descriptor decoding preserves authorized command bytes" {
     var override = Source{ .bytes = "{\"timeout_ms\":17,\"description\":\"Print confirmation\",\"cmd\":\"echo ok\"}" };
     const inspected = (try tools.inspectBashArguments(&override)).?;
     try std.testing.expectEqual(@as(?u64, 17), inspected.timeout_ms);
+    var defaulted = Source{ .bytes = "{\"description\":\"Print output\",\"cmd\":\"echo\"}" };
+    try std.testing.expectEqual(@as(?u64, null), (try tools.inspectBashArguments(&defaulted)).?.timeout_ms);
     inline for (.{
         "{\"description\":\"Print output\",\"cmd\":\"echo\\u0000bad\",\"timeout_ms\":null}",
-        "{\"description\":\"Print output\",\"cmd\":\"echo\"}",
         "{\"description\":\"Print output\",\"cmd\":\"echo\",\"timeout_ms\":0}",
         "{\"description\":\"Print output\",\"cmd\":\"echo\",\"timeout_ms\":9223372036854775808}",
         "{\"description\":\"Print output\",\"cmd\":\"echo\",\"timeout_ms\":1.5}",
