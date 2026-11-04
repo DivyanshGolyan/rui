@@ -1135,19 +1135,21 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 /// Runs the next core tool call (D24) to its resolution: it reads the
 /// call's arguments, which settlement already checked, and one Store
 /// command does what they ask. Nothing is written before that command, so
-/// a call this stops short of is simply run again.
-fn runNextCoreAction(host: *Host) execution_turn.Admission {
+/// a call this stops short of is simply run again. The arguments are read
+/// whole onto the heap, so its frame stays small: every Store call may run
+/// other threads' queued writes on this stack.
+noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
     const input = (host.store.nextCoreAction() catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
     }) orelse return .no_work;
-    const location = host.store.openContent(input.arguments) catch |err| {
+    const arguments_bytes = host.allocator.alloc(u8, std.math.cast(usize, input.arguments.length) orelse return .retry_later) catch return .retry_later;
+    defer host.allocator.free(arguments_bytes);
+    readCoreArguments(host, &input, arguments_bytes) catch |err| {
         fenceDispatch(host, "core tool input", err);
         return .retry_later;
     };
-    var source: bash.ContentSource = .{ .length = input.arguments.length };
-    source.reader.open(location);
-    defer source.reader.close();
+    var source: tools.core_tools.SliceSource = .{ .bytes = arguments_bytes };
     const Text = struct {
         list: std.ArrayList(u8) = .empty,
         allocator: std.mem.Allocator,
@@ -1183,6 +1185,21 @@ fn runNextCoreAction(host: *Host) execution_turn.Admission {
         },
     };
     return .admitted;
+}
+
+/// Reads a core call's whole arguments into `bytes`, which holds exactly
+/// their length.
+fn readCoreArguments(host: *Host, input: *const store_module.CoreActionInput, bytes: []u8) !void {
+    const location = try host.store.openContent(input.arguments);
+    var reader: store_module.ContentReader = undefined;
+    reader.open(location);
+    defer reader.close();
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const count = try reader.read(offset, bytes[offset..]);
+        if (count == 0) return error.ShortCanonicalRead;
+        offset += count;
+    }
 }
 
 fn admitBashAttempt(

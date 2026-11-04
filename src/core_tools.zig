@@ -143,7 +143,9 @@ fn Reader(comptime Source: type) type {
     return struct {
         source: Source,
         scanner: std.json.Scanner,
-        chunk: [4096]u8 = undefined,
+        /// Small: the source buffers its own reads, and this lives in the
+        /// settlement scan's and the engine's frames.
+        chunk: [256]u8 = undefined,
         ended: bool = false,
 
         fn next(self: *@This()) !std.json.Token {
@@ -179,20 +181,23 @@ fn isDecodeError(err: anyerror) bool {
     };
 }
 
-const TestSource = struct {
+/// A call's arguments already in memory, as the checks read them.
+pub const SliceSource = struct {
     bytes: []const u8,
     position: usize = 0,
 
-    fn peek(self: *TestSource) !?u8 {
+    pub fn peek(self: *SliceSource) !?u8 {
         return if (self.position == self.bytes.len) null else self.bytes[self.position];
     }
 
-    fn take(self: *TestSource) !u8 {
+    pub fn take(self: *SliceSource) !u8 {
         const byte = (try self.peek()) orelse return error.ShortCanonicalRead;
         self.position += 1;
         return byte;
     }
 };
+
+const TestSource = SliceSource;
 
 const TestText = struct {
     bytes: [256]u8 = undefined,
