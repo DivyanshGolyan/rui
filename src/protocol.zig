@@ -164,6 +164,7 @@ pub const Configuration = struct {
 pub const Kind = enum {
     host_info,
     host_stop,
+    host_pause,
     configure,
     message,
     session_stop,
@@ -477,6 +478,8 @@ pub const HostInfo = struct {
     /// Slots in use: held custody records, including detached cleanup. The
     /// value Current reports as `execution.custody_occupied`.
     custody_occupied: []const u8,
+    /// Whether the Host holds every new Turn until resumed (D193).
+    paused: bool,
     capabilities: struct {
         bash: bool,
         providers: Routes,
@@ -1037,6 +1040,8 @@ pub const ActivityFacts = struct {
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
     host_stop: struct { store: Bounded(max_store_bytes) = .{} },
+    /// Sets whether the Host holds every new Turn (D193).
+    host_pause: struct { store: Bounded(max_store_bytes) = .{}, paused: bool = false },
     configure: ConfigureCommand,
     message: MessageCommand,
     session_stop: SessionStopCommand,
@@ -1058,7 +1063,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
+            .host_info, .host_stop, .host_pause, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
         }
     }
 
@@ -1359,6 +1364,8 @@ const Parser = struct {
             .host_info
         else if (kind_text.eql("host_stop"))
             .host_stop
+        else if (kind_text.eql("host_pause"))
+            .host_pause
         else if (kind_text.eql("configure"))
             .configure
         else if (kind_text.eql("message"))
@@ -1407,6 +1414,12 @@ const Parser = struct {
         switch (kind) {
             .host_info => out.* = .{ .host_info = .{ .store = store } },
             .host_stop => out.* = .{ .host_stop = .{ .store = store } },
+            .host_pause => {
+                out.* = .{ .host_pause = .{ .store = store } };
+                try self.expectByte(',');
+                try self.expectKey("paused");
+                out.host_pause.paused = try self.readBoolean();
+            },
             .model_list => out.* = .{ .model_list = .{ .store = store } },
             .configure => {
                 out.* = .{ .configure = .{ .store = store, .configuration = .{ .workspace = .{ .value = .{ .len = 0 } } } } };
@@ -2380,6 +2393,8 @@ pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
 /// Holes: Store.
 pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
+/// Holes: Store, paused.
+pub const host_pause_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_pause\",\"store\":", store_hole, ",\"paused\":", Hole.boolean, "}" };
 /// Holes: Store.
 pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, "}" };
 /// Holes: Store, key.
@@ -2442,6 +2457,7 @@ pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, mod
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
+pub const max_host_pause_request_bytes = shapeBytes(host_pause_request);
 pub const max_model_list_request_bytes = shapeBytes(model_list_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
@@ -2455,10 +2471,11 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request,     host_info_request,             host_stop_request,
-    read_result_request,         list_sessions_changed_request, read_action_arguments_request,
-    read_action_call_id_request, conversation_content_request,  conversation_page_request,
-    activity_page_request,       activity_content_request,      model_list_request,
+    observe_command_request,       host_info_request,           host_stop_request,
+    host_pause_request,            read_result_request,         list_sessions_changed_request,
+    read_action_arguments_request, read_action_call_id_request, conversation_content_request,
+    conversation_page_request,     activity_page_request,       activity_content_request,
+    model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2603,9 +2620,9 @@ pub const max_control_response_bytes = @max(
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
-/// (decimal or `unlimited`), start time, slots in use, and each provider's
-/// Route.
-pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+/// (decimal or `unlimited`), start time, slots in use, whether new Turns
+/// are paused, and each provider's Route.
+pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
 comptime {
     const names = @typeInfo(Provider).@"enum".field_names;
     if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
@@ -2621,9 +2638,11 @@ pub const model_list_reply = struct {
     pub const max_bytes = head.len + model_list.max_providers_bytes + tail.len;
 };
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
+/// Hole: whether new Turns are now paused.
+pub const host_pause_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_pause_reply\",\"paused\":", Hole.boolean, "}" };
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
 
 pub const conversation_page_reply = struct {
     /// Hole: the page end.
