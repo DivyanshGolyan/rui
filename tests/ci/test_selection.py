@@ -1166,7 +1166,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "descriptor_capacity_integration.py release", "host_status_integration.py release",
             "host_launch_integration.py release", "host_stop_integration.py release",
             "admission_integration.sh debug", "host_process_test.py ",
-            "host_allocator_test.py release",
+            "host_allocator_test.py release", "launch_frame_integration.py release",
         }
         outputs = {}
         for part in ("all", "execution", "callers", "parallel"):

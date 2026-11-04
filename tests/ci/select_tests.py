@@ -84,6 +84,8 @@ RULES = (
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
+    (("src/launch_frame.zig", "tests/integration/launch_frame*"), ("test", "launch-frame-integration"),
+     ("test", "launch-frame-integration"), "The launch frame a program uses to start its own Host"),
     (("src/protocol.zig", "src/provider_name.zig", "src/platform.zig",
       "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
       "src/named_scratch.zig", "src/output_retention.zig", "src/HostDiagnostics.zig"),

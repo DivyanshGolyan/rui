@@ -12,12 +12,15 @@ const max_uid_bytes = "4294967295".len;
 const socket_suffix = ".sock";
 pub const max_runtime_directory_bytes = runtime_prefix.len + max_uid_bytes;
 pub const max_socket_path_bytes = max_runtime_directory_bytes + "/".len + 32 + socket_suffix.len;
+/// A launched Host binds its socket in the caller's runtime directory
+/// (launch_frame.zig); macOS binds at most this many path bytes.
+pub const max_launch_socket_path_bytes = 103;
 
 pub const Paths = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     database: protocol.Bounded(max_database_path_bytes) = .{},
     scratch: protocol.Bounded(max_scratch_path_bytes) = .{},
-    socket: protocol.Bounded(max_socket_path_bytes) = .{},
+    socket: protocol.Bounded(@max(max_socket_path_bytes, max_launch_socket_path_bytes)) = .{},
 };
 
 pub const StoreLease = struct {
