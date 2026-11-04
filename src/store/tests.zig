@@ -8590,7 +8590,7 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 var entry = (try view.nextEntry(0)).?;
                 meter.stop(.readHistoricalEntry);
-                entry = (try view.nextEntry(entry.position)).?;
+                entry = (try nextTestingItem(&view, entry.position)).?;
                 try std.testing.expectEqual(HistoricalEntryKind.provider_output, entry.kind);
                 meter.start();
                 _ = try view.openOutput(entry.position);
@@ -8598,7 +8598,7 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 _ = try view.nextOutputPart();
                 meter.stop(.readHistoricalPart);
-                while (entry.kind != .tool_results) entry = (try view.nextEntry(entry.position)).?;
+                while (entry.kind != .tool_results) entry = (try nextTestingItem(&view, entry.position)).?;
                 meter.start();
                 _ = (try view.nextToolResult()).?;
                 meter.stop(.readHistoricalToolResult);
