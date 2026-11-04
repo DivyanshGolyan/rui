@@ -42,6 +42,11 @@ runs:
       if: ${{ steps.requirements.outputs.node == 'true' }}
       with:
         node-version: '22'
+    - name: Install the TypeScript client's dependencies
+      if: ${{ steps.requirements.outputs.node == 'true' }}
+      shell: bash
+      working-directory: clients/ts
+      run: npm ci --ignore-scripts --no-audit --no-fund
     - name: Identify the actual native build tools
       id: tools
       shell: bash
@@ -68,7 +73,9 @@ runs:
         echo "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
         # The build runner is compiled for the host CPU, which varies between
         # runners of one image, so its cache is only reusable per CPU model.
-        if [ "$(uname -s)" = Darwin ]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(grep -m1 '^model name' /proc/cpuinfo); fi
+        # x86 names the model; ARM Linux has no "model name" line, so the first implementer line stands in, and
+        # a /proc/cpuinfo with neither falls back to the machine type rather than failing the step.
+        if [ "$(uname -s)" = Darwin ]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo || uname -m); fi
         echo "cpu=$(printf '%s' "$cpu" | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
     - name: Name the build cache keys
       id: build-keys
@@ -162,6 +169,10 @@ runs:
           Linux/x86_64)
             archive=zig-x86_64-linux-0.17.0
             checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+            ;;
+          Linux/aarch64)
+            archive=zig-aarch64-linux-0.17.0
+            checksum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
             ;;
           Darwin/arm64)
             archive=zig-aarch64-macos-0.17.0
