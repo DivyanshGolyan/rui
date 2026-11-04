@@ -1604,7 +1604,7 @@ test "a configure whose instructions and output schema are the same new bytes im
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            const rows = "SELECT count(*) FROM content";
+            const rows = store_testing.content_beside_tools;
 
             const create_bytes = "{\"title\":\"same-create\"}";
             var create = try completeConfiguration("same-create", "", workspace, "model-a");
@@ -5133,7 +5133,7 @@ test "multiwindow content import and deduplication preserve all bytes" {
             try command.key.set("second");
             command.session = created_session_0;
             try std.testing.expect(storage.configure(&command, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
             const observation = try storage.inspectSessionForTesting(created_session_0.slice());
             try std.testing.expectEqual(@as(u64, 2), observation.revision);
             var reader: ContentReader = undefined;
@@ -5447,7 +5447,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try std.testing.expect(exhausted_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
 
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND (primary_content_id IS NOT NULL OR secondary_content_id IS NOT NULL)", .{}));
 
             try storage.close();
@@ -5467,7 +5467,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try changed_kind.session.set("absent");
             changed_kind.text = unknown_message.text;
             try std.testing.expect(storage.submitMessageWithModel(&changed_kind, null, .{}) == .conflict);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
         }
     }.run);
 }
@@ -7786,6 +7786,7 @@ const EntryPoint = enum {
     readHistoricalOutput,
     readHistoricalPart,
     readHistoricalToolResult,
+    readHistoricalTool,
     checkAttempt,
 };
 
@@ -7834,6 +7835,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readHistoricalOutput = 2,
     .readHistoricalPart = 1,
     .readHistoricalToolResult = 2,
+    .readHistoricalTool = 1,
     .checkAttempt = 1,
 });
 
@@ -8056,6 +8058,10 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 try view.settings(&settings);
                 meter.stop(.readHistoricalSettings);
+                var tool: historical_domain.HistoricalTool = .{};
+                meter.start();
+                try std.testing.expect(try view.nextTool(&tool));
+                meter.stop(.readHistoricalTool);
                 meter.start();
                 var entry = (try view.nextEntry(0)).?;
                 meter.stop(.readHistoricalEntry);

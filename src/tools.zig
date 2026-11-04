@@ -30,6 +30,31 @@ pub const Record = struct {
 /// a longer call name cannot match any record.
 pub const max_name_bytes = 64;
 
+/// The most tools one set offers.
+pub const max_tools = 128;
+
+/// The identity of an ordered set of records, which the Store saves once:
+/// each member's name, owner and the content digests of its description
+/// and input schema, in order.
+pub fn setDigest(records: []const *const Record) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hash, "rui/tool-set/v1");
+    for (records) |member| {
+        hashField(&hash, member.name);
+        hashField(&hash, @tagName(member.owner));
+        hash.update(&protocol.contentDigest(member.description));
+        hash.update(&protocol.contentDigest(member.input_schema));
+    }
+    return hash.finalResult();
+}
+
+fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, value.len, .big);
+    hash.update(&length);
+    hash.update(value);
+}
+
 pub const bash_record: Record = .{
     .name = "bash",
     .owner = .rui,
@@ -43,8 +68,9 @@ pub const bash_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
-/// The record of each tool `Tool` names. Until the Store saves records
-/// (T1b), a Session's tools are still a `ToolSet` and this maps it.
+/// The record of each tool `Tool` names: the text a new tool set saves.
+/// Until the wire names tools by name, a Session's tools are a `ToolSet`
+/// and this maps it.
 pub fn record(tool: Tool) *const Record {
     return switch (tool) {
         .bash => &bash_record,

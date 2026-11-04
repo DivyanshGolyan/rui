@@ -588,6 +588,8 @@ pub const Preparation = struct {
     output_bag: ?store.HistoricalContent = undefined,
     /// The current Message's peer sender.
     sender: protocol.Bounded(protocol.max_session_bytes) = undefined,
+    /// The offered tool the tools stage renders, as the Store saved it.
+    tool: store.HistoricalTool = undefined,
     state: State,
 
     /// What one preparation starts from, reset by `init` in one assignment.
@@ -612,7 +614,6 @@ pub const Preparation = struct {
         content: ?ContentPiece = null,
         emission: Emission = .none,
         /// The next tool the tools stage considers.
-        next_tool: u8 = 0,
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
@@ -953,20 +954,20 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.tools_start, 0);
             },
             .tool => {
-                const offered = tools.Offered.ofMask(self.settings.tools_mask);
-                if (self.state.next_tool < offered.len) {
-                    const tool = offered.records[self.state.next_tool];
-                    self.state.next_tool += 1;
-                    switch (tool.owner) {
+                if (try self.view.nextTool(&self.tool)) {
+                    switch (self.tool.owner) {
                         .rui => {
-                            self.handles[0] = .{ .text = tool.name };
-                            self.handles[1] = .{ .text = tool.description };
-                            self.handles[2] = .{ .text = tool.input_schema };
+                            self.handles[0] = .{ .text = self.tool.name.slice() };
+                            self.handles[1] = .{ .content = self.tool.description };
+                            self.handles[2] = .{ .content = self.tool.input_schema };
                             return self.loadItemHeader(.tool, 0b111);
                         },
                         // Web search is the one provider-run tool until
                         // each Provider Adapter lists its own (T1c).
-                        .provider => return self.loadItemHeader(.web_search, 0),
+                        .provider => {
+                            if (!self.tool.name.eql(tools.web_search_record.name)) return error.CorruptStore;
+                            return self.loadItemHeader(.web_search, 0);
+                        },
                     }
                 }
                 self.state.stage = .text_format;

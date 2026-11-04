@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 51;
+pub const schema_version: u32 = 52;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -30,6 +30,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x65f259f9c7614afb },
+    .{ .schema_version = 52, .digest = 0x3af6ba701ed46098 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -157,7 +158,8 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
 
 // A label's syntax, not a provider list, so a new provider is no format change.
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
-const tools_mask_column: Column = .{ .name = "tools_mask", .type = .int, .check = std.fmt.comptimePrint("tools_mask BETWEEN 0 AND {d}", .{tool_catalog.all_tools_mask}) };
+// The tool records a Session's settings offer (D48), saved once by content.
+const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
@@ -188,6 +190,51 @@ pub const tables = [_]Table{
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
     },
+    // One tool as the model is told about it (D48): its name, who owns it
+    // (`rui`, or `provider` for a tool the provider runs, whose text the
+    // codec writes), and its description and input schema as content.
+    .{
+        .name = "tool_record",
+        .columns = &.{
+            .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_catalog.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
+            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider" } } },
+            .{ .name = "description_content_id", .type = .int },
+            .{ .name = "input_schema_content_id", .type = .int },
+        },
+        .primary_key = &.{"tool_record_id"},
+        .uniques = &.{&.{ "name", "owner", "description_content_id", "input_schema_content_id" }},
+        .foreign_keys = &.{
+            references("description_content_id", "content", content_reference),
+            references("input_schema_content_id", "content", content_reference),
+        },
+    },
+    // An ordered set of tool records, saved once: `digest` names its
+    // members' content (tools.zig `setDigest`).
+    .{
+        .name = "tool_set",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
+            .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
+            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_tools}) },
+        },
+        .primary_key = &.{"tool_set_id"},
+        .uniques = &.{&.{"digest"}},
+    },
+    .{
+        .name = "tool_set_member",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "tool_record_id", .type = .int },
+        },
+        .primary_key = &.{ "tool_set_id", "ordinal" },
+        .foreign_keys = &.{
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
+            references("tool_record_id", "tool_record", &.{"tool_record_id"}),
+        },
+        .without_rowid = true,
+    },
     .{
         .name = "session",
         .columns = &.{
@@ -201,7 +248,7 @@ pub const tables = [_]Table{
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
             .{ .name = "model", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "instructions_content_id", .type = .int },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             .{ .name = "revision", .type = .int, .check = "revision>0" },
@@ -225,6 +272,7 @@ pub const tables = [_]Table{
         .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
     },
@@ -262,7 +310,7 @@ pub const tables = [_]Table{
             .{ .name = "model", .type = .{ .text = null } },
             .{ .name = "instructions_content_id", .type = .int },
             .{ .name = "instructions_updated", .type = .flag },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             compaction_trigger_column,
@@ -276,6 +324,7 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
         .without_rowid = true,
@@ -664,6 +713,7 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
+    @setEvalBranchQuota(2000);
     return tableCarriesSessions(tables[tablePosition(&tables, table)]);
 }
 
