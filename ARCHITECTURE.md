@@ -45,43 +45,29 @@ flowchart TD
 
 Read sequentially or jump to the owning contract:
 
-- [Owners and identities](#owners-and-identities): who owns conversations and workflows.
+- [Owners and identities](#owners-and-identities): who owns conversations.
 - [Admission](#admission-and-public-requests) and [conversation/settings](#conversation-and-current-settings): configure, submit and recover replies.
 - [Model requests](#model-requests-continuation-and-compaction): freeze inputs, retain output and compact context.
 - [Tools and permission](#model-output-tools-and-permission), including [Exact Edit](#exact-edit).
 - [Execution and recovery](#transactions-execution-and-recovery), then [stops and outcomes](#stops-and-terminal-outcomes).
-- [Workflows](#workflow-evaluation-and-cancellation) and their [evaluator containment](#evaluator-containment).
 - [Inspection and local protocol](#inspection-and-local-protocol): observe, wait and control work.
 - [Host lifetime/platforms](#platforms-and-server-lifetime) and [resources/storage](#resources-storage-and-diagnostics).
 - [Remaining decisions](#remaining-decisions): implementation choices and qualification still outstanding.
 
 ## Owners and identities
 
-The explicitly started **Host** contains two owners:
+The explicitly started **Host** contains one owner:
 
 | Owner | Responsibility |
 | --- | --- |
 | Session core | Conversations, model requests, tool authorization, execution and recovery. |
-| Workflow Runtime | Workflow evaluation and cancellation through the ordinary core API. Its private disposable JavaScript evaluator computes calls from supplied facts. |
 
-Core and Runtime transact independently and never read each other's tables.
-They may share a Store and process; the contract does not specify database-file count.
-Runtime saves an intent before calling core and records core's answer afterward.
-Lost replies require idempotent resubmission.
-Cancellation can therefore submit work before stopping it; it cannot roll back core admission.
-A canonical storage fault fences the whole Host, despite the independent transactions.
+A canonical storage fault fences the whole Host.
 
 ```mermaid
 flowchart TD
     clients["Direct clients"] --> core
     subgraph host["Host"]
-        subgraph runtime["Workflow Runtime"]
-            workflow["Workflow execution"]
-            records["Durable Workflow and call records"]
-            evaluator["Private disposable evaluator"]
-            workflow --- records
-            workflow --- evaluator
-        end
         subgraph session["Session core"]
             core["Ordinary core API"]
             facts["SQLite facts and content"]
@@ -89,7 +75,6 @@ flowchart TD
             core --- facts
             core --> loop
         end
-        workflow --> core
     end
     loop --> effects["Provider / Bash / Edit"]
 ```
@@ -108,10 +93,12 @@ Credentials and diagnostics cannot determine semantic recovery.
 | Operation | One logical model request or Action. It owns its frozen inputs and execution/retry state; once resolved, it owns one immutable Resolution. |
 | Attempt | One physical try of an Operation. An Attempt can become uncertain after custody loss; it is not another Operation. |
 | Resolution | An Operation’s optional immutable final result. Semantic completion is independent of physical cleanup. |
+| Seam | A plug-in point of the core, such as the Store, the provider, the tools or the client interface. Seams are not called sockets or ports. |
+| Adapter | One implementation that fits a Seam, such as the SQLite Store or the OpenAI-key provider. The provider adapter fits the provider Seam. |
 
 Each fact has one authority.
 Each resident allocation has an owner, bounded population and release boundary.
-Core drives Sessions; Runtime drives Workflows through ordinary core calls.
+Core drives Sessions.
 Clients do not sequence internal transactions, dispatch or recovery.
 Private driving interfaces use direct transactions and effect modules that own their resource lifetimes.
 Native embedding and Cloudflare Durable Objects are design probes, not SDK, ABI or deployment commitments.
@@ -150,14 +137,13 @@ This source map locates the existing owners; file boundaries are not part of the
 
 | Term | Meaning |
 | --- | --- |
-| Name | Caller-chosen stable text within a documented scope. Session names are local to a Workflow; submission names are local to a Session within a Workflow. These are not freely editable display labels: changing a name can select different work. |
+| Name | Caller-chosen stable text within a documented scope. A name is not a freely editable display label: changing a name can select different work. |
 | Reference | Complete value used to address an object. A Session reference is its exact six-character ID, such as `k7m2qx`, not a live handle or lookup operation. |
-| ID | Runtime-assigned identity of a durable object, such as Store-wide Workflow ID `42`. Representation and allocation belong to the object's owner. |
-| Idempotency key | Identifies a submission across retries so its original committed answer can be recovered. The caller supplies a Workflow creation idempotency key; direct core callers supply a core idempotency key, while Workflow Runtime saves one generated UUIDv4 with each durable submission intent. This does not promise exactly-once external effects. |
-| Label | Non-identifying descriptive text. A Session has one optional Label, set through configuration: one non-blank line of 1–100 UTF-8 bytes, validated like a saved Bash description. It is freely editable, never an address, never model input and selects no work. It is distinct from a Workflow-local Name. |
+| ID | Host-assigned identity of a durable object, such as an Operation ID. Representation and allocation belong to the object's owner. |
+| Idempotency key | Identifies a submission across retries so its original committed answer can be recovered. Callers supply a core idempotency key. This does not promise exactly-once external effects. |
+| Label | Non-identifying descriptive text. A Session has one optional Label, set through configuration: one non-blank line of 1–100 UTF-8 bytes, validated like a saved Bash description. It is freely editable, never an address, never model input and selects no work. It is distinct from a Name. |
 
-Use these qualified terms consistently; do not use a tracing request ID as an idempotency key or confuse a local name with its full reference.
-The saved core token and the author's submission name serve different boundaries; authors do not generate or encode core tokens.
+Use these qualified terms consistently; do not use a tracing request ID as an idempotency key or confuse a name with its full reference.
 
 ### Naming and configuring a Session
 
@@ -220,7 +206,7 @@ Recovery requires authorization; a key grants no access.
 
 Core requires an exact UTF-8 string of at most 128 bytes and does not interpret or validate UUID syntax.
 An empty supplied string remains an identity, not a request to generate one.
-Runtime and client helpers default to lowercase, hyphenated UUIDv4 text (36 ASCII bytes), generated with platform cryptographically secure randomness.
+Client helpers default to lowercase, hyphenated UUIDv4 text (36 ASCII bytes), generated with platform cryptographically secure randomness.
 Core enforces bindings rather than assuming tokens are unique; separate clients choosing the same string share one identity.
 
 Recover matching admission answers before checking current conditions; changed inputs conflict without replacement.
@@ -291,7 +277,7 @@ Client owns keyed observation and result decoding for checking **one submitted r
 Its owned facts validate the queried key and expose the original operation kind and Session; selected Message callers additionally check these against their saved address.
 The original admission remains `accepted` even when later work fails or is cancelled.
 A terminal Message result takes precedence over coarser queue/progress hints; failed/completed processing must carry its Turn/Operation/Attempt binding, while stop-excluded input has a cancelled result without an invented Turn.
-Supported metadata for CLI and planned workflow consumers is:
+Supported metadata for CLI consumers is:
 
 | Observation | Supported facts |
 | --- | --- |
@@ -320,8 +306,6 @@ Global `request list` enumerates filename-valid generated handles even when thei
 Session-local `/requests` filters readable supported identities by recorded Store and Session.
 Neither listing transmits requests or establishes Host work status.
 
-Runtime saves exact submission identity, captured inputs and one UUIDv4 in its existing intent transaction before core invocation, then records the answer independently; resubmit with that immutable token after lost replies.
-Core knows no Workflow membership/cancellation.
 This provides recoverable admission, not exactly-once effects.
 Controls use the same saved-key protocol; their owners retain command-specific validation, target selection and completion semantics.
 An original acceptance is immutable even while its completion progresses.
@@ -340,8 +324,6 @@ Resending the same identity and inputs recovers that acceptance and its original
 The final answer may still be pending.
 Even after the Session has done newer work, `message-1` remains bound to its original result.
 A deliberate second submission uses a new identity.
-
-The [workflow identity example](#example-conversation-workflow-and-call-identities) shows how Runtime supplies these identities for workflow calls.
 
 ## Conversation and current settings
 
@@ -425,7 +407,7 @@ Defaults apply only when establishing a Session:
 | Label | No Label | `label: null` clears the Label | Preserve existing value |
 
 Omission never clears a field.
-Settings are ordinary JavaScript data captured at each configure invocation, before later caller mutation.
+Settings are plain data captured at each configure invocation, before later caller mutation.
 Each Session evolves independently; sharing a settings object creates no shared configuration entity.
 
 The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and `/status`) on `session start`, `session configure` and interactive `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
@@ -496,7 +478,7 @@ No automatic polling/clock refresh or Turn-environment reconstruction on retry.
 
 An optional persistent **Output Schema** selects a model-generated structured Final Answer; absence selects text.
 The producing request freezes it.
-The adapter translates to a supported provider mechanism and validates response/schema in the bounded validation path; workflows receive that value without a second interpretation.
+The adapter translates to a supported provider mechanism and validates response/schema in the bounded validation path; callers receive that value without a second interpretation.
 Unsupported schemas, refusal, incomplete generation and invalid output fail explicitly.
 No prose conversion, repair call, per-caller schema or reinterpretation under later settings is permitted.
 
@@ -1151,12 +1133,12 @@ A later Operation that was not offered Bash can still contain a trustworthy Bash
 Execution still requires the exact Action authorization below.
 
 Core owns and enforces Permission Mode per Session.
-Workflow Runtime configures the Sessions it uses through the ordinary Session configuration API, as other authorized clients do; clients present exact Permission Requests and submit decisions.
+Authorized clients configure Sessions through the ordinary Session configuration API, present exact Permission Requests and submit decisions.
 Mode persists across client disconnect, Host restart and later Session reuse until explicitly changed.
 Bypass therefore permits unattended progress without a connected approver; ask retains unanswered requests durably for a later client, without a resident client or per-Session worker.
 
 Sharing a Session shares its permission policy under ordinary configuration ordering.
-Concurrent use by multiple Workflows is technically possible but is not an intended V1 usage pattern and has no coordination or isolation guarantee; it adds no Workflow-local grant, policy copy or lifetime.
+Concurrent use by multiple clients is technically possible but is not an intended V1 usage pattern and has no coordination or isolation guarantee; it adds no per-client grant, policy copy or lifetime.
 One retained policy and one application boundary keep unattended work explainable without coupling authority to connection lifetime.
 
 **Authorization** durably permits one exact validated Action.
@@ -1175,7 +1157,6 @@ No Workspace isolation, global Action serialization or concurrent-writer coordin
 
 An authorized Bash command runs as the user and can access the user's files, network and credentials.
 The authorization protocol is not a sandbox.
-Evaluator capability restrictions below apply to that evaluator interface, not arbitrary authorized commands.
 
 ### Exact Edit
 
@@ -1387,7 +1368,7 @@ One reactor multiplexes provider streams and subprocess pipes.
 Effect modules own handles, bounded windows and charged scratch, never SQLite or permission/retry policy.
 After commit, adapters materialize outbound requests from manifests/content into unlinked scratch; execution streams output to scratch.
 No transaction spans request construction, provider/process execution, target mutation or delivery.
-Only private report-scratch and workflow visibility-metadata writes may occur under their owning read transactions; finish them before delivery/evaluation.
+Only private report-scratch writes may occur under their owning read transactions; finish them before delivery.
 
 Core invokes private provider/Bash/Edit interfaces through closed effect-specific inputs and evidence.
 No public provider module or generic dispatch registry is required.
@@ -1483,8 +1464,7 @@ Retain transactional and file-publication ordering for consistent observed succe
 | Boundary | Commit meaning and retained owner | Next consumer / recovery |
 | --- | --- | --- |
 | Validation rejects or transaction rolls back | No attempted mutation or dispatch authority survives. Input/scratch and unused reservation remain with their local owner for release. Previously committed facts remain authoritative. | Core may handle later requests after known rollback; canonical storage faults follow shutdown below. |
-| Configuration/message admission commits, reply is lost | Core owns the original request answer and its admitted configuration/work. Client connection resources confer no execution ownership. | Direct caller or Runtime repeats exact core idempotency key/inputs to recover that answer. |
-| Workflow intent commits, core reply is absent | Runtime owns exact submission intent; core independently owns any committed answer. Neither transaction rolls back the other's work. | Runtime resubmits through the ordinary core API, then saves the answer in its own transaction, including during cancellation recovery. |
+| Configuration/message admission commits, reply is lost | Core owns the original request answer and its admitted configuration/work. Client connection resources confer no execution ownership. | The caller repeats exact core idempotency key/inputs to recover that answer. |
 | Authorization commits, no Attempt exists | Core owns permission and eligibility; there is no permit, live effect or reserved waiting execution. | Core's ordinary capacity selection rechecks applicability before Attempt admission. |
 | Attempt commits, launch has not occurred | Core owns consumed allowance and uncertainty; only the committing invocation holds the one-shot permit and reserved custody. | That local owner may prepare/launch once or suppress launch and deliver a known failure. Fresh-process recovery cannot distinguish this boundary from lost running custody. |
 | Post-commit preparation fails | Attempt admission remains committed. Local owner retains incomplete scratch and custody for disposal and reports typed failure; it cannot refund admission or redispatch. | Core settles under existing failure/retry policy. A canonical read/save fault instead fences dispatch. If failure was not saved before custody loss, recover the admitted uncertainty. |
@@ -1492,7 +1472,7 @@ Retain transactional and file-publication ordering for consistent observed succe
 | Model Attempt remains uncertain | No accepted result exists for that Attempt. Scratch, credentials and transport status cannot change the saved meaning. | Core may admit a policy-authorized replacement with the historical manifest and conserved allowance; duplicate cost remains possible. |
 | Bash/Edit Attempt remains uncertain | No durable fact proves the external outcome, including whether launch/mutation began. | Core saves an indeterminate Tool Result without automatic replay or required target inspection. Agent may investigate with fresh ordinary calls. |
 | Outcome commits, resources remain live | Core's result is authoritative; local custody still owns callbacks, handles and scratch needed for safe release. | Observers consume the saved result; local cleanup releases custody independently. Stop completion follows its selected semantic obligations, not provider/billing termination. |
-| Required canonical read/save fails | The affected owner cannot establish new semantic facts; independent core/Runtime transactions do not provide a degraded-service mode. Host fences dispatch and retains local cleanup ownership. | Effect-aware shutdown; explicit restart after repair reacquires Store ownership and recovers each owner's committed facts. Never fabricate durable failure, stop completion or occupancy release. |
+| Required canonical read/save fails | The affected owner cannot establish new semantic facts; there is no degraded-service mode. Host fences dispatch and retains local cleanup ownership. | Effect-aware shutdown; explicit restart after repair reacquires Store ownership and recovers its committed facts. Never fabricate durable failure, stop completion or occupancy release. |
 
 External bytes cannot prove authorship.
 Uncertainty alone requires neither User intervention nor Turn termination; SQLite cannot transact external effects.
@@ -1723,7 +1703,7 @@ Stop completion and safe resource release are different facts.
 Matching retries recover the original selection/answer, including idle stops; observation follows that selection.
 A fresh stop needs a fresh key.
 Callers retain key and exact inputs before sending, without managing Turn identity or coordinating Session reuse for retries.
-Concurrent Session use remains outside the expected workflow.
+Concurrent Session use remains outside the expected usage.
 `rui session stop --all` reads the Session listing and sends one ordinary Session stop, with its own generated key, for each Session the overview's Ctrl-X could stop; it adds no cross-Session stop authority, and a Session that starts work after its listing page is read is not stopped.
 
 ### Interrupting one model operation
@@ -1789,326 +1769,11 @@ If C arrives while B still waits, preserve admission order; if B already started
 Retrying B's original idempotency key never adds another B.
 A crash reopens committed queue/selection facts without inventing a terminal outcome.
 
-## Workflow evaluation and cancellation
-
-### Workflow identity and saved calls
-
-A **Workflow** is one durable submitted computation, from acceptance through its terminal outcome.
-It owns immutable JavaScript source, Workspace, semantics and limits, together with its evolving progress, saved calls/results and outcome.
-Reevaluation, operation retries and Host restart continue the same Workflow.
-There is no separate Workflow Definition or versioned program entity; source is part of the Workflow.
-The selected Workspace is a live place for agents to work, not a frozen snapshot of its files.
-
-A caller **Workflow creation idempotency key** creates or reattaches that Workflow when exact creation inputs match.
-Workflow Runtime owns a separate Store-wide creation-key domain; equal text in the core-admission domain does not collide.
-The caller-provided value permits at most 128 UTF-8 bytes, preserved exactly; reject overflow without truncation or normalization before Workflow acceptance.
-This is an independent bound, not an allowance for nested Session references or submission names.
-Changing source, Workspace, semantics or limits requires a new key and a new Workflow; reusing a key with changed creation inputs conflicts.
-The new Workflow may deliberately reuse existing Sessions.
-
-A **Workflow ID** is a Store-wide integer allocated when Workflow creation commits and never reassigned to another committed Workflow.
-Workflow Runtime uses it for stable Session-reference and submission namespacing; core receives only opaque keys and has no Workflow lookup dependency.
-The caller Workflow creation idempotency key recovers creation after a lost reply; it is not the internal Workflow ID.
-Workflow IDs use the positive signed-64 range; exact integer allocation remains an implementation choice under nonreuse.
-
-The planned derivation of core Session references from Workflow-local names is incompatible with Store-allocated random IDs.
-Names cannot create or address a core Session.
-Allocation and binding semantics remain unresolved for the later Workflow Session-call slice; existing canonical IDs remain reusable and grant no access authority.
-
-A **Submission name** is author-provided stable text scoped to one Session within one Workflow, up to 128 UTF-8 bytes without truncation or normalization.
-This bounds the name, independently of the core key.
-Complete call identity is Workflow ID, full Session reference and Submission name.
-Runtime finds that identity’s intent and saved core token or creates an intent with a UUIDv4.
-The intent already retains author identity and inputs, so the token needs no composite encoding or separate registry.
-Core receives only Session reference, token, operation and inputs.
-
-Configuration and messages share this scope.
-Matching identity/inputs recover the original submission; changed kind/inputs conflict.
-Separate submissions to the same Session in one Workflow need distinct names, even through different local aliases.
-Different Sessions may share a name; a new Workflow may reuse the same Session and name for new work.
-
-Enforce unique author identities and tokens among Runtime intents.
-Concurrent equal-identity creation compares complete inputs and converges on the committed intent; losers never dispatch candidates.
-Resolve token collisions before publication with bounded regeneration.
-Entropy failure or exhaustion fails creation without weak-random fallback; existing intents need no randomness.
-Committed tokens remain immutable, even after core conflict.
-Cross-caller collisions follow the [core key rule](#recovering-a-submission-after-a-lost-reply); no registry, tuple encoder or lookup round trip is needed.
-
-Workflow source is one JavaScript module with a direct `export default async function` declaration (named or anonymous, non-generator).
-The evaluator invokes that function with a capability object as its sole argument; its fulfillment is the Workflow Output.
-The complete source is authored for each submission, including values chosen for that computation; V1 has no separate initial runtime arguments.
-Helpers and ordinary module statements may appear around the declaration, but imports, re-exports and dynamic imports are unavailable.
-A default expression, arrow, alias, class or synchronous/generator function is not a Workflow entry.
-The function name and parameter spelling have no semantic role.
-Module statements run only during evaluation, never validation.
-
-Before accepting a new Workflow, Workflow Runtime compiles the exact captured source under the selected JavaScript semantics without executing author code or admitting Session calls.
-Reject invalid syntax, unsupported constructs and statically provable violations of the selected entry-point/call contract with precise diagnostics; do not infer invalidity from naming style, computed keys, shadowed functions or uncertain control flow.
-No verb requirement or custom lint framework is selected.
-Runtime validation still checks actual call arguments, complete generated keys and repeated-call bindings.
-Recover an existing matching Workflow before new-source validation; changed creation inputs conflict without replacing it.
-
-The evaluator supplies syntax, entry and import checks.
-Workflow creation and Session-call bindings are separate implementation slices; see [current status](README.md#status).
-A creation-only slice must not execute Session calls.
-Before first evaluation, validate any Workflow admitted by that slice against the complete binding-aware call policy.
-Failure admits no Session calls and does not change the committed creation identity.
-New-Workflow admission must apply the full policy once bindings are available.
-
-Pre-acceptance validation uses the bounded evaluator lifecycle owner and its applicable memory/CPU/elapsed limits, sharing its serialization with ordinary evaluations.
-Captured source stays ingress-owned and charged through validation and admission or rejection; release compilation state and child resources safely, retaining no VM or bytecode cache.
-Compilation/resource failure admits no Workflow or Session work.
-No database transaction is held across compilation; the creation transaction rechecks the caller key and binds the exact validated source and other creation inputs.
-
-Workflow creation commits the Workflow creation idempotency key and complete bound creation inputs before acknowledgment or execution of author code.
-A client durably retains the destination Store, key, exact captured source bytes and other creation inputs before transmission; repeating creation with equal inputs attaches to the same Workflow, including after terminal completion or Host restart.
-Capturing source from a file happens once per submission: recovery uses the saved bytes even if the file changes, while submitting its edited contents with a new key creates a new Workflow.
-Changed creation inputs conflict without replacing the original.
-A lost reply is not a reason to choose a fresh Workflow creation idempotency key.
-Attachment observes saved work; it neither restarts a terminal Workflow nor retains an evaluator or connection on its behalf.
-
-Workflow Runtime owns Workflow creation inputs, generations, saved calls/results, cancellation and output.
-Submission names preserve exact text and use an unambiguous Workflow-and-Session namespace, not workflow name/content, invocation counter, code location or input hash.
-Authors derive stable keys/call inputs/order from source and original result identities or positions, not branch completion order.
-Equal-key conflicts are detected; accidental new keys cannot always be distinguished from intentional work.
-Pre-acceptance diagnostics do not prove arbitrary shared-mutation determinism or stable computed identities; historical Promise-delivery replay is not promised.
-
-### JavaScript Session functions
-
-Expose public declaration types for workflow authors, including `SessionSettings`, `ToolName` (`"bash"`) and `PermissionMode` (`"ask" | "bypass"`).
-Runtime values remain plain objects, arrays and strings; no settings class, constructor or runtime enum object is required.
-Workspace, instructions and model identifiers are strings; Output Schema is structured data.
-Declaration files provide editor guidance without adding TypeScript execution or transpilation.
-Keep declarations aligned with the public contract rather than exposing storage/provider internals.
-Runtime validates actual values regardless of editor type checking.
-
-The workflow-facing functions below are unimplemented and use positional submission names.
-Their planned allocation-binding contract is incompatible with the approved Store-allocated random Session IDs: synchronous, mutation-free `session(name)` cannot derive an ID that `configure(existingReference, ...)` then creates.
-Caller-named creation is not supported.
-Replacement allocation and binding semantics remain unresolved for the later Workflow Session-call slice; the table records the conflicting plan, not an allocation guarantee.
-
-| Function | Contract |
-| --- | --- |
-| `session(name)` | Superseded allocation-binding plan: synchronously derive a Session reference without a server call or durable mutation. Replacement semantics are unresolved. |
-| `configure(sessionReference, submissionName, settings)` | Planned Promise resolving to `undefined` after configuration commits, or rejecting on failure. The old first-configuration creation assumption is incompatible with existing-ID-only updates; creation binding is unresolved. Enqueues no message or new work. |
-| `sendMessage(sessionReference, submissionName, text)` | Returns a Promise that remains pending while the admitted message is queued, then delivers its processing Turn's final text or schema-validated value, rejecting on that processing failure or stop/cancellation exclusion. Uses current Session settings without a per-message override; unknown Sessions reject. |
-
-Both mutating functions are planned to accept an exact full Session ID.
-Reusing an existing Session passes its inspected ID unchanged; the first-creation API is unresolved.
-Submission names follow the Workflow-and-Session scope above; verb phrases are examples, not a validation rule.
-Matching replay recovers the original configuration acknowledgement or message outcome rather than reapplying settings or submitting another message.
-Final text and schema-validated values follow the existing output contract; a shared Turn can provide the same result to multiple submissions.
-
-### Example: conversation, Workflow and call identities
-
-A Workflow with key `review-42` uses `session("reviewer")` and a message call keyed `review-tests`:
-
-| Identity | What it selects in this example |
-| --- | --- |
-| Session reference | The reusable reviewer conversation's Store-allocated ID. How `session("reviewer")` binds that ID is unresolved. |
-| Workflow creation idempotency key `review-42` | Caller identity for creating or recovering this Workflow with its exact source and other creation inputs. |
-| Workflow ID | Store-wide integer identifying the committed Workflow and its coordinator namespace. |
-| Submission name `review-tests` | This submission to the reviewer Session within the Workflow. Runtime uses Workflow ID, full Session reference and Submission name to recover the intent and its saved core token. |
-
-Reevaluation recovers the same Session and submission.
-A fresh Workflow creates a different Session from the same local name; to reuse the earlier conversation, pass its inspected ID unchanged.
-Reusing a Session does not reuse an earlier submission or restart its Workflow.
-
-### Reevaluating from saved results
-
-An **Evaluation** is one invocation of the Workflow's JavaScript program against a fixed set of saved results/failures.
-Many Evaluations may advance one Workflow; an Evaluation is not a new Workflow.
-Each sees that fixed set for its entire lifetime.
-Its **Evaluation Generation** binds source, semantics, limits and that **Visibility Snapshot**.
-Later results belong to a later evaluation; they do not invalidate the current one.
-Generation/cancellation checks still govern publication.
-
-Evaluate from source, return all encountered calls plus root waiting/value/failure, then discard the heap.
-No retained Promise graph, bytecode, continuations or second dependency interpreter exists.
-
-Functions, loops, helpers, `Promise.all` and `Promise.allSettled` compose work; `Promise.race`/`Promise.any` cannot expose physical completion order.
-References/calculation/awaits need no separate keys.
-Configuration Promises acknowledge commit; message Promises follow the same admission through queueing to its established processing result or exclusion.
-Awaited configuration is a real dependency that may need another evaluation.
-
-The returned root determines completion.
-Fulfilled roots need not wait for unrelated calls, but encountered calls must undergo validation/admission before success publication.
-Their admitted Session work may outlive the Workflow without reopening it; unawaited JS continuations disappear.
-Pending roots publish their complete encountered unresolved-call set, without Promise-reachability analysis.
-Rejected roots follow failure handling; prior admissions remain real.
-
-For example, a workflow configures two named Sessions, awaits both acknowledgments, then submits keyed review messages and joins their Promises in input order.
-If only the second answer is visible, reevaluation recovers the same calls and the join remains pending.
-Once both are visible, a keyed summary message consumes those original answers, even if either Session has since done newer work.
-A rejected message follows ordinary JavaScript catch/allSettled behavior or rejects the root; rejection alone does not invoke Workflow cancellation or stop other admitted work.
-Runtime supplies recorded facts; only the evaluator executes the author's join and branch logic.
-
-### Validating and publishing encountered calls
-
-Capture each call's inputs at invocation, before later JS mutation, with strict-data checks.
-Validate complete evaluator output, known bindings and repeated complete call-identity consistency before new intents.
-Equal replay is read-only; new calls retain encounter order and independently recheck generation/cancellation before intent commit.
-Core checks core idempotency key/access/Session state independently.
-Preserve committed prefixes after failure/crash; never claim batch rollback.
-Atomically publish complete dependencies or terminal output with final generation/cancellation checks.
-Dependencies unresolved in the Visibility Snapshot remain recorded even if results arrive during evaluation/publication.
-
-### Selecting the next evaluation
-
-Use one asynchronous pull loop until a concrete cost justifies replacement under the [algorithm obligations](#capacity-and-selection-progress).
-
-Rediscover eligible Workflows from canonical facts and choose any legal candidate: a new Workflow, an interrupted generation, or a suspended Workflow with a newly available unresolved dependency.
-Relative selection order is unspecified.
-A whole join need not finish before reevaluation.
-Revalidate terminality/cancellation/generation.
-Finish one evaluation's outcome handling and physical cleanup, service ready host work, immediately recheck; only no eligible work arms one shared one-second timer.
-Do not queue missed ticks.
-Already-considered unchanged results cannot keep a suspended Workflow eligible, while new dependency visibility and interrupted generations remain discoverable.
-No completion hook, ready queue, subscription registry or per-waiter callback/payload is required.
-On crash, abandon interrupted calculations and capture current original results in a fresh generation; retain committed calls, fence stale publication, never reconstruct historical first visibility.
-Terminal Workflows do not reevaluate.
-
-### Preparing a fixed visibility snapshot
-
-Within Runtime's own read transaction, capture available keys, tags and immutable result references into charged private metadata scratch; this read view defines visibility and begins the Evaluation's preparation ownership.
-End it before result-body materialization and evaluation.
-
-Materialize every captured result body through its owning bounded interface, finishing DB access before each scratch write and servicing other work between windows.
-Check cancellation/staleness during those service turns.
-No core-table join or new lease is required.
-Native lookup reads only prepared immutable descriptors and decodes a result when an invocation requests it; decoding does not imply that the returned Promise is awaited.
-Construct decoded values with own data properties without invoking author-defined accessors during decoding.
-Separate invocations produce separate decoded values; reawaiting one Promise keeps JS identity.
-No decoded-answer or prepared-input cache spans Evaluations.
-Successful null and saved call failure remain distinct ordinary values.
-Missing/corrupt required canonical content follows the Host storage-fault fence; scratch, prepared-input, handoff or decoding failure is an Evaluation failure and cannot publish success.
-User-held decoded values still consume heap.
-
-V1 completes canonical input preparation before child execution.
-This eager copy is the selected algorithm, not the semantic contract: fixed visibility, bounded ownership and evaluator isolation are the retained guarantees.
-Copying unused bodies costs scratch/I/O, but bounds memory and avoids a live coordinator-to-evaluator read protocol within the child deadline.
-Runtime uses ordinary core APIs; the evaluator receives no core/SQLite access or status/decoded-answer cache.
-Reconsider immutable lazy reads only if representative integration attributes scratch exhaustion, accepted target misses or unacceptable Workflow latency/backlog to eager preparation; a high prepared/read ratio alone is insufficient.
-Any replacement preserves visibility, ownership bounds, control service and child-deadline meaning.
-
-### Owning evaluator input and output
-
-Runtime owns prepared saved-result input and captured output through the evaluation lifecycle.
-The child receives prepared immutable result/failure descriptors for native lookup when a capability is invoked; it passes only the capability object to the entry.
-Preparation streams into charged scratch with no descriptor/file per visible result or call.
-Derive a bounded descriptor set for the selected representation; traverse ranges/metadata through windows as result count grows.
-
-Finish input writes/integrity checks and recheck cancellation/staleness before spawning with completed read-only input.
-Partial preparation releases its artifacts and starts no child.
-Compile-only validation uses the same serialized supervision without output scratch; any child stdout is an error.
-Preparation time is measured separately; the child elapsed deadline starts only after successful spawn.
-
-The pinned worker owns strict-data serialization.
-The parent checks framing, end marker, EOF and normal exit before allowing success, but does not independently parse complete output.
-A worker defect can therefore deliver a complete invalid result to the consumer.
-
-Before child work, the evaluator's charged scratch owner creates output, acquires a read-only alias, removes the name and closes the scratch directory.
-Failed removal retains the name and custody for retry and fences reuse.
-Startup removes canonical named leftovers after a preparation crash.
-Evaluation and publication use anonymous handles; consumer success requires no later removal.
-
-The parent submits framed body slices through a fallible append callback and checks exit under an independent watchdog.
-The scratch owner, not the parent, owns the descriptor and budget.
-Output survives the last intent and dependency/outcome transaction; its charge releases after the final handle closes.
-Cancellation, stale generation, failure and shutdown terminate/reap as needed, then close pipes, input, output and metadata after pending I/O ends.
-Restart discards abandoned artifacts and evaluates fresh saved facts.
-
-### Cancelling a Workflow
-
-Workflow cancellation proceeds in this order:
-
-1. Durably fence new evaluations and calls.
-2. Recover every unanswered saved submission with its original inputs and record all answers.
-   This may configure Sessions or start work before stopping it.
-   That effect/cost window is accepted; cancellation is not rollback.
-3. Traverse distinct Sessions from accepted message calls in bounded batches.
-   Promptly request ordinary stops before awaiting their completions.
-   References, configuration and reads alone create no stop targets.
-4. Finish only after submissions and required stops resolve.
-   Committed completion ends propagation.
-
-Core has no Workflow fence.
-Before sending a stop, Runtime commits a cancellation-owned intent containing exact inputs and one core UUIDv4, unique per cancellation and Session.
-This transaction is independent of core admission.
-Intent population is bounded by distinct accepted-message Sessions; intents and recovered answers survive completion under the retry-history retention rule.
-Allocation or commit failure leaves cancellation unfinished and sends no unsaved stop.
-
-After crash, traversal recovers the same intents and keys, including successful or idle stops, and observes their original completion.
-Concurrent traversal must converge on one intent, not allocate another token.
-A definitive core-key conflict is a nonretryable command error: retain the intent and fence, do not report success, and neither endlessly resend nor replace the key.
-No automatic collision repair, propagation receipt, durable cursor or idle-check registry is required.
-
-A stop selects work only when core first admits it.
-Saving its identity cannot retroactively fence a Session.
-Other Workflows observe the stop without becoming cancelled.
-
-Sessions remain reusable, and any authorized local client with a reference can technically submit work.
-Coordinated concurrent writing through multiple clients or Workflows is not an intended usage pattern and receives no isolation or cancellation-protection guarantee: a delayed ordinary stop may select work another client placed in the Session.
-Rui adds no Session ownership, writer lock or transfer protocol.
-
-### Evaluator containment
-
-One evaluator lifecycle includes child execution, output handoff/publication or failure handling, and child/pipe cleanup before another begins.
-Model/tool work and controls remain concurrent; waiting Workflows retain no evaluator.
-
-The native evaluator requires default SIGCHLD handling without `SA_NOCLDWAIT` and rejects an incompatible disposition before spawn.
-Its caller preserves that disposition and exclusive wait ownership through cleanup; the evaluator never changes process-wide signal handling.
-Parent acceptance, parent failure and watchdog deadline/cancellation share one serialized terminal decision.
-Accepting complete output and normal child exit checks the original deadline and retires monitoring atomically; a delayed watchdog observation cannot replace that decision or an earlier committed failure.
-Watchdog signaling failure or inability to reap can still make the call report failure.
-Cancellation callbacks run outside the decision mutex.
-Child acceptance does not replace the Runtime's cancellation/generation check at publication.
-The parent terminates failed work before joining the watchdog and reaping.
-
-Give the child an empty environment, three explicit stdio pipes and only selected read-only prepared-input descriptors; close writable input handles first and enforce inheritance through construction/close-on-exec.
-Native bridge may positional-read those descriptors; JS gets no paths, raw descriptors, imports, FFI, filesystem, network, processes, storage, credentials, clock or randomness.
-No pathname opens or SQLite access are allowed.
-This is not protection after arbitrary native-code execution.
-
-CPU protection covers native decoding, compilation, JS/job draining and encoding.
-Elapsed lifetime spans successful spawn through protocol completion and exit; queue wait, external work and parent preparation/publication have their own ownership.
-Derive cooperative checks and kernel backstop from policy/OS granularity.
-Deadline expiry begins termination; retain resources until pipes close and child is reaped.
-Unexplained signals are not specific resource diagnoses.
-Exhaustion cannot publish partial success.
-
-Engine allocation/accounting limits remain exact.
-OS CPU and lifetime backstops are best-effort runaway protection: scheduler delay or blocked I/O may exceed elapsed limits.
-A returning overrun is failure, not renewed allowance or successful enforcement; unresolved processes and readers retain cleanup ownership.
-
-Use small evaluator-only extensions at a pinned QuickJS revision for bounded UTF-8 string construction and the Workflow entry/import compiler policy.
-Apply the policy to a generated translation unit without modifying the dependency archive; compile-only validation inspects parser-owned facts, not unlinked module namespace bindings or a second source scanner.
-Disable dynamic compilation before author code runs.
-Keep engine-layout access behind its native interfaces and require compatibility checks on dependency or build-configuration upgrades.
-The research prototype is not production integration or platform qualification.
-
-Bound native allocations/stack separately from engine heap; reuse temporary storage only after references expire.
-The native stack bound is 1 MiB: Linux sets the child soft/hard `RLIMIT_STACK`; macOS creates the bounded Mach-O stack and guard at exec, and the worker verifies the main-thread stack size before reading source.
-Failure prevents evaluation.
-Darwin rejects limit changes for custom stacks, and successful limit readback alone does not establish protection after shrinking an ordinary stack.
-Source may need contiguous storage within budget.
-Workflow Output is a streamed strict-data value without a separate serialized-size cap.
-No independent source/result-byte, entry/request-count or microtask quotas merely to preserve fixed tables; use bounded allocation/transfer and CPU/lifetime checks.
-The worker rejects invalid types/prototypes/accessors/cycles and nonfinite numbers; its object-key enumeration emits unique keys.
-Retain exact-binding, arithmetic, recursion and diagnostic checks at their owning boundaries.
-No process pool, numeric descriptor-ceiling scan, exit-time whole-buffer wiping, fixed address-space quota or RSS polling killer is selected.
-Internal capacities must qualify promised workloads, not silently redefine them.
-
-The pinned compiler currently needs one contiguous native source allocation.
-Its 64 MiB allocation budget includes the terminating byte and is independent of the 16 MiB engine heap; source that cannot fit fails validation without truncation or execution.
-This is a resource bound on that concrete allocation, not a separate Workflow source-field rule.
-Source and engine allocations can overlap (up to approximately 80 MiB of these two logical budgets, not a measured process footprint); qualify actual workloads before changing the native budget or compilation representation.
-
 ## Inspection and local protocol
 
 ### Public operations
 
-The adapter exposes Session configuration/messages, keyed result reads, observations/history/wait, permission, exact Model Interruption and stops, plus Workflow create/attach/inspect/cancel.
+The adapter exposes Session configuration/messages, keyed result reads, observations/history/wait, permission, exact Model Interruption and stops.
 Driving is internal, not public `advance`.
 
 #### CLI modes and commands
@@ -2459,7 +2124,7 @@ Only a fresh Enter at an Action's Allow once / Deny choice may decide it; the Ho
 Input custody prevents pre-choice typeahead or marked paste from authorizing it while preserving the next draft.
 The provider chooser remains a separate terminal reader, decoding through the same stream and editor.
 Option/Command-Backspace may be consumed by the terminal; only supported received sequences are promised.
-No Host/Workflow input policy, completion or configurable keymap is added, and recalling sent Messages keeps no history of its own.
+No Host input policy, completion or configurable keymap is added, and recalling sent Messages keeps no history of its own.
 
 An incomplete CSI or SS3 sequence also times out and ends the caller, rather than treating its delayed tail as Message text; bare ESC alone may expire without rejecting the draft.
 Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Up, Down, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
@@ -3122,29 +2787,21 @@ This is orderly error/signal cleanup, not a crash supervisor: SIGKILL, a fatal n
 If the shell is left raw or hidden, run `stty sane; printf '\033[?2026l\033[0m\033[?2004l\033[?25h\033[?1049l'` or the terminal's reset command.
 Host work and captured-request recovery are independent of terminal state; unsent drafts remain invocation-local and are lost on exit or crash.
 
-### Inspecting Sessions associated with a Workflow
-
-Combine Runtime records with ordinary core observations.
-Each owner’s observation is consistent; the report may lag and has no global cross-Session revision, evaluator-visibility role or cancellation authority.
-The one in-memory exception is Session listing's `since` token: an opaque Host-opening hint that says which Sessions may have changed, not a revision any read can be asked to be "as of", never stored and void after a Host restart.
-List full references and identifying context for Sessions with accepted configuration/messages, recovering lost answers first.
-Declarations/rejections establish no association; configuration-only Sessions are visible but outside cancellation’s stop set.
-The CLI queries this Host inspection to discover a known Workflow's Sessions, not its local saved-request records or SQLite.
-To reuse current state, inspect W1 and pass a selected key unchanged to W2; no output metadata, previous-Workflow argument, lookup, attachment or snapshot restore is needed.
-
 ### Capturing and delivering reports
+
+A report may lag and has no global cross-Session revision.
+The one in-memory exception is Session listing's `since` token: an opaque Host-opening hint that says which Sessions may have changed, not a revision any read can be asked to be "as of", never stored and void after a Host restart.
 
 Reports have exactly two closed profiles. **Current**, the default, contains effective settings including the Label, `created_at`, `context_estimate`, the Session work, `first_message` and `from_person_at` that Session listing reports, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, accepted call outcomes still participating in the active Turn, the selected work's original Message key (active Turn's first admission or oldest unexcluded queued admission), and up to ten most recent applied Messages from terminal Turns with their keys and outcomes.
 Selection and recent identities are committed Host facts, not local caller records; growing terminal history is excluded.
 Explicit **Full** contains Current plus the following closed inventory:
 
-- for a Session, every Session Context Revision; admitted Message with its binding, application or exclusion and public outcome; canonical Conversation entry; Turn; model or Action Operation with its public Resolution; Tool Call and ordered Tool Result, including bounded call rejection; Permission Request, Decision and Authorization; and committed Session stop or Model Interruption command with its public outcome;
-- for a Workflow, every accepted configuration or message submission with its saved public result or failure, associated Session reference, terminal Workflow outcome, cancellation, and cancellation-owned Session-stop intent with its public outcome.
+- for a Session, every Session Context Revision; admitted Message with its binding, application or exclusion and public outcome; canonical Conversation entry; Turn; model or Action Operation with its public Resolution; Tool Call and ordered Tool Result, including bounded call rejection; Permission Request, Decision and Authorization; and committed Session stop or Model Interruption command with its public outcome.
 
 Every inventory member is represented.
 Repeated content may reference an identified owning member that contains the complete bytes in the same Full report; revision content is owned by its first `(revision, field)` occurrence across instructions then output schema, and later occurrences name that owner directly.
 Content omitted from the report requires a separate public read.
-Evaluator generations/visibility snapshots, physical Attempts, private provider continuation, credentials and internal storage rows are not report collections.
+Physical Attempts, private provider continuation, credentials and internal storage rows are not report collections.
 Adding another public historical collection requires changing this inventory.
 Exact command and field spelling remains implementation work.
 
@@ -3154,7 +2811,7 @@ Service controls and settlement between queued reports without starving inspecti
 No report collection cap, report pagination/cursor, hard capture deadline, arbitrary section selector or successful partial report is permitted.
 Current includes all unresolved and actionable work even beyond resident buffers; Full includes every member of the closed inventory above.
 Larger strings stream through fixed windows/block writes; scratch/window size is not a field limit.
-Completeness applies to the selected public profile, not every internal fact or one globally consistent Core/Runtime instant.
+Completeness applies to the selected public profile, not every internal fact or one globally consistent instant.
 
 The report owner retains completed scratch through delivery; the connection borrows bounded reads.
 Capture failure releases incomplete scratch and returns an observation error.
@@ -3366,7 +3023,6 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 - **Inputs that contradict** the table's preconditions are canonical corruption, and the Store fences, as other readers do.
 - **Message progress** for a pending Message reports the coarse status of this value, following the Message work table: `working`, `retrying`, `bash` and `stopping` are `in_flight`, `approval` is `waiting_for_permission`, and `pending` is `runnable`.
 
-Workflow `permission_required` likewise means permission is actionable and no member work can progress.
 History supports recent entries, kind filters and after-position reads; unapplied input and reasons remain separately readable.
 
 The Host reads a Message's admission, binding/exclusion, outcome and, while pending, Session progress and earliest actionable Permission Request in one Store-owned observation.
@@ -3375,7 +3031,7 @@ This is not a global cross-owner snapshot.
 Current supplies a Session's summary and one-time work selection.
 Repeated observation by the human frontend or caller-owned polling retains no connection between reads.
 
-Underlying adapter and Workflow waits observe work; they do not start or resume it.
+Underlying adapter waits observe work; they do not start or resume it.
 These selection semantics are not non-interactive CLI commands:
 
 | Caller | Fixed selection | Returns when |
@@ -3406,7 +3062,6 @@ Excluded input remains distinguishable as not applied, with full content and rea
 Inspection and terminal-state waits return observed outcomes, including failure/cancellation, as data.
 Failure to obtain an observation is a separate error, not evidence that the work failed or a submission was rejected.
 State-changing core-command admission returns its committed acceptance or rejection under the core idempotency key protocol; communication loss leaves that answer uncertain until recovered.
-Workflow message Promises instead deliver the bound answer or reject with the recorded failure/cancellation under the workflow contract.
 These are distinct interfaces to the same authoritative facts.
 
 All five core mutation handlers report Store infrastructure failure, after unchanged fencing, as HTTP 500 `{"version":"7","type":"invocation_error","code":"canonical_store_failure"}`, the same format as canonical observation/read failure.
@@ -3466,7 +3121,6 @@ A successful observation of pending, rejected, failed or cancelled saved work ex
 Invocation, access, rendering, incomplete delivery and cleanup failure are nonzero.
 An accepted answer stays authoritative if later cleanup fails.
 Nonzero never proves noncommit.
-Delivered Workflow failure likewise remains a successful observation, not an invocation failure.
 Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
@@ -3490,7 +3144,7 @@ SQLite retains pending work; intake adds no application or durable queue.
 Kernel backlog and serialized Store access may involve waiting.
 
 Intake and durable admission make progress independently of execution credits, including when every credit holds a Bash caller sending a message.
-Discovery, Session stop, Workflow cancellation, Model Interruption and Permission Decision remain usable during supported ordinary load.
+Discovery, Session stop, Model Interruption and Permission Decision remain usable during supported ordinary load.
 The former 12/10/2 connection quotas and thread-per-connection model are not constraints on the replacement.
 Any caps, buffering or isolation machinery need demonstrated resource and progress justification.
 Demand scaling does not promise unlimited memory or throughput; genuine descriptor, allocation, scratch and infrastructure failures preserve exact uncertainty recovery.
@@ -3516,7 +3170,6 @@ Control service permits admission and durable acknowledgment, not a connection h
 Observe completion through subsequent one-shot reads.
 If admission is unavailable or the reply is lost, the caller cannot infer whether a control committed.
 Recover core controls with the original core idempotency key and inputs, preserving their committed selection.
-Workflow cancellation is addressed to one immutable Workflow ID and repeated cancellation recovers its existing fence and propagation intents; it never starts a new propagation after completion.
 Reconnection obtains a fresh complete observation, not a continuation of a partially delivered report.
 
 ### Live-control notification
@@ -3531,10 +3184,10 @@ Restart destroys the old process's transports; the new owner reconstructs from c
 
 ### Ingress ownership through admission
 
-Ingress remains connection-owned through the receiving core/Runtime owner's import or rejection.
+Ingress remains connection-owned through the receiving core owner's import or rejection.
 Disconnect before complete capture releases it without mutation; once admission is in progress, disconnect cannot revoke it or close its source before commit/rollback and the last read.
 Complete upload alone is not admission.
-A lost state-changing core-command reply recovers through its core idempotency key; Workflow creation uses its Workflow creation idempotency key, and cancellation recovers the existing cancellation for its Workflow ID.
+A lost state-changing core-command reply recovers through its core idempotency key.
 Restart never imports leftover ingress.
 
 ## Platforms and server lifetime
@@ -3551,7 +3204,6 @@ Keep platform memory metrics and unavailable counters distinct.
 | --- | --- |
 | Transport | Rui's own HTTP/2 client on pinned nghttp2 and OpenSSL, with name lookup on short-lived threads and addresses raced by family (Happy Eyeballs, RFC 8305: families alternate, the next attempt starts after 250 ms or as soon as one fails, and with two in flight the oldest gives way). `https://` origins tunnel through the `http://` proxy that `https_proxy`/`HTTPS_PROXY` names (a set lowercase name decides, even empty), read once when the transport starts, with `Proxy-Authorization: Basic` from the proxy URL's credentials; loopback and `no_proxy`/`NO_PROXY` hosts (`*`, names with their subdomains, IP addresses, CIDR ranges; no ports) connect directly; a proxy's 407 and 403 are distinct causes; an `https://` or other proxy scheme fails startup; HTTP/1.1 and HTTP/3/QUIC are absent. Use Apple SecTrust on macOS; on Linux, OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` when set (an unloadable path fails, never falls back), else the host's CA bundle; and explicit CA-file configuration (`--provider-ca-file`), which takes precedence, where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
 | Storage | Bundle pinned thread-safe SQLite with single-owner access and native VFS. Use local filesystems; network/shared-mounted Stores are unsupported. Enable macOS fullfsync. |
-| Evaluator | Bundle pinned QuickJS; child-scoped CPU/stack protection and parent termination/reaping on both systems. Disable core dumps with `RLIMIT_CORE=0`; Linux also sets `PR_SET_DUMPABLE=0` after exec, before sensitive input. Failure prevents evaluation. |
 | Credentials | One Rui-owned file on Linux and macOS. Check ownership/access, preserve account binding and atomically persist refresh; do not fall back to Codex CLI state or another backend. The file is readable by same-user programs, including authorized Bash; credentials never enter semantic data, logs or child environments. |
 | Files/processes | Configurable disk-backed scratch and installed Bash with optional executable path. Report known memory-backed scratch as incompatible with disk-first guarantees; unknown backing is a deployment assumption. A target-header C shim supplies non-consuming child observation and queued-pipe-byte counts; lifecycle policy remains in Zig. Process-group cleanup promises neither detached-descendant containment nor rollback. |
 
@@ -3659,7 +3311,7 @@ Optional retained output has no independent lease authority after producer alias
 
 Infrastructure shutdown promptly prevents new effect launches, interrupts supported effects and safely collects evidence while retaining resources until cleanup is safe.
 This is a dispatch fence followed by cleanup, not a promise to let admitted model work finish.
-It neither awaits model completion nor invents user stops or Workflow cancellation.
+It neither awaits model completion nor invents user stops.
 
 The existing execution owner first initiates shutdown across its occupied slots: suppress unlaunched work, cancel provider streams and request launched Bash termination.
 It then incrementally services Bash retirement and due retained cleanup in shared passes.
@@ -3713,7 +3365,7 @@ Permission waits retain only durable facts; Edit validation/build/copyback acqui
 
 Without capacity, eligible work stays in SQLite with no Attempt, consumed allowance, materialized request or wait flag.
 Each resource owner rediscovers eligible facts and chooses a legal candidate.
-Exact cross-Session and Workflow winner order is not public.
+Exact cross-Session winner order is not public.
 Approval, retry and restart preserve identity, authorization, deadlines and allowance, not scheduling rank.
 
 The execution loop filters blocked permissions and future retries, then revalidates at Attempt admission.
@@ -3739,7 +3391,6 @@ A candidate may wait behind its finite older-identity prefix.
 Blocked permission, future retries, retained custody and unavailable preparation are not eligibility.
 The guarantee is not equal time or token shares, preemption, a completion deadline or model success.
 Preferences may reset on restart; indefinitely repeated failures or restarts do not meet the stable-service assumptions.
-Workflow polling retains its finite-drain guarantee when competition is not replenished.
 
 The four-kind order adds fixed-size discovery policy, not per-Session workers, timers, a resident ready queue, durable scheduling phases or another credit pool.
 Control, completion, preparation and cleanup service continues between bounded admission steps.
@@ -3753,14 +3404,13 @@ Any index or hint needs an owner, population bound, failure behavior and release
 
 At fixed configured capacity and live-exchange population, retained orchestration memory and open-handle populations do not grow with durable history or payload item count.
 Large values travel through bounded windows, owned scratch/content stages or a read-only map of their capture's page cache, never a payload-sized copy.
-Dormant Sessions, terminal Turns and waiting Workflows retain no resident graph, worker, socket or credit.
+Dormant Sessions and terminal Turns retain no resident graph, worker, socket or credit.
 The Session change ring is fixed-size (4,096 entries, 90,136 bytes) and independent of Session count.
 So is the Session environment register: it holds at most 4,096 Sessions and 128 distinct environments of at most 1 MiB in total.
 An open overview holds the Store's rows in the client process, not the Host.
 
 This is not a whole-process ban on allocation after startup.
-Library, transport and evaluator allocations remain separately bounded.
-User-held decoded values consume evaluator heap within its own limit.
+Library and transport allocations remain separately bounded.
 
 A failed named-scratch unlink transfers its open aliases, retryable name and exact charge into one owner under custody.
 Reclamation treats an absent name as success, retains every resource on any other removal failure and releases handles/accounting exactly once before custody becomes reusable.
@@ -3795,7 +3445,6 @@ On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it
 | Clients | [Demand-scaled intake and control progress](#connection-capacity-and-control-headroom), independent of execution capacity. |
 | Exchange bounds | Request line+headers 16 KiB. Each in-flight Message exchange also holds its environment, at most 64 KiB, from its header until admission; that one allocation becomes the register's copy or is freed right after admission, so intake memory grows by at most 64 KiB per open Message exchange; derive short-control request, acknowledgment and error bounds separately from supported fields and their maximum encoded sizes. Reject oversized requests before mutation. |
 | Client deadlines | [Transport inactivity](#client-transport-and-observations) and [absolute discovery/header deadlines](#connection-capacity-and-control-headroom). |
-| Evaluator | One full lifecycle; initial 16 MiB JS allocation ceiling; 1 s process CPU and 5 s parent elapsed lifetime. Native/parent memory additional. |
 | Model retries | Startup default 3 after initial try; 2/4/8 s backoff or later valid Retry-After, then positive jitter up to one quarter of backoff; conserved per Operation. |
 | Provider inactivity | Startup default 5 min awaiting first body and between chunks; body/heartbeats reset it, no progressing-stream total deadline. |
 | Bash | Startup default 5 min from process start, output does not reset it; per-call positive finite representable override, no policy maximum. |
@@ -3896,12 +3545,12 @@ Retain custody/evidence through settlement.
 Real volume exhaustion is independent of the configured cap.
 Small controls need no execution credit or content scratch, but still need canonical writes.
 
-A read handoff does not duplicate charges; a physical copy does, including temporary import copies, request overlapping response and evaluator input overlapping output.
+A read handoff does not duplicate charges; a physical copy does, including temporary import copies and request overlapping response.
 Reserve each actual growth increment, not the possible maximum output.
 A short successful I/O may advance by its actual count and continue; premature EOF, zero progress where bytes are required or a terminal error cannot certify completion.
 On write failure retain every submitted byte not proven unwritten, including the complete increment when the API reports no reliable partial count, and stop the affected producer before releasing its resources.
 
-File and descriptor populations follow their concrete owners: occupied execution records, ordinary client exchanges, the single validation workspace, the single evaluator lifecycle and bounded diagnostic/export work.
+File and descriptor populations follow their concrete owners: occupied execution records, ordinary client exchanges, the single validation workspace and bounded diagnostic/export work.
 Their temporary-file counts likewise stay independent of payload item count and durable history; metadata grows in charged sequential storage.
 Include overlapping preparation/capture, partially constructed resources, spawn duplicates and delayed cleanup in startup derivation.
 Reserve required tracking before creating/opening resources; failure unwinds the resources already obtained.
@@ -3938,10 +3587,10 @@ Reopening across windows still repeats overflow-page traversal; synchronous work
 Closing a reader invalidates its cursor, not previously delivered caller-owned bytes or the reference.
 Close readers before their parent view.
 Scratch ranges/view-scoped handles cannot be stored as canonical references.
-Runtime materializes core-owned results through the ordinary core interface; adapters/evaluators receive no SQLite connection.
+Adapters receive no SQLite connection.
 Private continuation access remains exclusive to the Operation-bound provider view.
 
-Committed content remains available for saved requests, historical Operation views, workflow materialization and recovery.
+Committed content remains available for saved requests, historical Operation views and recovery.
 Temporary cleanup cannot invalidate it; V1 selects no canonical-content garbage collection or new lease.
 Read failures cannot masquerade as EOF/successful prefixes; missing/corrupt required content follows the Host-wide storage-fault boundary.
 Content readers read stored rows directly and hold no decode window; each hashes what it reads in order from the start and checks the digest at the end, as above.
@@ -3998,7 +3647,7 @@ Below the minimum, startup fails promptly with `RLIMIT_NOFILE`, capacity and lim
 No descriptor-credit pool or future-owner reservation is introduced.
 Later acquisition failures follow the acquiring owner's cleanup rules.
 
-Names, references and idempotency keys preserve exact text as specified in [admission terminology](#names-references-ids-and-idempotency-keys) and [Workflow identity](#workflow-identity-and-saved-calls): no trimming, case folding, Unicode normalization or arbitrary whitelist.
+Names, references and idempotency keys preserve exact text as specified in [admission terminology](#names-references-ids-and-idempotency-keys): no trimming, case folding, Unicode normalization or arbitrary whitelist.
 The representation layer must preserve those distinct scopes rather than treating all keys as one 128-byte class.
 Derive wire/request/acknowledgment/error bounds from each complete public value and worst-case escaping; other keys gain no length quota without an actual consumer requirement.
 Validate positivity/nonreuse and arithmetic for actual identity/ordinal consumers; SQLite INTEGER requires signed-64 representability where used.
@@ -4139,5 +3788,5 @@ Current and Full report profiles are selected; their presentation details must p
 Open issues hold unresolved decisions and research; this contract records accepted behavior.
 
 Production implementation and live-provider qualification remain required by [Verification](VERIFICATION.md).
-V1 excludes conversation branching, model/provider fallback, incompatible handoff, dynamic tools/MCP, generalized scheduling, multi-host coordination, retained workflow VMs and application-state retention/migration.
+V1 excludes conversation branching, model/provider fallback, incompatible handoff, dynamic tools/MCP, generalized scheduling, multi-host coordination and application-state retention/migration.
 Future fork creates a new Session with ancestry.
