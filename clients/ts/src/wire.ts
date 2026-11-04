@@ -38,6 +38,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/control/host-pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Holds every new Turn while paused, or releases them. Running work continues. */
+        post: operations["hostPause"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/configure": {
         parameters: {
             query?: never;
@@ -361,7 +378,10 @@ export interface components {
             ordinal: components["schemas"]["Decimal"];
             at: components["schemas"]["Decimal"];
             value: {
-                assistant: components["schemas"]["ActivityItemContent"];
+                assistant: {
+                    content: components["schemas"]["ActivityItemContent"];
+                    final: boolean;
+                };
             };
         } | {
             position: components["schemas"]["Decimal"];
@@ -406,9 +426,11 @@ export interface components {
             ordinal: components["schemas"]["Decimal"];
             at: components["schemas"]["Decimal"];
             value: {
-                outcome: {
+                turn_ended: {
                     turn: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
+                    /** @enum {string} */
+                    ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed";
                     code: string;
                     content: components["schemas"]["ActivityItemContent"] | null;
                 };
@@ -497,7 +519,7 @@ export interface components {
             /** @enum {string} */
             direction: "forward" | "backward";
             /** @description Each at most once, in the order the enum lists them. */
-            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "outcome" | "stop" | "sent" | "send_failed" | "received")[];
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received")[];
             limit: components["schemas"]["Decimal"];
         };
         CallActivity: {
@@ -616,6 +638,27 @@ export interface components {
                 value: string;
             };
         };
+        ConfigureConflictReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "configuration_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+            execution: {
+                /** @constant */
+                status: "unavailable";
+                /** @constant */
+                reason: "direct_reply_does_not_wait_for_model_processing";
+            };
+        };
         ConfigureReply: {
             /** @constant */
             version: "8";
@@ -647,26 +690,6 @@ export interface components {
                 session: string;
                 /** @enum {string} */
                 code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
-            };
-            execution: {
-                /** @constant */
-                status: "unavailable";
-                /** @constant */
-                reason: "direct_reply_does_not_wait_for_model_processing";
-            };
-        } | {
-            /** @constant */
-            version: "8";
-            /** @constant */
-            type: "configuration_reply";
-            answer: {
-                /** @constant */
-                status: "conflict";
-                /** @constant */
-                replayed: false;
-                session: string;
-                /** @constant */
-                code: "idempotency_key_conflict";
             };
             execution: {
                 /** @constant */
@@ -912,6 +935,7 @@ export interface components {
             descriptor_limit: string;
             started_at: components["schemas"]["Decimal"];
             custody_occupied: components["schemas"]["Decimal"];
+            paused: boolean;
             capabilities: {
                 /** @constant */
                 bash: true;
@@ -929,6 +953,21 @@ export interface components {
             /** @constant */
             kind: "host_info";
             store: string;
+        };
+        HostPauseReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "host_pause_reply";
+            paused: boolean;
+        };
+        HostPauseRequest: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            kind: "host_pause";
+            store: string;
+            paused: boolean;
         };
         HostStopReply: {
             /** @constant */
@@ -1140,6 +1179,25 @@ export interface components {
                 value: string;
             };
         };
+        MessageConflictReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "message_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+            execution: {
+                /** @constant */
+                status: "queued";
+            };
+        };
         MessageReply: {
             /** @constant */
             version: "8";
@@ -1185,24 +1243,6 @@ export interface components {
                 type: "text";
                 bytes: components["schemas"]["Decimal"];
                 sha256: string;
-            };
-            execution: {
-                /** @constant */
-                status: "queued";
-            };
-        } | {
-            /** @constant */
-            version: "8";
-            /** @constant */
-            type: "message_reply";
-            answer: {
-                /** @constant */
-                status: "conflict";
-                /** @constant */
-                replayed: false;
-                session: string;
-                /** @constant */
-                code: "idempotency_key_conflict";
             };
             execution: {
                 /** @constant */
@@ -1281,6 +1321,25 @@ export interface components {
             /** @constant */
             require_model: true;
         };
+        ModelInterruptionConflictReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "model_interruption_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                target: {
+                    session: string;
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                };
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+        };
         ModelInterruptionReply: {
             /** @constant */
             version: "8";
@@ -1312,24 +1371,6 @@ export interface components {
                 };
                 /** @enum {string} */
                 code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_operation" | "target_mismatch" | "operation_resolved";
-            };
-        } | {
-            /** @constant */
-            version: "8";
-            /** @constant */
-            type: "model_interruption_reply";
-            answer: {
-                /** @constant */
-                status: "conflict";
-                /** @constant */
-                replayed: false;
-                target: {
-                    session: string;
-                    turn: components["schemas"]["Decimal"];
-                    operation: components["schemas"]["Decimal"];
-                };
-                /** @constant */
-                code: "idempotency_key_conflict";
             };
         };
         ModelInterruptionRequest: {
@@ -2023,6 +2064,24 @@ export interface components {
         PeerFacts: {
             from_person_at: components["schemas"]["Decimal"] | null;
         };
+        PermissionDecisionConflictReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "permission_decision_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                decision: "allow_once" | "deny";
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+        };
         PermissionDecisionReply: {
             /** @constant */
             version: "8";
@@ -2052,23 +2111,6 @@ export interface components {
                 decision: "allow_once" | "deny";
                 /** @enum {string} */
                 code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "action_not_pending";
-            };
-        } | {
-            /** @constant */
-            version: "8";
-            /** @constant */
-            type: "permission_decision_reply";
-            answer: {
-                /** @constant */
-                status: "conflict";
-                /** @constant */
-                replayed: false;
-                session: string;
-                action: components["schemas"]["Decimal"];
-                /** @enum {string} */
-                decision: "allow_once" | "deny";
-                /** @constant */
-                code: "idempotency_key_conflict";
             };
         };
         PermissionDecisionRequest: {
@@ -2133,6 +2175,25 @@ export interface components {
             work: components["schemas"]["SessionWork"];
             peers: components["schemas"]["PeerFacts"];
         };
+        SessionStopConflictReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "session_stop_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+            completion: {
+                /** @constant */
+                status: "unavailable";
+            };
+        };
         SessionStopReply: {
             /** @constant */
             version: "8";
@@ -2164,24 +2225,6 @@ export interface components {
                 session: string;
                 /** @enum {string} */
                 code: "invalid_session_reference" | "unknown_session";
-            };
-            completion: {
-                /** @constant */
-                status: "unavailable";
-            };
-        } | {
-            /** @constant */
-            version: "8";
-            /** @constant */
-            type: "session_stop_reply";
-            answer: {
-                /** @constant */
-                status: "conflict";
-                /** @constant */
-                replayed: false;
-                session: string;
-                /** @constant */
-                code: "idempotency_key_conflict";
             };
             completion: {
                 /** @constant */
@@ -2255,6 +2298,8 @@ export interface components {
         WireVersion: "8";
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
         HostInstance: string;
+        /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused. */
+        HostInstanceRequired: string;
         /** @description How many bytes of client environment start the body, before the JSON request. */
         EnvironmentBytes: string;
     };
@@ -2308,8 +2353,8 @@ export interface operations {
             header: {
                 /** @description The wire version this document describes. Any other version is refused. */
                 "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
-                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
-                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused. */
+                "X-Rui-Host-Instance": components["parameters"]["HostInstanceRequired"];
             };
             path?: never;
             cookie?: never;
@@ -2327,6 +2372,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HostStopReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    hostPause: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostPauseRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostPauseReply"];
                 };
             };
             /** @description A refusal or failure. */
@@ -2365,6 +2448,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConfigureReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigureConflictReply"] | components["schemas"]["ErrorReply"];
                 };
             };
             /** @description A refusal or failure. */
@@ -2407,6 +2499,15 @@ export interface operations {
                     "application/json": components["schemas"]["MessageReply"];
                 };
             };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
             /** @description A refusal or failure. */
             default: {
                 headers: {
@@ -2443,6 +2544,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionStopReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionStopConflictReply"] | components["schemas"]["ErrorReply"];
                 };
             };
             /** @description A refusal or failure. */
@@ -2483,6 +2593,15 @@ export interface operations {
                     "application/json": components["schemas"]["ModelInterruptionReply"];
                 };
             };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelInterruptionConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
             /** @description A refusal or failure. */
             default: {
                 headers: {
@@ -2519,6 +2638,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PermissionDecisionReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PermissionDecisionConflictReply"] | components["schemas"]["ErrorReply"];
                 };
             };
             /** @description A refusal or failure. */
@@ -2588,13 +2716,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The content bytes, from the requested offset. */
+            /** @description The content, as text. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": string;
+                    "text/plain": string;
                 };
             };
             /** @description A refusal or failure. */
@@ -2626,13 +2754,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The content bytes, from the requested offset. */
+            /** @description The content, as text. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": string;
+                    "text/plain": string;
                 };
             };
             /** @description A refusal or failure. */
@@ -2664,13 +2792,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The content bytes, from the requested offset. */
+            /** @description The content, as text. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": string;
+                    "text/plain": string;
                 };
             };
             /** @description A refusal or failure. */
@@ -2702,12 +2830,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The Session report (JSON), or the failed response's bytes. The report's schema is not described yet. */
+            /** @description The Session report (JSON; its schema is not described yet), or, for a failed response export, that response's bytes. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
+                    "application/json": unknown;
                     "application/octet-stream": string;
                 };
             };
