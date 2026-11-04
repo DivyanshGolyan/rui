@@ -48,13 +48,18 @@ pub fn requiredEngines() !std.EnumSet(EngineName) {
     return names;
 }
 
-/// The first of `names` that conformance tests must reach but this build
-/// has no `Engine` for, or null. Postgres is not a Store engine yet; the
-/// wire tests in pg_tests.zig answer for it.
-pub fn unbuiltEngine(names: std.EnumSet(EngineName)) ?EngineName {
+/// Engines a test in this binary reaches without an `Engine`: Postgres
+/// through pg_tests.zig's wire tests, and MySQL through
+/// mysql_dialect_check.zig, which fails when `RUI_TEST_REQUIRE_ENGINES`
+/// lists mysql and no server answers.
+pub const checked_elsewhere: std.EnumSet(EngineName) = .initMany(&.{ .postgres, .mysql });
+
+/// The first of `names` that no test reaches, neither an `Engine` nor
+/// one of `elsewhere`, or null.
+pub fn unbuiltEngine(names: std.EnumSet(EngineName), elsewhere: std.EnumSet(EngineName)) ?EngineName {
     var listed = names.iterator();
     while (listed.next()) |name| {
-        if (name == .postgres) continue;
+        if (elsewhere.contains(name)) continue;
         if (std.meta.stringToEnum(Engine, @tagName(name)) == null) return name;
     }
     return null;
@@ -62,10 +67,10 @@ pub fn unbuiltEngine(names: std.EnumSet(EngineName)) ?EngineName {
 
 /// Runs `run(case)` once for each `Engine`, in order, and on a failure
 /// prints the engine's name and returns the error. It first checks
-/// `requiredEngines`: an unknown name, or a listed engine with no
-/// `Engine` (`unbuiltEngine`), fails every conformance test.
+/// `requiredEngines`: an unknown name, or a listed engine no test reaches
+/// (`unbuiltEngine`), fails every conformance test.
 pub fn forEachEngine(comptime run: anytype) !void {
-    if (unbuiltEngine(try requiredEngines())) |name| {
+    if (unbuiltEngine(try requiredEngines(), checked_elsewhere)) |name| {
         std.debug.print("RUI_TEST_REQUIRE_ENGINES lists {s}, an engine not built into these tests\n", .{@tagName(name)});
         return error.RequiredEngineNotBuilt;
     }

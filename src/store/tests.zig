@@ -8182,9 +8182,11 @@ test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
 
 test "a required engine these tests do not build fails them" {
     const Name = store_testing.EngineName;
-    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty));
-    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres })));
-    try std.testing.expectEqual(Name.mysql, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql })));
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty, .empty));
+    try std.testing.expectEqual(Name.mysql, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql }), .empty));
+    try std.testing.expectEqual(Name.postgres, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres }), .initOne(Name.mysql)));
+    // CI's live shards list both servers; each has a test of its own here.
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql, Name.postgres }), store_testing.checked_elsewhere));
 }
 
 test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
