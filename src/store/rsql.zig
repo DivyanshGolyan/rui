@@ -21,12 +21,73 @@ pub const Dialect = enum { sqlite, mysql };
 /// held to this.
 pub const reserved_names_checked = true;
 
-/// Words reserved in at least one engine (SQLite 3.53, Postgres 17, MySQL 8.4).
-const reserved_names = [_][]const u8{
-    "key",  "keys",      "call",     "groups",    "rank",   "row",    "rows",   "window",  "range",
-    "user", "lead",      "lag",      "order",     "limit",  "offset", "system", "lateral", "cube",
-    "of",   "recursive", "interval", "condition", "signal",
+/// Words reserved in at least one engine (SQLite 3.53, Postgres 17, MySQL
+/// 8.4): MySQL's whole list and the other engines' words Rui SQL met. A
+/// word the grammar reads as a keyword everywhere (`grammar_words`) is no
+/// name, so it is left out unless `keywords` gives it a place.
+const reserved_names = blk: {
+    @setEvalBranchQuota(100_000);
+    var words: []const []const u8 = &other_reserved;
+    for (mysql_reserved) |word| {
+        if (!isGrammarWord(word) or hasPlace(word)) words = words ++ .{word};
+    }
+    break :blk words;
 };
+
+/// `reserved_names` by length, so a word costs a comparison only with
+/// names as long as itself.
+const reserved_lookup = blk: {
+    @setEvalBranchQuota(100_000);
+    var pairs: [reserved_names.len]struct { []const u8 } = undefined;
+    for (reserved_names, &pairs) |word, *pair| pair.* = .{word};
+    break :blk std.StaticStringMapWithEql(void, std.static_string_map.eqlAsciiIgnoreCase).initComptime(pairs);
+};
+
+/// Words reserved on SQLite or Postgres but not on MySQL 8.4.
+const other_reserved = [_][]const u8{ "user", "offset" };
+
+/// MySQL 8.4's reserved words, as its manual lists them ("Keywords and
+/// Reserved Words", the words marked (R)).
+const mysql_reserved = [_][]const u8{
+    "accessible",     "add",                 "all",                "alter",              "analyze",       "and",           "as",             "asc",
+    "asensitive",     "before",              "between",            "bigint",             "binary",        "blob",          "both",           "by",
+    "call",           "cascade",             "case",               "change",             "char",          "character",     "check",          "collate",
+    "column",         "condition",           "constraint",         "continue",           "convert",       "create",        "cross",          "cube",
+    "cume_dist",      "current_date",        "current_time",       "current_timestamp",  "current_user",  "cursor",        "database",       "databases",
+    "day_hour",       "day_microsecond",     "day_minute",         "day_second",         "dec",           "decimal",       "declare",        "default",
+    "delayed",        "delete",              "dense_rank",         "desc",               "describe",      "deterministic", "distinct",       "distinctrow",
+    "div",            "double",              "drop",               "dual",               "each",          "else",          "elseif",         "empty",
+    "enclosed",       "escaped",             "except",             "exists",             "exit",          "explain",       "false",          "fetch",
+    "first_value",    "float",               "float4",             "float8",             "for",           "force",         "foreign",        "from",
+    "fulltext",       "function",            "generated",          "get",                "grant",         "group",         "grouping",       "groups",
+    "having",         "high_priority",       "hour_microsecond",   "hour_minute",        "hour_second",   "if",            "ignore",         "in",
+    "index",          "infile",              "inner",              "inout",              "insensitive",   "insert",        "int",            "int1",
+    "int2",           "int3",                "int4",               "int8",               "integer",       "intersect",     "interval",       "into",
+    "io_after_gtids", "io_before_gtids",     "is",                 "iterate",            "join",          "json_table",    "key",            "keys",
+    "kill",           "lag",                 "last_value",         "lateral",            "lead",          "leading",       "leave",          "left",
+    "like",           "limit",               "linear",             "lines",              "load",          "localtime",     "localtimestamp", "lock",
+    "long",           "longblob",            "longtext",           "loop",               "low_priority",  "match",         "maxvalue",       "mediumblob",
+    "mediumint",      "mediumtext",          "middleint",          "minute_microsecond", "minute_second", "mod",           "modifies",       "natural",
+    "not",            "no_write_to_binlog",  "nth_value",          "ntile",              "null",          "numeric",       "of",             "on",
+    "optimize",       "optimizer_costs",     "option",             "optionally",         "or",            "order",         "out",            "outer",
+    "outfile",        "over",                "partition",          "percent_rank",       "precision",     "primary",       "procedure",      "purge",
+    "qualify",        "range",               "rank",               "read",               "reads",         "read_write",    "real",           "recursive",
+    "references",     "regexp",              "release",            "rename",             "repeat",        "replace",       "require",        "resignal",
+    "restrict",       "return",              "revoke",             "right",              "rlike",         "row",           "rows",           "row_number",
+    "schema",         "schemas",             "second_microsecond", "select",             "sensitive",     "separator",     "set",            "show",
+    "signal",         "smallint",            "spatial",            "specific",           "sql",           "sqlexception",  "sqlstate",       "sqlwarning",
+    "sql_big_result", "sql_calc_found_rows", "sql_small_result",   "ssl",                "starting",      "stored",        "straight_join",  "system",
+    "table",          "tablesample",         "terminated",         "then",               "tinyblob",      "tinyint",       "tinytext",       "to",
+    "trailing",       "trigger",             "true",               "undo",               "union",         "unique",        "unlock",         "unsigned",
+    "update",         "usage",               "use",                "using",              "utc_date",      "utc_time",      "utc_timestamp",  "values",
+    "varbinary",      "varchar",             "varcharacter",       "varying",            "virtual",       "when",          "where",          "while",
+    "window",         "with",                "write",              "xor",                "year_month",    "zerofill",
+};
+
+fn hasPlace(word: []const u8) bool {
+    for (keywords) |keyword| if (std.ascii.eqlIgnoreCase(word, keyword.word)) return true;
+    return false;
+}
 
 /// Where a reserved word is a keyword rather than a name.
 const Place = enum {
@@ -40,6 +101,8 @@ const Place = enum {
     call,
     /// Directly inside the parentheses after `OVER`: a frame's unit.
     window,
+    /// Directly after `AS` inside the parentheses after `CAST`: a type.
+    cast_type,
 };
 
 /// The reserved words text may use as keywords, each in its one place.
@@ -52,8 +115,12 @@ const keywords = [_]struct { word: []const u8, place: Place }{
     .{ .word = "lead", .place = .call },
     .{ .word = "lag", .place = .call },
     .{ .word = "rank", .place = .call },
+    .{ .word = "row_number", .place = .call },
     .{ .word = "rows", .place = .window },
     .{ .word = "range", .place = .window },
+    .{ .word = "partition", .place = .before_by },
+    .{ .word = "blob", .place = .cast_type },
+    .{ .word = "integer", .place = .cast_type },
 };
 
 /// Words some engine lacks or reads differently, each with the portable form.
@@ -79,13 +146,16 @@ const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
 /// `reserved` mirrors `identifierError`'s on purpose: both take `reserved_names_checked`, one switch for names and text.
 pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]const u8 {
     comptime {
-        @setEvalBranchQuota(100 * text.len + 1000);
+        // A word's lookup in `reserved_lookup` takes up to a few hundred branches.
+        @setEvalBranchQuota(500 * text.len + 1000);
         var index: usize = 0;
         // The word just scanned, or "" after any other token.
         var previous: []const u8 = "";
         var depth: usize = 0;
         // The depth of the open `OVER (` group, if any.
         var window_depth: ?usize = null;
+        // The depth of the open `CAST(` group, if any.
+        var cast_depth: ?usize = null;
         while (index < text.len) {
             const byte = text[index];
             const pair: []const u8 = text[index..@min(index + 2, text.len)];
@@ -112,7 +182,9 @@ pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]c
                 if (reserved) {
                     if (std.ascii.eqlIgnoreCase(word, "rowid")) return "rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column";
                     if (identifierError(word, true)) |message| {
-                        if (!isKeyword(text, word, index, previous, window_depth != null and window_depth.? == depth)) return message;
+                        const in_window = window_depth != null and window_depth.? == depth;
+                        const in_cast = cast_depth != null and cast_depth.? == depth;
+                        if (!isKeyword(text, word, index, previous, in_window, in_cast)) return message;
                     }
                 }
                 if (std.ascii.eqlIgnoreCase(word, "IS")) {
@@ -128,8 +200,10 @@ pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]c
                 if (byte == '(') {
                     depth += 1;
                     if (std.ascii.eqlIgnoreCase(previous, "OVER")) window_depth = depth;
+                    if (std.ascii.eqlIgnoreCase(previous, "CAST")) cast_depth = depth;
                 } else if (byte == ')') {
                     if (window_depth != null and window_depth.? == depth) window_depth = null;
+                    if (cast_depth != null and cast_depth.? == depth) cast_depth = null;
                     depth -|= 1;
                 }
                 index += 1;
@@ -141,7 +215,7 @@ pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]c
 }
 
 /// Whether reserved `word`, which ends at `end`, stands in its keyword place.
-fn isKeyword(comptime text: []const u8, comptime word: []const u8, comptime end: usize, comptime previous: []const u8, comptime in_window: bool) bool {
+fn isKeyword(comptime text: []const u8, comptime word: []const u8, comptime end: usize, comptime previous: []const u8, comptime in_window: bool, comptime in_cast: bool) bool {
     for (keywords) |keyword| {
         if (!std.ascii.eqlIgnoreCase(word, keyword.word)) continue;
         const next = skipSpace(text, end);
@@ -151,6 +225,7 @@ fn isKeyword(comptime text: []const u8, comptime word: []const u8, comptime end:
             .after_with => std.ascii.eqlIgnoreCase(previous, "WITH"),
             .call => end < text.len and text[end] == '(',
             .window => in_window,
+            .cast_type => in_cast and std.ascii.eqlIgnoreCase(previous, "AS"),
         };
     }
     return false;
@@ -165,9 +240,7 @@ fn nextWord(comptime text: []const u8, comptime from: usize) []const u8 {
 /// Why `name` cannot name a table, column or index on every engine, or null.
 pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]const u8 {
     if (!reserved) return null;
-    for (reserved_names) |word| {
-        if (std.ascii.eqlIgnoreCase(name, word)) return "rsql: '" ++ name ++ "' is reserved on some engine; rename it";
-    }
+    if (reserved_lookup.has(name)) return "rsql: '" ++ name ++ "' is reserved on some engine; rename it";
     return null;
 }
 
@@ -2873,6 +2946,14 @@ test "only a type Read, Write or Page made counts as a typed statement" {
         pub const sql: [:0]const u8 = "DELETE FROM session";
     }));
     try std.testing.expect(!comptime isStatement(struct {}));
+}
+
+test "every word MySQL 8.4 reserves is a name Rui SQL refuses, unless the grammar reads it as a keyword" {
+    try std.testing.expectEqualStrings("rsql: 'usage' is reserved on some engine; rename it", comptime portabilityError("WITH usage AS (SELECT 1 AS x) SELECT x FROM usage", reserved_names_checked).?);
+    try std.testing.expectEqualStrings("rsql: 'match' is reserved on some engine; rename it", comptime portabilityError("SELECT x AS match FROM turn", reserved_names_checked).?);
+    inline for (mysql_reserved) |word| {
+        try std.testing.expectEqual(!isGrammarWord(word) or hasPlace(word), comptime identifierError(word, true) != null);
+    }
 }
 
 test "a reserved word is a keyword only in its own place, and a name anywhere else" {

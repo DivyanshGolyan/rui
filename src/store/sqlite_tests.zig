@@ -248,7 +248,7 @@ test "creating a Session takes the same work however many Sessions exist" {
     _ = try configureTestSession(&storage, "creation-steps-prepare");
     const few = try Creation.steps(&storage, "creation-steps-few");
     // Above the Host's next created_seq, which these rows bypass.
-    try store_testing.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
+    try store_testing.sqlite_only.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
         "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
         "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
         "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
@@ -376,7 +376,7 @@ test "a statement that fails after an entry point touched its Session fails and 
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
         // Nothing of the failed command committed.
-        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key IN ('key-fault-relabel','key-fault-message')", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key IN ('key-fault-relabel','key-fault-message')", .{}));
     }
 }
 
@@ -497,13 +497,13 @@ test "a guard that fails in an engine pass fails the next run, and nothing after
     var loaded: TestingRound.head.Result = undefined;
     a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
     try a.run();
-    const before = try store_testing.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()});
+    const before = try store_testing.sqlite_only.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()});
     // Revision 99 matches no row, so the guard fails when the pass steps it.
     a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 99 });
     a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
     try std.testing.expectEqual(2, a.passes);
     try std.testing.expectError(error.TestingGuard, a.run());
-    try std.testing.expectEqual(before, try store_testing.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()}));
+    try std.testing.expectEqual(before, try store_testing.sqlite_only.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()}));
     try a.abandon(.{});
 }
 
@@ -617,7 +617,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_testing.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()});
+        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()});
         try touchForTesting(&storage, session.slice());
         try touchForTesting(&storage, peer.slice());
     }
@@ -777,7 +777,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
         .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-stop-metadata", &calls);
-    const action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
+    const action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
     try allow.key.set("settlement-stop-allow");
     try allow.session.set(allocated_session_0.slice());
@@ -805,11 +805,11 @@ test "Action settlement atomically yields to an earlier Session stop" {
     try std.testing.expect(completed_replay.accepted.replayed);
     try std.testing.expectEqual(protocol.SessionStopCompletion.completed, completed_replay.accepted.completion);
 
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
-    const result_content_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation", .{});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
+    const result_content_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation", .{});
     const result_metadata = try testingContentReference(&storage, result_content_id);
     try expectContent(&storage, result_metadata, "Cancelled by Session stop.");
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code='cancelled'", .{allocated_session_0.slice()}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code='cancelled'", .{allocated_session_0.slice()}));
     try expectDenseSessionPositions(&storage, allocated_session_0.slice());
 }
 
@@ -821,7 +821,7 @@ test "canonical report and Action read failures fence later commands" {
     defer report_store.close() catch unreachable;
     const allocated_session_0 = try configureTestSession(&report_store, "report-corrupt-config");
     try sqlite.exec(report_store.database, "PRAGMA foreign_keys=OFF");
-    try store_testing.exec(&report_store, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{allocated_session_0.slice()});
+    try store_testing.sqlite_only.exec(&report_store, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{allocated_session_0.slice()});
     try sqlite.exec(report_store.database, "PRAGMA foreign_keys=ON");
     var report_root: [protocol.max_store_bytes]u8 = undefined;
     const report_root_length = try report_tmp.dir.realPath(std.testing.io, &report_root);
@@ -847,8 +847,8 @@ test "canonical report and Action read failures fence later commands" {
     try submitTestMessage(&action_store, &action_tmp, "action-corrupt-message", "action-corrupt-message", allocated_session_1.slice(), "propose");
     const binding = (try action_store.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&action_store, &action_tmp, binding, "action-corrupt-metadata");
-    const action_id = try store_testing.queryU64(&action_store, "SELECT min(action_id) FROM action_operation", .{});
-    try store_testing.withoutForeignKeys(&action_store, "DELETE FROM content WHERE content_id=(SELECT call_id_content_id FROM model_tool_call ORDER BY operation_id,call_ordinal LIMIT 1)", .{});
+    const action_id = try store_testing.sqlite_only.queryU64(&action_store, "SELECT min(action_id) FROM action_operation", .{});
+    try store_testing.sqlite_only.withoutForeignKeys(&action_store, "DELETE FROM content WHERE content_id=(SELECT call_id_content_id FROM model_tool_call ORDER BY operation_id,call_ordinal LIMIT 1)", .{});
     try std.testing.expectError(error.CorruptStore, action_store.actionCallId(allocated_session_1.slice(), action_id));
     try std.testing.expect(action_store.isFenced());
     try std.testing.expectError(error.StoreFenced, action_store.actionArguments(allocated_session_1.slice(), action_id));
@@ -876,7 +876,7 @@ test "canonical report and Action read failures fence later commands" {
                     std.testing.allocator.free(bytes);
                     break :blk {};
                 } else |err| err,
-                .arguments => if (storage.actionArguments(allocated_session_2.slice(), try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{}))) |_| {} else |err| err,
+                .arguments => if (storage.actionArguments(allocated_session_2.slice(), try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{}))) |_| {} else |err| err,
                 .execution => blk: {
                     const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
                     var input: BashExecutionInput = undefined;
@@ -941,12 +941,12 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     };
     try settleCallsForTesting(&storage, &tmp, binding, "mixed-metadata", &calls);
 
-    try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call", .{}));
-    try std.testing.expectEqual(@as(u64, 5), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code IS NOT NULL", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=4 AND rejection_code='unknown_tool'", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=5 AND rejection_code='unknown_tool'", .{}));
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal WHERE tool_call.rejection_code IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 7), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call", .{}));
+    try std.testing.expectEqual(@as(u64, 5), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=4 AND rejection_code='unknown_tool'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=5 AND rejection_code='unknown_tool'", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal WHERE tool_call.rejection_code IS NOT NULL", .{}));
     try expectDenseSessionPositions(&storage, allocated_session_0.slice());
     {
         const rejected_action = try sqlite.prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");
@@ -1002,7 +1002,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         break :first try std.fmt.parseInt(u64, report.value.actions.unresolved[0].action, 10);
     };
     {
-        const content_id = try store_testing.queryU64(&storage, "SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=5", .{});
+        const content_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=5", .{});
         const metadata = try testingContentReference(&storage, content_id);
         var reader: ContentReader = undefined;
         reader.open(try storage.openContent(metadata));
@@ -1052,10 +1052,10 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     const recovered = try reopened.inspectSessionForTesting(allocated_session_0.slice());
     try std.testing.expectEqual(@as(u64, 2), recovered.action_count);
     try std.testing.expectEqual(@as(u64, 5), recovered.rejected_call_count);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM action_operation WHERE action_id=(SELECT min(action_id) FROM action_operation) " ++
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&reopened, "SELECT count(*) FROM action_operation WHERE action_id=(SELECT min(action_id) FROM action_operation) " ++
         "AND parent_operation_id=(SELECT min(parent_operation_id) FROM action_operation) " ++
         "AND call_ordinal=0 AND resolution_code='denied'", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(reopened.database, "SELECT count(*) FROM permission_decision_command WHERE command_key='mixed-deny' " ++
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&reopened, "SELECT count(*) FROM permission_decision_command WHERE command_key='mixed-deny' " ++
         "AND action_id=CAST((SELECT min(action_id) FROM action_operation) AS TEXT)", .{}));
     try expectContent(&reopened, try reopened.actionCallId(allocated_session_0.slice(), first_action_id), "call-1");
     try expectContent(&reopened, try reopened.actionArguments(allocated_session_0.slice(), first_action_id), "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}");
@@ -1096,8 +1096,8 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
         .{ .item_id = "item-2", .name = "other", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "check-metadata", &calls);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool'", .{}));
 
     // Each pair changes only one field, the null-valued one where a NULL could
     // pass the CHECK. The valid witness shows the row satisfies every
@@ -1181,7 +1181,7 @@ test "closed value columns accept exactly their values" {
             .rejected = &.{ "'interrupted'", "'Failed'", "''" },
         },
     };
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE entry_kind=1", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE entry_kind=1", .{}));
     var sql: [512]u8 = undefined;
     inline for (columns) |column| {
         for (column.accepted) |value|
@@ -1200,7 +1200,7 @@ test "claiming Session positions stops at the largest position, and fails when i
 
     const session = try configureTestSessionAsk(&storage, "claim-config");
     const last: u64 = std.math.maxInt(i64);
-    try store_testing.exec(&storage, "UPDATE session SET next_position=9223372036854775805 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=9223372036854775805 WHERE session_ref=?1", .{session.slice()});
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
@@ -1216,9 +1216,9 @@ test "claiming Session positions stops at the largest position, and fails when i
         try std.testing.expectError(error.SessionPositionExhausted, positions.take(last + 1));
         try a.commit();
     }
-    try std.testing.expectEqual(last, try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{}));
+    try std.testing.expectEqual(last, try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{}));
 
-    try store_testing.exec(&storage, "UPDATE session SET next_position=1 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=1 WHERE session_ref=?1", .{session.slice()});
     try sqlite.exec(storage.database, "CREATE TEMP TRIGGER skip_claim BEFORE UPDATE OF next_position ON main.session BEGIN SELECT RAISE(IGNORE); END");
     {
         const entry = try store_core.enter(&storage, .none);
@@ -1395,7 +1395,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
     };
     const guarded = try Snapshot.take(&storage, tmp.dir);
     defer guarded.deinit();
-    const unclaimed = try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{});
+    const unclaimed = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{});
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
@@ -1410,15 +1410,15 @@ test "a stale Action settlement leaves the Store byte-identical" {
     try std.testing.expectEqualSlices(u8, guarded.database, refused.database);
     try std.testing.expectEqualSlices(u8, guarded.log, refused.log);
     try std.testing.expectEqual(guarded.ids, refused.ids);
-    try std.testing.expectEqual(unclaimed, try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM content WHERE CAST(payload AS TEXT)='A result the guard refuses.'", .{}));
+    try std.testing.expectEqual(unclaimed, try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM content WHERE CAST(payload AS TEXT)='A result the guard refuses.'", .{}));
 
     // The open Action still settles at the position and content id the stale ones left.
-    const position = try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{});
+    const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{});
     const content_id = storage.ids.next.get(.content_id);
     try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{}));
-    try std.testing.expectEqual(position, try store_testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE resolution_code='failed'", .{}));
-    try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code='failed'", .{}));
+    try std.testing.expectEqual(position, try store_testing.sqlite_only.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE resolution_code='failed'", .{}));
+    try std.testing.expectEqual(content_id, try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code='failed'", .{}));
 }
 
 test "every transition dates its fact from the Host clock" {
@@ -1436,7 +1436,7 @@ test "every transition dates its fact from the Host clock" {
         .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "dated-metadata", &calls);
-    var allow: protocol.PermissionDecisionCommand = .{ .action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation", .{}), .decision = .allow_once };
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation", .{}), .decision = .allow_once };
     try allow.key.set("dated-allow");
     try allow.session.set(session.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
@@ -1487,7 +1487,7 @@ test "Action admission never visits an Action waiting for permission" {
         var metadata_buffer: [32]u8 = undefined;
         try settleTwoActionsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&metadata_buffer, "waiting-metadata-{d}", .{round}));
         try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
-        allowed_id.* = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+        allowed_id.* = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
 
         const select = try sqlite.prepare(storage.database, next_action_attempt_sql);
         defer _ = c.sqlite3_finalize(select);
@@ -1495,7 +1495,7 @@ test "Action admission never visits an Action waiting for permission" {
         cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
     // Four waiting Actions cost the scan what two did: none is in its index.
-    try std.testing.expectEqual(@as(u64, 4), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND resolution_code IS NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 4), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND resolution_code IS NULL", .{}));
     try std.testing.expectEqual(steps[0], steps[1]);
 
     // One allowed Action per Turn enters the index; its sibling stays out.
@@ -1535,8 +1535,8 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try submitTestMessage(&storage, &tmp, "result-second", "result-second", session.slice(), "second");
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
-    const first_action_id = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
-    const second_action_id = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+    const first_action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+    const second_action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
     var deny_second: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try deny_second.key.set("result-deny-second");
     try deny_second.session.set(session.slice());
@@ -1666,7 +1666,7 @@ test "tool continuation selection never visits a Turn waiting for its tool resul
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
         cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_code IS NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_code IS NULL", .{}));
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
@@ -2047,7 +2047,7 @@ test "historical accepted assistant output completeness and provenance fence rea
             .model => try storage.setHistoricalModelForTesting(source_binding, "different-model"),
         }
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-        if (case.tied_owners) try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=" ++
+        if (case.tied_owners) try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=" ++
             "(SELECT min(admission_position) FROM model_operation WHERE output_item_count IS NOT NULL) WHERE output_item_count IS NOT NULL", .{});
         // Deliberately bypass the message-certificate CHECK too: these cases
         // exercise read-time detection of damaged persisted item kinds.
@@ -2154,7 +2154,7 @@ test "historical accepted output selection work excludes failed Operation popula
             const session = try configureTestSession(&storage, "selection-config");
             try submitTestMessage(&storage, &tmp, "selection-input", "selection-input", session.slice(), "retain");
             const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
+            try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
             const insert = try sqlite.prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
@@ -2285,7 +2285,7 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
 
     var costs: [2]i32 = undefined;
     for ([_]usize{ 100, 10_000 }, 0..) |history, index| {
-        try store_testing.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop", .{});
+        try store_testing.sqlite_only.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
@@ -2405,9 +2405,9 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
         // alone passes it, and only the read of the saved items finds it.
         try std.testing.expectError(error.InvalidProviderEnvelope, settleMessagesForTesting(&storage, &tmp, binding, 66, false, repeat_at));
         try std.testing.expect(!storage.isFenced());
-        try std.testing.expectEqual(0, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
+        try std.testing.expectEqual(0, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
         try settleMessagesForTesting(&storage, &tmp, binding, 66, false, null);
-        try std.testing.expectEqual(66, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
+        try std.testing.expectEqual(66, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
         try expectDenseSessionPositions(&storage, session.slice());
     }
 }
@@ -2456,7 +2456,7 @@ test "a settlement batch holds 64 items, read narrow up to sixteen" {
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try settleMessagesForTesting(&storage, &tmp, binding, case[0], false, null);
         try std.testing.expectEqual([4]i64{ case[1][0], case[1][1], case[1][2], case[1][3] }, digestReadsForTesting(&storage));
-        try std.testing.expectEqual(case[0], try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
+        try std.testing.expectEqual(case[0], try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
     }
 }
 
@@ -2487,14 +2487,14 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
         };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
-    try std.testing.expectEqual(64, try store_testing.queryU64(&storage, "SELECT count(DISTINCT item_id_digest) FROM model_output_item", .{}));
+    try std.testing.expectEqual(64, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT item_id_digest) FROM model_output_item", .{}));
     const digest = protocol.contentDigest("item-63");
     const statement = try sqlite.prepare(storage.database, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
     defer _ = c.sqlite3_finalize(statement);
     try sqlite.bindBlob(statement, 1, &digest);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(1, c.sqlite3_column_int64(statement, 0));
-    try std.testing.expectEqual(64, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call", .{}));
+    try std.testing.expectEqual(64, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call", .{}));
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
@@ -2534,7 +2534,7 @@ test "a success settlement whose pending Messages read fails reports main's Sess
     // A pending Message makes the count read the stop cutoff.
     try submitTestMessage(&storage, &tmp, "stop-read-second", "stop-read-second-key", session.slice(), "second");
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    try store_testing.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES('stop-read-stop',?1,NULL,0,1)", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES('stop-read-stop',?1,NULL,0,1)", .{session.slice()});
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
     try store_testing.failReadsOf(&storage, "session_stop");
     // Round 1 reads it with the Attempt; a step failure there was
@@ -2572,9 +2572,9 @@ test "64 calls with distinct unknown names fit one call batch's identities" {
         };
     }
     try settleCallsForTesting(&storage, &tmp, binding, "unknown-calls", &calls);
-    try std.testing.expectEqual(64, try store_testing.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'", .{}));
-    try std.testing.expectEqual(64, try store_testing.queryU64(&storage, "SELECT count(DISTINCT name_content_id) FROM model_tool_call", .{}));
-    try std.testing.expectEqual(64, try store_testing.queryU64(&storage, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call", .{}));
+    try std.testing.expectEqual(64, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call WHERE rejection_code='unknown_tool'", .{}));
+    try std.testing.expectEqual(64, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT name_content_id) FROM model_tool_call", .{}));
+    try std.testing.expectEqual(64, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT arguments_content_id) FROM model_tool_call", .{}));
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
@@ -2589,9 +2589,9 @@ test "equal texts in many batches share one row, and entries keep item order" {
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // A later batch's lookup runs after the earlier batch's inserts.
     try settleMessagesForTesting(&storage, &tmp, binding, 140, true, null);
-    try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(DISTINCT message_content_id) FROM model_output_item", .{}));
-    try std.testing.expectEqual(140, try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3", .{}));
-    try std.testing.expectEqual(0, try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i " ++
+    try std.testing.expectEqual(1, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT message_content_id) FROM model_output_item", .{}));
+    try std.testing.expectEqual(140, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE entry_kind=3", .{}));
+    try std.testing.expectEqual(0, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i " ++
         "ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal WHERE e.session_position<>i.session_position", .{}));
     try expectDenseSessionPositions(&storage, session.slice());
 }
@@ -2613,8 +2613,8 @@ test "an item with more content than a batch holds settles through its own looku
     try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
     const items = [_][]const u8{ writer.buffered(), "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}" };
     try settleItemsForTesting(&storage, &tmp, binding, &items, "done");
-    try std.testing.expectEqual(300, try store_testing.queryU64(&storage, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3", .{}));
-    try std.testing.expectEqual(2, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
+    try std.testing.expectEqual(300, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE part_kind=3", .{}));
+    try std.testing.expectEqual(2, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
     try expectDenseSessionPositions(&storage, session.slice());
 }
 
@@ -2848,7 +2848,7 @@ test "controls wait behind an active model settlement transaction" {
     try std.testing.expect(interrupt_reply == .rejected);
     try std.testing.expectEqual(protocol.ModelInterruptionRejection.operation_resolved, interrupt_reply.rejected.code);
 
-    const action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
+    const action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
     try expectContent(
         &storage,
         try storage.actionCallId(session.slice(), action_id),
@@ -2934,13 +2934,13 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try store_testing.exec(&storage, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
     var view: HistoricalView = undefined;
     try storage.openHistoricalView(binding, &view);
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
-    try store_testing.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
     for ([_][:0]const u8{
         "UPDATE session SET provider='Codex' WHERE session_ref=?1",
         "UPDATE session_revision SET provider='9codex' WHERE session_ref=?1",
@@ -2952,7 +2952,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
 
-    try store_testing.exec(&storage, "UPDATE session SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET provider='other' WHERE session_ref=?1", .{created_session_0.slice()});
     try std.testing.expectError(error.CorruptStore, storage.inspectSessionForTesting(created_session_0.slice()));
 }
 
@@ -2968,7 +2968,7 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try store_testing.sqliteExec(storage.database, sql, .{session.slice()});
@@ -3347,8 +3347,8 @@ test "real SQLite full during import publishes no canonical prefix" {
     try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
     try std.testing.expect((try reopened.observeCommand("full-import")).status == .absent);
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&reopened, "SELECT count(*) FROM content WHERE byte_length=131072", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&reopened, "SELECT count(*) FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&reopened, "SELECT count(*) FROM content WHERE byte_length=131072", .{}));
 }
 
 test "message admissions remain queued in order and retain bounded canonical content" {
@@ -3395,7 +3395,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     const stamped = try sqlite.pragmaInt(storage.database, "SELECT admitted_at FROM message_admission WHERE admission_id=1");
     try std.testing.expect(before <= stamped and stamped <= after);
     // A replayed or restarted admission keeps the time it was admitted at.
-    try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=1000 WHERE admission_id=1", .{});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admitted_at=1000 WHERE admission_id=1", .{});
 
     const replay = storage.submitMessageWithModel(&first, commits.callback(), .{});
     // A replayed admission installs nothing.
@@ -3490,13 +3490,13 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unknown, &input));
     // The other Action of the call pair, never attempted: its timeout is NULL.
     var unattempted = action;
-    unattempted.action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND attempt_ordinal=0", .{session.slice()});
+    unattempted.action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND attempt_ordinal=0", .{session.slice()});
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(unattempted, &input));
     var rebound = action;
     rebound.turn_id += 1000;
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(rebound, &input));
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    try store_testing.exec(&storage, "UPDATE action_operation SET permission_revision=999 WHERE session_ref=?1 AND attempt_ordinal=1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET permission_revision=999 WHERE session_ref=?1 AND attempt_ordinal=1", .{session.slice()});
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(action, &input));
     try std.testing.expect(!storage.isFenced());
@@ -3511,7 +3511,7 @@ test "revoking a sender runs main's statements, with no transaction, and a missi
     const session = try configureTestSession(&storage, "revoke-config");
     const action = try attemptBashForTesting(&storage, &tmp, session.slice());
     const held = "SELECT count(*) FROM action_operation WHERE session_ref=?1 AND sender_handle IS NOT NULL";
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, held, .{session.slice()}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, held, .{session.slice()}));
 
     // Main: its UPDATE, then its touch's Workspace read. Now: the read, then the UPDATE.
     var statements: TestingStatements = .{};
@@ -3519,7 +3519,7 @@ test "revoking a sender runs main's statements, with no transaction, and a missi
     try storage.revokeActionSender(action);
     statements.end(storage.database);
     try std.testing.expectEqual(@as(u64, 2), statements.count);
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, held, .{session.slice()}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, held, .{session.slice()}));
 
     var unknown = action;
     unknown.action_id += 1000;
@@ -3719,8 +3719,8 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     try storage.open(io, database, paths.store.slice());
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
-    try store_testing.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,zeroblob(0))", .{});
-    const crash_rows = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,zeroblob(0))", .{});
+    const crash_rows = try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM content", .{});
     try std.testing.expect((try cwd.statFile(io, wal, .{})).size > 0);
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, shm, .{}));
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, journal, .{}));
@@ -3748,8 +3748,8 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
 
     // A payload past the auto-checkpoint size moves into the database file,
     // and the next commit truncates the reset WAL to the size limit.
-    try store_testing.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),6291456,0,zeroblob(6291456))", .{});
-    try store_testing.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,zeroblob(0))", .{});
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),6291456,0,zeroblob(6291456))", .{});
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,zeroblob(0))", .{});
     try std.testing.expect((try cwd.statFile(io, database, .{})).size > 6291456);
     try std.testing.expect((try cwd.statFile(io, wal, .{})).size <= 4194304);
     try storage.close();
@@ -3763,7 +3763,7 @@ test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash c
     try tmp.dir.copyFile("crash/rui.sqlite3-wal", cwd, wal, io, .{});
     try storage.open(io, database, paths.store.slice());
     storage_open = true;
-    try std.testing.expectEqual(crash_rows, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expectEqual(crash_rows, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     var database_only_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
@@ -3901,7 +3901,7 @@ test "existing Store rejects a format that store_meta does not hold" {
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     var storage: Store = undefined;
     try storage.open(std.testing.io, database, root);
-    try std.testing.expectEqual(@as(u64, schema_version), try store_testing.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
     try storage.close();
     const Case = struct { sql: [:0]const u8, refusal: anyerror };
     const cases = [_]Case{
@@ -4006,11 +4006,11 @@ test "a Workspace is matched by its digest and then its text" {
     var other_command = try completeConfiguration("digest-other", "", other_workspace, "model");
     const other = storage.configure(&other_command, .{}).accepted.session;
 
-    const first_key = try store_testing.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{first.slice()});
-    try std.testing.expectEqual(first_key, try store_testing.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{sibling.slice()}));
-    try std.testing.expectEqual(first_key, try store_testing.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{first.slice()}));
-    const other_key = try store_testing.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{other.slice()});
-    try std.testing.expectEqual(other_key, try store_testing.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{other.slice()}));
+    const first_key = try store_testing.sqlite_only.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{first.slice()});
+    try std.testing.expectEqual(first_key, try store_testing.sqlite_only.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{sibling.slice()}));
+    try std.testing.expectEqual(first_key, try store_testing.sqlite_only.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{first.slice()}));
+    const other_key = try store_testing.sqlite_only.queryU64(&storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{other.slice()});
+    try std.testing.expectEqual(other_key, try store_testing.sqlite_only.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{other.slice()}));
     try std.testing.expect(other_key != first_key);
 
     var scope: protocol.Bounded(protocol.max_workspace_bytes) = .{};
@@ -4041,7 +4041,7 @@ test "a reference is checked when its row is written, not at commit" {
         }
     };
     try std.testing.expectError(error.SqliteExecFailed, Admission.insert(storage.database, session.slice(), "later-command"));
-    try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
         "VALUES('later-command',2,'',zeroblob(32),1,'',0,0,(SELECT max(command_seq)+1 FROM core_command))", .{});
     try Admission.insert(storage.database, session.slice(), "later-command");
 }
@@ -4083,7 +4083,7 @@ test "canonical observation failure fences later admission" {
     const created_session_0 = created_session_0_reply.accepted.session;
 
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    try store_testing.exec(&storage, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
     try std.testing.expectError(error.CorruptStore, storage.inspectSessionForTesting(created_session_0.slice()));
 
@@ -4183,7 +4183,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
         try sqlite.bindText(corrupt, 2, session.slice());
         try sqlite.expectDone(corrupt);
     } else {
-        try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1)", .{session.slice()});
+        try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1)", .{session.slice()});
     }
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
     request.end = valid.end;
@@ -4237,7 +4237,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
     // Damaging the first rejection must leave the requested sibling healthy;
     // identical rejection bytes would deduplicate into one content identity.
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call", .{}));
     var request = protocol.ConversationPage{};
     try request.session.set(session.slice());
     const valid = try store_core.publicConversationPageForTesting(&storage, request);
@@ -4255,12 +4255,12 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     // Keep counts, acceptance positions and results intact for sibling damage:
     // reading the healthy highest ordinal must validate the entire group.
     switch (damage) {
-        .sibling_ordinal => try store_testing.exec(&storage, "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0", .{}),
-        .sibling_call_id => try store_testing.exec(&storage, "UPDATE model_tool_call SET call_id_content_id=(SELECT name_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0", .{}),
-        .sibling_arguments => try store_testing.exec(&storage, "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0", .{}),
-        .private => try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)", .{}),
+        .sibling_ordinal => try store_testing.sqlite_only.exec(&storage, "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0", .{}),
+        .sibling_call_id => try store_testing.sqlite_only.exec(&storage, "UPDATE model_tool_call SET call_id_content_id=(SELECT name_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0", .{}),
+        .sibling_arguments => try store_testing.sqlite_only.exec(&storage, "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0", .{}),
+        .private => try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)", .{}),
         .missing => {
-            try store_testing.withoutForeignKeys(&storage, "DELETE FROM content WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)", .{});
+            try store_testing.sqlite_only.withoutForeignKeys(&storage, "DELETE FROM content WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)", .{});
         },
     }
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
@@ -4332,7 +4332,7 @@ test "public completed Action sibling corruption fences first Conversation read"
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, binding, "output");
             for ([_][]const u8{ "allow-first", "allow-second" }) |key| {
-                const action_id = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE resolution_code IS NULL", .{});
+                const action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE resolution_code IS NULL", .{});
                 var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
                 try allow.key.set(key);
                 try allow.session.set(session.slice());
@@ -4342,7 +4342,7 @@ test "public completed Action sibling corruption fences first Conversation read"
             }
             // Obtain only the immutable identity, not a traversal on another
             // public route that could accidentally supply validation authority.
-            const position = try store_testing.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
+            const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
             try sqlite.exec(storage.database, fault);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
@@ -4416,11 +4416,11 @@ test "a message's text is stored once and its parts replay as lengths of it" {
     const session = try configureTestSession(&storage, "text-once-config");
     const answer = [_]TestingAnswerPart{ .{ .encoded = "one ", .decoded = "one " }, .{ .encoded = "", .decoded = "" }, .{ .encoded = "tw\\u00f6", .decoded = "tw\u{f6}" } };
     try answerTestTurn(&storage, &tmp, session.slice(), "text-once", &answer);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE payload=CAST('one tw\u{f6}' AS BLOB) AND private=0", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE payload IN (CAST('one ' AS BLOB),CAST('tw\u{f6}' AS BLOB))", .{}));
-    try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_part WHERE text_content_id IS NULL", .{}));
-    try std.testing.expectEqual(@as(u64, 4 + 0 + 4), try store_testing.queryU64(&storage, "SELECT sum(text_length) FROM model_output_part", .{}));
-    try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT content_id FROM conversation_entry WHERE entry_kind=3", .{}), try store_testing.queryU64(&storage, "SELECT message_content_id FROM model_output_item WHERE item_kind=2", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM content WHERE payload=CAST('one tw\u{f6}' AS BLOB) AND private=0", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM content WHERE payload IN (CAST('one ' AS BLOB),CAST('tw\u{f6}' AS BLOB))", .{}));
+    try std.testing.expectEqual(@as(u64, 3), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_output_part WHERE text_content_id IS NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 4 + 0 + 4), try store_testing.sqlite_only.queryU64(&storage, "SELECT sum(text_length) FROM model_output_part", .{}));
+    try std.testing.expectEqual(try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM conversation_entry WHERE entry_kind=3", .{}), try store_testing.sqlite_only.queryU64(&storage, "SELECT message_content_id FROM model_output_item WHERE item_kind=2", .{}));
     // Each part kind holds exactly its text shape, and a message names its text.
     for ([_]struct { ConstraintProbe, [:0]const u8 }{
         .{ .check_violation, "UPDATE model_output_part SET text_length=NULL WHERE part_ordinal=0" },
@@ -4595,7 +4595,7 @@ test "missing assistant certificates respect page windows and fixed ends" {
             try submitTestMessage(&storage, &tmp, key, key, missing.session.slice(), "later user input");
         }
         _ = (try storage.admitNextModelAttempt(.{})).?;
-        try store_testing.exec(&storage, "DELETE FROM conversation_entry WHERE entry_kind=3", .{});
+        try store_testing.sqlite_only.exec(&storage, "DELETE FROM conversation_entry WHERE entry_kind=3", .{});
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
         try storage.close();
         try testingStore(&storage, &tmp, std.testing.io);
@@ -4942,7 +4942,7 @@ test "continued accepted output keeps model immutable and public text readable" 
     try storage.settleModelSuccess(completion_binding, &output, .{});
     // The same output is an answer both before and after pending input is
     // consumed. Only the owning Turn's completion decision differs.
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'", .{}));
     try expectBindingPreserved(&storage, created_session_0.slice(), "after-output");
     const completed = (try storage.observeCommand("continued-first")).message.?.queue.?;
     const completion = switch (completed.state) {
@@ -5080,7 +5080,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
             // Attempt's answer will.
             try std.testing.expectEqualStrings("", resolution.slice());
             try std.testing.expectEqualStrings("", recorded.slice());
-            try store_testing.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE retry_due_at_ms IS NOT NULL", .{});
+            try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE retry_due_at_ms IS NOT NULL", .{});
             binding = (try admitRetryForTesting(&storage)).?.permit.binding;
         } else {
             try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
@@ -5109,7 +5109,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     try submitTestMessage(&storage, &tmp, "uncorrelated-input", "uncorrelated-message", session.slice(), "fail");
     const terminal = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = "" } }, .ordinary, .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE request_id IS NULL AND resolution_code='provider_http_401'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE request_id IS NULL AND resolution_code='provider_http_401'", .{}));
 }
 
 test "a refresh claim whose UPDATE changes no row answers false and does not fence, as on main" {
@@ -5152,7 +5152,7 @@ test "a refresh claim whose UPDATE changes no row answers false and does not fen
         try std.testing.expect(!try entry.finishTransaction(store_core.Ordinary.attempt_binding, .{}, access.end(.{}, model_settlement_domain.claimModelAuthRefresh(&interposed, binding))));
     }
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE auth_refresh_claimed=1", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE auth_refresh_claimed=1", .{}));
 }
 
 test "temporary model failures conserve allowance and exhaust after four Attempts" {
@@ -5302,7 +5302,7 @@ test "canonical historical read failure fences dispatch without a fabricated out
     const binding = try admitted_attempt.permit.consume();
 
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    try store_testing.exec(&storage, "UPDATE session_revision SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
     var view: HistoricalView = undefined;
     try storage.openHistoricalView(binding, &view);
@@ -5355,7 +5355,7 @@ test "activity revalidation takes the same steps however long a Session's histor
 
     var steps: [2]i32 = undefined;
     for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
-        try store_testing.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop; DELETE FROM turn", .{});
+        try store_testing.sqlite_only.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop; DELETE FROM turn", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
@@ -5609,7 +5609,7 @@ test "retry due index excludes future population and preserves age ordering" {
         "INDEXED BY test_model_operation_retry_age WHERE resolution_code IS NULL AND attempt_ordinal<4 " ++
         "AND retry_due_at_ms<=?1 AND operation_id>?2 ORDER BY operation_id LIMIT 2";
     for ([_]usize{ 100, 1_000, 10_000 }, 0..) |future_count, index| {
-        try store_testing.exec(&storage, "DELETE FROM model_operation", .{});
+        try store_testing.sqlite_only.exec(&storage, "DELETE FROM model_operation", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
@@ -5633,7 +5633,7 @@ test "retry due index excludes future population and preserves age ordering" {
 
     var due_costs: [3]i32 = undefined;
     for ([_]usize{ 10, 100, 1_000 }, 0..) |due_count, index| {
-        try store_testing.exec(&storage, "DELETE FROM model_operation", .{});
+        try store_testing.sqlite_only.exec(&storage, "DELETE FROM model_operation", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
@@ -5649,8 +5649,8 @@ test "retry due index excludes future population and preserves age ordering" {
     try std.testing.expect(due_costs[1] > due_costs[0]);
     try std.testing.expect(due_costs[2] > due_costs[1]);
 
-    try store_testing.exec(&storage, "DELETE FROM model_operation", .{});
-    try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM model_operation", .{});
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
         "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) VALUES" ++
         "(1,1,'000001',1,1,1,1,99,0,1)," ++
         "(2,2,'000002',1,1,1,1,50,0,1)," ++
@@ -5673,7 +5673,7 @@ const testing_401: ModelFailure = .{ .correlated = .{ .code = "provider_http_401
 
 fn settleTransientForTesting(storage: *Store, binding: AttemptBinding) !AttemptBinding {
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_503" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
-    try store_testing.exec(storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL AND retry_due_at_ms!=0", .{});
+    try store_testing.sqlite_only.exec(storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL AND retry_due_at_ms!=0", .{});
     return (try admitRetryForTesting(storage)).?.permit.binding;
 }
 
@@ -5691,7 +5691,7 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     try submitTestMessage(&storage, &tmp, "refresh-a", "refresh-a", session.slice(), "a");
     const a1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expect(try storage.claimModelAuthRefresh(a1));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND auth_refresh_claimed=1", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND auth_refresh_claimed=1", .{}));
     try std.testing.expect(!try storage.claimModelAuthRefresh(a1));
     // A completed refresh makes the one replacement immediately eligible,
     // without generic backoff, and records the 401.
@@ -5783,7 +5783,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     defer storage.close() catch unreachable;
 
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    try store_testing.exec(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
+    try store_testing.sqlite_only.exec(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
         "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
         "SELECT value,value,printf('%06d',value),1,1,1,1," ++
@@ -5835,7 +5835,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.attempt_ordinal);
     try std.testing.expectEqual(@as(usize, 5150), comparisons);
 
-    try store_testing.exec(&storage, "DELETE FROM model_operation", .{});
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM model_operation", .{});
     for (6000..6102) |value| {
         var buffer: [32]u8 = undefined;
         const key = try std.fmt.bufPrint(&buffer, "exhausted-{d}", .{value});
@@ -5982,7 +5982,7 @@ test "the queued Messages cost the queue, not the history after a page's end" {
     // as one ending after the stop does.
     var steps: [2][2]i32 = undefined;
     for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
-        try store_testing.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop", .{});
+        try store_testing.sqlite_only.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
@@ -6038,7 +6038,7 @@ test "a stop cancels its Actions in pages of one write each, in call order at de
             }
             try settleCallsForTesting(&storage, &tmp, binding, "many-calls", &calls);
         }
-        try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND attempt_ordinal=0", .{}));
+        try std.testing.expectEqual(@as(u64, count), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND attempt_ordinal=0", .{}));
         var stop = try completeSessionStop("many-stop", session.slice());
         var statements: TestingStatements = .{};
         statements.begin(storage.database);
@@ -6052,11 +6052,11 @@ test "a stop cancels its Actions in pages of one write each, in call order at de
         const pages = (count + 12) / 13;
         const expected: u64 = if (count == 0) 10 else 11 + 2 * pages;
         try std.testing.expectEqual(expected, statements.count);
-        try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
+        try std.testing.expectEqual(@as(u64, count), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
         // Acceptance follows call order.
-        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN action_operation b " ++
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN action_operation b " ++
             "ON b.parent_operation_id=a.parent_operation_id AND a.call_ordinal<b.call_ordinal WHERE a.acceptance_position>=b.acceptance_position", .{}));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_code='cancelled'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_code='cancelled'", .{}));
         try expectDenseSessionPositions(&storage, session.slice());
         try std.testing.expect(!storage.isFenced());
     }
@@ -6075,14 +6075,14 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     const ask = try configureTestSessionAsk(&storage, "stepped-ask");
     try submitTestMessage(&storage, &tmp, "stepped-ask-input", "stepped-ask-input", ask.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-ask-calls");
-    const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+    const first = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
     try denyForTesting(&storage, ask.slice(), "stepped-deny-first", first);
-    try store_testing.exec(&storage, "UPDATE model_operation SET resolved_at=300;UPDATE action_operation SET resolved_at=100 WHERE resolution_code IS NOT NULL", .{});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET resolved_at=300;UPDATE action_operation SET resolved_at=100 WHERE resolution_code IS NOT NULL", .{});
     try std.testing.expectEqual(@as(u64, 100), try expectOneWork(&storage, &tmp, ask.slice(), "approval"));
     // Denying the other settles the group: pending from the later denial,
     // whose clock read earlier still.
-    try denyForTesting(&storage, ask.slice(), "stepped-deny-second", try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{}));
-    try store_testing.exec(&storage, "UPDATE action_operation SET resolved_at=" ++
+    try denyForTesting(&storage, ask.slice(), "stepped-deny-second", try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{}));
+    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET resolved_at=" ++
         "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 50 ELSE 100 END", .{});
     try std.testing.expectEqual(@as(u64, 50), try expectOneWork(&storage, &tmp, ask.slice(), "pending"));
 
@@ -6276,7 +6276,7 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
         const session = try configureTestSession(&storage, "forward-config");
         try submitTestMessage(&storage, &tmp, "forward-first", "first", session.slice(), "first");
         try submitTestMessage(&storage, &tmp, "forward-second", "second", session.slice(), "second");
-        const first = try store_testing.queryU64(&storage, "SELECT min(admission_position) FROM message_admission", .{});
+        const first = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(admission_position) FROM message_admission", .{});
         // Foreign keys are off: each tool group names its Turn before the
         // Turn row exists. A cancelled Turn needs no answer content.
         try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -6410,7 +6410,7 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
         if (shape == .many_operations) try std.testing.expect(page.call_activity.total > 32);
         // The last candidate call's item stops being a call item; no kept
         // presentation reads that call.
-        try store_testing.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
+        try store_testing.sqlite_only.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
             "(SELECT operation_id,item_ordinal FROM model_tool_call ORDER BY operation_id DESC,call_ordinal DESC LIMIT 1)", .{});
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
         try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
@@ -6429,7 +6429,7 @@ test "the tool outcome rule counts an Operation's calls against its call items" 
     const session = try configureTestSessionAsk(&storage, "count-config");
     try submitTestMessage(&storage, &tmp, "count-input", "input", session.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "count-calls");
-    try store_testing.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3 AND item_ordinal=" ++
+    try store_testing.sqlite_only.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3 AND item_ordinal=" ++
         "(SELECT item_ordinal FROM model_tool_call WHERE call_ordinal=1)", .{});
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
     try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
@@ -6452,7 +6452,7 @@ test "the Current report fences an unauthorized Action proposed under bypass" {
     try submitTestMessage(&storage, &tmp, "unauthorized-input", "input", session.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "unauthorized-calls");
     // The CHECK pairs a grant with its decision, so the damage clears both.
-    try store_testing.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL WHERE call_ordinal=1", .{});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL WHERE call_ordinal=1", .{});
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
     try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
     try std.testing.expect(storage.isFenced());
@@ -6509,7 +6509,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
 
     // A replacement Attempt keeps its Operation's frozen effort.
     try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
-    try store_testing.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL", .{});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL", .{});
     const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(first.operation_id, retry.operation_id);
     {
@@ -6665,7 +6665,7 @@ test "historical context selection work excludes nonmatching Operation populatio
             // Isolate search work from payload work: failed assistant/compaction
             // Operations have no accepted output. Their population must not be
             // scanned inside one source/frontier/anchor selection step.
-            try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
+            try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
             const insert = try sqlite.prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
@@ -6715,7 +6715,7 @@ test "model admission work excludes failed historical Operation population" {
             try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
             const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             // Keep the actual current Operation newer than all injected history.
-            try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001", .{});
+            try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001", .{});
             const insert = try sqlite.prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
@@ -6908,7 +6908,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             };
             try std.testing.expectEqual(if (compact) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
             try std.testing.expectEqual(@as(u64, if (compact) 1 else 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
-            if (kind == .instruction) try std.testing.expectEqual(@as(u64, @intCast(population + 1 + @as(usize, if (compact) 0 else 2))), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_revision IS NOT NULL", .{}));
+            if (kind == .instruction) try std.testing.expectEqual(@as(u64, @intCast(population + 1 + @as(usize, if (compact) 0 else 2))), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_revision IS NOT NULL", .{}));
             return measured.steps;
         }
     };
@@ -6947,9 +6947,9 @@ test "admission fails before COMMIT when a counted write changes other than its 
         try std.testing.expectError(case.expected, storage.admitModelAttempt(.message, .{}));
         try std.testing.expect(storage.isFenced());
         // The round failed before COMMIT: no Turn, entry or bound Message stays.
-        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn", .{}));
-        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry", .{}));
-        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE turn_id IS NOT NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM conversation_entry", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE turn_id IS NOT NULL", .{}));
     }
 }
 
@@ -6965,7 +6965,7 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
     try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":5}", .request_id = .{}, .report = "" } }, .ordinary, .{});
     // The saved record's first byte made one no UTF-8 decoder accepts.
     try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(X'FF'||substr(payload,2) AS BLOB) WHERE payload=CAST('{\"refusal\":\"quota\",\"resets_at\":5}' AS BLOB)");
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT changes()", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT changes()", .{}));
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
     const failed = (try store_core.activityPageForTesting(&storage, request)).work.work.state.failed;
@@ -7057,7 +7057,7 @@ test "a list row whose first Message is missing is CorruptStore" {
     // The first Turn still names the admission, whose content is gone, so
     // the row's settings read finds no row.
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    try store_testing.exec(&storage, "DELETE FROM content WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref=?1)", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM content WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref=?1)", .{session.slice()});
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
     var used = std.atomic.Value(u64).init(0);
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
@@ -7530,7 +7530,7 @@ fn mixedHistorySteps(count: usize) ![report_domain.full_pages.len]i64 {
             try settleItemsForTesting(&storage, &tmp, answered, &items, "Done.");
             continue;
         }
-        const last = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+        const last = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
         for (0..count / 2) |step| {
             var key: [32]u8 = undefined;
             try denyForTesting(&storage, target, try std.fmt.bufPrint(&key, "mixed-deny-{d}", .{step}), last - step);
@@ -7641,9 +7641,9 @@ test "a Full list takes a statement per 256 rows, and lists each row once in ord
         try settleItemsForTesting(&storage, &tmp, successor.permit.binding, &items, "ok");
     }
     for ([_]usize{ 256, 257, 513 }) |rows| {
-        while (try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE kind=3", .{}) < rows) {
+        while (try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM core_command WHERE kind=3", .{}) < rows) {
             var key: [32]u8 = undefined;
-            var stop = try completeSessionStop(try std.fmt.bufPrint(&key, "chunked-stop-{d:0>4}", .{try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE kind=3", .{})}), session.slice());
+            var stop = try completeSessionStop(try std.fmt.bufPrint(&key, "chunked-stop-{d:0>4}", .{try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM core_command WHERE kind=3", .{})}), session.slice());
             // An idle Session accepts each stop.
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
         }
@@ -7830,7 +7830,7 @@ test "Full history answers a later row's failure before a kept row's content, wh
             "WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='double-fault-0'); PRAGMA ignore_check_constraints=OFF");
         if (later_fails) {
             // The third is listed between the first and the second.
-            try store_testing.exec(&storage, "UPDATE message_admission SET admission_position=(SELECT admission_position FROM message_admission WHERE command_key='double-fault-0') " ++
+            try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admission_position=(SELECT admission_position FROM message_admission WHERE command_key='double-fault-0') " ++
                 "WHERE command_key='double-fault-2'; UPDATE message_admission SET admission_position=admission_position+10 WHERE command_key='double-fault-1'", .{});
             try std.testing.expectError(error.CorruptStore, testingFullHistory(&storage, &tmp, session.slice(), null));
         } else try std.testing.expectError(error.ContentReadFailed, testingFullHistory(&storage, &tmp, session.slice(), null));

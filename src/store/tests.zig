@@ -1402,7 +1402,8 @@ test "a list row carries its Session's Label, times, first Message, work and pee
             }
             _ = (try storage.admitNextModelAttempt(.{})).?;
             try submitTestMessage(&storage, &tmp, "row-second", "row-second", session.slice(), "and then");
-            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=2000 WHERE admission_id=(SELECT max(admission_id) FROM message_admission)", .{});
+            const newest_admission = try store_testing.queryU64(&storage, "SELECT max(admission_id) FROM message_admission", .{});
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=2000 WHERE admission_id=?1", .{newest_admission});
             {
                 // The first Message is now its Turn's; the latest person's Message is
                 // the queued second one.
@@ -4950,9 +4951,12 @@ test "message observation validates accepted admission references independently"
                 switch (corruption) {
                     .session => try store_testing.exec(&storage, "UPDATE message_admission SET session_ref=?1 " ++
                         "WHERE command_key='reference-primary-message'", .{other_session.slice()}),
-                    .content => try store_testing.exec(&storage, "UPDATE message_admission SET content_id=(" ++
-                        "SELECT content_id FROM message_admission WHERE command_key='reference-other-message') " ++
-                        "WHERE command_key='reference-primary-message'", .{}),
+                    .content => try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?1 " ++
+                        "WHERE command_key='reference-primary-message'", .{try store_testing.queryU64(
+                        &storage,
+                        "SELECT content_id FROM message_admission WHERE command_key='reference-other-message'",
+                        .{},
+                    )}),
                 }
                 try std.testing.expectError(
                     error.CorruptStore,
@@ -6123,8 +6127,9 @@ test "a Tool Result is dated by its group's last acceptance, even when the clock
             // The clock stepped back between the two acceptances: the later one,
             // at the greater position, carries the earlier time.
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT acceptance_position) FROM action_operation", .{}));
+            const latest_acceptance = try store_testing.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try store_testing.exec(&storage, "UPDATE action_operation SET resolved_at=" ++
-                "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 100 ELSE 200 END", .{});
+                "CASE WHEN acceptance_position=?1 THEN 100 ELSE 200 END", .{latest_acceptance});
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
             const page = try store_core.activityPageForTesting(&storage, request);
@@ -7019,9 +7024,10 @@ test "compaction selected newest base corruption fences rather than using an old
                 const newest = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleCompactionForTesting(&storage, &tmp, newest, &.{ .compaction, .message });
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const newest_operation = try store_testing.queryU64(&storage, "SELECT max(operation_id) FROM model_output_item", .{});
                 switch (corruption) {
-                    .anchor => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4", .{}),
-                    .tail => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=2", .{}),
+                    .anchor => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=?1 AND item_kind=4", .{newest_operation}),
+                    .tail => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=?1 AND item_kind=2", .{newest_operation}),
                     .payload => try store_testing.exec(&storage, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT extras_content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4)", .{}),
                 }
                 var view: HistoricalView = undefined;
@@ -8176,9 +8182,11 @@ test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
 
 test "a required engine these tests do not build fails them" {
     const Name = store_testing.EngineName;
-    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty));
-    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres })));
-    try std.testing.expectEqual(Name.mysql, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql })));
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty, .empty));
+    try std.testing.expectEqual(Name.mysql, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql }), .empty));
+    try std.testing.expectEqual(Name.postgres, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres }), .initOne(Name.mysql)));
+    // CI's live shards list both servers; each has a test of its own here.
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql, Name.postgres }), store_testing.checked_elsewhere));
 }
 
 test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
@@ -8718,10 +8726,10 @@ test "creating a Session takes the same work however many Sessions exist, in rou
             const few = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-few");
             const few_rounds = few.taken();
-            try store_testing.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
-                "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
                 "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+                "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
+                "SELECT 100000+value,'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
             const many = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-many");
             try std.testing.expectEqual(few_rounds, many.taken());
@@ -8931,18 +8939,16 @@ test "complete historical tool-result traversal scales with groups and calls, in
 
 /// A bound fixture statement that adds `?1` failed Operations after
 /// Operation `?2`, in its Turn.
-const failed_operations_sql = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
-    "SELECT value+1 FROM sequence WHERE value<?1) " ++
-    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
+const failed_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
     "attempt_ordinal,output_reservation,resolution_code,resolved_at) " ++
+    "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
     "1,0,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 /// `failed_operations_sql`, the Operations alternating in purpose.
-const failed_purpose_operations_sql = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
-    "SELECT value+1 FROM sequence WHERE value<?1) " ++
-    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
+const failed_purpose_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
     "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+    "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
     "0,1,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
@@ -9081,11 +9087,12 @@ test "Full Message projection work does not multiply Messages by stops, in round
                 try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
                     "VALUES(?1,?2,?3,1,NULL,1,?4)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
             }
+            const last_command = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0) FROM core_command", .{});
             for (1..stop_count + 1) |index| {
                 var key: [32]u8 = undefined;
                 const command = try std.fmt.bufPrint(&key, "stop-{d}", .{index});
                 try store_testing.withoutForeignKeys(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
-                    "VALUES(?1,3,?2,zeroblob(32),NULL,NULL,1,'accepted',0,0,(SELECT coalesce(max(command_seq),0)+1 FROM core_command))", .{ command, session.slice() });
+                    "VALUES(?1,3,?2,zeroblob(32),NULL,NULL,1,'accepted',0,0,?3)", .{ command, session.slice(), last_command + index });
                 try store_testing.withoutForeignKeys(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) " ++
                     "VALUES(?1,?2,NULL,?3,?4,1)", .{ command, session.slice(), message_count, index });
             }
@@ -9098,8 +9105,9 @@ test "Full Message projection work does not multiply Messages by stops, in round
     }.run);
 }
 
-/// The head of a fixture statement over `value` 1 through `?1`.
-const sequence_to_first_argument = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
+/// The WITH of a fixture INSERT over `value` 1 through `?1`. It goes after
+/// the INSERT's column list, the one place MySQL and SQLite both take it.
+const sequence_to_first_argument = "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
 
 test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in rounds" {
     try store_testing.forEachEngine(struct {
@@ -9124,20 +9132,20 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session", .{});
             // Foreign keys are off: each history Message names its Turn
             // before the Turn row exists.
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
-                "SELECT value,?2,printf('history-%d',value),?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                sequence_to_first_argument ++
+                "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                sequence_to_first_argument ++
                 "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1 FROM sequence", .{ history, session.slice(), start });
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                sequence_to_first_argument ++
                 "SELECT value,0,?2,?3+4*(value-1)+1,3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                sequence_to_first_argument ++
                 "SELECT value,?2,0,0,?4,?4,?4,zeroblob(120),'unknown_tool',?4,?3+4*(value-1)+2 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                sequence_to_first_argument ++
                 "SELECT value,?2,value,value,value,'completed',?3+4*(value-1)+3,1 FROM sequence", .{ history, session.slice(), start });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+4*?1", .{history});
             // The history rows bypass the Host's ids.
@@ -9191,9 +9199,9 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
             try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
-                "SELECT 1000+value,?2,printf('received-%d',value),?4,?3+value-1,1,?5,value FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
+                sequence_to_first_argument ++
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,value FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
@@ -9227,17 +9235,17 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             // Each tool group names its Turn before the Turn row exists. A
             // cancelled Turn needs no answer content.
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                sequence_to_first_argument ++
                 "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1 FROM sequence", .{ history, session.slice(), start });
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                sequence_to_first_argument ++
                 "SELECT 1000+value,0,?2,?3+3*(value-1),3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                sequence_to_first_argument ++
                 "SELECT 1000+value,?2,0,0,?4,?4,?4,zeroblob(120),'unknown_tool',?4,?3+3*(value-1)+1 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                sequence_to_first_argument ++
                 "SELECT 1000+value,?2,1000+value,1000+value,1000+value,'cancelled',?3+3*(value-1)+2,1 FROM sequence", .{ history, session.slice(), start });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+3*?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
@@ -9270,9 +9278,9 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             // The waiting Messages have no commands.
-            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
-                "SELECT 1000+value,?2,printf('waiting-%d',value),?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                sequence_to_first_argument ++
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");

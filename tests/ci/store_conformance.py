@@ -54,7 +54,7 @@ SQLITE_TESTS = "src/store/sqlite_tests.zig"
 SQLITE_CODE = re.compile(
     r"\bsqlite\.|\bc\.(?:sqlite3|SQLITE)|\.database\b|\bStatementCache\b|\bsqlite_heap_bytes\b|"
     r"\.passes\b|\.statements\b|\btesting_content_work\.(?:read|blob|closes)\b|\.read_blob\b|"
-    r"\.open\(\s*(?:std\.testing\.)?io\s*,|\bopenWithOptions\b")
+    r"\.open\(\s*(?:std\.testing\.)?io\s*,|\bopenWithOptions\b|\bsqlite_only\b")
 SQLITE_IMPORT = '@import("sqlite.zig")'
 # Store helpers of tests.zig that conformance code reaches through the fixtures.
 NEUTRAL_HELPERS = {"testingStore"}

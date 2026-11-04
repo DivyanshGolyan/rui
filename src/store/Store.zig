@@ -244,7 +244,9 @@ pub const Store = struct {
         // A new Host never inherits a lost Action's sender authority. It
         // clears every Session's rows, so it cannot tie to one as a typed
         // Write must; its text is held to rsql's portability rules only.
-        try sqlite.exec(database.?, comptime portable("UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL"));
+        const sender_sweep = "UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL";
+        if (@import("builtin").is_test) @import("mysql_dialect_check.zig").shadowPrepare(comptime rsql.render(.mysql, sender_sweep));
+        try sqlite.exec(database.?, comptime portable(sender_sweep));
 
         if (@import("builtin").is_test) try sqlite.createTouchOracleForTesting(database.?);
 
@@ -1249,10 +1251,12 @@ fn control(self: *Store, comptime which: Control) !void {
 /// Only a type `rsql.Read` or `rsql.Write` made passes, so its text passed
 /// rsql's checks when that type was made (`rsql.isStatement`). A test
 /// build also renders `S.mysql`, so it fails on a statement it reaches
-/// here that has no MySQL spelling; a release build renders none.
+/// here that has no MySQL spelling, and hands that text to the live
+/// MySQL check (`mysql_dialect_check.shadowPrepare`); a release build
+/// renders none.
 pub fn cachedTyped(self: *Store, comptime S: type) !*c.sqlite3_stmt {
     comptime if (!rsql.isStatement(S)) @compileError("cachedTyped runs only a type rsql.Read or rsql.Write made: " ++ @typeName(S));
-    if (@import("builtin").is_test) _ = comptime S.mysql;
+    if (@import("builtin").is_test) @import("mysql_dialect_check.zig").shadowPrepare(comptime S.mysql.prepared());
     return cachedStatic(self, S.sql);
 }
 

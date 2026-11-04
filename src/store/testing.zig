@@ -12,6 +12,7 @@ const output_decode = @import("../output_decode.zig");
 const store_core = @import("Store.zig");
 const rsql = @import("rsql.zig");
 const sqlite = @import("sqlite.zig");
+const mysql_dialect_check = @import("mysql_dialect_check.zig");
 const required_engines = @import("wire/required_engines.zig");
 const Store = store_core.Store;
 const historical_domain = @import("domain/historical.zig");
@@ -47,13 +48,18 @@ pub fn requiredEngines() !std.EnumSet(EngineName) {
     return names;
 }
 
-/// The first of `names` that conformance tests must reach but this build
-/// has no `Engine` for, or null. Postgres is not a Store engine yet; the
-/// wire tests in pg_tests.zig answer for it.
-pub fn unbuiltEngine(names: std.EnumSet(EngineName)) ?EngineName {
+/// Engines a test in this binary reaches without an `Engine`: Postgres
+/// through pg_tests.zig's wire tests, and MySQL through
+/// mysql_dialect_check.zig, which fails when `RUI_TEST_REQUIRE_ENGINES`
+/// lists mysql and no server answers.
+pub const checked_elsewhere: std.EnumSet(EngineName) = .initMany(&.{ .postgres, .mysql });
+
+/// The first of `names` that no test reaches, neither an `Engine` nor
+/// one of `elsewhere`, or null.
+pub fn unbuiltEngine(names: std.EnumSet(EngineName), elsewhere: std.EnumSet(EngineName)) ?EngineName {
     var listed = names.iterator();
     while (listed.next()) |name| {
-        if (name == .postgres) continue;
+        if (elsewhere.contains(name)) continue;
         if (std.meta.stringToEnum(Engine, @tagName(name)) == null) return name;
     }
     return null;
@@ -61,10 +67,10 @@ pub fn unbuiltEngine(names: std.EnumSet(EngineName)) ?EngineName {
 
 /// Runs `run(case)` once for each `Engine`, in order, and on a failure
 /// prints the engine's name and returns the error. It first checks
-/// `requiredEngines`: an unknown name, or a listed engine with no
-/// `Engine` (`unbuiltEngine`), fails every conformance test.
+/// `requiredEngines`: an unknown name, or a listed engine no test reaches
+/// (`unbuiltEngine`), fails every conformance test.
 pub fn forEachEngine(comptime run: anytype) !void {
-    if (unbuiltEngine(try requiredEngines())) |name| {
+    if (unbuiltEngine(try requiredEngines(), checked_elsewhere)) |name| {
         std.debug.print("RUI_TEST_REQUIRE_ENGINES lists {s}, an engine not built into these tests\n", .{@tagName(name)});
         return error.RequiredEngineNotBuilt;
     }
@@ -201,8 +207,16 @@ pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
     .{ .text = "SELECT unixepoch() FROM turn", .refused = true },
 };
 
+/// `text` when it passes `fixtureTextError`, else a failed build. Each
+/// call also hands its MySQL spelling to the live MySQL check
+/// (`mysql_dialect_check.shadowPrepareFixture`).
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
     if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
+    switch (comptime rsql.mysqlRendering(text)) {
+        .refused => |message| @compileError("fixture: MySQL rendering refuses it: " ++ message ++ ": " ++ text),
+        .rendered => {},
+    }
+    mysql_dialect_check.shadowPrepareFixture(text);
     return text;
 }
 
@@ -251,6 +265,25 @@ pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: any
     defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
     try exec(storage, sql, args);
 }
+
+/// The same fixtures for tests that run only on SQLite
+/// (sqlite_tests.zig): `sql` is SQLite's text, held to no portability
+/// rule and never handed to the live MySQL check.
+pub const sqlite_only = struct {
+    pub fn exec(storage: *Store, sql: [:0]const u8, args: anytype) !void {
+        return sqliteExec(storage.database, sql, args);
+    }
+
+    pub fn queryU64(storage: *Store, sql: [:0]const u8, args: anytype) !u64 {
+        return sqliteQueryU64(storage.database, sql, args);
+    }
+
+    pub fn withoutForeignKeys(storage: *Store, sql: [:0]const u8, args: anytype) !void {
+        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
+        try sqliteExec(storage.database, sql, args);
+    }
+};
 
 /// Leaves `table` preparing normally but failing at the first step of a
 /// statement that reads it, the shape of an I/O or corruption fault after
