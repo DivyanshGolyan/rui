@@ -26,8 +26,17 @@ export interface Post {
 	instance?: string;
 	/** Client environment bytes sent ahead of the JSON (`/v1/message`). */
 	environment?: Buffer;
-	/** Progress deadlines, which tests shorten. A call that expires has an unconfirmed outcome: the Host may still have acted. */
-	timeouts?: { responseMs?: number; idleMs?: number };
+	/** `prefix`: resolve with the first this-many bytes of a successful reply and drop the rest. `max`: the most a reply may hold; the default fits the Host's control replies. */
+	limits?: ReplyLimits;
+}
+
+export interface ReplyLimits {
+	prefix?: number;
+	max?: number;
+	/** The longest silence before the first reply byte, once the request is sent. Default 5 s. */
+	responseMs?: number;
+	/** The longest a transfer may make no byte of progress. Default 60 s. */
+	idleMs?: number;
 }
 
 /** A failure to reach the Host at all, as opposed to a refusal from it. */
@@ -47,20 +56,30 @@ export function post(call: Post): Promise<Buffer> {
 	if (call.environment !== undefined) headers["X-Rui-Environment-Bytes"] = String(call.environment.length);
 	return new Promise((resolve, reject) => {
 		const outgoing = request({ socketPath: call.socketPath, path: call.path, method: "POST", headers, agent: false });
-		const idle = call.timeouts?.idleMs ?? TRANSFER_IDLE_MS;
+		const idle = call.limits?.idleMs ?? TRANSFER_IDLE_MS;
 		outgoing.setTimeout(idle);
 		outgoing.on("timeout", () => outgoing.destroy(new Error("the Host made no progress in time")));
 		// Silence after the whole request went out gets the short budget; any byte of progress renews the long one.
-		outgoing.on("finish", () => outgoing.setTimeout(call.timeouts?.responseMs ?? RESPONSE_WAIT_MS));
+		outgoing.on("finish", () => outgoing.setTimeout(call.limits?.responseMs ?? RESPONSE_WAIT_MS));
 		outgoing.on("error", (error) => reject(new ConnectionError(error.message, { cause: error })));
 		outgoing.on("response", (incoming) => {
 			outgoing.setTimeout(idle);
 			const chunks: Buffer[] = [];
 			let length = 0;
 			incoming.on("data", (chunk: Buffer) => {
+				if (call.limits?.prefix !== undefined && incoming.statusCode === 200) {
+					chunks.push(chunk);
+					length += chunk.length;
+					if (length >= (call.limits?.prefix ?? Infinity)) {
+						incoming.destroy();
+						resolve(Buffer.concat(chunks).subarray(0, call.limits?.prefix));
+					}
+					return;
+				}
 				length += chunk.length;
-				if (length > MAX_REPLY_BYTES) {
-					incoming.destroy(new Error(`the reply exceeds ${MAX_REPLY_BYTES} bytes`));
+				const max = call.limits?.max ?? MAX_REPLY_BYTES;
+				if (length > max) {
+					incoming.destroy(new Error(`the reply exceeds ${max} bytes`));
 					return;
 				}
 				chunks.push(chunk);
@@ -77,7 +96,7 @@ export function post(call: Post): Promise<Buffer> {
 }
 
 function refusal(status: number | undefined, reply: Buffer): Error {
-	let parsed: components["schemas"]["ErrorReply"] | undefined;
+	let parsed: (components["schemas"]["ErrorReply"] & { answer?: { status?: unknown; code?: unknown } }) | undefined;
 	try {
 		parsed = JSON.parse(reply.toString("utf8"));
 	} catch {
@@ -85,6 +104,10 @@ function refusal(status: number | undefined, reply: Buffer): Error {
 	}
 	if (parsed && typeof parsed.code === "string" && typeof parsed.type === "string") {
 		return new RuiRequestError(parsed.type, parsed.code);
+	}
+	// A reused key with different input answers 409 with the command's own envelope.
+	if (parsed?.answer && typeof parsed.answer.code === "string" && typeof parsed.answer.status === "string") {
+		return new RuiRequestError(parsed.answer.status, parsed.answer.code);
 	}
 	return new RuiRequestError("invocation_error", `http_${status ?? "unknown"}`);
 }
