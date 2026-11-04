@@ -261,10 +261,17 @@ pub const all_tools_mask: u8 = blk: {
 
 pub const CallFacts = struct {
     name: CallName,
-    bash_arguments: ?BashArguments,
-    /// Why a bash call's arguments were rejected; set exactly when its
-    /// `bash_arguments` is null.
-    bash_problem: ?BashProblem = null,
+    /// A bash call's checked arguments; null for any other name.
+    bash: ?BashCheck,
+
+    /// The arguments of a bash call the parser accepted.
+    pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
+        const check = &(self.bash orelse return null);
+        return switch (check.*) {
+            .accepted => |*accepted| accepted,
+            .rejected => null,
+        };
+    }
 };
 
 /// Why a Bash call's arguments were rejected. Its text goes back to the
@@ -308,18 +315,13 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype) !
         if (std.mem.eql(u8, &name, "bash")) .bash else .unknown
     else
         .unknown;
-    if (kind != .bash) return .{ .name = kind, .bash_arguments = null };
-    return switch (try checkBashArguments(arguments)) {
-        .accepted => |accepted| .{ .name = kind, .bash_arguments = accepted },
-        .rejected => |problem| .{ .name = kind, .bash_arguments = null, .bash_problem = problem },
-    };
+    return .{ .name = kind, .bash = if (kind == .bash) try checkBashArguments(arguments) else null };
 }
 
-/// A rejected call's result text. `problem` is the call's `bash_problem`,
-/// set whenever `code` is `invalid_arguments`.
-pub fn rejectionResult(code: protocol.ProposalRejection, problem: ?BashProblem, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
+/// A rejected call's result text, from `classifyCall`'s code for `facts`.
+pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
-        .invalid_arguments => return switch (problem.?) {
+        .invalid_arguments => return switch (facts.bash.?.rejected) {
             inline else => |value| "Invalid arguments for tool 'bash': " ++ comptime value.text() ++ ".",
         },
         .unknown_tool => {
@@ -339,7 +341,11 @@ pub fn rejectionResult(code: protocol.ProposalRejection, problem: ?BashProblem, 
 
 /// Admission policy over adapter-certified descriptor facts and frozen tools.
 /// Call this under the transaction that publishes the proposal and Action.
-pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {
+pub fn classifyCall(facts: *const CallFacts, frozen: ToolSet) ?protocol.ProposalRejection {
+    return classifyName(facts.name, facts.bashArguments() != null, frozen);
+}
+
+fn classifyName(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {
     return switch (name) {
         .bash => if (!frozen.contains(.bash)) .unknown_tool else if (!valid_arguments) .invalid_arguments else null,
         .unknown => .unknown_tool,
@@ -349,11 +355,11 @@ pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?pro
 test "tool classification uses frozen availability before argument validity" {
     const none: ToolSet = .empty;
     const bash_only = ToolSet.initOne(.bash);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, false, none).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, true, none).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.invalid_arguments, classifyCall(.bash, false, bash_only).?);
-    try std.testing.expect(classifyCall(.bash, true, bash_only) == null);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.unknown, true, .full).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.bash, false, none).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.bash, true, none).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.invalid_arguments, classifyName(.bash, false, bash_only).?);
+    try std.testing.expect(classifyName(.bash, true, bash_only) == null);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.unknown, true, .full).?);
 }
 
 pub fn validBashArguments(source: anytype) !bool {
@@ -397,7 +403,8 @@ fn checkBash(source: anytype, writer: anytype, input: anytype) !BashCheck {
     var parser: BashParser = .{};
     while (true) {
         const progress = parser.advance(source, writer, input, 4096) catch |err| {
-            if (isBashDescriptorError(err)) return .{ .rejected = parser.stringProblem() };
+            // A decoding failure outside a string's bytes.
+            if (isBashDescriptorError(err)) return .{ .rejected = .malformed_json };
             return err;
         };
         switch (progress) {
@@ -514,7 +521,7 @@ pub const BashParser = struct {
                     } else if (next == '\\') {
                         self.phase = .escape;
                     } else {
-                        try self.emitString(writer, input, &.{next});
+                        self.emitString(writer, input, &.{next}) catch |err| return self.emitFailure(err);
                     }
                 },
                 .escape => {
@@ -531,7 +538,7 @@ pub const BashParser = struct {
                         else => return .{ .invalid = .malformed_json },
                     };
                     if (decoded) |byte| {
-                        try self.emitString(writer, input, &.{byte});
+                        self.emitString(writer, input, &.{byte}) catch |err| return self.emitFailure(err);
                         self.phase = .string;
                     } else {
                         self.unicode_value = 0;
@@ -548,7 +555,7 @@ pub const BashParser = struct {
                             self.phase = .surrogate_backslash;
                         } else {
                             if (self.unicode_value >= 0xdc00 and self.unicode_value <= 0xdfff) return .{ .invalid = self.stringProblem() };
-                            if (!(try self.emitScalar(writer, input, self.unicode_value))) return .{ .invalid = self.stringProblem() };
+                            if (!(self.emitScalar(writer, input, self.unicode_value) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
                             self.phase = .string;
                         }
                     }
@@ -558,7 +565,7 @@ pub const BashParser = struct {
                     self.phase = .surrogate_u;
                 },
                 .surrogate_u => {
-                    if (next != 'u') return .{ .invalid = self.stringProblem() };
+                    if (next != 'u') return .{ .invalid = if (std.mem.indexOfScalar(u8, "\"\\/bfnrt", next) != null) self.stringProblem() else .malformed_json };
                     self.unicode_value = 0;
                     self.unicode_digits = 0;
                     self.phase = .low_unicode;
@@ -570,7 +577,7 @@ pub const BashParser = struct {
                         if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) return .{ .invalid = self.stringProblem() };
                         const scalar = 0x10000 + ((self.high_surrogate - 0xd800) << 10) +
                             (self.unicode_value - 0xdc00);
-                        if (!(try self.emitScalar(writer, input, scalar))) return .{ .invalid = self.stringProblem() };
+                        if (!(self.emitScalar(writer, input, scalar) catch |err| return self.emitFailure(err))) return .{ .invalid = self.stringProblem() };
                         self.phase = .string;
                     }
                 },
@@ -655,6 +662,13 @@ pub const BashParser = struct {
         if (!self.has_command) return .{ .invalid = .missing_cmd };
         if (!self.has_description) return .{ .invalid = .missing_description };
         return .{ .complete = self.result };
+    }
+
+    /// A string's bytes that cannot be held or are not UTF-8 reject the
+    /// call as that string's problem; any other failure is the caller's.
+    fn emitFailure(self: *const BashParser, err: anyerror) !BashParseProgress {
+        if (isBashDescriptorError(err)) return .{ .invalid = self.stringProblem() };
+        return err;
     }
 
     /// What is wrong when the string being read cannot be decoded or held.
@@ -839,6 +853,8 @@ test "rejected Bash arguments name what is wrong" {
         .{ "{\"cmd\":\"true\"}", .missing_description },
         .{ "{\"description\":\"Run tests\",\"cmd\":7}", .cmd_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"a\\u0000b\"}", .cmd_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\n\"}", .cmd_invalid },
+        .{ "{\"description\":\"Run tests\",\"cmd\":\"\\ud83d\\q\"}", .malformed_json },
         .{ "{\"description\":\"\",\"cmd\":\"true\"}", .description_invalid },
         .{ "{\"description\":\"" ++ @as([101]u8, @splat('a')) ++ "\",\"cmd\":\"true\"}", .description_invalid },
         .{ "{\"description\":\"Run tests\",\"cmd\":\"true\",\"stdin\":42}", .stdin_invalid },
@@ -872,13 +888,22 @@ test "an invalid-arguments result tells the model what was wrong" {
             return error.TestUnexpectedNameRead;
         }
     }{};
-    for (std.enums.values(BashProblem)) |problem| {
-        const text = try rejectionResult(.invalid_arguments, problem, &name, 4, @splat(0), &buffer);
-        try std.testing.expect(std.mem.startsWith(u8, text, "Invalid arguments for tool 'bash': "));
-        try std.testing.expectEqualStrings(problem.text(), text["Invalid arguments for tool 'bash': ".len .. text.len - 1]);
-        try std.testing.expect(text[text.len - 1] == '.');
+    const cases = [_]struct { BashProblem, []const u8 }{
+        .{ .malformed_json, "Invalid arguments for tool 'bash': the arguments are not one well-formed JSON object." },
+        .{ .unknown_field, "Invalid arguments for tool 'bash': only cmd, description, stdin and timeout_ms are accepted." },
+        .{ .duplicate_field, "Invalid arguments for tool 'bash': a field appears more than once." },
+        .{ .missing_cmd, "Invalid arguments for tool 'bash': cmd is required." },
+        .{ .missing_description, "Invalid arguments for tool 'bash': description is required." },
+        .{ .cmd_invalid, "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters." },
+        .{ .description_invalid, "Invalid arguments for tool 'bash': description must be a nonblank, single-line string of UTF-8 text, at most 100 bytes." },
+        .{ .stdin_invalid, "Invalid arguments for tool 'bash': stdin must be a string of UTF-8 text." },
+        .{ .timeout_invalid, "Invalid arguments for tool 'bash': timeout_ms must be an integer from 1 to 9223372036854775807." },
+    };
+    comptime std.debug.assert(cases.len == std.enums.values(BashProblem).len);
+    for (cases) |case| {
+        const facts: CallFacts = .{ .name = .bash, .bash = .{ .rejected = case[0] } };
+        try std.testing.expectEqualStrings(case[1], try rejectionResult(.invalid_arguments, &facts, &name, 4, @splat(0), &buffer));
     }
-    try std.testing.expectEqualStrings("Invalid arguments for tool 'bash': cmd is required.", try rejectionResult(.invalid_arguments, .missing_cmd, &name, 4, @splat(0), &buffer));
 }
 
 test "Bash descriptions are required and bounded by decoded UTF-8 bytes" {
