@@ -3509,7 +3509,11 @@ After delivery retires and local borrowers finish, intake closes the accepted so
 Retained cleanup keeps its file handles, charge and exchange owner until reclamation succeeds.
 Incomplete uploads publish nothing.
 Every valid short control and its complete semantic response fit a field-derived bound, including framing and worst-case escaping, without content scratch.
-Reject oversized discovery before body parsing and route/kind disagreement before content capture.
+Reject oversized discovery before body parsing, and route/kind disagreement as soon as `kind` is read, which is before any content capture when `kind` precedes the content.
+A request's object members may come in any order, as JSON allows, so clients generated from `openapi.json` in any language can build bodies (D212).
+Each member appears at most once, required members must all be present, and unknown members fail.
+The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content strings as they arrive (a Message's `text` value, a configure command's `instructions` and `output_schema` values), and the second fills the command, so each content value takes the capture its string arrived in.
+Once `kind` is known, content the kind cannot carry fails before capture; before that, at most two strings are captured, and a third fails.
 Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes.
 Progress cannot renew it.
 Mutation-response waiting and transfer inactivity follow [the client transport contract](#client-transport-and-observations).
