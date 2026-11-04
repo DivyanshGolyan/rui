@@ -108,6 +108,17 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
     }
 }
 
+/// The Store at `schema.migration_baseline`, which the migration tests of
+/// each engine move to the current schema: its DDL as SQLite and MySQL ran
+/// it then, and rows a Store at the baseline held, written as fixture text
+/// for both engines. They never change; `schema.migrations` grows instead.
+pub const baseline_sqlite_ddl: [:0]const u8 = @embedFile("migration_baseline.sqlite.sql");
+pub const baseline_mysql_ddl: [:0]const u8 = @embedFile("migration_baseline.mysql.sql");
+pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql");
+comptime {
+    if (fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
+}
+
 /// `text`, once it passes `fixtureTextError`. Each call also hands its
 /// MySQL spelling to the live MySQL check
 /// (`mysql_dialect_check.shadowPrepareFixture`).

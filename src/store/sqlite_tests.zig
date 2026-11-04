@@ -4130,7 +4130,7 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw.?, "PRAGMA journal_mode=DELETE");
-        try sqlite.exec(raw.?, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version - 1}));
+        try sqlite.exec(raw.?, std.fmt.comptimePrint("PRAGMA user_version={d}", .{store_schema.migration_baseline - 1}));
     }
     const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(before);
@@ -7953,4 +7953,198 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     try std.testing.expect(storage.isFenced());
+}
+
+fn openRaw(path: []const u8) !*c.sqlite3 {
+    var raw: ?*c.sqlite3 = null;
+    var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    if (c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{path}, 0), &raw) != c.SQLITE_OK) {
+        if (raw) |database| _ = c.sqlite3_close(database);
+        return error.StoreOpenFailed;
+    }
+    return raw.?;
+}
+
+/// Every table's rows but store_meta's, in key order: a line per row, and
+/// each value as its type and its bytes.
+fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
+    inline for (store_schema.tables) |table| {
+        if (comptime std.mem.eql(u8, table.name, "store_meta")) continue;
+        const order = comptime blk: {
+            var text: []const u8 = "";
+            for (table.primary_key, 0..) |column, position| text = text ++ (if (position == 0) "" else ",") ++ column;
+            break :blk text;
+        };
+        const statement = try sqlite.prepare(database, "SELECT * FROM " ++ table.name ++ " ORDER BY " ++ order);
+        defer _ = c.sqlite3_finalize(statement);
+        try out.print("{s}\n", .{table.name});
+        while (true) {
+            switch (c.sqlite3_step(statement)) {
+                c.SQLITE_DONE => break,
+                c.SQLITE_ROW => {},
+                else => return error.StatementFailed,
+            }
+            for (0..@intCast(c.sqlite3_column_count(statement))) |column| {
+                const index: c_int = @intCast(column);
+                switch (c.sqlite3_column_type(statement, index)) {
+                    c.SQLITE_NULL => try out.writeAll(" null"),
+                    c.SQLITE_INTEGER => try out.print(" {d}", .{c.sqlite3_column_int64(statement, index)}),
+                    c.SQLITE_TEXT => {
+                        const text = c.sqlite3_column_text(statement, index) orelse return error.OutOfMemory;
+                        const length: usize = @intCast(c.sqlite3_column_bytes(statement, index));
+                        try out.print(" t{d}:{s}", .{ length, text[0..length] });
+                    },
+                    c.SQLITE_BLOB => {
+                        const length: usize = @intCast(c.sqlite3_column_bytes(statement, index));
+                        const blob: [*]const u8 = if (length == 0) "" else @ptrCast(c.sqlite3_column_blob(statement, index).?);
+                        try out.print(" x{d}:{x}", .{ length, blob[0..length] });
+                    },
+                    else => return error.UnexpectedColumnType,
+                }
+            }
+            try out.writeByte('\n');
+        }
+    }
+}
+
+/// A fresh Store at `path` that then gets `baseline_rows` and opens once
+/// more, as a migrated Store did.
+fn freshStoreWithBaselineRows(path: []const u8, root: []const u8) !void {
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    try storage.close();
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+    }
+    try storage.open(std.testing.io, path, root);
+    try storage.close();
+}
+
+test "a Store at the migration baseline with its rows takes every migration at open and reads as a fresh Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var migrated_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const migrated = try std.fmt.bufPrint(&migrated_buffer, "{s}/migrated.sqlite3", .{root});
+    var fresh_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const fresh = try std.fmt.bufPrint(&fresh_buffer, "{s}/fresh.sqlite3", .{root});
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version={d}", .{ store_schema.application_id, store_schema.migration_baseline }));
+        const meta = try sqlite.prepare(raw, std.fmt.comptimePrint("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','{d}')", .{store_schema.migration_baseline}));
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, protocol.wire_version);
+        try sqlite.bindText(meta, 2, root);
+        try sqlite.expectDone(meta);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+    }
+    var storage: Store = undefined;
+    storage.open(std.testing.io, migrated, root) catch |err| {
+        std.debug.print("the Store at the migration baseline did not open: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    try storage.close();
+    try freshStoreWithBaselineRows(fresh, root);
+
+    var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer migrated_rows.deinit();
+    var fresh_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer fresh_rows.deinit();
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try writeRows(raw, &migrated_rows.writer);
+    }
+    {
+        const raw = try openRaw(fresh);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &fresh_rows.writer);
+    }
+    try std.testing.expect(migrated_rows.written().len > 1000);
+    try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
+}
+
+/// `object`'s CREATE text in the current schema.
+fn objectSql(comptime name: []const u8) [:0]const u8 {
+    comptime {
+        for (store_schema.objects(.sqlite)) |object| if (std.mem.eql(u8, object.name, name)) {
+            const terminated = object.sql ++ "\x00";
+            return terminated[0..object.sql.len :0];
+        };
+        @compileError("no schema object " ++ name);
+    }
+}
+
+/// A current Store whose store_meta format reads `from`, with one Session.
+fn storeAtFormat(tmp: *std.testing.TmpDir, path_buffer: []u8, root_buffer: []u8, comptime from: u32) !struct { path: []const u8, root: []const u8 } {
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, root_buffer)];
+    const path = try std.fmt.bufPrint(path_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    _ = try configureTestSession(&storage, "migration-session");
+    try storage.close();
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';PRAGMA user_version={d}", .{ from, from }));
+    return .{ .path = path, .root = root };
+}
+
+test "a migration that rebuilds a referenced table from the schema's text keeps its rows and references, and the Store opens" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
+    const rebuild = comptime blk: {
+        var statements: []const [:0]const u8 = &.{ "ALTER TABLE session RENAME TO session_old", objectSql("session"), "INSERT INTO session SELECT * FROM session_old", "DROP TABLE session_old" };
+        for (store_schema.indexes) |index| if (std.mem.eql(u8, index.table, "session")) {
+            statements = statements ++ .{objectSql(index.name)};
+        };
+        break :blk statements;
+    };
+    {
+        const raw = try openRaw(store.path);
+        defer _ = c.sqlite3_close(raw);
+        try store_schema.migrate(raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{}, .digest = 0 }});
+    }
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, store.path, store.root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
+}
+
+test "a migration that leaves other text than bootstrap's, or a broken reference, or runs on another format, commits nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
+    // SQLite splices an added column into the table's text, so the column
+    // bootstrap would write in place reads differently.
+    const added = "ALTER TABLE session ADD COLUMN migration_probe INTEGER";
+    const Case = struct { from: u32, statements: []const [:0]const u8, refusal: anyerror };
+    const cases = [_]Case{
+        .{ .from = 7, .statements = &.{added}, .refusal = error.WrongStoreSchema },
+        .{ .from = 7, .statements = &.{"DELETE FROM session"}, .refusal = error.MigrationBrokeForeignKey },
+        .{ .from = 6, .statements = &.{}, .refusal = error.WrongStoreVersion },
+    };
+    const raw = try openRaw(store.path);
+    defer _ = c.sqlite3_close(raw);
+    for (cases) |case| {
+        try std.testing.expectError(case.refusal, store_schema.migrate(raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{}, .digest = 0 }}));
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_table_info('session') WHERE name='migration_probe'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
+    }
 }
