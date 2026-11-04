@@ -48,6 +48,7 @@ pub fn build(b: *std.Build) void {
     configureHostLaunch(b, tests);
     configureTerminalEditor(b, tests);
     configureTransport(b, tests, target, pinned_transport);
+    configureOpenApi(b, tests);
     const run_tests = ci.run(tests);
     // Reuse compiled artifacts, never a prior test outcome (even with a fixed seed).
     run_tests.has_side_effects = true;
@@ -71,6 +72,7 @@ pub fn build(b: *std.Build) void {
     configureHostLaunch(b, deadline_witness);
     configureTerminalEditor(b, deadline_witness);
     configureTransport(b, deadline_witness, target, pinned_transport);
+    configureOpenApi(b, deadline_witness);
     const run_full_tests = ci.run(deadline_witness);
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
@@ -93,6 +95,19 @@ pub fn build(b: *std.Build) void {
         "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
     );
     logic_test_step.dependOn(&run_logic_tests.step);
+
+    const openapi_emitter = b.addExecutable(.{
+        .name = "openapi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/openapi_main.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const emit_openapi = b.addRunArtifact(openapi_emitter);
+    const update_openapi = b.addUpdateSourceFiles();
+    update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("openapi.json"), "openapi.json");
+    b.step("openapi", "Write openapi.json from the wire types; a unit test fails while it is stale").dependOn(&update_openapi.step);
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
@@ -623,6 +638,7 @@ pub fn build(b: *std.Build) void {
         configureHostLaunch(b, apple_tests);
         configureTerminalEditor(b, apple_tests);
         configureTransport(b, apple_tests, apple, null);
+        configureOpenApi(b, apple_tests);
         macos_types_step.dependOn(&apple_tests.step);
     }
     const targets = [_]std.Target.Query{
@@ -1171,4 +1187,10 @@ fn addSqliteShell(
         .flags = &.{"-std=gnu99"},
     });
     return executable;
+}
+
+/// The checked-in wire contract, which a unit test compares with what the
+/// wire types emit.
+fn configureOpenApi(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    compile.root_module.addAnonymousImport("openapi.json", .{ .root_source_file = b.path("openapi.json") });
 }

@@ -82,6 +82,8 @@ RULES = (
     (("src/server*.zig", "tests/integration/admission_integration.sh"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
+    (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
+     "The wire contract: openapi.json must equal what the wire types emit"),
     (("src/protocol.zig", "src/provider_name.zig", "src/platform.zig",
       "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
       "src/named_scratch.zig", "src/output_retention.zig", "src/HostDiagnostics.zig"),
