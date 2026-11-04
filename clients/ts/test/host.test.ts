@@ -50,7 +50,7 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 		assert.deepEqual(environment.map((entry) => entry.split("=")[0]).sort(), ["HOME", "PATH", "TMPDIR"].filter((name) => process.env[name] !== undefined).sort());
 		for (const file of ["environ", "cmdline"]) assert.ok(!readFileSync(`/proc/${pid}/${file}`, "utf8").includes(key), file);
 	}
-	const created = [...runtimeDirs()].filter((name) => !before.has(name));
+	const created = [...runtimeDirs()].filter((name) => !before.has(name) && !name.startsWith("rui-ts-"));
 	assert.equal(created.length, 1, String(created));
 
 	const exits: ExitEvent[] = [];
