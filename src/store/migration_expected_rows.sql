@@ -17,9 +17,9 @@ INSERT INTO content(content_id,digest,byte_length,private,payload) VALUES
 INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) VALUES
 (1,'bash','rui',14,15),
 (2,'web_search','provider',1,1);
-INSERT INTO tool_set(tool_set_id,digest,member_count) VALUES
-(2,X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2',1),
-(4,X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da',2);
+INSERT INTO tool_set(tool_set_id,digest,member_count,names) VALUES
+(2,X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2',1,'bash'),
+(4,X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da',2,'bash web_search');
 INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES
 (2,0,1),
 (4,0,1),

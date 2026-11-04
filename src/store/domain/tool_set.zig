@@ -33,8 +33,8 @@ const insert_record = rsql.Write(.{
 });
 
 const insert_set = rsql.Write(.{
-    .sql = "INSERT INTO tool_set(tool_set_id,digest,member_count) VALUES(?1,?2,?3)",
-    .Args = struct { id: u64, digest: [32]u8, count: u64 },
+    .sql = "INSERT INTO tool_set(tool_set_id,digest,member_count,names) VALUES(?1,?2,?3,?4)",
+    .Args = struct { id: u64, digest: [32]u8, count: u64, names: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -80,6 +80,9 @@ pub const Members = struct {
 pub const Ensure = struct {
     members: Members,
     digest: [32]u8,
+    /// The members' names (`tool_catalog.max_names_bytes`); bytes that
+    /// outlive the Access, as its queued insert reads them.
+    names: []const u8,
     set: lookup_set.Result = null,
     pairs: [tool_count]content_domain.Pair = undefined,
     descriptions: [tool_count]content_domain.Import = undefined,
@@ -89,7 +92,7 @@ pub const Ensure = struct {
 
     pub fn init(set: tool_catalog.ToolSet) Ensure {
         const members = Members.of(set);
-        return .{ .members = members, .digest = tool_catalog.setDigest(members.slice()) };
+        return .{ .members = members, .digest = tool_catalog.setDigest(members.slice()), .names = tool_catalog.setNames(set) };
     }
 };
 
@@ -129,7 +132,7 @@ pub fn finish(a: anytype, state: *Ensure) !u64 {
     if (known) try a.run();
 
     const set_id = try a.identity(.tool_set_id);
-    a.write(insert_set, .{ .id = set_id, .digest = state.digest, .count = records.len });
+    a.write(insert_set, .{ .id = set_id, .digest = state.digest, .count = records.len, .names = state.names });
     for (records, 0..) |record, index| {
         const record_id = if (state.existing[index]) |row| row.tool_record_id.get() else id: {
             const id = try a.identity(.tool_record_id);

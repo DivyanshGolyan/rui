@@ -33,6 +33,32 @@ pub const max_name_bytes = 64;
 /// The most tools one set offers.
 pub const max_tools = 128;
 
+/// The most name bytes one set's members hold together (D214).
+pub const max_set_name_bytes = 4096;
+
+/// A set's names as the Store keeps them: in member order, one space
+/// between each two.
+pub const max_names_bytes = max_set_name_bytes + max_tools - 1;
+
+/// The names a set of built-ins saves, as `max_names_bytes` describes.
+/// Until the wire names tools by name, every set is a `ToolSet`, so each
+/// spelling is a literal.
+pub fn setNames(set: ToolSet) []const u8 {
+    const spellings = comptime blk: {
+        const count = 1 << std.enums.values(Tool).len;
+        var out: [count][]const u8 = undefined;
+        for (0..count) |bits| {
+            var names: []const u8 = "";
+            for (std.enums.values(Tool), 0..) |tool, index| if (bits & (1 << index) != 0) {
+                names = names ++ (if (names.len == 0) "" else " ") ++ @tagName(tool);
+            };
+            out[bits] = names;
+        }
+        break :blk out;
+    };
+    return spellings[set.bits.mask];
+}
+
 /// The identity of an ordered set of records, which the Store saves once:
 /// each member's name, owner and the content digests of its description
 /// and input schema, in order.
