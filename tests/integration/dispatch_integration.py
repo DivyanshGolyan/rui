@@ -3566,6 +3566,7 @@ def main(mode="all", correlation_case="all"):
                 {
                     "type": "function",
                     "name": "bash",
+                    "strict": False,
                     "parameters": {
                         "type": "object",
                         "properties": {

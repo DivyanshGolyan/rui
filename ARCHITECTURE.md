@@ -1118,7 +1118,7 @@ No Step/group entity is required.
 Actions run and settle independently, including within one Workspace.
 
 Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
-Function tools are offered without the provider's strict mode: the provider does not check a call against its schema, Rui does.
+Function tools are offered with `"strict": false`, explicitly, since an omitted field lets the provider make the schema strict: the provider does not check a call against its schema, Rui does.
 A call whose arguments fail that check is settled as an `invalid_arguments` rejection whose result tells the model what was wrong (for example "Invalid arguments for tool 'bash': cmd is required."), so the model corrects the call within the Turn; the Turn does not fail.
 The description is nonblank, single-line, valid UTF-8, and at most 100 decoded UTF-8 bytes.
 Validation counts decoded bytes, not JSON spelling, characters, or display columns.
