@@ -145,60 +145,7 @@ fn ended(self: *Request) Error!Outcome {
 // Tests run a scripted loopback server on a thread, as the HTTP/1.1
 // client's own tests do.
 
-const Script = struct {
-    listener: std.posix.fd_t = -1,
-    port: u16 = 0,
-    thread: ?std.Thread = null,
-    reply: []const u8,
-    seen: [4096]u8 = undefined,
-    seen_len: usize = 0,
-
-    fn start(self: *Script) !void {
-        self.listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
-        if (self.listener < 0) return error.SocketFailed;
-        var address: std.c.sockaddr.in = std.mem.zeroes(std.c.sockaddr.in);
-        address.family = std.c.AF.INET;
-        address.addr = @bitCast([4]u8{ 127, 0, 0, 1 });
-        if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
-        if (std.c.bind(self.listener, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
-        if (std.c.listen(self.listener, 1) != 0) return error.ListenFailed;
-        var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
-        if (std.c.getsockname(self.listener, @ptrCast(&address), &length) != 0) return error.NameFailed;
-        self.port = std.mem.bigToNative(u16, address.port);
-        self.thread = try std.Thread.spawn(.{}, serve, .{self});
-    }
-
-    fn serve(self: *Script) void {
-        const fd_ = std.c.accept(self.listener, null, null);
-        if (fd_ < 0) return;
-        defer _ = std.c.close(fd_);
-        while (!self.requestIn()) {
-            const read = std.c.recv(fd_, self.seen[self.seen_len..].ptr, self.seen.len - self.seen_len, 0);
-            if (read <= 0) return;
-            self.seen_len += @intCast(read);
-        }
-        var written: usize = 0;
-        while (written < self.reply.len) {
-            const sent = std.c.send(fd_, self.reply[written..].ptr, self.reply.len - written, 0);
-            if (sent <= 0) return;
-            written += @intCast(sent);
-        }
-    }
-
-    fn requestIn(self: *const Script) bool {
-        const seen = self.seen[0..self.seen_len];
-        const head_end = (std.mem.indexOf(u8, seen, "\r\n\r\n") orelse return false) + 4;
-        const marker = "Content-Length: ";
-        const at = std.mem.indexOf(u8, seen[0..head_end], marker).? + marker.len;
-        const line_end = std.mem.indexOfPos(u8, seen, at, "\r\n").?;
-        return seen.len >= head_end + (std.fmt.parseInt(usize, seen[at..line_end], 10) catch unreachable);
-    }
-
-    fn stop(self: *Script) void {
-        if (self.thread) |thread| thread.join();
-        _ = std.c.close(self.listener);
-    }
-};
+const Script = @import("test_server.zig");
 
 const request = @import("request.zig");
 
