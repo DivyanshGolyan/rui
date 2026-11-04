@@ -68,8 +68,8 @@ INSERT INTO model_output_part(operation_id,item_ordinal,part_ordinal,part_array,
 INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,rejection_code,rejection_content_id,acceptance_position,action_kind) VALUES
 (2,'brhkcj',0,0,9,10,11,'Run first command',X'0400000000000000a0fbca0ae84c22252231e4bffa4714809c6d0949720b266767b8fce2aae5055706000000000000005e2ab58aab1f361a7463d83515ae4f2519f54468f5dbc37e1a30c35f7b6defed4100000000000000f1a4d9bc3bf8c59e61a8111bc926dbd19ecd2adb95e7879a75e598dc0876b115',NULL,NULL,NULL,1),
 (2,'brhkcj',1,1,9,12,13,'Run second command',X'0400000000000000a0fbca0ae84c22252231e4bffa4714809c6d0949720b266767b8fce2aae5055706000000000000002424a1124da95105ad0cae02f8974290bcdfa6b8f722ab0a9010a03d85dc70aa4200000000000000218db1eed2b15d82d37c2be4440ff39e46365886bd914326b0bf6fceee17f4d1',NULL,NULL,NULL,1);
-INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,attempt_ordinal,bash_timeout_override_ms,bash_timeout_ms,sender_handle,resolution_code,resolution_content_id,acceptance_position,attempt_at,decided_at,resolved_at) VALUES
-(1,2,0,'brhkcj',1,1,1,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,NULL),
-(2,2,1,'brhkcj',1,1,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,attempt_ordinal,bash_timeout_override_ms,bash_timeout_ms,sender_handle,resolution_code,resolution_content_id,acceptance_position,attempt_at,decided_at,resolved_at,approval_position) VALUES
+(1,2,0,'brhkcj',1,1,1,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,NULL,4),
+(2,2,1,'brhkcj',1,1,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,5);
 INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES
 ('fixture-allow','1','allow_once');

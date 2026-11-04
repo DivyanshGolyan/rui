@@ -205,13 +205,11 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             " UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ on(9) ++ " AND " ++ range("sender_position", "0") ++
             " UNION ALL SELECT session_position,0,10,NULL FROM model_output_item @index(model_output_hosted_history) " ++
             "WHERE session_ref=?1 AND item_kind=5 AND " ++ on(10) ++ " AND " ++ range("session_position", "0") ++
-            // A call made while the Session asked for approval: its Action
-            // was saved under an `ask` revision, whatever was decided since.
-            " UNION ALL SELECT item.session_position,1,12,action.action_id FROM model_output_item item @index(model_output_call_history) " ++
-            "JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
-            "JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-            "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
-            "WHERE item.session_ref=?1 AND item.item_kind=3 AND revision.permission_mode=0 AND " ++ on(12) ++ " AND " ++ range("item.session_position", "1") ++ order,
+            // A call made while the Session asked for approval, at its
+            // call's position: its Action was saved under an `ask` revision,
+            // whatever was decided since.
+            " UNION ALL SELECT approval_position,1,12,action_id FROM action_operation @index(action_operation_approval) " ++
+            "WHERE session_ref=?1 AND approval_position IS NOT NULL AND " ++ on(12) ++ " AND " ++ range("approval_position", "1") ++ order,
     };
 }
 

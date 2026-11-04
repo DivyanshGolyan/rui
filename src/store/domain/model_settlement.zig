@@ -746,10 +746,12 @@ const insert_call = rsql.Write(.{
 });
 
 /// An accepted call's Action, decided now when the revision bypasses asks.
+/// Under an `ask` revision it keeps its call's position as the feed's
+/// approval request.
 const insert_action = rsql.Write(.{
-    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at) " ++
-        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END)",
-    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64 },
+    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position) " ++
+        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8)",
+    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1611,6 +1613,7 @@ fn Settlement(comptime A: type) type {
                 .revision = s.settling.revision.get(),
                 .authorized = s.settling.permission_mode,
                 .timeout_ms = call_facts.bashArguments().?.timeout_ms,
+                .approval_position = if (s.settling.permission_mode) null else s.first_item_position + record.ordinal,
             });
         }
     };
