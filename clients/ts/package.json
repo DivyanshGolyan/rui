@@ -1,0 +1,23 @@
+{
+  "name": "rui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Start a Rui Host as a child process and talk to it over its local socket.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "openapi-typescript ../../openapi.json --output src/wire.ts",
+    "check": "node scripts/check.mjs",
+    "test": "node --experimental-strip-types --test \"test/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}
