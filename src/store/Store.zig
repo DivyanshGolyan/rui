@@ -81,8 +81,9 @@ pub const Store = struct {
     instance: [16]u8 = undefined,
     statements: StatementCache = .{},
     /// The Host hands out every id and sequence value, and each
-    /// transaction's second; see `HostValues`.
-    ids: HostValues,
+    /// transaction's second; see `HostValues`. Out of line beside the
+    /// change ring, so a new identity does not grow the Store.
+    ids: *HostValues,
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
@@ -223,7 +224,7 @@ pub const Store = struct {
         try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
         if (existing) {
             if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
-            try store_schema.validateExisting(database.?, selector);
+            try store_schema.openExisting(io, database.?, selector);
         }
         try sqlite.exec(database.?, "PRAGMA busy_timeout=0");
         try sqlite.exec(database.?, "PRAGMA foreign_keys=ON");
@@ -254,7 +255,9 @@ pub const Store = struct {
         try stored_selector.set(selector);
         const changes = try createRing();
         errdefer destroyRing(changes);
-        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = .{ .next = undefined } };
+        const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
+        ids.* = .{ .next = undefined };
+        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = ids };
         self.served = options.served;
         // The Store is in final storage, so the function may keep its address.
         if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
@@ -881,17 +884,18 @@ const TestingContentWork = struct {
 };
 
 // The frame that holds a Store keeps every byte of it resident, so a fixed
-// buffer belongs in memory of its own, like the change ring's. Test builds
-// add `TestingContentWork` and stay within 768 bytes, so a new field must
-// come out of existing padding, or out of the Store.
+// buffer belongs in memory of its own, like the change ring's. The production
+// Store is 688 bytes; test builds add 24 bytes of counters and sit exactly at
+// 712, so a new field must come out of existing padding, or out of the Store.
 comptime {
     if (@sizeOf(TestingContentWork) != 24) @compileError("TestingContentWork grew past 24 bytes; the test-build Store has no room");
-    if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
+    if (@sizeOf(Store) > 712) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
 
 /// The Store's state too large for the frame that holds it.
 const OutOfLine = struct {
     ring: change_ring.Ring,
+    ids: HostValues,
     scratch: Scratch align(scratch_align),
 };
 
@@ -910,9 +914,10 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 10240;
 
 comptime {
-    // The settlement batch is the larger use: 14480 bytes, 9592 beyond the
-    // configure reads. Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 4888 or scratch_bytes != 14480)
+    // The settlement batch is the larger use: 14480 bytes, 9120 beyond the
+    // configure reads, 5360 with the tool set a configure may save. Exact,
+    // so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 5360 or scratch_bytes != 14480)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -922,7 +927,7 @@ comptime {
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
 /// resident for the Store's life: at most 14480 bytes, a settlement
-/// batch's size, of which a configure writes 4888.
+/// batch's size, of which a configure writes 5360.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -1289,7 +1294,7 @@ fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
 
 /// A column whose values the Host hands out: a row's id, or its place in
 /// a Store-wide order.
-pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id };
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id };
 
 /// What the Host hands to transactions. The next value of each `Identity`
 /// is the Store's maximum plus one, read at open and again for each column
@@ -1340,6 +1345,8 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
             .created_seq => "session",
             .command_seq => "core_command",
             .admission_id => "message_admission",
+            .tool_record_id => "tool_record",
+            .tool_set_id => "tool_set",
         };
         const Ceiling = rsql.Read(.{
             .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,

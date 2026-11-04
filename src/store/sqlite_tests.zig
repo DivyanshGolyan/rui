@@ -10,6 +10,7 @@ const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
+const tool_catalog = @import("../tools.zig");
 const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -249,9 +250,9 @@ test "creating a Session takes the same work however many Sessions exist" {
     const few = try Creation.steps(&storage, "creation-steps-few");
     // Above the Host's next created_seq, which these rows bypass.
     try store_testing.sqlite_only.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
-        "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+        "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
         "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-        "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+        "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
     // Changing foreign_keys expires prepared statements: prepare them again.
     _ = try configureTestSession(&storage, "creation-steps-prepare-again");
     try std.testing.expectEqual(few, try Creation.steps(&storage, "creation-steps-many"));
@@ -392,6 +393,8 @@ fn takeEveryIdentityForTesting(storage: *Store) ![std.enums.values(store_core.Id
         "SELECT max(created_seq) FROM session",
         "SELECT max(command_seq) FROM core_command",
         "SELECT max(admission_id) FROM message_admission",
+        "SELECT max(tool_record_id) FROM tool_record",
+        "SELECT max(tool_set_id) FROM tool_set",
     };
     var taken: [maxima.len]u64 = undefined;
     const entry = try store_core.enter(storage, .none);
@@ -413,7 +416,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    // Entry points commit rows in all seven columns.
+    // Entry points commit rows in every column.
     const first_session = try configureTestSessionAsk(&storage, "identity-config");
     try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", first_session.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-first");
@@ -423,6 +426,15 @@ test "a rolled-back transaction's identities are handed out again, a committed o
 
     // Committing the given-back values in every column: none is handed out again.
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
+    // Web search too: a new tool set, and its record, commit.
+    var tools: protocol.ConfigureCommand = .{};
+    try tools.key.set("identity-later-tools");
+    tools.session = second_session;
+    tools.configuration.tools.state = .value;
+    tools.configuration.tools.count = 2;
+    tools.configuration.tools.values[0] = .bash;
+    tools.configuration.tools.values[1] = .web_search;
+    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
     // New text, so content commits a new row too.
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-second");
@@ -1079,6 +1091,109 @@ fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
     defer _ = c.sqlite3_finalize(statement);
     if (c.sqlite3_step(statement) == c.SQLITE_DONE) return .accepted;
     return if (c.sqlite3_extended_errcode(database) == c.SQLITE_CONSTRAINT_CHECK) .check_violation else .other_failure;
+}
+
+test "a fresh Store creates a Session with instructions, an output schema and the default tools" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration("fresh-tool-texts", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
+    command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    // Five new content rows in one transaction: both values, Bash's two
+    // texts and web search's empty text.
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 5), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+}
+
+test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const Tools = struct {
+        fn set(store: *Store, key: []const u8, session: protocol.Bounded(protocol.max_session_bytes), offered: []const tool_catalog.Tool) !void {
+            var command: protocol.ConfigureCommand = .{};
+            try command.key.set(key);
+            command.session = session;
+            command.configuration.tools.state = .value;
+            command.configuration.tools.count = @intCast(offered.len);
+            @memcpy(command.configuration.tools.values[0..offered.len], offered);
+            try std.testing.expect(store.configure(&command, .{}) == .accepted);
+        }
+        fn counts(store: *Store) ![3]u64 {
+            return .{
+                try store_testing.queryU64(store, "SELECT count(*) FROM tool_set", .{}),
+                try store_testing.queryU64(store, "SELECT count(*) FROM tool_record", .{}),
+                try store_testing.queryU64(store, "SELECT count(*) FROM tool_set_member", .{}),
+            };
+        }
+    };
+    // Two Sessions offering Bash share one set and one record.
+    const first = try configureTestSessionAsk(&storage, "saved-tools-first");
+    const second = try configureTestSessionAsk(&storage, "saved-tools-second");
+    try std.testing.expectEqual([3]u64{ 1, 1, 1 }, try Tools.counts(&storage));
+    // A new set reuses the records it shares with a saved one.
+    try Tools.set(&storage, "saved-tools-both", second, &.{ .bash, .web_search });
+    try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
+    try Tools.set(&storage, "saved-tools-none", first, &.{});
+    try std.testing.expectEqual([3]u64{ 3, 2, 3 }, try Tools.counts(&storage));
+    // Each revision keeps the set it was saved with.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
+        "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
+
+    // A reworded built-in changes no saved set: the saved text is what an
+    // Operation offers.
+    const reworded = "Reworded description.";
+    try submitTestMessage(&storage, &tmp, "saved-tools-message", "saved-tools-message", second.slice(), reworded);
+    try sqlite.exec(storage.database, "UPDATE tool_record SET description_content_id=(SELECT content_id FROM content WHERE CAST(payload AS TEXT)='Reworded description.') WHERE name='bash'");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(binding, &view);
+    defer view.close();
+    var settings: HistoricalSettings = undefined;
+    try view.settings(&settings);
+    try std.testing.expectEqual(@as(u64, 2), settings.tool_count);
+    var tool: historical_domain.HistoricalTool = .{};
+    try std.testing.expect(try view.nextTool(&tool));
+    try std.testing.expectEqualStrings("bash", tool.name.slice());
+    try std.testing.expectEqual(tool_catalog.Owner.rui, tool.owner);
+    try std.testing.expectEqual(protocol.contentDigest(reworded), tool.description.digest);
+    try std.testing.expectEqual(protocol.contentDigest(tool_catalog.bash_record.input_schema), tool.input_schema.digest);
+    try std.testing.expect(try view.nextTool(&tool));
+    try std.testing.expectEqualStrings("web_search", tool.name.slice());
+    try std.testing.expectEqual(tool_catalog.Owner.provider, tool.owner);
+    try std.testing.expect(!try view.nextTool(&tool));
+}
+
+test "a Bash call the Operation did not offer is rejected and keeps its description" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools.count = 0;
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    try submitTestMessage(&storage, &tmp, "unoffered-message", "unoffered-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "unoffered-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
 }
 
 test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itself" {
@@ -3878,7 +3993,7 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw.?, "PRAGMA journal_mode=DELETE");
-        try sqlite.exec(raw.?, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version - 1}));
+        try sqlite.exec(raw.?, std.fmt.comptimePrint("PRAGMA user_version={d}", .{store_schema.migration_baseline - 1}));
     }
     const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(before);
@@ -4737,7 +4852,17 @@ test "one committed selection freezes its settings and input prefix" {
     try view.settings(&settings);
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
-    try std.testing.expectEqual(configuration_domain.default_tools_mask, settings.tools_mask);
+    // The frozen tools come back as the Store saved them, in set order.
+    const offered = tool_catalog.Offered.ofMask(configuration_domain.default_tools_mask);
+    try std.testing.expectEqual(@as(u64, offered.len), settings.tool_count);
+    var tool: historical_domain.HistoricalTool = .{};
+    for (offered.slice()) |expected| {
+        try std.testing.expect(try view.nextTool(&tool));
+        try std.testing.expectEqualStrings(expected.name, tool.name.slice());
+        try std.testing.expectEqual(expected.owner, tool.owner);
+        try std.testing.expectEqual(@as(u64, expected.description.len), tool.description.length);
+    }
+    try std.testing.expect(!try view.nextTool(&tool));
     const first_input = (try view.nextEntry(0)).?;
     const second_input = (try view.nextEntry(first_input.position)).?;
     const instruction = (try view.nextEntry(second_input.position)).?;
@@ -4796,7 +4921,7 @@ test "one committed selection freezes its settings and input prefix" {
     try later_view.settings(&later_settings);
     try std.testing.expectEqual(protocol.Provider.codex, later_settings.provider);
     try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
-    try std.testing.expectEqual(@as(u8, 0), later_settings.tools_mask);
+    try std.testing.expectEqual(@as(u64, 0), later_settings.tool_count);
     var position: u64 = 0;
     // The failed first Operation keeps its boundary between the inputs.
     for ([_]HistoricalEntryKind{ .user, .user, .instruction, .operation, .user }) |kind| {
@@ -5407,9 +5532,9 @@ test "runnable discovery measures eligible ineligible and history populations in
             if (ineligible != 0) {
                 try sqlite.exec(
                     database,
-                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
                         "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
+                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -5425,9 +5550,9 @@ test "runnable discovery measures eligible ineligible and history populations in
             }
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
-                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
                     "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
+                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
@@ -5573,9 +5698,9 @@ test "retry admission and exhausted recovery use their selection indexes" {
 fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try sqlite.exec(
         database,
-        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask," ++
+        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id," ++
             "permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
+            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,1,0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
             "FROM (SELECT DISTINCT session_ref FROM model_operation),(SELECT coalesce(max(created_seq),0) AS base FROM session)",
     );
 }
@@ -7978,4 +8103,270 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     try std.testing.expect(storage.isFenced());
+}
+
+fn openRaw(path: []const u8) !*c.sqlite3 {
+    var raw: ?*c.sqlite3 = null;
+    var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    if (c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{path}, 0), &raw) != c.SQLITE_OK) {
+        if (raw) |database| _ = c.sqlite3_close(database);
+        return error.StoreOpenFailed;
+    }
+    return raw.?;
+}
+
+/// Every table's rows but store_meta's, in key order: a line per row, and
+/// each value as its type and its bytes.
+fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
+    inline for (store_schema.tables) |table| {
+        if (comptime std.mem.eql(u8, table.name, "store_meta")) continue;
+        const order = comptime blk: {
+            var text: []const u8 = "";
+            for (table.primary_key, 0..) |column, position| text = text ++ (if (position == 0) "" else ",") ++ column;
+            break :blk text;
+        };
+        const statement = try sqlite.prepare(database, "SELECT * FROM " ++ table.name ++ " ORDER BY " ++ order);
+        defer _ = c.sqlite3_finalize(statement);
+        try out.print("{s}\n", .{table.name});
+        while (true) {
+            switch (c.sqlite3_step(statement)) {
+                c.SQLITE_DONE => break,
+                c.SQLITE_ROW => {},
+                else => return error.StatementFailed,
+            }
+            for (0..@intCast(c.sqlite3_column_count(statement))) |column| {
+                const index: c_int = @intCast(column);
+                switch (c.sqlite3_column_type(statement, index)) {
+                    c.SQLITE_NULL => try out.writeAll(" null"),
+                    c.SQLITE_INTEGER => try out.print(" {d}", .{c.sqlite3_column_int64(statement, index)}),
+                    c.SQLITE_TEXT => {
+                        const text = c.sqlite3_column_text(statement, index) orelse return error.OutOfMemory;
+                        const length: usize = @intCast(c.sqlite3_column_bytes(statement, index));
+                        try out.print(" t{d}:{s}", .{ length, text[0..length] });
+                    },
+                    c.SQLITE_BLOB => {
+                        const length: usize = @intCast(c.sqlite3_column_bytes(statement, index));
+                        const blob: [*]const u8 = if (length == 0) "" else @ptrCast(c.sqlite3_column_blob(statement, index).?);
+                        try out.print(" x{d}:{x}", .{ length, blob[0..length] });
+                    },
+                    else => return error.UnexpectedColumnType,
+                }
+            }
+            try out.writeByte('\n');
+        }
+    }
+}
+
+/// A fresh Store at `path` that then gets `expected_rows`, which must meet
+/// its foreign keys, and opens once more.
+fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    try storage.close();
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(raw, store_testing.expected_rows);
+        const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
+        defer _ = c.sqlite3_finalize(violations);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(violations));
+    }
+    try storage.open(std.testing.io, path, root);
+    try storage.close();
+}
+
+test "a Store at the migration baseline with its rows takes every migration at open and reads as a fresh Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var migrated_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const migrated = try std.fmt.bufPrint(&migrated_buffer, "{s}/migrated.sqlite3", .{root});
+    var fresh_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const fresh = try std.fmt.bufPrint(&fresh_buffer, "{s}/fresh.sqlite3", .{root});
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version={d}", .{ store_schema.application_id, store_schema.migration_baseline }));
+        const meta = try sqlite.prepare(raw, std.fmt.comptimePrint("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','{d}')", .{store_schema.migration_baseline}));
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, protocol.wire_version);
+        try sqlite.bindText(meta, 2, root);
+        try sqlite.expectDone(meta);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+    }
+    var storage: Store = undefined;
+    storage.open(std.testing.io, migrated, root) catch |err| {
+        std.debug.print("the Store at the migration baseline did not open: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    try storage.close();
+    try freshStoreWithExpectedRows(fresh, root);
+
+    var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer migrated_rows.deinit();
+    var fresh_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer fresh_rows.deinit();
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try writeRows(raw, &migrated_rows.writer);
+    }
+    {
+        const raw = try openRaw(fresh);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &fresh_rows.writer);
+    }
+    try std.testing.expect(migrated_rows.written().len > 1000);
+    try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
+}
+
+test "a migration whose step fails leaves its backup and the original Store readable, and replaces an earlier backup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
+    const backup_name = "store.backup";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = backup_name, .data = "earlier" });
+    // Names that only begin like the copy's are someone else's.
+    for ([_][]const u8{ "store.sqlite3.kept", "store.backup.saved", "store.backup-old" }) |kept| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = kept, .data = "kept" });
+    }
+    {
+        const raw = try openRaw(store.path);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
+    }
+    for ([_][]const u8{ "store.sqlite3.kept", "store.backup.saved", "store.backup-old" }) |kept| {
+        var kept_buffer: [8]u8 = undefined;
+        try std.testing.expectEqualStrings("kept", try tmp.dir.readFile(std.testing.io, kept, &kept_buffer));
+    }
+    var backup_path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const backup_path = try std.fmt.bufPrint(&backup_path_buffer, "{s}/" ++ backup_name, .{store.root});
+    for ([_][]const u8{ store.path, backup_path }) |path| {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_integrity_check WHERE integrity_check='ok'"));
+    }
+    // A backup that cannot be written refuses the Store before any step runs.
+    try tmp.dir.deleteFile(std.testing.io, backup_name);
+    try tmp.dir.createDir(std.testing.io, backup_name, .default_dir);
+    {
+        const raw = try openRaw(store.path);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{} }}));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
+    }
+    try std.testing.expect((try tmp.dir.statFile(std.testing.io, backup_name, .{})).kind == .directory);
+}
+
+test "a Store at the maximum path backs itself up before a migration" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store_path = try createMaximumCanonicalStore(&tmp, &store_buffer);
+    const paths = try platform.resolveClientPaths(io, store_path);
+    const database = paths.database.slice();
+    try std.testing.expectEqual(@as(usize, platform.max_database_path_bytes), database.len);
+    {
+        var storage: Store = undefined;
+        try storage.open(io, database, paths.store.slice());
+        defer storage.close() catch unreachable;
+        _ = try configureTestSession(&storage, "migration-session");
+    }
+    const raw = try openRaw(database);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, "UPDATE store_meta SET meta_value='7' WHERE meta_key='format';PRAGMA user_version=7");
+    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, paths.store.slice(), 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
+    var backup_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const backup = try std.fmt.bufPrint(&backup_buffer, "{s}/rui.backup", .{paths.store.slice()});
+    try std.testing.expect((try std.Io.Dir.cwd().statFile(io, backup, .{})).size > 0);
+}
+
+/// `object`'s CREATE text in the current schema.
+fn objectSql(comptime name: []const u8) [:0]const u8 {
+    comptime {
+        for (store_schema.objects(.sqlite)) |object| if (std.mem.eql(u8, object.name, name)) {
+            const terminated = object.sql ++ "\x00";
+            return terminated[0..object.sql.len :0];
+        };
+        @compileError("no schema object " ++ name);
+    }
+}
+
+/// A current Store whose store_meta format reads `from`, with one Session.
+fn storeAtFormat(tmp: *std.testing.TmpDir, path_buffer: []u8, root_buffer: []u8, comptime from: u32) !struct { path: []const u8, root: []const u8 } {
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, root_buffer)];
+    const path = try std.fmt.bufPrint(path_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    _ = try configureTestSession(&storage, "migration-session");
+    try storage.close();
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';PRAGMA user_version={d}", .{ from, from }));
+    return .{ .path = path, .root = root };
+}
+
+test "a migration that rebuilds a referenced table from the schema's text keeps its rows and references, and the Store opens" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
+    const rebuild = comptime blk: {
+        var statements: []const [:0]const u8 = &.{ "ALTER TABLE session RENAME TO session_old", objectSql("session"), "INSERT INTO session SELECT * FROM session_old", "DROP TABLE session_old" };
+        for (store_schema.indexes) |index| if (std.mem.eql(u8, index.table, "session")) {
+            statements = statements ++ .{objectSql(index.name)};
+        };
+        break :blk statements;
+    };
+    {
+        const raw = try openRaw(store.path);
+        defer _ = c.sqlite3_close(raw);
+        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{} }});
+    }
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, store.path, store.root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
+}
+
+test "a migration that leaves other text than bootstrap's, or a broken reference, or runs on another format, commits nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
+    // SQLite splices an added column into the table's text, so the column
+    // bootstrap would write in place reads differently.
+    const added = "ALTER TABLE session ADD COLUMN migration_probe INTEGER";
+    const Case = struct { from: u32, statements: []const [:0]const u8, refusal: anyerror };
+    const cases = [_]Case{
+        .{ .from = 7, .statements = &.{added}, .refusal = error.WrongStoreSchema },
+        .{ .from = 7, .statements = &.{"DELETE FROM session"}, .refusal = error.MigrationBrokeForeignKey },
+        .{ .from = 6, .statements = &.{}, .refusal = error.WrongStoreVersion },
+    };
+    const raw = try openRaw(store.path);
+    defer _ = c.sqlite3_close(raw);
+    for (cases) |case| {
+        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{} }}));
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_table_info('session') WHERE name='migration_probe'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
+    }
 }

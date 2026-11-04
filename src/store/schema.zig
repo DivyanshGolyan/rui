@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x48066d4b9a27fab9 },
+    .{ .schema_version = 51, .digest = 0x3774614c40fc9070 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -44,6 +44,75 @@ comptime {
         "the Store's bootstrap changed: set the last row's digest to 0x{x:0>16} if schema_version is unreleased, else bump it and append a row",
         .{digest()},
     ));
+}
+
+/// The oldest format a Store moves forward from (D204). An older Store, or
+/// a newer one, is refused with WrongStoreVersion, as before migrations.
+pub const migration_baseline: u32 = 51;
+
+/// One forward step of the Store format, from `from` to `from + 1`, as
+/// statements per engine. SQLite runs `sqlite` when a Store opens
+/// (`openExisting`). Rui runs no DDL on MySQL (D203): the DB team runs
+/// `mysql`, which `mysqlMigration` joins. Every statement is one string
+/// literal, so the source is the text that runs: a CHECK or predicate is
+/// copied from the schema's rendered text (`ddl`), whose source passed
+/// `rsql.expressionError`, and the migration tests hold the migrated Store
+/// to that text. tests/ci/test_store_schema_version.py refuses an entry
+/// that is anything but literals, and compares every step whose `from` is
+/// below the released schema_version with its text at the release.
+///
+/// SQLite keeps each CREATE text as run, and a Store opens only when every
+/// object's text equals a fresh bootstrap's. ALTER TABLE ADD COLUMN splices
+/// the new column into the stored text, and RENAME quotes the new name, so
+/// a step that changes a table rebuilds it: it renames the table aside,
+/// creates it with the new text, copies its rows, drops the old table and
+/// creates its indexes again. `migrate` runs the steps with foreign keys
+/// off and legacy_alter_table on, so other tables' references keep the
+/// table's name, and checks every foreign key before it commits.
+pub const Migration = struct {
+    from: u32,
+    sqlite: []const [:0]const u8,
+    mysql: []const [:0]const u8,
+};
+
+/// Every step from `migration_baseline` to `schema_version`, oldest first.
+/// The baseline snapshots (migration_baseline.*.sql) never change; the
+/// chain grows. Only a step past the released schema_version may change.
+pub const migrations = [_]Migration{};
+
+comptime {
+    if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
+    for (migrations, 0..) |step, position| {
+        const expected = migration_baseline + position;
+        if (step.from != expected) @compileError(std.fmt.comptimePrint(
+            "migrations: step {d} moves from {d}; the step after {d} must move from {d}",
+            .{ position, step.from, expected -| 1, expected },
+        ));
+        if (step.from >= schema_version) @compileError(std.fmt.comptimePrint(
+            "migrations: the step from {d} moves past schema_version {d}: set schema_version to {d} and append its bootstrap_digests row, or drop the step",
+            .{ step.from, schema_version, step.from + 1 },
+        ));
+    }
+    if (migrations.len < schema_version - migration_baseline) @compileError(std.fmt.comptimePrint(
+        "migrations: schema_version is {d}, and no step moves a Store from {d}: append .{{ .from = {d}, .sqlite = ..., .mysql = ... }}",
+        .{ schema_version, migration_baseline + migrations.len, migration_baseline + migrations.len },
+    ));
+}
+
+/// The statements of the step from `from`, as one text for the DB team to
+/// run on a MySQL Store at `from`; `ddl(.mysql)` is a new MySQL Store's.
+/// PR 8's `rui store schema --engine mysql [--from N]` prints them. Rui takes
+/// no backup of a MySQL Store: backing it up before applying the text is the
+/// DB team's job.
+pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
+    return comptime blk: {
+        if (from < migration_baseline or from - migration_baseline >= migrations.len)
+            @compileError(std.fmt.comptimePrint("migrations: no step moves a Store from {d}", .{from}));
+        var text: []const u8 = "";
+        for (migrations[from - migration_baseline].mysql) |statement| text = text ++ statement ++ ";\n";
+        const terminated = text ++ "\x00";
+        break :blk terminated[0..text.len :0];
+    };
 }
 
 /// SQL membership of `column` in a closed set of enum tags or text literals:
@@ -157,7 +226,8 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
 
 // A label's syntax, not a provider list, so a new provider is no format change.
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
-const tools_mask_column: Column = .{ .name = "tools_mask", .type = .int, .check = std.fmt.comptimePrint("tools_mask BETWEEN 0 AND {d}", .{tool_catalog.all_tools_mask}) };
+// The tool records a Session's settings offer (D48), saved once by content.
+const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
@@ -188,6 +258,51 @@ pub const tables = [_]Table{
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
     },
+    // One tool as the model is told about it (D48): its name, who owns it
+    // (`rui`, or `provider` for a tool the provider runs, whose text the
+    // codec writes), and its description and input schema as content.
+    .{
+        .name = "tool_record",
+        .columns = &.{
+            .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_catalog.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
+            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider" } } },
+            .{ .name = "description_content_id", .type = .int },
+            .{ .name = "input_schema_content_id", .type = .int },
+        },
+        .primary_key = &.{"tool_record_id"},
+        .uniques = &.{&.{ "name", "owner", "description_content_id", "input_schema_content_id" }},
+        .foreign_keys = &.{
+            references("description_content_id", "content", content_reference),
+            references("input_schema_content_id", "content", content_reference),
+        },
+    },
+    // An ordered set of tool records, saved once: `digest` names its
+    // members' content (tools.zig `setDigest`).
+    .{
+        .name = "tool_set",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
+            .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
+            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_tools}) },
+        },
+        .primary_key = &.{"tool_set_id"},
+        .uniques = &.{&.{"digest"}},
+    },
+    .{
+        .name = "tool_set_member",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "tool_record_id", .type = .int },
+        },
+        .primary_key = &.{ "tool_set_id", "ordinal" },
+        .foreign_keys = &.{
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
+            references("tool_record_id", "tool_record", &.{"tool_record_id"}),
+        },
+        .without_rowid = true,
+    },
     .{
         .name = "session",
         .columns = &.{
@@ -201,7 +316,7 @@ pub const tables = [_]Table{
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
             .{ .name = "model", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "instructions_content_id", .type = .int },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             .{ .name = "revision", .type = .int, .check = "revision>0" },
@@ -225,6 +340,7 @@ pub const tables = [_]Table{
         .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
     },
@@ -263,7 +379,7 @@ pub const tables = [_]Table{
             .{ .name = "model", .type = .{ .text = null } },
             .{ .name = "instructions_content_id", .type = .int },
             .{ .name = "instructions_updated", .type = .flag },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             compaction_trigger_column,
@@ -277,6 +393,7 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
         .without_rowid = true,
@@ -659,6 +776,9 @@ pub const indexes = [_]Index{
     .{ .name = "model_operation_retry_exhausted", .table = "model_operation", .columns = &.{"operation_id"}, .where = retry_exhausted_sql },
     .{ .name = "model_operation_session_history", .table = "model_operation", .columns = &.{ "session_ref", "operation_id" } },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
+    // Every Operation by admission, whatever its outcome: request history
+    // places each earlier Operation's effort boundary (codec /2).
+    .{ .name = "model_operation_admission", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "model_operation_context_history", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = oneOf("resolution_code", &accepted_resolutions) },
     .{ .name = "model_operation_compaction_bases", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = "purpose=1 AND " ++ resolutionIs("resolution_code", .compacted) },
     .{ .name = "conversation_entry_history", .table = "conversation_entry", .columns = &.{ "session_ref", "session_position" } },
@@ -677,6 +797,7 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
+    @setEvalBranchQuota(2000);
     return tableCarriesSessions(tables[tablePosition(&tables, table)]);
 }
 
@@ -1155,15 +1276,115 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "COMMIT");
 }
 
+/// Opens a Store of this application at schema_version, or moves one at a
+/// format from migration_baseline on to it first (`migrate`).
+pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !void {
+    if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
+    const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
+    if (found == schema_version) return validateCurrent(database, selector);
+    if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
+    return migrate(io, database, selector, found, migrations[found - migration_baseline ..]);
+}
+
+/// First writes `migrationBackup`; a Store whose backup fails is refused
+/// with nothing migrated. Then, in one transaction: runs `steps`' SQLite statements on a Store at
+/// format `from`, sets its format to schema_version, and commits only if
+/// the Store then validates as a fresh bootstrap's would
+/// (`validateCurrent`) and every foreign key holds. A Store whose
+/// store_meta format is not `from` is a WrongStoreVersion, and any failure
+/// leaves the Store as it was.
+pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+    try migrationBackup(io, database);
+    // Both outside the transaction, where PRAGMA foreign_keys takes effect.
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    defer sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch {};
+    try sqlite.exec(database, "BEGIN EXCLUSIVE");
+    errdefer sqlite.rollback(database);
+    var from_text: [10]u8 = undefined;
+    if (!try metaEquals(database, "format", std.fmt.bufPrint(&from_text, "{d}", .{from}) catch unreachable)) return error.WrongStoreVersion;
+    for (steps) |step| for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    {
+        const violations = try sqlite.prepare(database, "PRAGMA foreign_key_check");
+        defer _ = c.sqlite3_finalize(violations);
+        switch (c.sqlite3_step(violations)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => return error.MigrationBrokeForeignKey,
+            else => return error.StatementFailed,
+        }
+    }
+    try sqlite.exec(database, version_sql);
+    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
+    try validateCurrent(database, selector);
+    try sqlite.exec(database, "COMMIT");
+}
+
+/// Before a migration, a copy of the Store at `from` beside its file: for
+/// `<name>.sqlite3`, `<name>.backup`, written page by page through SQLite's
+/// online backup API, so it holds the last committed state and is as large
+/// as the Store. Its path is a byte shorter than the Store's, so it and its
+/// journal fit wherever the Store's do. The one name per file means an
+/// earlier copy is replaced and nothing else beside the Store is touched;
+/// the copy's own user_version says which format it holds. The copy and
+/// its directory entry are synced before the migration starts. Every
+/// failure is a MigrationBackupFailed.
+fn migrationBackup(io: std.Io, database: *c.sqlite3) !void {
+    return writeMigrationBackup(io, database) catch |err| switch (err) {
+        error.MigrationBackupFailed => err,
+        else => {
+            std.log.warn("Store migration backup failed: {s}", .{@errorName(err)});
+            return error.MigrationBackupFailed;
+        },
+    };
+}
+
+const store_extension = ".sqlite3";
+const backup_extension = ".backup";
+comptime {
+    if (backup_extension.len >= store_extension.len) @compileError("a backup's path must be shorter than its Store's");
+}
+
+fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
+    const path = std.mem.span(c.sqlite3_db_filename(database, "main") orelse return error.MigrationBackupFailed);
+    if (!std.mem.endsWith(u8, path, store_extension)) return error.MigrationBackupFailed;
+    const directory_path = std.fs.path.dirname(path) orelse return error.MigrationBackupFailed;
+    // Iterable, so the handle is a real descriptor (not O_PATH) that fsync takes.
+    var directory = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
+    defer directory.close(io);
+    // SQLite's allocator, not a path-sized stack buffer: the Host's stack frame budget.
+    const backup_text = c.sqlite3_mprintf("%.*s" ++ backup_extension, @as(c_int, @intCast(path.len - store_extension.len)), path.ptr) orelse return error.MigrationBackupFailed;
+    defer c.sqlite3_free(backup_text);
+    const backup = std.mem.span(backup_text);
+    const backup_name = backup[directory_path.len + 1 ..];
+    directory.deleteFile(io, backup_name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    // The online backup API, not VACUUM INTO: the build sets
+    // SQLITE_MAX_ATTACHED=0, and VACUUM INTO attaches its target.
+    {
+        var target: ?*c.sqlite3 = null;
+        defer _ = c.sqlite3_close(target);
+        if (c.sqlite3_open_v2(backup, &target, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX, null) != c.SQLITE_OK)
+            return error.MigrationBackupFailed;
+        const copying = c.sqlite3_backup_init(target, "main", database, "main") orelse return error.MigrationBackupFailed;
+        const stepped = c.sqlite3_backup_step(copying, -1);
+        if (c.sqlite3_backup_finish(copying) != c.SQLITE_OK or stepped != c.SQLITE_DONE) return error.MigrationBackupFailed;
+    }
+    var copy = try directory.openFile(io, backup_name, .{});
+    defer copy.close(io);
+    try copy.sync(io);
+    if (std.c.fsync(directory.handle) != 0) return error.MigrationBackupFailed;
+}
+
 /// Refuses a Store unless its tables and indexes are exactly the ones
 /// bootstrap creates, each with the same CREATE text. SQLite keeps that text
-/// as run and bootstrap is its only writer, so a dropped CHECK, a changed
-/// column or a missing or extra index or trigger is a WrongStoreSchema. A
+/// as run, and only bootstrap and `migrate` write it, so a dropped CHECK, a
+/// changed column, a migration that leaves other text than bootstrap's, or a
+/// missing or extra index or trigger is a WrongStoreSchema. A
 /// network engine keeps no such text: PR 8/9 compare its catalog's tables,
 /// columns and indexes by name and type instead, which cannot see a CHECK.
-pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
-    if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
-    if (try sqlite.pragmaInt(database, "PRAGMA user_version") != schema_version) return error.WrongStoreVersion;
+/// Its caller has read user_version as schema_version, or set it.
+fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
     {
         const expected = comptime objects(.sqlite);
         const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");

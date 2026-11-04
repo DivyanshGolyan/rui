@@ -284,6 +284,11 @@ test "TD1 sequence model {name}" {{
         for path in (overlay / "src").rglob("*"):
             if path.is_file() and path not in expected:
                 path.unlink()
+        # A cached overlay can hold directories from another revision's
+        # tree, such as main's newer packages; the manifest names them too.
+        for path in sorted((overlay / "src").rglob("*"), reverse=True):
+            if path.is_dir() and not path.is_symlink() and path not in expected and not any(path.iterdir()):
+                path.rmdir()
         command = ["zig", "build", "test", "-j2", "--cache-dir", str(cache / "build"),
                    "-Dtest-filter=TD1 sequence model" + ("" if selector == "all" else " " + selector),
                    "--summary", "all", "--verbose"]
