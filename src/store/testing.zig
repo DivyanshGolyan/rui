@@ -244,13 +244,13 @@ fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
 /// `args` in order: integers, `Blob`s as blobs, and byte slices as text.
 /// The fixtures run on SQLite, the only engine today.
 pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
-    return sqliteExec(storage.database, fixtureText(sql), args);
+    return sqliteExec(storage.sqliteDatabase(), fixtureText(sql), args);
 }
 
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
 /// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
-    return sqliteQueryU64(storage.database, fixtureText(sql), args);
+    return sqliteQueryU64(storage.sqliteDatabase(), fixtureText(sql), args);
 }
 
 /// `exec` on a SQLite connection, for any SQLite text: sqlite_tests.zig's
@@ -279,8 +279,8 @@ pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anyt
 /// engine today, PRAGMA foreign_keys is OFF around it and ON after it, also
 /// when it fails.
 pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-    defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+    defer sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
     try exec(storage, sql, args);
 }
 
@@ -289,17 +289,17 @@ pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: any
 /// rule and never handed to the live MySQL check.
 pub const sqlite_only = struct {
     pub fn exec(storage: *Store, sql: [:0]const u8, args: anytype) !void {
-        return sqliteExec(storage.database, sql, args);
+        return sqliteExec(storage.sqliteDatabase(), sql, args);
     }
 
     pub fn queryU64(storage: *Store, sql: [:0]const u8, args: anytype) !u64 {
-        return sqliteQueryU64(storage.database, sql, args);
+        return sqliteQueryU64(storage.sqliteDatabase(), sql, args);
     }
 
     pub fn withoutForeignKeys(storage: *Store, sql: [:0]const u8, args: anytype) !void {
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-        defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
-        try sqliteExec(storage.database, sql, args);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        defer sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
+        try sqliteExec(storage.sqliteDatabase(), sql, args);
     }
 };
 
@@ -308,8 +308,8 @@ pub const sqlite_only = struct {
 /// a statement compiled. On SQLite, the only engine today, `table` is
 /// renamed and a view whose filter overflows `abs` takes its name.
 pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
-    try sqlite.exec(storage.database, "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");
-    try sqlite.exec(storage.database, "CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable " ++
+    try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");
+    try sqlite.exec(storage.sqliteDatabase(), "CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable " ++
         "WHERE abs(-9223372036854775808) IS NOT NULL");
 }
 

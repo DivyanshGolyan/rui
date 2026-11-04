@@ -339,6 +339,11 @@ pub const Store = struct {
         return result;
     }
 
+    /// The SQLite connection, for SQLite-only tests and fixtures.
+    pub fn sqliteDatabase(self: *const Store) *c.sqlite3 {
+        return self.database;
+    }
+
     pub fn close(self: *Store) !void {
         // Every caller has its answer, so the queue is empty.
         self.queue().closing();
