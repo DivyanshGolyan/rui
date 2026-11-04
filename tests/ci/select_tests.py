@@ -197,7 +197,8 @@ LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
 # development too, or its green would say nothing about that server.
 # Development keeps the rule's own targets among them.
 LIVE_RULES = (
-    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig"),
+    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig",
+      "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
      LIVE_POSTGRES_TARGETS),
     (("src/store/wire/mysql.zig", "src/store/wire/mysql_driver.zig", "tests/integration/mysql_wire*",
@@ -208,7 +209,8 @@ LIVE_RULES = (
     # Every Store statement, the schema, the fixtures and the wire client
     # can change what MySQL refuses.
     (("src/store.zig", "src/store/*", "!src/store/wire/pg*.zig", "!src/store/wire/scram.zig",
-      "!src/store/wire/tls.zig", "tests/integration/mysql_server.py"),
+      "!src/store/wire/tls.zig", "tests/integration/mysql_server.py",
+      "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test",), (),
      "The Store's live MySQL dialect check drives MySQL 8.4 through the wire client; macOS skips it",
      LIVE_MYSQL_TARGETS),

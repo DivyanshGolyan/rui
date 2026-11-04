@@ -10,6 +10,12 @@
 //! Without both variables the check does nothing and its test skips, unless
 //! `RUI_TEST_REQUIRE_ENGINES` lists `mysql`; then its test fails.
 //!
+//! With `RUI_TEST_MYSQL_RECORD` set, the check rewrites that file after each
+//! thing it does: the DDL statements it ran, the PREPAREs it issued, and the
+//! probes MySQL refused as expected. CI fails a shard whose record is
+//! missing or counts no PREPARE (`tests/integration/live_engines.py`), so
+//! any path that keeps the check from running turns red.
+//!
 //! PREPARE resolves names, types and grammar; it binds no value and runs
 //! nothing, so literal typing, guards, row counts, transactions and query
 //! plans are not checked here.
@@ -35,8 +41,25 @@ var driver: mysql_driver.Driver = undefined;
 var ddl_refusals: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
 var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
 var password_buffer: [mysql.max_password_bytes]u8 = undefined;
+var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+/// The file `RUI_TEST_MYSQL_RECORD` names, or null.
+var record_path: ?[]const u8 = null;
+/// What the check did in this process, as the record states it.
+var done: struct {
+    ddl: u32 = 0,
+    ddl_refused: u32 = 0,
+    prepares: u32 = 0,
+    prepare_refused: u32 = 0,
+    probes: u32 = 0,
 
-const Config = struct { socket: []const u8, password: []const u8 };
+    pub fn format(counts: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("ddl={d} ddl_refused={d} prepares={d} prepare_refused={d} probes={d}\n", .{
+            counts.ddl, counts.ddl_refused, counts.prepares, counts.prepare_refused, counts.probes,
+        });
+    }
+} = .{};
+
+const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8 };
 
 /// The server the environment names, copied out of it; null when it names
 /// none. `error.MysqlRequired` when `RUI_TEST_REQUIRE_ENGINES` lists `mysql`
@@ -51,7 +74,30 @@ fn configured() !?Config {
     if (socket.?.len > socket_buffer.len or password.?.len > password_buffer.len) return error.MysqlConfigTooLong;
     @memcpy(socket_buffer[0..socket.?.len], socket.?);
     @memcpy(password_buffer[0..password.?.len], password.?);
-    return .{ .socket = socket_buffer[0..socket.?.len], .password = password_buffer[0..password.?.len] };
+    const record = environ.get("RUI_TEST_MYSQL_RECORD");
+    if (record) |path| {
+        if (path.len > record_buffer.len) return error.MysqlConfigTooLong;
+        @memcpy(record_buffer[0..path.len], path);
+    }
+    return .{
+        .socket = socket_buffer[0..socket.?.len],
+        .password = password_buffer[0..password.?.len],
+        .record = if (record) |path| record_buffer[0..path.len] else null,
+    };
+}
+
+/// Under `mutex`: rewrites the record file with `done`, when one is named.
+/// A failed write logs at err level, so a run that cannot record fails.
+fn writeRecord() void {
+    const path = record_path orelse return;
+    var line: [160]u8 = undefined;
+    const text = std.fmt.bufPrint(&line, "{f}", .{done}) catch unreachable;
+    const io = std.testing.io;
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch |err|
+        return std.log.err("MySQL dialect check: cannot write the record {s}: {s}", .{ path, @errorName(err) });
+    defer file.close(io);
+    file.writeStreamingAll(io, text) catch |err|
+        std.log.err("MySQL dialect check: cannot write the record {s}: {s}", .{ path, @errorName(err) });
 }
 
 /// Under `mutex`: the bootstrapped connection, or null when MySQL is not
@@ -82,6 +128,8 @@ fn connection() ?*mysql_driver.Driver {
         return null;
     };
     state = .open;
+    record_path = config.record;
+    writeRecord();
     return &driver;
 }
 
@@ -106,7 +154,11 @@ fn setup(text: []const u8) !void {
 }
 
 fn ddl(name: []const u8, text: []const u8) !void {
-    if (try run(text)) |refused| try ddl_refusals.writer.print("{s}: {f}\n  {s}\n", .{ name, refused, text });
+    done.ddl += 1;
+    if (try run(text)) |refused| {
+        done.ddl_refused += 1;
+        try ddl_refusals.writer.print("{s}: {f}\n  {s}\n", .{ name, refused, text });
+    }
 }
 
 const Refused = struct {
@@ -171,8 +223,11 @@ fn once(comptime text: []const u8, comptime unrendered: ?[]const u8) void {
         state = .broken;
         std.log.err("MySQL dialect check: connection failed: {s}", .{@errorName(err)});
         return;
-    } orelse return;
-    std.log.err("MySQL 8.4 refused to PREPARE: {f}\n  {s}", .{ refused, text });
+    };
+    done.prepares += 1;
+    if (refused != null) done.prepare_refused += 1;
+    writeRecord();
+    std.log.err("MySQL 8.4 refused to PREPARE: {f}\n  {s}", .{ refused orelse return, text });
 }
 
 /// The flag that `text` was checked in this process. The struct names
@@ -265,5 +320,7 @@ test "PREPARE on the check's database refuses what MySQL 8.4 refuses" {
             std.debug.print("{s}: {f}\n", .{ probe.text, refused });
             return err;
         };
+        done.probes += 1;
     }
+    writeRecord();
 }
