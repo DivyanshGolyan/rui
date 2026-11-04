@@ -1145,7 +1145,7 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
     }) orelse return .no_work;
     const arguments_bytes = host.allocator.alloc(u8, std.math.cast(usize, input.arguments.length) orelse return .retry_later) catch return .retry_later;
     defer host.allocator.free(arguments_bytes);
-    readCoreArguments(host, &input, arguments_bytes) catch |err| {
+    host.store.readCoreArguments(&input, arguments_bytes) catch |err| {
         fenceDispatch(host, "core tool input", err);
         return .retry_later;
     };
@@ -1185,21 +1185,6 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
         },
     };
     return .admitted;
-}
-
-/// Reads a core call's whole arguments into `bytes`, which holds exactly
-/// their length.
-fn readCoreArguments(host: *Host, input: *const store_module.CoreActionInput, bytes: []u8) !void {
-    const location = try host.store.openContent(input.arguments);
-    var reader: store_module.ContentReader = undefined;
-    reader.open(location);
-    defer reader.close();
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const count = try reader.read(offset, bytes[offset..]);
-        if (count == 0) return error.ShortCanonicalRead;
-        offset += count;
-    }
 }
 
 fn admitBashAttempt(

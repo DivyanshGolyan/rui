@@ -1028,6 +1028,21 @@ pub const Store = struct {
     pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
         return content_domain.openContentIdentity(self, reference, false);
     }
+
+    /// Reads a core call's whole arguments into `bytes`, which holds exactly
+    /// their length, one content window at a time.
+    pub fn readCoreArguments(self: *Store, input: *const CoreActionInput, bytes: []u8) !void {
+        var reader: content_domain.ContentReader = undefined;
+        reader.open(try self.openContent(input.arguments));
+        defer reader.close();
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const end = @min(bytes.len, offset + content_domain.ContentReader.content_window_bytes);
+            const count = try reader.read(offset, bytes[offset..end]);
+            if (count == 0) return error.ShortCanonicalRead;
+            offset += count;
+        }
+    }
 };
 
 pub const Faults = struct {

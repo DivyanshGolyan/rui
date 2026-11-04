@@ -8585,6 +8585,73 @@ test "a message_agent call runs as one core command: the Message is admitted fro
     try expectDenseSessionPositions(&storage, receiver.slice());
 }
 
+test "a message_agent call of the longest escaped text is read back past one content window and delivered whole" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const caller = try configureMessagingSession(&storage, "long-caller");
+    const receiver = try configureTestSession(&storage, "long-receiver");
+    try submitTestMessage(&storage, &tmp, "long-task", "long-task", caller.slice(), "send it all");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const gpa = std.testing.allocator;
+    // Every byte of the text is a quote, so the arguments hold twice the
+    // text and are read in more than one window.
+    const text = try gpa.alloc(u8, tool_catalog.core_tools.message_agent_max_text_bytes);
+    defer gpa.free(text);
+    @memset(text, '"');
+    var decoded: std.ArrayList(u8) = .empty;
+    defer decoded.deinit(gpa);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(gpa);
+    try decoded.print(gpa, "{{\"id\":\"{s}\",\"text\":\"", .{receiver.slice()});
+    try encoded.print(gpa, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"", .{receiver.slice()});
+    for (text) |_| {
+        try decoded.appendSlice(gpa, "\\\"");
+        try encoded.appendSlice(gpa, "\\\\\\\"");
+    }
+    try decoded.appendSlice(gpa, "\"}");
+    try encoded.appendSlice(gpa, "\\\"}");
+    try std.testing.expect(decoded.items.len > content_domain.ContentReader.content_window_bytes);
+    const calls = [_]TestingCall{.{ .item_id = "long-item", .name = "message_agent", .encoded_call_id = "long-call", .decoded_call_id = "long-call", .encoded_arguments = encoded.items, .decoded_arguments = decoded.items }};
+    try settleCallsForTesting(&storage, &tmp, model, "long-metadata", &calls);
+
+    const input = (try storage.nextCoreAction()).?;
+    const bytes = try gpa.alloc(u8, @intCast(input.arguments.length));
+    defer gpa.free(bytes);
+    try storage.readCoreArguments(&input, bytes);
+    try std.testing.expectEqualStrings(decoded.items, bytes);
+    var source: tool_catalog.core_tools.SliceSource = .{ .bytes = bytes };
+    const Text = struct {
+        list: std.ArrayList(u8) = .empty,
+
+        pub fn writeAll(self: *@This(), part: []const u8) !void {
+            try self.list.appendSlice(std.testing.allocator, part);
+        }
+    };
+    var read_text: Text = .{};
+    defer read_text.list.deinit(gpa);
+    const check = try tool_catalog.core_tools.checkMessageAgent(&source, &read_text);
+    try std.testing.expect(check == .accepted);
+    try std.testing.expectEqualStrings(text, read_text.list.items);
+    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(input.binding, check.accepted.id.slice(), read_text.list.items, .{}));
+    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+    var reader: content_domain.ContentReader = undefined;
+    reader.open(try storage.openContent(try testingContentReference(&storage, text_id)));
+    defer reader.close();
+    const delivered = try gpa.alloc(u8, text.len + 1);
+    defer gpa.free(delivered);
+    var count: usize = 0;
+    while (true) {
+        const read = try reader.read(count, delivered[count..@min(delivered.len, count + content_domain.ContentReader.content_window_bytes)]);
+        if (read == 0) break;
+        count += read;
+    }
+    try std.testing.expectEqualStrings(text, delivered[0..count]);
+}
+
 test "a stop that selects a message_agent call's Turn cancels it before it runs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
