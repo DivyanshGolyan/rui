@@ -300,6 +300,10 @@ D204. (Divyansh 08:23Z) Replaces D94's "no backward compatibility" for the Store
 D205. (lane M question, my call) D177/D195's `_meta` keys are `dev.rui/sessionId`, `dev.rui/parentSessionId` (absent for a root Session), `dev.rui/rootSessionId` and `dev.rui/turnId`, with the same id strings the client API shows.
 D206. (lane M question, my call) Rui's MCP client supports `x-mcp-header` as MCP 2026-07-28 requires (primitive argument values copied into `Mcp-Param-{Name}` headers, base64 when not safe ASCII) and leaves out a tool whose `x-mcp-header` is invalid when it lists tools. `ttlMs`/`cacheScope` on `tools/list` are parsed and ignored (D110).
 
+D207. (lane T question, my call) The catalog keeps one context window per model id (D78), with no per-Adapter cap. For ChatGPT sign-in, models.dev's 1,050,000 is looser than the 272,000 ChatGPT serves, so the `compactAt` check is weaker there. An overflow is still faithful: D191 makes room, else `context_full`. The TUI and CLI default `compactAt` for ChatGPT sign-in is a client product default of 244,800 tokens.
+D208. (lane T question, my call) The catalog's effort list is taken as listed, so `none` is accepted where models.dev lists it. A provider refusal is the faithful error.
+D209. (lane T question, my call) C1 lands after S1, which removes the default effort and the percentage trigger, so the catalog never needs a default effort.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.

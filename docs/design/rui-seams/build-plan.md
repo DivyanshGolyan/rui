@@ -52,7 +52,7 @@ A lane owns its shared files: another lane's PR that must touch one of them land
 ### Format queue
 
 Store format changes land in this order, each bumping the schema version once (D173):
-1. DB thread 5e-2b (schema 51), then 5e-3, 6a, 6b as already planned, then the migration runner (D204), owned by the DB thread, before any other format change.
+1. DB thread 5e-2b (schema 51), then 5e-3, 6a, 6b as already planned, then the migration runner, PR 6d (D204; baseline schema 51, brief /mnt/project-files/rui-db-adapters/impl/pr6d-brief.md), stacked on 6c and before PR 7 and any other format change.
 2. T1b tool records.
 3. F1 ending names, if the PR keeps stored names (otherwise no bump).
 4. K1 `parent` column.
@@ -78,7 +78,7 @@ Each line: id, size, what it builds, ledger refs, depends on.
 - **T3** (M) Tool changes without a cache miss. Tool added, removed or reworded becomes a revision (core-made key, D174); the codec emits `additional_tools` at that Operation; a removed tool keeps its description and a call to it returns "this tool was removed". Format bump for core-made keys. Refs D53, D54, D55, D138, A-D76. Depends on T1b, T2. Merge gated by P1.
 - **T4** (M) `find_tools` and `loadedTools`. A core tool that matches words against names and descriptions and loads matches through T3's path; `loadedTools` defaults to all of `tools`. Refs D52, D160. Depends on T3, K0.
 - **T5** (M) Model switch. `update` may change the model within the provider; the next request rebuilds from the visible conversation. Refs D192. Depends on T2, S1.
-- **C1** (M) Shipped catalog. A build step turns a models.dev snapshot into a compact table of effort levels and context window per model id; `model_capability.zig`'s hand-copied Codex rows go away while its functions keep their callers. Refs D78, D79, A-D79, D151, D154. Depends on nothing.
+- **C1** (M) Shipped catalog. A build step turns a models.dev snapshot into a compact table of effort levels and context window per model id; `model_capability.zig`'s hand-copied Codex rows go away while its functions keep their callers. Refs D78, D79, A-D79, D151, D154, D207 to D209. Depends on S1 (D209).
 - **C2** (M) Catalog refresh. Fetch `models.dev/api.json` at Host start and on each model-list request with ETag (checked: served over HTTP/2, so the existing h2 client on the Reactor does it), save the slim result in the Store, fall back to saved then shipped. Format bump. Refs D79, D80, D153. Depends on C1.
 - **C3** (S) The model picker groups the same id across providers. Refs D81. Depends on C1.
 
@@ -124,7 +124,7 @@ Each line: id, size, what it builds, ledger refs, depends on.
 
 ### Start today (no dependencies)
 
-T1a, C1 (lane T); F1, K7 (lane K); M1, M2 (lane M); P0, A1, A2 (lane L); plus P1 for Divyansh whenever convenient.
+T1a (lane T); F1, K7 (lane K); M1, M2 (lane M); P0, A1, A2 (lane L); plus P1 for Divyansh whenever convenient.
 Within a lane, builders are pipelined: PR N+1's builder starts when PR N's builder hands back (orchestration rule 1).
 
 ### Dependency graph
