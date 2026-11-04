@@ -82,10 +82,11 @@ RULES = (
     (("src/server*.zig", "tests/integration/admission_integration.sh"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
-    (("src/launch_frame.zig", "tests/integration/launch_frame*"), ("test", "launch-frame-integration"),
-     ("test", "launch-frame-integration"), "The launch frame a program uses to start its own Host"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
+    (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
+    (("src/launch_frame.zig", "tests/integration/launch_frame*"), ("test", "launch-frame-integration", "ts-client"),
+     ("test", "launch-frame-integration", "ts-client"), "The launch frame a program uses to start its own Host"),
     (("src/protocol.zig", "src/provider_name.zig", "src/platform.zig",
       "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
       "src/named_scratch.zig", "src/output_retention.zig", "src/HostDiagnostics.zig"),
@@ -226,7 +227,7 @@ CACHE_POLICY = {
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": "measurement-check" in targets, "python": bool(targets)}
+    return {"go": "measurement-check" in targets, "node": "ts-client" in targets, "python": bool(targets)}
 
 
 def execution_batches(targets, check_part="all"):
