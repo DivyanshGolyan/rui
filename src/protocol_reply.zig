@@ -677,9 +677,11 @@ pub const Current = struct {
             action: Id,
             parent_operation: Id,
             call_ordinal: Count,
-            tool: JsonEnum(enum { bash }),
+            tool: JsonEnum(protocol.BuiltInTool),
             permission_revision: Id,
-            authorization: JsonEnum(enum { pending, bypass, allow_once }),
+            /// `core`: a core tool's call, which settlement authorizes at
+            /// once with no permission decision.
+            authorization: JsonEnum(enum { pending, bypass, allow_once, core }),
             call_id: Reference,
             arguments: Reference,
         },

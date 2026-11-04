@@ -8630,10 +8630,37 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try std.testing.expectEqual(@as(usize, 1), list.page.count);
     try std.testing.expect(list.page.rows[0].tools.eql(.initOne(.message_agent)));
 
+    // A call waiting to run shows as the core tool's, which needed no
+    // permission decision under `ask`.
+    try submitTestMessage(&storage, &tmp, "listed-task", "listed-task", session.slice(), "tell yourself");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var arguments_buffer: [64]u8 = undefined;
+    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
+    var encoded_buffer: [96]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
+    const calls = [_]TestingCall{.{ .item_id = "listed-item", .name = "message_agent", .encoded_call_id = "listed-call", .decoded_call_id = "listed-call", .encoded_arguments = encoded, .decoded_arguments = arguments }};
+    try settleCallsForTesting(&storage, &tmp, model, "listed-metadata", &calls);
+
     const reported = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
     defer std.testing.allocator.free(reported);
+    try std.testing.expect(std.mem.indexOf(u8, reported, "\"tool\":\"message_agent\",\"permission_revision\":\"1\",\"authorization\":\"core\"") != null);
     try file.setLength(io, 0);
     try file.writePositionalAll(io, reported, 0);
     const current = try protocol_reply.CurrentReply.decode(io, file, session.slice(), .{ .report = .{ .bytes = reported.len } });
     try std.testing.expect(current.current.settings.tools.set.eql(.initOne(.message_agent)));
+    const Sink = struct {
+        core_calls: usize = 0,
+        pub fn visit(self: *@This(), attention: protocol_reply.Current.Attention) !void {
+            switch (attention) {
+                .unresolved => |row| {
+                    try std.testing.expect(row.tool.value == .message_agent and row.authorization.value == .core);
+                    self.core_calls += 1;
+                },
+                else => {},
+            }
+        }
+    };
+    var sink: Sink = .{};
+    try current.current.traverse(io, file, &sink);
+    try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
 }
