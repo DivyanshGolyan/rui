@@ -280,6 +280,15 @@ D192. (Divyansh 07:05Z, card) Replaces D29's "only the model is fixed" and D113'
 
 D193. (Divyansh 07:07Z, card) Rui gets a Host-wide pause. `rui.pause()` lets running Turns finish and holds every new Turn (from callers, `start_agent`, agent messages and child deliveries); Messages are still accepted and queue. `rui.resume()` starts them in the usual order. The scheduler treats a pause as capacity zero for new Turns. Host status shows it.
 
+## Decided from Drift's second answer (11-04 08:05Z, my technical calls)
+
+D194. Replaces D80 and D189 for providers without a list. A provider's live model list is optional. When the provider has no list (Marlin answers `/v1/models` with 401 for service keys), Rui does not check usability: a spec names its model, and a provider refusal is the faithful error. No per-provider list URL or field-path setting.
+D195. Extends D177: every MCP `tools/call` also carries the calling Turn's id in `_meta`, and `turn_ended` carries the same id.
+D196. The launch frame takes `paused: true`, so the Host opens paused (D193) and starts no owed Turn until `resume()`.
+D197. D191 never drops the Session's instructions or its first User Message; it drops from the second message on. If that is still too big, the Turn ends `context_full`.
+D198. `lockWaitMs` is a `Rui.connect` option (default 120 s, D183). Drift's readiness does not wait for Rui.
+D199. Stage's MySQL has `innodb_doublewrite=OFF`, so Rui refuses to open there with `durability_innodb_doublewrite` (D156, no opt-out) until the server's administrator turns it on.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
