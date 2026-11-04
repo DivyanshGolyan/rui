@@ -3,10 +3,10 @@
 //! come before the defaults new Sessions start from.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
+const built_in_tool = @import("built_in_tool.zig");
 const command_value = @import("command_value.zig");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
-const protocol = @import("protocol.zig");
 const Provider = @import("provider_name.zig").Provider;
 const TerminalText = @import("TerminalText.zig");
 const shortPath = @import("home_path.zig").shortPath;
@@ -111,7 +111,7 @@ pub const Session = struct {
     effort: ?ReasoningEffort,
     effort_override: bool,
     permission: enum { ask, bypass },
-    tools: protocol.ToolSelection,
+    tools: built_in_tool.Selection,
     /// The Session was configured with instructions.
     instructions: bool,
     /// Null when the Host sets no automatic threshold.
@@ -351,10 +351,10 @@ fn unreadable(out: *std.Io.Writer, err: anyerror) !?[]const u8 {
 }
 
 /// Names `tools` in catalog order, with spaces for underscores, or "none".
-fn writeTools(out: *std.Io.Writer, tools: protocol.ToolSelection) !void {
+fn writeTools(out: *std.Io.Writer, tools: built_in_tool.Selection) !void {
     if (tools.count() == 0) return out.writeAll("none");
     var named = false;
-    for (std.enums.values(protocol.BuiltInTool)) |tool| if (tools.contains(tool)) {
+    for (std.enums.values(built_in_tool.BuiltInTool)) |tool| if (tools.contains(tool)) {
         if (named) try out.writeAll(", ");
         named = true;
         for (@tagName(tool)) |byte| try out.writeByte(if (byte == '_') ' ' else byte);

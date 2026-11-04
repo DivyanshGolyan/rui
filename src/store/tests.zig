@@ -8612,9 +8612,7 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.stopSession);
         }
 
-        /// Two Bash calls under ask: one allowed, run and settled, one
-        /// denied; then the continuation's history, its failure, and the
-        /// Session's reads.
+        /// A message_agent call, delivered.
         fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -8638,6 +8636,9 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.deliverAgentMessage);
         }
 
+        /// Two Bash calls under ask: one allowed, run and settled, one
+        /// denied; then the continuation's history, its failure, and the
+        /// Session's reads.
         fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSessionAsk(storage, "budget-tools");
             try submitTestMessage(storage, tmp, "budget-tools-input", "budget-tools-key", session.slice(), "run");

@@ -1,4 +1,5 @@
 const std = @import("std");
+const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
@@ -184,13 +185,8 @@ pub const ToolsField = struct {
 /// A `tools` list's names, one space apart.
 pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
 
-/// The tools the Host offers, in their names' byte order: `bash` runs locally as
-/// Actions; `message_agent` is the core's own, run as a core command (D24);
-/// `web_search` is hosted, run by the provider inside a response.
-pub const BuiltInTool = enum { bash, message_agent, web_search };
-
-/// A Session's built-in tools, as reports and list rows carry them.
-pub const ToolSelection = std.EnumSet(BuiltInTool);
+pub const BuiltInTool = built_in_tool.BuiltInTool;
+pub const ToolSelection = built_in_tool.Selection;
 
 /// The longest JSON list of tool names a report or row writes.
 pub const max_tool_selection_json_bytes = blk: {
