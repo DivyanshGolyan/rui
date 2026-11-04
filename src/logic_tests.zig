@@ -29,6 +29,7 @@ const cores = .{
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
     .{ "keymap.zig", @import("keymap.zig") },
+    .{ "mcp/arguments.zig", @import("mcp/arguments.zig") },
     .{ "mcp/document.zig", @import("mcp/document.zig") },
     .{ "mcp/EventStream.zig", @import("mcp/EventStream.zig") },
     .{ "mcp/headers.zig", @import("mcp/headers.zig") },

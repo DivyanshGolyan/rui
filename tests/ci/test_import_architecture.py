@@ -214,7 +214,7 @@ const y = @import("after.zig");
     def test_source_scan_tests_follow_the_store_directory(self):
         scan = 'test "{}" {{\n{}\n}}\n'
         listing = '    const sources = .{ @embedFile("Store.zig"), @embedFile("domain/a.zig") };'
-        names = ("Store entry points lock and fence only through canonical access",
+        names = ("Store entry points queue and fence only through canonical access",
                  "every function that enters the Store has a round budget")
 
         def tests(*listings):
@@ -234,7 +234,7 @@ const y = @import("after.zig");
                 store_access_sources(root)
             (root / "src/store/domain/b.zig").unlink()
             short = listing.replace('@embedFile("domain/a.zig")', "")
-            for listings, which in (((short, listing), "lock and fence"), ((listing, short), "round budget")):
+            for listings, which in (((short, listing), "queue and fence"), ((listing, short), "round budget")):
                 with self.subTest(which=which):
                     (root / "src/store/tests.zig").write_text(tests(*listings))
                     with self.assertRaisesRegex(ValueError, f"{which}.*the Store's files are"):

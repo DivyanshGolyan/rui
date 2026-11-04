@@ -89,6 +89,7 @@ test {
     _ = @import("rsql.zig");
     _ = @import("schema.zig");
     _ = @import("access.zig");
+    _ = @import("queue.zig");
 }
 
 /// Tests read a view's settings by value; the Host fills them in place.
@@ -685,7 +686,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
             var scratch_path: [protocol.max_store_bytes]u8 = undefined;
             const scratch_length = try tmp.dir.realPath(std.testing.io, &scratch_path);
             // Hold a captured page while a new configuration commits: delivery owns
-            // scratch, not a SQLite cursor, transaction or Store mutex.
+            // scratch, not a SQLite cursor, transaction or Store entry.
             var held = try storage.captureSessionList(&.{}, .{
                 .scratch_path = scratch_path[0..scratch_length],
                 .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
@@ -2343,10 +2344,10 @@ test "the Store prepares only typed statements, its transaction control and test
     }
 }
 
-test "Store entry points lock and fence only through canonical access" {
+test "Store entry points queue and fence only through canonical access" {
     // Every entry point classifies its errors through `Entry`; a new path
-    // cannot take the mutex, read or set the fence beside it, or enter
-    // without returning through a classifier.
+    // cannot take a lock beside the Store's queue, read or set the fence
+    // beside it, or enter without returning through a classifier.
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
@@ -2366,6 +2367,7 @@ test "Store entry points lock and fence only through canonical access" {
         @embedFile("schema.zig"),
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
+        @embedFile("queue.zig"),
     };
     var locks: usize = 0;
     var fence_stores: usize = 0;
@@ -2383,7 +2385,8 @@ test "Store entry points lock and fence only through canonical access" {
             try std.testing.expect(std.mem.indexOf(u8, body, "entry.finish") != null);
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), locks);
+    // The Store's queue: `release`, `closing`, `take`, and its tests' `waitQueued`.
+    try std.testing.expectEqual(@as(usize, 4), locks);
     try std.testing.expectEqual(@as(usize, 1), fence_stores);
     try std.testing.expectEqual(@as(usize, 1), fence_loads);
     try std.testing.expect(entered > 0);
@@ -8276,7 +8279,8 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 }
 
 /// The functions that enter the Store (`enter(self, ...)`), each a
-/// separate locked transition, by the name the source gives it.
+/// separate transition while the Store is held, by the name the source
+/// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
     configure,
     submitMessageWithModel,
@@ -8416,6 +8420,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("schema.zig"),
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
+        @embedFile("queue.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
     var fixtures: [entering_fixtures.len]bool = @splat(false);
@@ -8433,7 +8438,14 @@ test "every function that enters the Store has a round budget" {
             const fn_at = @max(std.mem.lastIndexOf(u8, before, " fn ") orelse 0, std.mem.lastIndexOf(u8, before, "\nfn ") orelse 0) + " fn ".len;
             var end = fn_at;
             while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
-            const name = source[fn_at..end];
+            // The body a public entry point queues; only a test fixture
+            // enters outside one, holding the Store for itself.
+            const held = std.mem.endsWith(u8, source[fn_at..end], "Held");
+            const name = if (held) source[fn_at .. end - "Held".len] else source[fn_at..end];
+            if (!held and !std.mem.endsWith(u8, name, "ForTesting")) {
+                std.debug.print("{s} enters the Store outside the queue; give it a body named {s}Held\n", .{ name, name });
+                return error.EnterOutsideQueue;
+            }
             if (std.mem.endsWith(u8, name, "ForTesting")) {
                 const listed = for (entering_fixtures, 0..) |fixture, position| {
                     if (std.mem.eql(u8, fixture, name)) break position;

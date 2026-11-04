@@ -133,6 +133,22 @@ pub fn decodedLength(string_contents: []const u8) usize {
     return @intCast(counter.fullCount());
 }
 
+/// Whether two strings' contents as written decode to the same text, at
+/// any length: unlike `keyIs`, neither side is held in a fixed buffer.
+pub fn sameText(a: []const u8, b: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, a, '\\') == null and std.mem.indexOfScalar(u8, b, '\\') == null) return std.mem.eql(u8, a, b);
+    if (decodedLength(a) != decodedLength(b)) return false;
+    return std.mem.eql(u8, &digestOf(a), &digestOf(b));
+}
+
+fn digestOf(string_contents: []const u8) [32]u8 {
+    var buffer: [64]u8 = undefined;
+    var hashing: std.Io.Writer.Hashing(std.crypto.hash.sha2.Sha256) = .init(&buffer);
+    writeDecoded(&hashing.writer, string_contents) catch unreachable;
+    hashing.writer.flush() catch unreachable;
+    return hashing.hasher.finalResult();
+}
+
 const Sink = struct {
     writer: *std.Io.Writer,
     failure: ?std.Io.Writer.Error = null,
@@ -215,4 +231,13 @@ test "check refuses what is not one object" {
     try std.testing.expectError(error.UnexpectedJsonDelimiter, check("[1]"));
     try std.testing.expectError(error.UnexpectedJsonEnd, check("{\"a\":"));
     try std.testing.expectError(error.TrailingJson, check("{} {}"));
+}
+
+test "sameText compares decoded strings of any length" {
+    try std.testing.expect(sameText("a\\u0062c", "abc"));
+    try std.testing.expect(!sameText("a\\u0062c", "abd"));
+    try std.testing.expect(!sameText("a\\u0062", "abc"));
+    const long: [500]u8 = @splat('x');
+    try std.testing.expect(sameText("\\u0078" ++ long[1..], &long));
+    try std.testing.expect(!sameText("\\u0079" ++ long[1..], &long));
 }

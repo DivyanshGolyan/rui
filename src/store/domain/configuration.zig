@@ -63,6 +63,16 @@ fn requestedTools(requested: *const protocol.Configuration) tool_catalog.ToolSet
     return set;
 }
 
+/// Whether `tools` names a tool some provider runs that `provider` does not.
+/// The parser admits only names the Host offers, so each is a built-in.
+fn providerToolMissing(provider: protocol.Provider, tools: *const protocol.ToolsField) bool {
+    var names = tools.iterator();
+    while (names.next()) |name| {
+        if (tool_catalog.record(tool_catalog.builtIn(name).?).owner == .provider and !provider.runsTool(name)) return true;
+    }
+    return false;
+}
+
 /// Persisted session.permission_mode for a validated mode name.
 fn permissionModeCode(mode: []const u8) u8 {
     return if (std.mem.eql(u8, mode, "ask")) 0 else 1;
@@ -87,7 +97,14 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
 pub const default_tools_mask: u8 = blk: {
     var mask: u8 = 0;
     var names = std.mem.splitScalar(u8, product_defaults.tools, ',');
-    while (names.next()) |name| mask |= tool_catalog.toolBit(std.meta.stringToEnum(Tool, name).?);
+    while (names.next()) |name| {
+        const tool = std.meta.stringToEnum(Tool, name).?;
+        // A creation that names no tools gets these on any provider.
+        if (tool_catalog.record(tool).owner == .provider) for (std.enums.values(protocol.Provider)) |provider| {
+            if (!provider.runsTool(name)) @compileError(@tagName(provider) ++ " does not run default tool " ++ name);
+        };
+        mask |= tool_catalog.toolBit(tool);
+    }
     break :blk mask;
 };
 
@@ -195,6 +212,8 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !protocol.validLabel(requested.label.value.slice())) return .invalid_label;
+    if (requested.tools.state == .value and
+        providerToolMissing(provider orelse current.?.provider, &requested.tools)) return .provider_tool_missing;
     if (requested.reasoning_effort.state == .value) {
         const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
