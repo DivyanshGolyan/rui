@@ -52,6 +52,9 @@ def verify_mysql(environ):
     except FileNotFoundError:
         return f"{path} is missing: the unit binary never opened the live dialect check"
     print(f"MySQL dialect check record: {text.strip()}")
-    if parse_record(text).get("prepares", 0) == 0:
+    counts = parse_record(text)
+    if counts.get("prepares", 0) == 0:
         return f"{path} counts no PREPARE: the live dialect check checked nothing"
+    if counts.get("migrations", 0) == 0:
+        return f"{path} counts no passed migration test: the MySQL migration gate did not run or failed"
     return None

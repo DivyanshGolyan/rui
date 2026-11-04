@@ -78,13 +78,16 @@ class VerifyTest(unittest.TestCase):
                 return live_engines.verify_mysql({live_engines.MYSQL_RECORD: str(path)})
 
     def test_a_record_with_prepares_passes(self):
-        self.assertIsNone(self.verify("ddl=40 ddl_refused=0 prepares=812 prepare_refused=0 probes=4\n"))
+        self.assertIsNone(self.verify("ddl=40 ddl_refused=0 prepares=812 prepare_refused=0 probes=4 migrations=1\n"))
 
     def test_a_missing_record_fails(self):
         self.assertIn("missing", self.verify(None))
 
     def test_a_record_without_prepares_fails(self):
-        self.assertIn("no PREPARE", self.verify("ddl=40 ddl_refused=0 prepares=0 prepare_refused=0 probes=4\n"))
+        self.assertIn("no PREPARE", self.verify("ddl=40 ddl_refused=0 prepares=0 prepare_refused=0 probes=4 migrations=1\n"))
+
+    def test_a_record_without_a_passed_migration_test_fails(self):
+        self.assertIn("migration", self.verify("ddl=40 ddl_refused=0 prepares=812 prepare_refused=0 probes=4 migrations=0\n"))
 
     def test_an_unset_record_variable_fails(self):
         self.assertIn("not set", live_engines.verify_mysql({}))
