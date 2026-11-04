@@ -52,7 +52,7 @@ def dispose_page(process, endpoint, thread, timeout):
     )
 
 
-ACTIVITY_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "sent", "send_failed", "received", "approval_requested"]
+ACTIVITY_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "sent", "send_failed", "received", "approval_requested", "session_changed"]
 
 
 def request(socket_path, store, route, kind, session, **fields):

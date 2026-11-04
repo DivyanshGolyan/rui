@@ -213,6 +213,18 @@ class StackFramesTest(unittest.TestCase):
         _, failures = gate(SEEDED, debugging)
         self.assertEqual([failure.split(":")[0] for failure in failures], ["debug.print"])
 
+    def test_a_dispatcher_counts_what_it_runs_through_a_pointer(self):
+        # store.Store.capture runs client.only through a pointer: 0x40000
+        # more on every chain through it.
+        rules = policy({**SEEDED, "client.only": 0x40000}, ceilings={"main thread": 0x46000, "worker": 0x48000})
+        rules["dispatches"] = [{"caller": "store.Store.capture", "callees": "client.", "cause": "fixture"}]
+        report, failures = check(parse(DISASSEMBLY), rules)
+        self.assertEqual(failures, [])
+        self.assertIn("    262144 client.only", report)
+        rules["dispatches"] = [{"caller": "store.Store.capture", "callees": "absent.", "cause": "fixture"}]
+        with self.assertRaisesRegex(ValueError, "no absent. functions"):
+            check(parse(DISASSEMBLY), rules)
+
     def test_every_spawned_thread_is_named_by_exactly_one_anchor(self):
         with self.assertRaisesRegex(ValueError, "reaches anchors \\[\\]"):
             gate(SEEDED, threads={"worker": "client.only"})

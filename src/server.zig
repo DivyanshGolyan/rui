@@ -1205,8 +1205,8 @@ const ControlTiming = struct {
         var candidates = std.mem.splitScalar(u8, gate_hook.keys, ',');
         while (candidates.next()) |candidate| {
             if (!std.mem.eql(u8, candidate, self.command_key.slice())) continue;
-            // Integration tests deliberately hold this acquired Store mutex
-            // until intake routes a competing control. Their keeper
+            // Integration tests deliberately hold this acquired Store entry
+            // (the Store runs nothing else meanwhile) until intake routes a competing control. Their keeper
             // descriptor prevents FIFO-open deadlock; process teardown bounds
             // a missing release without granting this gate semantic authority.
             var gate = std.Io.Dir.cwd().openFile(self.host.io, gate_hook.path, .{}) catch return;
@@ -3158,6 +3158,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
         .{ .approval_requested = .{ .action = max, .operation = max, .call_ordinal = max } },
+        .{ .session_changed = .{ .revision = max, .field = .output_reservation } },
     };
     try std.testing.expectEqual(std.meta.tags(std.meta.Tag(protocol.ActivityItem.Value)).len, values.len);
     var longest_item: protocol.ActivityItem = undefined;

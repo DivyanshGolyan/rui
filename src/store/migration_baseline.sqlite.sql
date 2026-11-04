@@ -84,6 +84,17 @@ CREATE TABLE session_revision(
  label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),
  PRIMARY KEY(session_ref,revision)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE session_change(
+ session_ref TEXT NOT NULL REFERENCES session(session_ref),
+ position INTEGER NOT NULL CHECK(position>0),
+ ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+ revision INTEGER NOT NULL CHECK(revision>1),
+ field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label')),
+ changed_at INTEGER NOT NULL CHECK(changed_at>0),
+ PRIMARY KEY(session_ref,position,ordinal),
+ UNIQUE(session_ref,revision,field),
+ FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE message_admission(
  admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),
  session_ref TEXT NOT NULL REFERENCES session(session_ref),

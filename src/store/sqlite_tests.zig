@@ -4797,9 +4797,10 @@ test "one committed selection freezes its settings and input prefix" {
         (try storage.observeCommand("dispatch-1")).message.?.queue.?.state == .queued,
     );
 
-    // Failed admission publishes neither projection nor instruction inclusion.
+    // Failed admission publishes neither projection nor instruction
+    // inclusion; the revision's change row holds position 3.
     try std.testing.expectEqual(@as(i64, 0), try sqlite.pragmaInt(storage.database, "SELECT count(*) FROM conversation_entry"));
-    try std.testing.expectEqual(@as(i64, 3), try sqlite.pragmaInt(storage.database, "SELECT next_position FROM session"));
+    try std.testing.expectEqual(@as(i64, 4), try sqlite.pragmaInt(storage.database, "SELECT next_position FROM session"));
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();

@@ -178,8 +178,8 @@ pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field:
 }
 
 /// The read Access `candidate` finds the next Action outside any
-/// transaction, so a poll that finds none costs one statement. The held
-/// Store mutex excludes every other writer, so the candidate is still
+/// transaction, so a poll that finds none costs one statement. The Store
+/// runs no other entry point meanwhile, so the candidate is still
 /// current when the write Access `a` attempts it.
 pub fn admitNextActionAttempt(
     candidate: anytype,

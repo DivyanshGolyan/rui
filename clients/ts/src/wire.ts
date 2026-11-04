@@ -498,6 +498,17 @@ export interface components {
                     call_ordinal: components["schemas"]["Decimal"];
                 };
             };
+        } | {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            at: components["schemas"]["Decimal"];
+            value: {
+                session_changed: {
+                    revision: components["schemas"]["Decimal"];
+                    /** @enum {string} */
+                    field: "provider" | "model" | "instructions" | "tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label";
+                };
+            };
         };
         ActivityItemContent: {
             bytes: components["schemas"]["Decimal"];
@@ -530,7 +541,7 @@ export interface components {
             /** @enum {string} */
             direction: "forward" | "backward";
             /** @description Each at most once, in the order the enum lists them. */
-            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested")[];
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed")[];
             limit: components["schemas"]["Decimal"];
         };
         CallActivity: {
@@ -700,7 +711,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             execution: {
                 /** @constant */
@@ -1247,7 +1258,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             input: {
                 /** @constant */

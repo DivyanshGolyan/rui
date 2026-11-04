@@ -1496,6 +1496,11 @@ Uncertainty alone requires neither User intervention nor Turn termination; SQLit
 
 ### Store durability
 
+One thread at a time holds the Store: its connection, its scratch and its id allocator.
+A caller that finds the Store free holds it and runs its entry point on its own thread; a caller that finds it busy queues its request and sleeps, and the holder runs queued requests in arrival order before it lets go, so each waiter wakes once, with its answer.
+A holder runs at most 64 requests for others, then hands the Store to the next waiter.
+A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
+
 The Host opens the Store database with `locking_mode=EXCLUSIVE`, `journal_mode=WAL`, `synchronous=FULL` (with `fullfsync` on macOS) and a 4-MiB `journal_size_limit`.
 Each commit appends to `rui.sqlite3-wal` and syncs it before the transaction returns, so an acknowledged commit survives a process crash and, under SQLite's WAL `FULL` contract, an OS crash or power loss on storage that honors sync.
 Automatic checkpoints copy committed pages into `rui.sqlite3` and truncate a grown WAL to the limit; a clean close checkpoints and deletes the WAL.
@@ -2948,14 +2953,16 @@ Permission preparation consumes the same normal Activity scan before showing the
 Current's active attention and history-independent query contract remain unchanged.
 This projection has fixed resident storage, not history-independent query cost.
 
-`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`; and decimal-string `limit`, from 1 to 16.
+`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`, `session_changed`; and decimal-string `limit`, from 1 to 16.
 The cursor may name a row of any kind; the page lists only the asked kinds, and each row source is gated by the kinds before it reads, so a kind not asked for costs no read unless it shares a source with an asked one: `user` and `assistant` share the Conversation entries, and a `received`-only page passes over the person's admissions.
 A person's Messages alone are one seek in the index of Messages without a Session sender, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
 Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
-Only complete Tool Result groups share positions, using one-based call ordinals; an `approval_requested` row shares its call's position at ordinal 1; other rows use zero.
+Only complete Tool Result groups share positions, using one-based call ordinals; an `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows use zero.
 An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
+A `session_changed` row (D138, D218) is one setting a later revision changed, carrying `revision` and `field` (a configuration member's name: `provider`, `model`, `instructions`, `tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`).
+The revision's commit writes them to `session_change` at a position taken when it is accepted, never edited; the revision keeps the current values, and a creation and a revision that changes nothing have none.
 A nonnull ordinal identifies an actual row in this Session and end.
 Continue from the last returned row with that ordinal and the same end/direction.
 Null ordinal denotes a sequence boundary, excluding all rows at position; position zero starts either traversal.

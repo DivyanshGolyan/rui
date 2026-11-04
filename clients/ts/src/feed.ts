@@ -26,6 +26,7 @@ export const FEED_KINDS = [
 	"send_failed",
 	"received",
 	"approval_requested",
+	"session_changed",
 ] as const satisfies readonly WireKind[];
 export type FeedKind = (typeof FEED_KINDS)[number];
 // A kind the wire gains fails to compile here until the list has it.
