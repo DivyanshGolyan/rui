@@ -113,7 +113,7 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
                 if (!context.providerConfigured() or !context.modelPreparationOpen()) continue;
                 break :blk switch (kind) {
                     .retry => if (state.retry_admission_due) context.admitRetry() else continue,
-                    .message => context.admitNewModel(),
+                    .message => context.admitNewModel(admission_key.paused),
                     .tool_continuation => context.admitToolContinuation(),
                     .bash => unreachable,
                 };
@@ -193,6 +193,9 @@ const Recording = struct {
     model_prep_open: bool = true,
     slot_changes: u64 = 0,
     paused: bool = false,
+    /// Flips the pause right after the run reads it, as a racing listener can.
+    flip_pause_after_read: bool = false,
+    admitted_paused: ?bool = null,
     observed_slots: ?SlotFacts = null,
     transport: bool = false,
     bash: bool = false,
@@ -343,12 +346,15 @@ const Recording = struct {
         return self.retry_admission;
     }
 
-    fn turnsPaused(self: *const Recording) bool {
-        return self.paused;
+    fn turnsPaused(self: *Recording) bool {
+        const paused = self.paused;
+        if (self.flip_pause_after_read) self.paused = !paused;
+        return paused;
     }
 
-    fn admitNewModel(self: *Recording) Admission {
+    fn admitNewModel(self: *Recording, paused: bool) Admission {
         self.record(.admit_new);
+        self.admitted_paused = paused;
         return self.new_admission;
     }
 
@@ -764,6 +770,16 @@ test "a pause or resume reruns the message scan with no commit" {
     _ = run(&state, &context);
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+}
+
+test "the message scan and its cache key use one pause snapshot" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .flip_pause_after_read = true };
+    var state: State = .{};
+    _ = run(&state, &context);
+    // The listener paused after the key read `false`; the scan still ran as
+    // unpaused, so caching its empty result under `false` is truthful.
+    try std.testing.expectEqual(@as(?bool, false), context.admitted_paused);
+    try std.testing.expect(context.paused);
 }
 
 test "an admission that must retry later keeps scanning without a commit" {

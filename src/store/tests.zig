@@ -4280,8 +4280,8 @@ test "production turn preserves skipped continuation preference through actual S
         pub fn turnsPaused(_: *@This()) bool {
             return false;
         }
-        pub fn admitNewModel(self: *@This()) turn.Admission {
-            return self.admit(.message);
+        pub fn admitNewModel(self: *@This(), paused: bool) turn.Admission {
+            return self.admit(if (paused) .open_turn_message else .message);
         }
         pub fn admitToolContinuation(self: *@This()) turn.Admission {
             return self.admit(.tool_continuation);

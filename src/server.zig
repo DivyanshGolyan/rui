@@ -3182,6 +3182,7 @@ test "retired reserved exchanges cannot block their successors while workers are
             const path = switch (route) {
                 .host_info => "host-info",
                 .host_stop => "control/host-stop",
+                .host_pause => "control/host-pause",
                 .session_stop => "control/session-stop",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
