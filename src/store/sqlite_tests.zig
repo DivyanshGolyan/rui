@@ -8072,6 +8072,46 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
+test "a migration whose step fails leaves its backup and the original Store readable, and replaces an earlier backup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
+    const backup_name = std.fmt.comptimePrint("store.sqlite3.migration-7-to-{d}", .{store_schema.schema_version});
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "store.sqlite3.migration-3-to-4", .data = "earlier" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "store.sqlite3.kept", .data = "kept" });
+    {
+        const raw = try openRaw(store.path);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{}, .digest = 0 }}));
+    }
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "store.sqlite3.migration-3-to-4", .{}));
+    _ = try tmp.dir.statFile(std.testing.io, "store.sqlite3.kept", .{});
+    var backup_path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const backup_path = try std.fmt.bufPrint(&backup_path_buffer, "{s}/" ++ backup_name, .{store.root});
+    for ([_][]const u8{ store.path, backup_path }) |path| {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_integrity_check WHERE integrity_check='ok'"));
+    }
+    // A backup that cannot be written refuses the Store before any step runs.
+    try tmp.dir.deleteFile(std.testing.io, backup_name);
+    try tmp.dir.createDir(std.testing.io, "store.sqlite3.migration-2-to-3", .default_dir);
+    {
+        const raw = try openRaw(store.path);
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{}, .digest = 0 }}));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
+    }
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, backup_name, .{}));
+}
+
 /// `object`'s CREATE text in the current schema.
 fn objectSql(comptime name: []const u8) [:0]const u8 {
     comptime {
@@ -8113,7 +8153,7 @@ test "a migration that rebuilds a referenced table from the schema's text keeps 
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try store_schema.migrate(raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{}, .digest = 0 }});
+        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{}, .digest = 0 }});
     }
     var storage: Store = undefined;
     try storage.open(std.testing.io, store.path, store.root);
@@ -8140,7 +8180,7 @@ test "a migration that leaves other text than bootstrap's, or a broken reference
     const raw = try openRaw(store.path);
     defer _ = c.sqlite3_close(raw);
     for (cases) |case| {
-        try std.testing.expectError(case.refusal, store_schema.migrate(raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{}, .digest = 0 }}));
+        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{}, .digest = 0 }}));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));

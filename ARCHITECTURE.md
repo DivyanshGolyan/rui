@@ -1312,7 +1312,10 @@ Store identity binds the canonical original path; moving or copying its director
 Restoring a backup requires exclusive access to the original path and preservation of any replacement Store before restoration.
 The [recovery instructions](docs/store-reset.md) leave the original Store untouched.
 
-When migrations are implemented after stability, the Host runs them at startup under its Store ownership lock, after an explicitly approved backup of the stopped Store.
+The Host runs a SQLite Store's pending migrations at startup under its Store ownership lock, and first backs the Store up itself, with no approval prompt: SQLite's online backup API copies it beside its file as `<file>.migration-<from>-to-<to>`, replacing any earlier copy of that kind so at most one exists, and syncs the copy and its directory.
+If the backup fails, nothing migrates and the Store is refused.
+The copy is as large as the Store and stays until the next migration replaces it or the user deletes it.
+On MySQL, backing the Store up before applying a migration's text is the DB team's job.
 At that stage, the installer will only check and report compatibility.
 Today both installers replace the command through one shell owner, `rui_publish` in [release/publish.sh](release/publish.sh), and then report only facts that need action.
 A first install reports the installed version, its location and the first command to run.
