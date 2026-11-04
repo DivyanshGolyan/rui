@@ -42,10 +42,15 @@ pub const Event = union(enum) {
     end,
 };
 
-const State = enum { connecting, sending, receiving, done };
+/// Once connected, the request is sent and the response read at once: a
+/// server may answer (a 401, a 413) before it reads the whole body, and
+/// may then wait for the client to close.
+const State = enum { connecting, open, done };
 
 fd: std.posix.fd_t,
 state: State,
+/// The request bytes still to send; empty once all are sent, or once a
+/// response head arrived, after which the rest would not be read.
 pending: []const u8,
 sent: usize,
 parser: Parser,
@@ -85,7 +90,7 @@ pub fn init(self: *Exchange, target: request.Target, bytes: []const u8) error{ L
     if (!configure(fd)) return error.LocalFailure;
     while (true) switch (std.posix.errno(std.c.connect(fd, @ptrCast(&storage), length))) {
         .SUCCESS => {
-            self.state = .sending;
+            self.state = .open;
             return;
         },
         .INTR => continue,
@@ -107,8 +112,8 @@ pub fn deinit(self: *Exchange) void {
 /// The poll events `advance` waits for; none once the exchange is done.
 pub fn events(self: *const Exchange) i16 {
     return switch (self.state) {
-        .connecting, .sending => std.c.POLL.OUT,
-        .receiving => std.c.POLL.IN,
+        .connecting => std.c.POLL.OUT,
+        .open => if (self.pending.len != 0) std.c.POLL.IN | std.c.POLL.OUT else std.c.POLL.IN,
         .done => 0,
     };
 }
@@ -131,26 +136,12 @@ pub fn advance(self: *Exchange) Error!Event {
             var peer: std.c.sockaddr.in6 = undefined;
             var peer_len: std.c.socklen_t = @sizeOf(std.c.sockaddr.in6);
             switch (std.posix.errno(std.c.getpeername(self.fd, @ptrCast(&peer), &peer_len))) {
-                .SUCCESS => self.state = .sending,
+                .SUCCESS => self.state = .open,
                 .NOTCONN => return .waiting,
                 else => return error.LocalFailure,
             }
         },
-        .sending => {
-            if (self.sent == self.pending.len) {
-                self.state = .receiving;
-                continue;
-            }
-            const rest = self.pending[self.sent..];
-            const sent = std.c.send(self.fd, rest.ptr, rest.len, send_flags);
-            switch (std.posix.errno(sent)) {
-                .SUCCESS => self.sent += @intCast(sent),
-                .INTR => {},
-                .AGAIN => return .waiting,
-                else => return if (self.sent == 0) error.ConnectFailed else error.ConnectionLost,
-            }
-        },
-        .receiving => {
+        .open => {
             // The parser runs even on no bytes: a body that has just ended
             // reports its end without another read.
             const step = try self.parser.next(self.buffer[self.start..self.end]);
@@ -164,31 +155,71 @@ pub fn advance(self: *Exchange) Error!Event {
                 .body => |bytes| return .{ .body = bytes },
                 .end => return self.finished(),
             }
-            if (self.start != 0) {
-                const held = self.end - self.start;
-                std.mem.copyForwards(u8, self.buffer[0..held], self.buffer[self.start..self.end]);
-                self.start = 0;
-                self.end = held;
-            }
-            // The parser asks for more only while a head or line is
-            // incomplete, both bounded below the buffer.
-            std.debug.assert(self.end < self.buffer.len);
-            const read = std.c.recv(self.fd, self.buffer[self.end..].ptr, self.buffer.len - self.end, 0);
-            switch (std.posix.errno(read)) {
-                .SUCCESS => {
-                    if (read == 0) {
-                        _ = try self.parser.finish();
-                        return self.finished();
-                    }
-                    self.end += @intCast(read);
+            const sent = try self.send();
+            const received = try self.receive();
+            switch (received) {
+                .bytes => {},
+                .closed => {
+                    _ = try self.parser.finish();
+                    return self.finished();
                 },
-                .INTR => {},
-                .AGAIN => return .waiting,
-                else => return error.ConnectionLost,
+                .none => if (!sent) return .waiting,
             }
         },
         .done => return .end,
     };
+}
+
+/// Sends what the socket takes now; returns whether it took any.
+fn send(self: *Exchange) Error!bool {
+    if (self.pending.len == 0) return false;
+    while (true) {
+        const sent = std.c.send(self.fd, self.pending.ptr, self.pending.len, send_flags);
+        switch (std.posix.errno(sent)) {
+            .SUCCESS => {
+                self.sent += @intCast(sent);
+                self.pending = self.pending[@intCast(sent)..];
+                return true;
+            },
+            .INTR => continue,
+            .AGAIN => return false,
+            else => {
+                if (self.sent == 0) return error.ConnectFailed;
+                // The server may have answered and closed before reading
+                // the rest; its answer is still there to read.
+                self.pending = &.{};
+                return false;
+            },
+        }
+    }
+}
+
+const Received = enum { bytes, closed, none };
+
+/// Reads what has arrived into the buffer after the bytes it holds.
+fn receive(self: *Exchange) Error!Received {
+    if (self.start != 0) {
+        const held = self.end - self.start;
+        std.mem.copyForwards(u8, self.buffer[0..held], self.buffer[self.start..self.end]);
+        self.start = 0;
+        self.end = held;
+    }
+    // The parser asks for more only while a head or line is incomplete,
+    // both bounded below the buffer.
+    std.debug.assert(self.end < self.buffer.len);
+    while (true) {
+        const read = std.c.recv(self.fd, self.buffer[self.end..].ptr, self.buffer.len - self.end, 0);
+        switch (std.posix.errno(read)) {
+            .SUCCESS => {
+                if (read == 0) return .closed;
+                self.end += @intCast(read);
+                return .bytes;
+            },
+            .INTR => continue,
+            .AGAIN => return .none,
+            else => return error.ConnectionLost,
+        }
+    }
 }
 
 fn finished(self: *Exchange) Event {
@@ -223,6 +254,9 @@ const TestServer = struct {
     reply: ?[]const []const u8,
     seen: [1024]u8 = undefined,
     seen_len: usize = 0,
+    /// Answer once the head is in, without reading the body, then wait for
+    /// the client to close, as a server rejecting an upload may.
+    answer_early: bool = false,
 
     fn start(self: *TestServer) !void {
         self.listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
@@ -251,7 +285,7 @@ const TestServer = struct {
         defer _ = std.c.close(fd);
         const replies = self.reply orelse return;
         // Read until the head and its declared body are in.
-        while (std.mem.indexOf(u8, self.seen[0..self.seen_len], "\r\n\r\n") == null or !self.bodyIn()) {
+        while (std.mem.indexOf(u8, self.seen[0..self.seen_len], "\r\n\r\n") == null or (!self.answer_early and !self.bodyIn())) {
             const read = std.c.recv(fd, self.seen[self.seen_len..].ptr, self.seen.len - self.seen_len, 0);
             if (read <= 0) return;
             self.seen_len += @intCast(read);
@@ -264,6 +298,9 @@ const TestServer = struct {
                 written += @intCast(sent);
             }
         }
+        if (!self.answer_early) return;
+        var drain: [4096]u8 = undefined;
+        while (std.c.recv(fd, &drain, drain.len, 0) > 0) {}
     }
 
     fn bodyIn(self: *const TestServer) bool {
@@ -372,6 +409,33 @@ test "a response cut short after the request left is a lost outcome" {
     try std.testing.expectError(error.TruncatedResponse, post(&server, "{}", &out));
     try std.testing.expect(out.sent);
     try std.testing.expectEqualStrings("partial", out.body[0..out.body_len]);
+}
+
+test "an answer that arrives while the request is still uploading is read" {
+    var server: TestServer = .{ .listener = -1, .port = 0, .answer_early = true, .reply = &.{"HTTP/1.1 413 Content Too Large\r\nContent-Length: 8\r\n\r\ntoo big!"} };
+    try server.start();
+    defer server.stop();
+    var url_buffer: [64]u8 = undefined;
+    const target = try request.parseTarget(try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/mcp", .{server.port}));
+    // Far more than loopback socket buffers hold, so sending blocks long
+    // before the body is out.
+    const body_len = 16 * 1024 * 1024;
+    const bytes = try std.testing.allocator.alloc(u8, 512 + body_len);
+    defer std.testing.allocator.free(bytes);
+    var writer: std.Io.Writer = .fixed(bytes);
+    try request.writePost(&writer, target, &.{}, body_len);
+    const head_len = writer.buffered().len;
+    @memset(bytes[head_len..][0..body_len], 'x');
+    const exchange = try std.testing.allocator.create(Exchange);
+    defer std.testing.allocator.destroy(exchange);
+    try exchange.init(target, bytes[0 .. head_len + body_len]);
+    defer exchange.deinit();
+    var out: Outcome = .{};
+    try drive(exchange, &out);
+    try std.testing.expectEqual(@as(u16, 413), out.status);
+    try std.testing.expectEqualStrings("too big!", out.body[0..out.body_len]);
+    try std.testing.expect(out.sent);
+    try std.testing.expect(exchange.sent < head_len + body_len);
 }
 
 test "a malformed response is refused, not read as a body" {
