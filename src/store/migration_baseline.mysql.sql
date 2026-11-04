@@ -17,6 +17,39 @@ CREATE TABLE content(
  CHECK(private IN (0,1)),
  CHECK(length(payload)=byte_length)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE tool_record(
+ tool_record_id BIGINT NOT NULL,
+ name VARCHAR(64) NOT NULL,
+ owner VARCHAR(8) NOT NULL,
+ description_content_id BIGINT NOT NULL,
+ input_schema_content_id BIGINT NOT NULL,
+ PRIMARY KEY(tool_record_id),
+ UNIQUE(name,owner,description_content_id,input_schema_content_id),
+ FOREIGN KEY(description_content_id) REFERENCES content(content_id),
+ FOREIGN KEY(input_schema_content_id) REFERENCES content(content_id),
+ CHECK(tool_record_id>0),
+ CHECK(OCTET_LENGTH(name) BETWEEN 1 AND 64 AND (NOT REGEXP_LIKE(name,'[^A-Za-z0-9_-]','c'))),
+ CHECK(owner IN ('rui','provider'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE tool_set(
+ tool_set_id BIGINT NOT NULL,
+ digest VARBINARY(32) NOT NULL,
+ member_count BIGINT NOT NULL,
+ PRIMARY KEY(tool_set_id),
+ UNIQUE(digest),
+ CHECK(tool_set_id>0),
+ CHECK(length(digest)=32),
+ CHECK(member_count BETWEEN 0 AND 128)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE tool_set_member(
+ tool_set_id BIGINT NOT NULL,
+ ordinal BIGINT NOT NULL,
+ tool_record_id BIGINT NOT NULL,
+ PRIMARY KEY(tool_set_id,ordinal),
+ FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),
+ FOREIGN KEY(tool_record_id) REFERENCES tool_record(tool_record_id),
+ CHECK(ordinal>=0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 CREATE TABLE session(
  session_ref VARCHAR(6) NOT NULL,
  workspace TEXT NOT NULL,
@@ -26,7 +59,7 @@ CREATE TABLE session(
  prefix_seal BLOB,
  model TEXT NOT NULL,
  instructions_content_id BIGINT NOT NULL,
- tools_mask BIGINT NOT NULL,
+ tool_set_id BIGINT NOT NULL,
  permission_mode BIGINT NOT NULL,
  output_schema_content_id BIGINT,
  revision BIGINT NOT NULL,
@@ -42,6 +75,7 @@ CREATE TABLE session(
  PRIMARY KEY(session_ref),
  UNIQUE(created_seq),
  FOREIGN KEY(instructions_content_id) REFERENCES content(content_id),
+ FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),
  FOREIGN KEY(output_schema_content_id) REFERENCES content(content_id),
  CHECK(OCTET_LENGTH(session_ref)=6 AND (NOT REGEXP_LIKE(session_ref,'[^0123456789abcdefghjkmnpqrstvwxyz]','c'))),
  CHECK(OCTET_LENGTH(workspace) BETWEEN 1 AND 4096),
@@ -50,7 +84,7 @@ CREATE TABLE session(
  CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),
  CHECK(prefix_seal IS NULL OR length(prefix_seal)=56),
  CHECK(OCTET_LENGTH(model) BETWEEN 1 AND 256),
- CHECK(tools_mask BETWEEN 0 AND 3),
+ CHECK(tool_set_id>0),
  CHECK(permission_mode BETWEEN 0 AND 1),
  CHECK(revision>0),
  CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
@@ -98,7 +132,7 @@ CREATE TABLE session_revision(
  model LONGTEXT NOT NULL,
  instructions_content_id BIGINT NOT NULL,
  instructions_updated TINYINT NOT NULL,
- tools_mask BIGINT NOT NULL,
+ tool_set_id BIGINT NOT NULL,
  permission_mode BIGINT NOT NULL,
  output_schema_content_id BIGINT,
  compaction_trigger BIGINT,
@@ -110,11 +144,12 @@ CREATE TABLE session_revision(
  FOREIGN KEY(session_ref) REFERENCES session(session_ref),
  FOREIGN KEY(command_key) REFERENCES core_command(command_key),
  FOREIGN KEY(instructions_content_id) REFERENCES content(content_id),
+ FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),
  FOREIGN KEY(output_schema_content_id) REFERENCES content(content_id),
  CHECK(revision>0),
  CHECK(OCTET_LENGTH(provider) BETWEEN 1 AND 16 AND REGEXP_LIKE(provider,'^[a-z]','c') AND (NOT REGEXP_LIKE(provider,'[^a-z0-9_-]','c'))),
  CHECK(instructions_updated IN (0,1)),
- CHECK(tools_mask BETWEEN 0 AND 3),
+ CHECK(tool_set_id>0),
  CHECK(permission_mode BETWEEN 0 AND 1),
  CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
  CHECK(output_reservation IS NULL OR output_reservation>=0),
@@ -469,6 +504,7 @@ CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operat
 CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id);
 CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
 CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
+CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position);
 CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position);
 CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position);
 CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);

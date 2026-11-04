@@ -10,6 +10,25 @@ CREATE TABLE content(
  payload BLOB NOT NULL CHECK(length(payload)=byte_length),
  UNIQUE(digest,byte_length,private)
 ) STRICT;
+CREATE TABLE tool_record(
+ tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),
+ name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),
+ owner TEXT NOT NULL CHECK(owner IN ('rui','provider')),
+ description_content_id INTEGER NOT NULL REFERENCES content(content_id),
+ input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),
+ UNIQUE(name,owner,description_content_id,input_schema_content_id)
+) STRICT;
+CREATE TABLE tool_set(
+ tool_set_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_set_id>0),
+ digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),
+ member_count INTEGER NOT NULL CHECK(member_count BETWEEN 0 AND 128)
+) STRICT;
+CREATE TABLE tool_set_member(
+ tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),
+ ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+ tool_record_id INTEGER NOT NULL REFERENCES tool_record(tool_record_id),
+ PRIMARY KEY(tool_set_id,ordinal)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE session(
  session_ref TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(session_ref AS BLOB))=6 AND (session_ref NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*' AND length(session_ref)=length(CAST(session_ref AS BLOB)))),
  workspace TEXT NOT NULL CHECK(length(CAST(workspace AS BLOB)) BETWEEN 1 AND 4096),
@@ -19,7 +38,7 @@ CREATE TABLE session(
  prefix_seal BLOB CHECK(prefix_seal IS NULL OR length(prefix_seal)=56),
  model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),
  instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
- tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND 3),
+ tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),
  permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),
  output_schema_content_id INTEGER REFERENCES content(content_id),
  revision INTEGER NOT NULL CHECK(revision>0),
@@ -56,7 +75,7 @@ CREATE TABLE session_revision(
  model TEXT NOT NULL,
  instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
  instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),
- tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND 3),
+ tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),
  permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),
  output_schema_content_id INTEGER REFERENCES content(content_id),
  compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
@@ -284,6 +303,7 @@ CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operat
 CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=4;
 CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
 CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
+CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position);
 CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE (resolution_code='answer' OR resolution_code='compacted' OR resolution_code='tool_proposals');
 CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='compacted';
 CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
