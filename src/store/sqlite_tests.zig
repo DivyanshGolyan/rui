@@ -432,9 +432,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     try tools.key.set("identity-later-tools");
     tools.session = second_session;
     tools.configuration.tools.state = .value;
-    tools.configuration.tools.count = 2;
-    tools.configuration.tools.values[0] = .bash;
-    tools.configuration.tools.values[1] = .web_search;
+    tools.configuration.tools = try .of(&.{ "bash", "web_search" });
     try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
     // New text, so content commits a new row too.
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
@@ -1118,13 +1116,11 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const Tools = struct {
-        fn set(store: *Store, key: []const u8, session: protocol.Bounded(protocol.max_session_bytes), offered: []const tool_catalog.Tool) !void {
+        fn set(store: *Store, key: []const u8, session: protocol.Bounded(protocol.max_session_bytes), offered: []const []const u8) !void {
             var command: protocol.ConfigureCommand = .{};
             try command.key.set(key);
             command.session = session;
-            command.configuration.tools.state = .value;
-            command.configuration.tools.count = @intCast(offered.len);
-            @memcpy(command.configuration.tools.values[0..offered.len], offered);
+            command.configuration.tools = try .of(offered);
             try std.testing.expect(store.configure(&command, .{}) == .accepted);
         }
         fn counts(store: *Store) ![3]u64 {
@@ -1140,7 +1136,7 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
     try std.testing.expectEqual([3]u64{ 1, 1, 1 }, try Tools.counts(&storage));
     // A new set reuses the records it shares with a saved one.
-    try Tools.set(&storage, "saved-tools-both", second, &.{ .bash, .web_search });
+    try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
     try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
     try std.testing.expectEqual([3]u64{ 3, 2, 3 }, try Tools.counts(&storage));
@@ -3029,8 +3025,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("provider-reopen", "", workspace, "model-a");
     configuration.configuration.tools.state = .value;
-    configuration.configuration.tools.count = 1;
-    configuration.configuration.tools.values[0] = .bash;
+    configuration.configuration.tools = try .of(&.{"bash"});
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("ask");
     var storage: Store = undefined;
@@ -3563,7 +3558,7 @@ fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []c
     var tools: protocol.ConfigureCommand = .{};
     try tools.key.set("bash-tools");
     try tools.session.set(session);
-    tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
+    tools.configuration.tools = try .of(&.{"bash"});
     tools.configuration.permission_mode.state = .value;
     try tools.configuration.permission_mode.value.set("bypass");
     try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
@@ -6975,8 +6970,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 try tools.key.set("tools");
                 try tools.session.set(session.slice());
                 tools.configuration.tools.state = .value;
-                tools.configuration.tools.count = 1;
-                tools.configuration.tools.values[0] = .bash;
+                tools.configuration.tools = try .of(&.{"bash"});
                 tools.configuration.permission_mode.state = .value;
                 try tools.configuration.permission_mode.value.set("bypass");
                 try std.testing.expect(storage.configure(&tools, .{}) == .accepted);

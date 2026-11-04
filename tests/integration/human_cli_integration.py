@@ -6582,14 +6582,20 @@ def main(selected="all"):
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
-        for index, tools in enumerate(("edit", "bash,edit", "edit,bash", "bash,bash", "Bash", "none,bash")):
+        # The CLI checks each name's spelling and repeats and sends nothing
+        # when one fails; which names exist is the Host's to say.
+        for index, (tools, code) in enumerate((("edit", "UnknownTool"), ("bash,edit", "UnknownTool"),
+                                               ("edit,bash", "UnknownTool"), ("bash,bash", "DuplicateToolName"),
+                                               ("Bash", "UnknownTool"), ("none,bash", "UnknownTool"),
+                                               ("bash,", "InvalidToolName"))):
             record = state / f"removed-tools-{index}.json"
             rejected = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
                 "--session", session, "--record", str(record), "--key", f"removed-tools-{index}",
                 "--tools", tools], env={**os.environ, "HOME": str(preferences_home)},
                 capture_output=True, text=True, timeout=10)
-            assert rejected.returncode != 0 and "UnknownTool" in rejected.stderr, (tools, rejected)
-            assert not record.exists(), ("invalid tool selection published a capture", tools)
+            assert rejected.returncode != 0 and code in rejected.stdout + rejected.stderr, (tools, rejected)
+            # A request the Host refuses was sent, so its capture stays.
+            assert record.exists() == (code == "UnknownTool"), ("tool selection capture", tools)
         for tools, mode in (("none", "bypass"), ("none", "ask"),
                             ("bash", "bypass"), ("bash", "ask"),
                             ("web_search", "ask"), ("bash,web_search", "bypass")):
