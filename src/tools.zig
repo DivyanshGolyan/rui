@@ -1,6 +1,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const codec_abi = @import("codec_abi.zig");
+pub const core_tools = @import("core_tools.zig");
 
 /// Bash receives the command as one `-c` argument. Linux rejects an
 /// argument of 128 KiB including its NUL (MAX_ARG_STRLEN with 4 KiB pages),
@@ -66,7 +67,26 @@ pub const bash_record: Record = .{
         "\"required\":[\"cmd\",\"description\"],\"additionalProperties\":false}",
 };
 
+pub const message_agent_record: Record = .{
+    .name = "message_agent",
+    .owner = .rui,
+    .description = core_tools.message_agent_description,
+    .input_schema = core_tools.message_agent_schema,
+};
+
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
+
+/// Who carries out an accepted call to a tool Rui owns, derived from its
+/// name (D46): Bash runs as an Action process; a core tool runs as a core
+/// command (D24). The Store keeps it as the call's action kind.
+pub const Runner = enum(u8) {
+    bash = 1,
+    core = 2,
+
+    pub fn of(tool: *const Record) Runner {
+        return if (tool == &message_agent_record) .core else .bash;
+    }
+};
 
 /// The record of each tool `Tool` names: the text a new tool set saves.
 /// Until the wire names tools by name, a Session's tools are a `ToolSet`
@@ -74,6 +94,7 @@ pub const web_search_record: Record = .{ .name = "web_search", .owner = .provide
 pub fn record(tool: Tool) *const Record {
     return switch (tool) {
         .bash => &bash_record,
+        .message_agent => &message_agent_record,
         .web_search => &web_search_record,
     };
 }
@@ -141,6 +162,7 @@ pub const Description = protocol.Bounded(protocol.max_tool_description_bytes);
 pub const Call = union(Tool) {
     /// Arguments the parser accepted, whose description it required.
     bash: *const BashArguments,
+    message_agent: *const core_tools.MessageAgentArguments,
     web_search: WebSearchCall,
 };
 
@@ -158,6 +180,12 @@ pub const WebSearchCall = struct {
 pub fn describe(call: Call) Description {
     const out: Description = switch (call) {
         .bash => |arguments| arguments.description,
+        // The core writes its own tools' lines (D105).
+        .message_agent => |arguments| blk: {
+            var out: Description = .{};
+            compose(&out, &.{ "Message ", "" }, &.{arguments.id.slice()});
+            break :blk out;
+        },
         .web_search => |search| describeWebSearch(search),
     };
     std.debug.assert(protocol.ToolPresentation.validDescription(out.slice()));
@@ -345,6 +373,7 @@ pub fn toolBit(tool: Tool) u8 {
     return switch (tool) {
         .bash => 1,
         .web_search => 2,
+        .message_agent => 4,
     };
 }
 
@@ -362,6 +391,9 @@ pub const CallFacts = struct {
     /// A call named bash's checked arguments, offered or not; null for any
     /// other name.
     bash: ?BashCheck,
+    /// A call named message_agent's checked arguments, offered or not; null
+    /// for any other name.
+    message_agent: ?core_tools.MessageAgentCheck = null,
 
     /// The arguments of a bash call the parser accepted.
     pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
@@ -372,6 +404,22 @@ pub const CallFacts = struct {
             .accepted => |*accepted| accepted,
             .rejected => null,
         };
+    }
+
+    /// The arguments of a message_agent call the parser accepted.
+    pub fn messageAgentArguments(self: *const CallFacts) ?*const core_tools.MessageAgentArguments {
+        const check = if (self.message_agent) |*value| value else return null;
+        return switch (check.*) {
+            .accepted => |*accepted| accepted,
+            .rejected => null,
+        };
+    }
+
+    /// The line a call is shown as, when its arguments carry one.
+    pub fn description(self: *const CallFacts) ?Description {
+        if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
+        if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
+        return null;
     }
 };
 
@@ -415,10 +463,16 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
+    const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
     const tool = if (complete) offeredFunction(offered, name[0..length]) else null;
-    // A Bash call's arguments are read whether or not it was offered, so a
+    // A call's arguments are read whether or not it was offered, so a
     // rejected call keeps its description for presentation.
-    return .{ .tool = tool, .bash = if (named) try checkBashArguments(arguments) else null };
+    var discard: Discard = .{};
+    return .{
+        .tool = tool,
+        .bash = if (named) try checkBashArguments(arguments) else null,
+        .message_agent = if (messaging) try core_tools.checkMessageAgent(arguments, &discard) else null,
+    };
 }
 
 /// The offered record a function call named `name` resolves to. A
@@ -434,7 +488,9 @@ fn offeredFunction(offered: []const *const Record, name: []const u8) ?*const Rec
 /// A rejected call's result text, from `classifyCall`'s code for `facts`.
 pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
-        .invalid_arguments => return switch (facts.bash.?.rejected) {
+        .invalid_arguments => if (facts.message_agent) |check| return switch (check.rejected) {
+            inline else => |value| "Invalid arguments for tool 'message_agent': " ++ comptime value.text() ++ ".",
+        } else return switch (facts.bash.?.rejected) {
             inline else => |value| "Invalid arguments for tool 'bash': " ++ comptime value.text() ++ ".",
         },
         .unknown_tool => {
@@ -458,6 +514,7 @@ pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts
 pub fn classifyCall(facts: *const CallFacts) ?protocol.ProposalRejection {
     if (facts.tool == null) return .unknown_tool;
     if (facts.bash) |check| if (check == .rejected) return .invalid_arguments;
+    if (facts.message_agent) |check| if (check == .rejected) return .invalid_arguments;
     return null;
 }
 
@@ -858,7 +915,7 @@ fn emit(destination: ?*protocol.Bounded(16), writer: anytype, bytes: []const u8)
 }
 
 const Discard = struct {
-    fn writeAll(_: *Discard, _: []const u8) !void {}
+    pub fn writeAll(_: *Discard, _: []const u8) !void {}
 };
 
 pub fn isBashDescriptorError(err: anyerror) bool {

@@ -745,13 +745,14 @@ const insert_call = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// An accepted call's Action, decided now when the revision bypasses asks.
+/// An accepted call's Action, decided now when the revision bypasses asks
+/// or the core runs it.
 /// Under an `ask` revision it keeps its call's position as the feed's
 /// approval request.
 const insert_action = rsql.Write(.{
     .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position) " ++
-        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8)",
-    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64 },
+        "VALUES(?1,?2,?3,@session(?4),?9,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8)",
+    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64, kind: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1586,9 +1587,10 @@ fn Settlement(comptime A: type) type {
                 std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
                 @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
-            // A Bash call has its description whether or not it was offered;
-            // one whose arguments the parser rejected has none.
-            const description: ?tool_catalog.Description = if (call_facts.bashArguments()) |arguments| tool_catalog.describe(.{ .bash = arguments }) else null;
+            // A call has its description whether or not it was offered; one
+            // whose arguments the parser rejected has none.
+            const description = call_facts.description();
+            const runner: ?tool_catalog.Runner = if (rejection_code == null) .of(call_facts.tool.?) else null;
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
@@ -1599,21 +1601,24 @@ fn Settlement(comptime A: type) type {
                 .rejection_code = rejection_code,
                 .rejection_content_id = rejection_content_id,
                 .acceptance_position = if (rejection_code != null) try s.positions.take(1) else null,
-                .action_kind = if (rejection_code == null) 1 else null,
+                .action_kind = if (runner) |kind| @intFromEnum(kind) else null,
                 .description = if (description) |text| if (text.len != 0) text else null else null,
                 .field_metadata = field_metadata,
                 .session = s.session,
             });
-            if (rejection_code != null) return;
+            const kind = runner orelse return;
+            // A core tool acts only on the Store, so no person decides it.
+            const authorized = kind == .core or s.settling.permission_mode;
             s.a.write(insert_action, .{
                 .action_id = try s.a.identity(.action_id),
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
                 .session = s.session,
+                .kind = @intFromEnum(kind),
                 .revision = s.settling.revision.get(),
-                .authorized = s.settling.permission_mode,
-                .timeout_ms = call_facts.bashArguments().?.timeout_ms,
-                .approval_position = if (s.settling.permission_mode) null else s.first_item_position + record.ordinal,
+                .authorized = authorized,
+                .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
+                .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
             });
         }
     };

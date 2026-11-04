@@ -25,6 +25,8 @@ const sqlite = @import("sqlite.zig");
 const c = sqlite.c;
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
 const ActionAttemptBinding = action_domain.ActionAttemptBinding;
+const AgentDelivery = command_domain.AgentDelivery;
+const CoreActionInput = action_domain.CoreActionInput;
 const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -670,6 +672,25 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
+    /// The next core tool call to run (D24), or null.
+    pub fn nextCoreAction(self: *Store) !?CoreActionInput {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.nextCoreAction(&access));
+    }
+
+    /// Runs the `message_agent` call `binding` names with its checked
+    /// arguments, in one transaction.
+    pub fn deliverAgentMessage(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, faults)));
+    }
+
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
@@ -915,9 +936,9 @@ const accepted_settlement_growth = 10240;
 
 comptime {
     // The settlement batch is the larger use: 14480 bytes, 9120 beyond the
-    // configure reads, 5360 with the tool set a configure may save. Exact,
+    // configure reads, 5560 with the tool set a configure may save. Exact,
     // so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 5360 or scratch_bytes != 14480)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 5560 or scratch_bytes != 14480)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }

@@ -5,6 +5,7 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -412,6 +413,86 @@ noinline fn submitCreating(
         },
     };
     return rejectMessage(a, command, &reads, command.sender != null and sender_valid, rejection.?, faults);
+}
+
+/// What running a `message_agent` call did.
+pub const AgentDelivery = enum {
+    /// The Message was admitted to its Session and the call succeeded.
+    delivered,
+    /// Nothing was sent, and the call failed with a result saying why.
+    failed,
+    /// A stop selected the call's Turn, and the stop resolves the call.
+    stopped,
+};
+
+/// The command key a `message_agent` call's Message is saved under. Keys a
+/// person or script sends are theirs; a taken key fails the call.
+fn agentMessageKey(buffer: *[protocol.max_key_bytes]u8, action_id: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/message_agent/{d}", .{action_id}) catch unreachable;
+}
+
+/// Runs a `message_agent` call as one core command (D24, D41): admits
+/// `text` to the Session `target` names, from the call's own Session, and
+/// resolves the call with what happened, in one transaction. A Message it
+/// sends carries no client environment (D169).
+pub fn deliverAgentMessage(
+    a: anytype,
+    binding: action_domain.ActionAttemptBinding,
+    target: []const u8,
+    text: []const u8,
+    faults: Faults,
+) !AgentDelivery {
+    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const key = agentMessageKey(&key_buffer, binding.action_id);
+    var facts: action_domain.core_facts.Result = undefined;
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &facts);
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, key, &saved);
+    var receiver: target_session.Result = null;
+    readTarget(a, target, &receiver);
+    var message: content_domain.Import = .ofBytes(text, false);
+    content_domain.lookup(a, &message);
+    try a.run();
+    const found = facts orelse return error.StaleActionAttemptBinding;
+    if (found.stopped) {
+        try a.abandon(.{});
+        return .stopped;
+    }
+    var result_buffer: [160]u8 = undefined;
+    const delivered = receiver != null and saved == null;
+    const result = if (receiver == null)
+        std.fmt.bufPrint(&result_buffer, "No Session {s} in this Store; nothing was sent.", .{target}) catch unreachable
+    else if (saved != null)
+        "Rui could not send this Message: its command key is already taken. Nothing was sent."
+    else
+        std.fmt.bufPrint(&result_buffer, "Delivered to {s}.", .{target}) catch unreachable;
+    var outcome: content_domain.Import = .ofBytes(result, false);
+    content_domain.lookup(a, &outcome);
+    try a.run();
+
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    if (delivered) {
+        const head = receiver.?.session;
+        const text_id = try content_domain.importBytes(a, &message, text);
+        var digest = std.crypto.hash.sha2.Sha256.init(.{});
+        digest.update("rui/core/message_agent/v1");
+        digest.update(&protocol.contentDigest(text));
+        try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, null, &.{ .accepted = true });
+        a.write(admit_sent_message, .{
+            .admission_id = try a.identity(.admission_id),
+            .session = head,
+            .key = key,
+            .content_id = text_id,
+            .position = try (try a.positions(head)).take(1),
+            .sender = found.session,
+            .sender_position = try (try a.positions(found.session)).take(1),
+        });
+    }
+    const outcome_id = try content_domain.importBytes(a, &outcome, result);
+    try action_domain.queueCoreResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return if (delivered) .delivered else .failed;
 }
 
 /// The Session a stop names, and the last Message admitted to it: the

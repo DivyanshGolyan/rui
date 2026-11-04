@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x9dc0d23fd8743bd4 },
+    .{ .schema_version = 51, .digest = 0x83ce0b3c8732012a },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -659,7 +659,7 @@ pub const tables = [_]Table{
             .{ .name = "rejection_code", .type = .{ .tag = &.{ "unknown_tool", "invalid_arguments" } }, .nullable = true },
             .{ .name = "rejection_content_id", .type = .int, .nullable = true },
             .{ .name = "acceptance_position", .type = .int, .nullable = true, .check = "acceptance_position IS NULL OR acceptance_position>0" },
-            .{ .name = "action_kind", .type = .int, .nullable = true, .check = "action_kind IS NULL OR action_kind=1" },
+            .{ .name = "action_kind", .type = .int, .nullable = true, .check = "action_kind IS NULL OR action_kind IN (1,2)" },
         },
         .primary_key = &.{ "operation_id", "call_ordinal" },
         .uniques = &.{ &.{ "operation_id", "item_ordinal" }, &.{ "operation_id", "call_id_content_id" }, &.{ "operation_id", "call_ordinal", "action_kind" } },
@@ -672,7 +672,7 @@ pub const tables = [_]Table{
             references("rejection_content_id", "content", content_reference),
         },
         .checks = &.{
-            "(rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND @same(action_kind,1)) OR " ++
+            "(rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND action_kind IS NOT NULL) OR " ++
                 "(rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL AND acceptance_position IS NOT NULL AND action_kind IS NULL)",
         },
         .without_rowid = true,
@@ -684,7 +684,9 @@ pub const tables = [_]Table{
             .{ .name = "parent_operation_id", .type = .int },
             .{ .name = "call_ordinal", .type = .int, .check = "call_ordinal>=0" },
             .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "tool_kind", .type = .int, .check = "tool_kind=1" },
+            // How the call is carried out (`tools.Runner`): 1 runs Bash as an
+            // Action process, 2 runs a core tool as a core command.
+            .{ .name = "tool_kind", .type = .int, .check = "tool_kind IN (1,2)" },
             .{ .name = "permission_revision", .type = .int, .check = "permission_revision>0" },
             // Written only by the insert, under a `bypass` revision, and by an
             // accepted `allow_once` decision. Stored because it keys the
@@ -721,6 +723,8 @@ pub const tables = [_]Table{
         },
         .checks = &.{
             "@distinct(resolution_code,'denied') OR (authorized=0 AND attempt_ordinal=0)",
+            // A core command is decided at once and never attempted.
+            "tool_kind=1 OR (authorized=1 AND attempt_ordinal=0 AND bash_timeout_override_ms IS NULL AND approval_position IS NULL)",
             "(attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)",
             "(resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR " ++
                 "(resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)",
@@ -769,7 +773,7 @@ pub const indexes = [_]Index{
     // for a resolved Action (action_operation's CHECK).
     .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
-    .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
+    .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{ "tool_kind", "action_id" }, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     // Calls walk it (`report.full_calls`).
     .{ .name = "model_tool_call_session_order", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "call_ordinal" } },
