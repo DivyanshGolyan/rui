@@ -30,6 +30,11 @@ pub const max_code_bytes = 96;
 /// at most 256 bytes plus a shortened mark, and their separator.
 pub const max_report_bytes = 2 * 256 + ": ".len + 2 * "…".len;
 pub const max_tool_description_bytes = 100;
+/// A tool name: 1-64 bytes of [A-Za-z0-9_-] (OpenAI's function name limit).
+pub const max_tool_name_bytes = 64;
+/// The most names one `tools` list holds, and their bytes together (D214).
+pub const max_tools = 128;
+pub const max_tool_list_name_bytes = 4096;
 /// A Session Label obeys the saved Bash description rule.
 pub const max_label_bytes = max_tool_description_bytes;
 
@@ -133,13 +138,73 @@ pub const ContentField = struct {
     }
 };
 
-/// The catalog, in its one canonical order: `bash` runs locally as Actions;
-/// `web_search` is hosted, run by the provider inside a response.
+/// A `tools` list: tool names, sorted by bytes with none repeated, so one
+/// list has one spelling and one digest. The names are held one space
+/// apart. The parser checks the Host offers each one.
 pub const ToolsField = struct {
     state: FieldState = .omitted,
-    count: u2 = 0,
-    values: [2]enum { bash, web_search } = undefined,
+    count: u8 = 0,
+    names: Bounded(max_tool_names_bytes) = .{},
+
+    pub fn iterator(self: *const ToolsField) std.mem.TokenIterator(u8, .scalar) {
+        return std.mem.tokenizeScalar(u8, self.names.slice(), ' ');
+    }
+
+    /// A list of `names`, which must be sorted and valid.
+    pub fn of(names: []const []const u8) error{ InvalidToolName, InvalidJsonShape }!ToolsField {
+        var out: ToolsField = .{ .state = .value };
+        for (names) |name| try out.append(name);
+        return out;
+    }
+
+    /// Appends `name`, which must sort after every name already held. A
+    /// name outside the grammar is `InvalidToolName`; one out of order,
+    /// repeated, or past a limit is `InvalidJsonShape`.
+    pub fn append(self: *ToolsField, name: []const u8) error{ InvalidToolName, InvalidJsonShape }!void {
+        if (!validToolName(name)) return error.InvalidToolName;
+        if (self.count == max_tools) return error.InvalidJsonShape;
+        const held = self.names.slice();
+        if (self.count != 0) {
+            const last = held[if (std.mem.lastIndexOfScalar(u8, held, ' ')) |space| space + 1 else 0..];
+            if (std.mem.order(u8, last, name) != .lt) return error.InvalidJsonShape;
+        }
+        // The limit counts name bytes only, not the separators.
+        if (held.len - (self.count -| 1) + name.len > max_tool_list_name_bytes) return error.InvalidJsonShape;
+        var at = held.len;
+        if (self.count != 0) {
+            self.names.bytes[at] = ' ';
+            at += 1;
+        }
+        @memcpy(self.names.bytes[at..][0..name.len], name);
+        self.names.len = at + name.len;
+        self.count += 1;
+    }
 };
+
+/// A `tools` list's names, one space apart.
+pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
+
+/// The tools the Host offers, in their names' byte order: `bash` runs locally as
+/// Actions; `web_search` is hosted, run by the provider inside a response.
+pub const BuiltInTool = enum { bash, web_search };
+
+/// The built-in tool `name` names, or null.
+pub fn builtInTool(name: []const u8) ?BuiltInTool {
+    return std.meta.stringToEnum(BuiltInTool, name);
+}
+
+comptime {
+    const tools = std.enums.values(BuiltInTool);
+    for (tools[1..], tools[0 .. tools.len - 1]) |tool, previous| {
+        if (std.mem.order(u8, @tagName(previous), @tagName(tool)) != .lt) @compileError("built-in tools in name order");
+    }
+}
+/// Whether `name` is a tool name: 1-64 bytes of [A-Za-z0-9_-].
+pub fn validToolName(name: []const u8) bool {
+    if (name.len == 0 or name.len > max_tool_name_bytes) return false;
+    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
+    return true;
+}
 
 pub const Configuration = struct {
     workspace: OptionalBounded(max_workspace_bytes) = .{},
@@ -218,9 +283,8 @@ fn configureDigest(session: []const u8, configuration: *const Configuration, req
     hash.update(&.{@backingInt(configuration.tools.state)});
     if (configuration.tools.state == .value) {
         hash.update(&.{configuration.tools.count});
-        for (configuration.tools.values[0..configuration.tools.count]) |tool| {
-            hashField(&hash, @tagName(tool));
-        }
+        var names = configuration.tools.iterator();
+        while (names.next()) |name| hashField(&hash, name);
     }
     hashOptional(&hash, &configuration.permission_mode);
     hashContent(&hash, &configuration.output_schema);
@@ -1171,11 +1235,12 @@ pub const Ingress = struct {
     request: Request = undefined,
 
     // Initial Message combines configuration scalars and sender identity.
-    // Allow worst-case escaping of both and 128 short grammar tokens (keys,
-    // states, tools and literals, each at most 32 bytes), plus punctuation
-    // and one preserved whitespace separator at every lexical boundary.
+    // Allow worst-case escaping of both, of a full `tools` list, and of 128
+    // short grammar tokens (keys, states and literals, each at most 32
+    // bytes), plus punctuation and one preserved whitespace separator at
+    // every lexical boundary.
     const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
-        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 128 * 32) + 128 * 8);
+        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + max_tool_list_name_bytes + 128 * 32) + (128 + max_tools) * 8);
 
     /// Builds the Ingress in its home. `request` stays unwritten.
     pub fn init(self: *Ingress, allocator: std.mem.Allocator, options: ParseOptions) void {
@@ -2019,19 +2084,15 @@ const Parser = struct {
             .state => try self.readSmallString(&state),
             .value => {
                 try self.expectByte('[');
-                // Each tool at most once, in catalog order, so one catalog has
-                // one spelling and one digest.
-                tools.count = 0;
+                tools.* = .{};
                 if (!try self.consumeIf(']')) while (true) {
-                    var value: Bounded(16) = .{};
-                    try self.readSmallString(&value);
-                    const Tool = @typeInfo(@FieldType(ToolsField, "values")).array.child;
-                    const tool = std.meta.stringToEnum(Tool, value.slice()) orelse return error.UnknownTool;
-                    if (tools.count != 0 and @backingInt(tool) <= @backingInt(tools.values[tools.count - 1])) return error.InvalidJsonShape;
-                    tools.values[tools.count] = tool;
-                    tools.count += 1;
+                    var name: Bounded(max_tool_name_bytes) = .{};
+                    self.readSmallString(&name) catch |err| return if (err == error.ValueTooLong) error.InvalidToolName else err;
+                    if (!validToolName(name.slice())) return error.InvalidToolName;
+                    // The Host offers the built-ins; MCP servers' tools join them later.
+                    if (builtInTool(name.slice()) == null) return error.UnknownTool;
+                    try tools.append(name.slice());
                     if (try self.consumeIf(']')) break;
-                    if (tools.count == tools.values.len) return error.InvalidJsonShape;
                     try self.expectByte(',');
                 };
             },
@@ -3430,18 +3491,22 @@ test "configuration provider envelope preserves exact spelling and omission" {
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
-test "configuration tools accept each catalog tool once, in catalog order" {
-    const cases = [_]struct { value: []const u8, count: u2 = 0, first: ?@typeInfo(@FieldType(ToolsField, "values")).array.child = null, failure: ?anyerror = null }{
+test "configuration tools are names the Host offers, sorted, each once" {
+    const cases = [_]struct { value: []const u8, names: []const u8 = "", count: u8 = 0, failure: ?anyerror = null }{
         .{ .value = "[]" },
-        .{ .value = "[\"bash\"]", .count = 1, .first = .bash },
-        .{ .value = "[\"web_search\"]", .count = 1, .first = .web_search },
-        .{ .value = "[\"bash\",\"web_search\"]", .count = 2, .first = .bash },
+        .{ .value = "[\"bash\"]", .names = "bash", .count = 1 },
+        .{ .value = "[\"web_search\"]", .names = "web_search", .count = 1 },
+        .{ .value = "[\"bash\",\"web_search\"]", .names = "bash web_search", .count = 2 },
+        .{ .value = "[\"b\\u0061sh\"]", .names = "bash", .count = 1 },
         .{ .value = "[\"edit\"]", .failure = error.UnknownTool },
         .{ .value = "[\"Bash\"]", .failure = error.UnknownTool },
-        .{ .value = "[\"none\"]", .failure = error.UnknownTool },
+        .{ .value = "[\"bash\",\"edit\"]", .failure = error.UnknownTool },
+        .{ .value = "[\"\"]", .failure = error.InvalidToolName },
+        .{ .value = "[\"web search\"]", .failure = error.InvalidToolName },
+        .{ .value = "[\"bash.v2\"]", .failure = error.InvalidToolName },
+        .{ .value = "[\"" ++ @as([65]u8, @splat('x')) ++ "\"]", .failure = error.InvalidToolName },
         .{ .value = "[\"bash\",\"bash\"]", .failure = error.InvalidJsonShape },
         .{ .value = "[\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
-        .{ .value = "[\"bash\",\"edit\"]", .failure = error.UnknownTool },
         .{ .value = "[\"bash\",\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
     };
     for (cases) |case| {
@@ -3464,9 +3529,34 @@ test "configuration tools accept each catalog tool once, in catalog order" {
         } else {
             const request = try parseForTest(&parser);
             try std.testing.expectEqual(case.count, request.configure.configuration.tools.count);
-            if (case.first) |first| try std.testing.expectEqual(first, request.configure.configuration.tools.values[0]);
+            try std.testing.expectEqualStrings(case.names, request.configure.configuration.tools.names.slice());
         }
     }
+}
+
+test "a tools list holds at most 128 names and 4096 name bytes" {
+    var names: [max_tools + 1][3]u8 = undefined;
+    var many: ToolsField = .{ .state = .value };
+    for (&names, 0..) |*name, index| {
+        name.* = .{ 'a' + @as(u8, @intCast(index / 26 / 26)), 'a' + @as(u8, @intCast(index / 26 % 26)), 'a' + @as(u8, @intCast(index % 26)) };
+        if (index < max_tools) try many.append(name) else try std.testing.expectError(error.InvalidJsonShape, many.append(name));
+    }
+    try std.testing.expectEqual(@as(u8, max_tools), many.count);
+
+    // 64 names of 64 bytes fill the name bytes; the separators do not count.
+    var long: ToolsField = .{ .state = .value };
+    var name: [max_tool_name_bytes]u8 = @splat('a');
+    for (0..max_tool_list_name_bytes / max_tool_name_bytes) |index| {
+        name[name.len - 1] = 'A' + @as(u8, @intCast(index % 26));
+        name[name.len - 2] = 'A' + @as(u8, @intCast(index / 26));
+        try long.append(&name);
+    }
+    try std.testing.expectEqual(@as(usize, max_tool_list_name_bytes) + long.count - 1, long.names.len);
+    try std.testing.expectError(error.InvalidJsonShape, long.append("z"));
+    var iterator = long.iterator();
+    var seen: usize = 0;
+    while (iterator.next()) |each| : (seen += 1) try std.testing.expectEqual(max_tool_name_bytes, each.len);
+    try std.testing.expectEqual(@as(usize, long.count), seen);
 }
 
 test "Session inspection selects a closed report profile or exact failed response stream" {

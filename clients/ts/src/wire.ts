@@ -581,8 +581,8 @@ export interface components {
             } | {
                 /** @constant */
                 state: "value";
-                /** @description Each at most once, in the order the enum lists them. */
-                value: ("bash" | "web_search")[];
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
             };
             permission_mode: {
                 /** @constant */
@@ -1127,8 +1127,8 @@ export interface components {
             } | {
                 /** @constant */
                 state: "value";
-                /** @description Each at most once, in the order the enum lists them. */
-                value: ("bash" | "web_search")[];
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
             };
             permission_mode: {
                 /** @constant */

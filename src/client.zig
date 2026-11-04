@@ -1379,23 +1379,30 @@ const Capture = struct {
     fn writeTools(self: *Capture, tools: ?[]const u8) !void {
         const value = tools orelse return self.write("{\"state\":\"omitted\"}");
         try self.write("{\"state\":\"value\",\"value\":[");
-        // A comma list such as `bash,web_search`, each name once, written in
-        // catalog order; `none` is the empty catalog.
+        // A comma list such as `bash,web_search`, each name once, written
+        // sorted by bytes as the wire asks; `none` is the empty list. Which
+        // names the Host offers is the Host's to check.
         if (!std.mem.eql(u8, value, "none")) {
-            const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
-            var chosen = std.EnumSet(Tool).empty;
+            var chosen: [protocol.max_tools][]const u8 = undefined;
+            var count: usize = 0;
             var names = std.mem.splitScalar(u8, value, ',');
             while (names.next()) |name| {
-                const tool = std.meta.stringToEnum(Tool, name) orelse return error.UnknownTool;
-                if (chosen.contains(tool)) return error.UnknownTool;
-                chosen.insert(tool);
+                if (!protocol.validToolName(name)) return error.InvalidToolName;
+                if (count == chosen.len) return error.TooManyTools;
+                chosen[count] = name;
+                count += 1;
             }
-            var first = true;
-            var tools_in_order = chosen.iterator();
-            while (tools_in_order.next()) |tool| {
-                if (!first) try self.write(",");
-                first = false;
-                try self.writeJsonString(@tagName(tool));
+            std.mem.sort([]const u8, chosen[0..count], {}, struct {
+                fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+                    return std.mem.order(u8, left, right) == .lt;
+                }
+            }.lessThan);
+            for (chosen[0..count], 0..) |name, index| {
+                if (index != 0) {
+                    if (std.mem.eql(u8, chosen[index - 1], name)) return error.DuplicateToolName;
+                    try self.write(",");
+                }
+                try self.writeJsonString(name);
             }
         }
         try self.write("]}");

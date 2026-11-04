@@ -345,8 +345,7 @@ fn configureTestSessionWithMode(
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration(key, "", workspace, "model-a");
     command.configuration.tools.state = .value;
-    command.configuration.tools.count = 1;
-    command.configuration.tools.values[0] = .bash;
+    command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set(mode);
     const reply = storage.configure(&command, .{});
@@ -1668,8 +1667,7 @@ test "Full revisions own repeated content once and render semantic settings" {
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var initial = try completeConfiguration("revision-owner-1", "", workspace, "model-a");
             initial.configuration.tools.state = .value;
-            initial.configuration.tools.count = 1;
-            initial.configuration.tools.values[0] = .bash;
+            initial.configuration.tools = try .of(&.{"bash"});
             initial.configuration.permission_mode.state = .value;
             try initial.configuration.permission_mode.value.set("ask");
             initial.configuration.instructions = try testingContent(&tmp, "revision-owner-instructions", 1, 64 * 1024);
@@ -1696,8 +1694,7 @@ test "Full revisions own repeated content once and render semantic settings" {
             try third.key.set("revision-owner-3");
             try third.session.set(created_session_0.slice());
             third.configuration.tools.state = .value;
-            third.configuration.tools.count = 1;
-            third.configuration.tools.values[0] = .bash;
+            third.configuration.tools = try .of(&.{"bash"});
             third.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-a-again", schema_a);
             defer third.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expect(storage.configure(&third, .{}) == .accepted);
@@ -3175,8 +3172,7 @@ test "call classification uses the proposing Operation frozen catalog" {
             try add_bash.key.set("frozen-call-add-bash");
             try add_bash.session.set(session.slice());
             add_bash.configuration.tools.state = .value;
-            add_bash.configuration.tools.count = 1;
-            add_bash.configuration.tools.values[0] = .bash;
+            add_bash.configuration.tools = try .of(&.{"bash"});
             try std.testing.expect(storage.configure(&add_bash, .{}) == .accepted);
             const calls = [_]TestingCall{.{
                 .item_id = "frozen-item",
@@ -4740,7 +4736,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             var tools: protocol.ConfigureCommand = .{};
             try tools.key.set("sender-tools");
             try tools.session.set(sender);
-            tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
+            tools.configuration.tools = try .of(&.{"bash"});
             tools.configuration.permission_mode.state = .value;
             try tools.configuration.permission_mode.value.set("bypass");
             try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
@@ -9513,8 +9509,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     try tools.key.set("tools");
                     try tools.session.set(session.slice());
                     tools.configuration.tools.state = .value;
-                    tools.configuration.tools.count = 1;
-                    tools.configuration.tools.values[0] = .bash;
+                    try tools.configuration.tools.append("bash");
                     tools.configuration.permission_mode.state = .value;
                     try tools.configuration.permission_mode.value.set("bypass");
                     try std.testing.expect(storage.configure(&tools, .{}) == .accepted);

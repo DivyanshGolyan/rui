@@ -306,7 +306,27 @@ fn State(comptime value: anytype, comptime allow_null: bool) type {
     };
 }
 
-const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
+const Tool = protocol.BuiltInTool;
+
+/// A configure's `tools`: names the Host offers, sorted by bytes, none repeated.
+const ToolNameList = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{
+            .type = Value{ .string = "array" },
+            .items = try d.object(.{
+                .type = Value{ .string = "string" },
+                .pattern = Value{ .string = std.fmt.comptimePrint("^[A-Za-z0-9_-]{{1,{d}}}$", .{protocol.max_tool_name_bytes}) },
+            }),
+            .maxItems = Value{ .integer = protocol.max_tools },
+            .uniqueItems = Value{ .bool = true },
+            .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
+            .description = Value{ .string = "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers." },
+        });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.print("[\"{s}\"]", .{@tagName(std.meta.tags(Tool)[0])});
+    }
+};
 
 /// Fields after `output_schema` are optional to the Host, in any order; the
 /// client always sends all four, in this order.
@@ -318,7 +338,7 @@ fn configurationShape(comptime name: []const u8, comptime instructions: anytype,
             ",\"provider\":",           State(Hole{ .string = protocol.max_provider_bytes }, false),
             ",\"model\":",              State(Hole{ .string = protocol.max_model_bytes }, false),
             ",\"instructions\":",       instructions,
-            ",\"tools\":",              State(Hole{ .tag_set = Tool }, false),
+            ",\"tools\":",              State(ToolNameList, false),
             ",\"permission_mode\":",    State(Hole{ .string = 16 }, false),
             ",\"output_schema\":",      output_schema,
             ",\"compaction_trigger\":", State(Hole{ .string = 20 }, true),
