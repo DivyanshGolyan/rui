@@ -1201,7 +1201,7 @@ test "an Access commits its writes, positions and identities together, or none o
             try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
             const after = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
             try std.testing.expectEqual(position + 2, try store_testing.queryU64(&storage, next_sql, .{}));
-            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND CAST(payload AS TEXT)='round committed'", .{}));
+            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND payload=X'" ++ comptime &std.fmt.bytesToHex("round committed", .upper) ++ "'", .{}));
             const dated: i64 = @intCast(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}));
             try std.testing.expect(before <= dated and dated <= after);
         }
