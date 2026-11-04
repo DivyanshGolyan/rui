@@ -40,6 +40,15 @@ fn Responses(comptime version: responses.Version) type {
     };
 }
 
+/// Whether the codec declares function tools inside the history, at each
+/// Operation boundary, instead of in the tools stage.
+pub fn declaresTools(codec: protocol.Codec) bool {
+    return switch (codec) {
+        .@"openai-responses/1" => false,
+        .@"openai-responses/2" => true,
+    };
+}
+
 pub fn manifest(codec: protocol.Codec) *const codec_abi.Manifest {
     return switch (codec) {
         inline else => |tag| &module(tag).manifest,

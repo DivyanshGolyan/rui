@@ -621,6 +621,11 @@ pub const Preparation = struct {
         /// The next tool the tools stage considers.
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
+        /// The Operation boundary whose function tools are being declared,
+        /// whether its declaration has opened, and the stage after it.
+        declaration: ?store.Declaration = null,
+        declaration_open: bool = false,
+        after_declaration: Stage = .history,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
         /// This request's history span, from its start.
         span: ?MemoSpan = null,
@@ -685,6 +690,11 @@ pub const Preparation = struct {
         covered_tool_results,
         /// The boundary of the Operation being prepared, after the span.
         current_operation,
+        /// An Operation boundary's function tools, for a codec that
+        /// declares them in the history; `declared_tool` writes the one
+        /// `declarations` read before opening.
+        declarations,
+        declared_tool,
         compaction_trigger,
         tools,
         tool,
@@ -895,7 +905,10 @@ pub const Preparation = struct {
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
                     // A compaction base covers the boundaries before its
                     // anchor with the output, so effort there is the top's.
-                    .operation => if (!covered) return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0),
+                    .operation => if (!covered) {
+                        if (entry.declares and codecs.declaresTools(self.settings.codec)) self.declare(.{ .tool_set_id = entry.tool_set_id, .position = entry.position }, .history);
+                        return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0);
+                    },
                     .provider_output => {
                         if (covered) return .pending;
                         validateRequestedBinding(entry.requested_model.?.slice(), self.settings.model.slice()) catch {
@@ -959,7 +972,26 @@ pub const Preparation = struct {
             // boundary: after everything admitted before it.
             .current_operation => {
                 self.state.stage = .compaction_trigger;
+                if (codecs.declaresTools(self.settings.codec)) self.declare(self.view.currentDeclaration(), .compaction_trigger);
                 return self.loadItemHeader(.{ .operation = effortOf(self.settings.reasoning_effort) }, 0);
+            },
+            .declarations => {
+                const declaration = &self.state.declaration.?;
+                if (try self.view.nextDeclaredTool(declaration, &self.tool)) {
+                    if (self.state.declaration_open) return self.loadDeclaredTool();
+                    self.state.declaration_open = true;
+                    self.state.stage = .declared_tool;
+                    return self.loadItemHeader(.declare_open, 0);
+                }
+                const opened = self.state.declaration_open;
+                self.state.declaration = null;
+                self.state.declaration_open = false;
+                self.state.stage = self.state.after_declaration;
+                if (opened) return self.loadItemHeader(.declare_close, 0);
+            },
+            .declared_tool => {
+                self.state.stage = .declarations;
+                return self.loadDeclaredTool();
             },
             .compaction_trigger => {
                 self.state.stage = .tools;
@@ -970,7 +1002,11 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.tools_start, 0);
             },
             .tool => {
-                if (try self.view.nextTool(&self.tool)) {
+                // A codec that declares function tools in the history gets
+                // only the provider-run ones here.
+                if (codecs.declaresTools(self.settings.codec)) {
+                    if (try self.view.nextProviderTool(&self.tool)) return self.loadProviderTool();
+                } else if (try self.view.nextTool(&self.tool)) {
                     switch (self.tool.owner) {
                         .rui => {
                             self.handles[0] = .{ .text = self.tool.name.slice() };
@@ -978,12 +1014,7 @@ pub const Preparation = struct {
                             self.handles[2] = .{ .content = self.tool.input_schema };
                             return self.loadItemHeader(.tool, 0b111);
                         },
-                        // Web search is the one provider-run tool until
-                        // each Provider Adapter lists its own (T1c).
-                        .provider => {
-                            if (!self.tool.name.eql(tools.web_search_record.name)) return error.CorruptStore;
-                            return self.loadItemHeader(.web_search, 0);
-                        },
+                        .provider => return self.loadProviderTool(),
                     }
                 }
                 self.state.stage = .text_format;
@@ -1002,6 +1033,30 @@ pub const Preparation = struct {
             .history_store, .complete => unreachable,
         }
         return .pending;
+    }
+
+    /// Starts declaring `declaration`'s function tools after the boundary
+    /// item being loaded, then moves on to `after`.
+    fn declare(self: *Preparation, declaration: store.Declaration, after: Stage) void {
+        self.state.declaration = declaration;
+        self.state.declaration_open = false;
+        self.state.after_declaration = after;
+        self.state.stage = .declarations;
+    }
+
+    /// The function tool `self.tool` holds, as a declaration's member.
+    fn loadDeclaredTool(self: *Preparation) Next {
+        self.handles[0] = .{ .text = self.tool.name.slice() };
+        self.handles[1] = .{ .content = self.tool.description };
+        self.handles[2] = .{ .content = self.tool.input_schema };
+        return self.loadItemHeader(.declared_tool, 0b111);
+    }
+
+    /// The provider-run tool `self.tool` holds. Web search is the one
+    /// either OpenAI provider runs (`Provider.runsTool`).
+    fn loadProviderTool(self: *Preparation) !Next {
+        if (!self.tool.name.eql(tools.web_search_record.name)) return error.CorruptStore;
+        return self.loadItemHeader(.web_search, 0);
     }
 
     /// Load `item` into `self.item`, with the handles whose bits are set in
@@ -1818,6 +1873,10 @@ const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\"
     "\",\"strict\":false,\"parameters\":" ++ tools.bash_record.input_schema ++ "}";
 // A Session created with the product's default tools.
 const default_tools_json = bash_tool_json ++ ",{\"type\":\"web_search\",\"external_web_access\":true}";
+/// Version two's declaration of Bash inside the history, and its top-level
+/// tools for the default set: only the provider-run one.
+const declared_bash_json = "{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[" ++ bash_tool_json ++ "]}";
+const default_top_tools_json = "{\"type\":\"web_search\",\"external_web_access\":true}";
 
 // Share prose, not request construction: independently JSON-encode fixture inputs.
 fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8) ![]u8 {
@@ -2071,12 +2130,13 @@ const composed_replayed_call_b = "{\"type\":\"function_call\",\"name\":\"bash\",
 const composed_expected =
     "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
     "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
+    declared_bash_json ++ "," ++
     composed_replayed ++ "," ++
     composed_replayed_call_a ++ "," ++
     composed_replayed_call_b ++ "," ++
     "{\"type\":\"function_call_output\",\"call_id\":\"order-call-a\",\"output\":\"Permission denied.\"}," ++
     "{\"type\":\"function_call_output\",\"call_id\":\"order-call-b\",\"output\":\"Permission denied.\"}]," ++
-    "\"tools\":[" ++ bash_tool_json ++ "]," ++
+    "\"tools\":[]," ++
     "\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
 
 test "scratch namespaces admit a Message while matching provider scratch exists" {
@@ -2258,7 +2318,7 @@ test "request preparation retains the allocated ID across reopen and replacement
     try setup.submit("prep-replacement-input", "prep-replacement-message", session.slice(), "same input");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const original = try admitted.permit.consume();
-    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}],\"tools\":[" ++ default_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
+    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}," ++ declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
     defer std.testing.allocator.free(expected);
     var binding = original;
     for (0..2) |index| {
@@ -2430,8 +2490,10 @@ test "request preparation frozen selection excludes later messages" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
     const input = parsed.value.object.get("input").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), input.len);
+    // The message, then the Operation's declaration of its tools.
+    try std.testing.expectEqual(@as(usize, 2), input.len);
     try std.testing.expectEqualStrings("first", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
@@ -2553,8 +2615,8 @@ test "request preparation freezes settings at admission" {
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
-    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
-        bash_tool_json ++ "],\"text\":{\"verbosity\":\"low\"}}";
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}," ++
+        declared_bash_json ++ "],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}";
     const full_expected = try requestGolden(setup.workspace, session.slice(), expected);
     defer std.testing.allocator.free(full_expected);
     try std.testing.expectEqualStrings(full_expected, result.bytes);
@@ -3166,16 +3228,18 @@ test "every replayed output item parses equal to the item the provider sent" {
     const arena = arena_state.allocator();
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
     const input = parsed.object.get("input").?.array.items;
-    // The user input, every item in order, then the rejected call's result.
-    try std.testing.expectEqual(cases.len + 2, input.len);
-    for (cases, input[1 .. 1 + cases.len], 0..) |case, actual, index| {
+    // The user input, the Operation's declared tools, every item in order,
+    // then the rejected call's result.
+    try std.testing.expectEqual(cases.len + 3, input.len);
+    try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
+    for (cases, input[2 .. 2 + cases.len], 0..) |case, actual, index| {
         const expected = try std.json.parseFromSliceLeaky(std.json.Value, arena, case.replayed orelse case.sent, .{});
         if (!jsonEqualForTesting(expected, actual)) {
             std.debug.print("item {d} sent: {s}\nrequest: {s}\n", .{ index, case.sent, request.bytes });
             return error.TestExpectedEqual;
         }
     }
-    try std.testing.expectEqualStrings("function_call_output", input[cases.len + 1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("function_call_output", input[cases.len + 2].object.get("type").?.string);
 }
 
 test "request preparation replays reasoning continuation without its private reasoning text" {
@@ -3221,9 +3285,9 @@ test "request preparation replays reasoning continuation without its private rea
         defer std.testing.allocator.free(result.bytes);
         const body = try std.mem.concat(std.testing.allocator, u8, &.{
             "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
-            "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"original\"}]},",
+            "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"original\"}]}," ++ declared_bash_json ++ ",",
             case.replayed,
-            ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ default_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
+            ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
         });
         defer std.testing.allocator.free(body);
         const expected = try requestGolden(setup.workspace, session.slice(), body);
@@ -3289,7 +3353,8 @@ test "compaction preparation appends request only trigger and replays asymmetric
         defer if (prep.state.active) prep.cancel();
         const request = try drainPreparation(&prep, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
-        try std.testing.expect(std.mem.indexOf(u8, request.bytes, "first host input\"}]},{\"type\":\"compaction_trigger\"}],\"tools\":") != null);
+        // The failed Operation declared Bash; the compaction offers the same.
+        try std.testing.expect(std.mem.indexOf(u8, request.bytes, "first host input\"}]}," ++ declared_bash_json ++ ",{\"type\":\"compaction_trigger\"}],\"tools\":") != null);
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"store\":false,\"stream\":true") != null);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, request.bytes, "compaction_trigger"));
     }
@@ -3356,12 +3421,15 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
     try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[2]));
     const input = parsed.value.object.get("input").?.array.items;
-    try std.testing.expectEqual(@as(usize, 4), input.len);
+    // The base covers the earlier declarations, so the Operation after the
+    // anchor declares its tools again.
+    try std.testing.expectEqual(@as(usize, 5), input.len);
     try std.testing.expectEqualStrings("first host input", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("compaction", input[1].object.get("type").?.string);
     try std.testing.expect(input[1].object.get("created_by") == null);
     try std.testing.expectEqualStrings("tail", input[2].object.get("id").?.string);
     try std.testing.expectEqualStrings("later host input", input[3].object.get("content").?.array.items[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("additional_tools", input[4].object.get("type").?.string);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "covered-private") == null);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "compaction_trigger") == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
@@ -3423,7 +3491,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     defer memos.deinit(std.testing.io);
     const full = try prepareMemoForTesting(&setup, fourth_binding, &memos, .{});
     defer std.testing.allocator.free(full.bytes);
-    try expectInputTexts(full.bytes, &.{ "do work", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output", "answer one", "second message", "new rules", "answer two", "third message" });
+    try expectInputTexts(full.bytes, &.{ "do work", "additional_tools", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output", "answer one", "second message", "new rules", "answer two", "third message" });
     const kept = memo_entries[0].memo.?;
     try setup.storage.settleModelAttemptFailure(fourth_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
     var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -3434,7 +3502,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     try store.setHistoryFloorForTesting(&setup.storage, compact_binding.operation_id, "new rules", 1);
     const compaction = try prepareMemoForTesting(&setup, compact_binding, &memos, .{});
     defer std.testing.allocator.free(compaction.bytes);
-    try expectInputTexts(compaction.bytes, &.{ "do work", "new rules", "answer two", "third message", "compaction_trigger" });
+    try expectInputTexts(compaction.bytes, &.{ "do work", "new rules", "additional_tools", "answer two", "third message", "compaction_trigger" });
     // The base's memo spans dropped history: the compaction rebuilds and
     // keeps no memo of its own floor.
     try std.testing.expectEqual(@as(usize, 0), compaction.copied);
@@ -3445,7 +3513,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     const successor_binding = try successor.permit.consume();
     const after = try prepareMemoForTesting(&setup, successor_binding, &memos, .{});
     defer std.testing.allocator.free(after.bytes);
-    try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message" });
+    try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "additional_tools" });
     // Requests on the base share its floor, so their memo serves again.
     try std.testing.expect(try expectMemoRebuildEqual(&setup, successor_binding, &memos, .{}) > 0);
     // A later compaction that makes no room keeps the floor, and so does
@@ -3455,14 +3523,14 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     const again_binding = try again.permit.consume();
     const again_request = try prepareMemoForTesting(&setup, again_binding, &memos, .{});
     defer std.testing.allocator.free(again_request.bytes);
-    try expectInputTexts(again_request.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "compaction_trigger" });
+    try expectInputTexts(again_request.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "additional_tools", "compaction_trigger" });
     try store.settleCompactionForTesting(&setup.storage, &setup.tmp, again_binding, &.{.compaction});
     try setup.submit("floor-last", "floor-last-key", session.slice(), "last message");
     var last = (try setup.storage.admitNextModelAttempt(.{})).?;
     const last_binding = try last.permit.consume();
     const last_request = try prepareMemoForTesting(&setup, last_binding, &memos, .{});
     defer std.testing.allocator.free(last_request.bytes);
-    try expectInputTexts(last_request.bytes, &.{ "do work", "new rules", "third message", "later message", "compaction", "last message" });
+    try expectInputTexts(last_request.bytes, &.{ "do work", "new rules", "third message", "later message", "compaction", "last message", "additional_tools" });
 }
 
 test "a compaction that overflows makes room a level at a time, then the Turn ends context_full" {
@@ -3491,10 +3559,10 @@ test "a compaction that overflows makes room a level at a time, then the Turn en
     // The full compaction, then levels 1 to 3, each dropping one more
     // Message; the first Message always stays.
     const expected = [_][]const []const u8{
-        &.{ texts[0], texts[1], texts[2], texts[3], texts[4], "compaction_trigger" },
-        &.{ texts[0], texts[2], texts[3], texts[4], "compaction_trigger" },
-        &.{ texts[0], texts[3], texts[4], "compaction_trigger" },
-        &.{ texts[0], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[1], texts[2], texts[3], texts[4], "additional_tools", "compaction_trigger" },
+        &.{ texts[0], texts[2], texts[3], texts[4], "additional_tools", "compaction_trigger" },
+        &.{ texts[0], texts[3], texts[4], "additional_tools", "compaction_trigger" },
+        &.{ texts[0], texts[4], "additional_tools", "compaction_trigger" },
     };
     for (expected) |inputs| {
         var compact = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedCompaction;
@@ -3668,6 +3736,13 @@ fn expectMemoRebuildEqual(setup: *PreparationTestSetup, binding: store.AttemptBi
 /// Settle `binding` with a reasoning item or a message and one Bash call,
 /// deny that call and admit the successor.
 fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64) !store.AttemptBinding {
+    return advanceHistoryForTesting(setup, session, binding, round, round);
+}
+
+/// Settles `binding` with one output item and a Bash call, denies the call's
+/// Action `action` (null when the call was not offered, so it made none),
+/// and admits the successor.
+fn advanceHistoryForTesting(setup: *PreparationTestSetup, session: protocol.Bounded(protocol.max_session_bytes), binding: store.AttemptBinding, round: u64, action: ?u64) !store.AttemptBinding {
     var names: [4][32]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&names[0], "memo-round-{d}", .{round});
     const reasoning_id = try std.fmt.bufPrint(&names[1], "memo-r{d}", .{round});
@@ -3682,11 +3757,13 @@ fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.
     else
         try std.fmt.bufPrint(&json_buffer, "{{\"type\":\"message\",\"id\":\"{s}\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{{\"type\":\"output_text\",\"text\":\"step {d}\",\"annotations\":[{{\"type\":\"url_citation\",\"url\":\"u\"}}]}},{{\"type\":\"output_text\",\"text\":\"\\n\"}}]}}", .{ reasoning_id, round });
     try settleComposedForTesting(setup, binding, prefix, kind, item, &.{.{ .item_id = item_id, .call_id = call_id }});
-    var deny: protocol.PermissionDecisionCommand = .{ .action_id = round };
-    var key_buffer: [32]u8 = undefined;
-    try deny.key.set(try std.fmt.bufPrint(&key_buffer, "memo-deny-{d}", .{round}));
-    deny.session = session;
-    try std.testing.expect(setup.storage.decidePermission(&deny, .{}) == .accepted);
+    if (action) |id| {
+        var deny: protocol.PermissionDecisionCommand = .{ .action_id = id };
+        var key_buffer: [32]u8 = undefined;
+        try deny.key.set(try std.fmt.bufPrint(&key_buffer, "memo-deny-{d}", .{round}));
+        deny.session = session;
+        try std.testing.expect(setup.storage.decidePermission(&deny, .{}) == .accepted);
+    }
     var successor = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedSuccessorAdmission;
     return successor.permit.consume();
 }
@@ -3809,8 +3886,10 @@ test "request N+1 begins with request N's history span" {
         const start = std.mem.indexOf(u8, request.bytes, "\"input\":[").? + "\"input\":[".len;
         const span = request.bytes[start..][0..heldMemoLength(&table, session.slice())];
         // The span ends where the history does: what depends on being
-        // last follows it.
-        try std.testing.expectStringStartsWith(request.bytes[start + span.len ..], "],\"tools\":[");
+        // last follows it, the current Operation's declared tools first.
+        const after = request.bytes[start + span.len ..];
+        const between = after[0 .. std.mem.indexOf(u8, after, "],\"tools\":[") orelse return error.TestUnexpectedResult];
+        if (between.len != 0) try std.testing.expectStringStartsWith(between, ",{\"type\":\"additional_tools\"");
         if (previous) |earlier| {
             try std.testing.expect(span.len > earlier.len);
             try std.testing.expectStringStartsWith(span, earlier);
@@ -3870,6 +3949,65 @@ test "an effort change keeps each request's input a prefix of the next" {
             try std.testing.expectStringEndsWith(request.bytes[0..input_end], "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"medium\"}}");
         }
         std.testing.allocator.free(request.bytes);
+    }
+}
+
+test "a tool change keeps each request's input a prefix of the next" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    // The tools set before each round's successor is admitted; null leaves
+    // them. Bash is removed, then offered again, then web search joins.
+    const rounds = [_]?[]const []const u8{ null, &.{}, null, &.{"bash"}, &.{ "bash", "web_search" } };
+    var offered = true;
+    var actions: u64 = 0;
+    var previous: ?[]u8 = null;
+    defer if (previous) |bytes| std.testing.allocator.free(bytes);
+    for (rounds, 0..) |tools_round, round| {
+        if (round != 0) {
+            // The call the previous request offered Bash for makes an Action.
+            const action: ?u64 = if (offered) id: {
+                actions += 1;
+                break :id actions;
+            } else null;
+            if (tools_round) |names| {
+                var update: protocol.ConfigureCommand = .{};
+                var key: [32]u8 = undefined;
+                try update.key.set(try std.fmt.bufPrint(&key, "tools-round-{d}", .{round}));
+                update.session = session;
+                update.configuration.tools = try .of(names);
+                update.configuration.tools.state = .value;
+                try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+            }
+            binding = try advanceHistoryForTesting(&setup, session, binding, round, action);
+            if (tools_round) |names| offered = names.len != 0;
+        }
+        // A memo copy writes what a rebuild does.
+        _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+        const request = try prepareMemoForTesting(&setup, binding, null, .{});
+        defer std.testing.allocator.free(request.bytes);
+        // Everything up to the end of the input is the next request's start.
+        const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
+        if (previous) |earlier| {
+            try std.testing.expectStringStartsWith(request.bytes, earlier);
+            std.testing.allocator.free(earlier);
+        }
+        previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
+        // Bash stays declared in the history while removed, and a call to
+        // it gets the removed result; offered again, it is declared again.
+        try std.testing.expectEqual(@as(usize, if (round < 3) 1 else 2), std.mem.count(u8, request.bytes, "additional_tools"));
+        try std.testing.expectEqual(round >= 2, std.mem.indexOf(u8, request.bytes, tools.removed_tool_result) != null);
+        // The top holds only web search, once it is offered.
+        const top = request.bytes[input_end + "],\"tools\":[".len ..];
+        try std.testing.expectEqual(round == 4, std.mem.startsWith(u8, top, default_top_tools_json));
+        if (round != 4) try std.testing.expect(std.mem.startsWith(u8, top, "]"));
     }
 }
 

@@ -606,7 +606,7 @@ def prove_reused_session(state):
         assert len(endpoint.requests) == 4, endpoint.requests
         initial_request = json.loads(endpoint.requests[0])
         assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT, store=store, session=session), initial_request
-        assert initial_request["input"] == [
+        assert [item for item in initial_request["input"] if item.get("type") != "additional_tools"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
         ], initial_request
         second_request = json.loads(endpoint.requests[2])
