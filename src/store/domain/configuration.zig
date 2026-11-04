@@ -52,25 +52,37 @@ pub fn toolSet(mask: c_int) !tool_catalog.ToolSet {
     return set;
 }
 
-/// The tools a creation or a `tools` change saves: the requested ones, or
-/// the defaults when a creation names none.
-fn requestedTools(requested: *const protocol.Configuration) tool_catalog.ToolSet {
-    if (requested.tools.state != .value) return toolSet(default_tools_mask) catch unreachable;
-    var set: tool_catalog.ToolSet = .empty;
-    // The parser admits only tools the Host offers: the built-ins.
-    var names = requested.tools.iterator();
-    while (names.next()) |name| set.insert(tool_catalog.builtIn(name).?);
-    return set;
+/// The tool names a creation or a `tools` change saves: the requested
+/// ones, or the defaults when a creation names none.
+fn requestedNames(requested: *const protocol.Configuration) *const protocol.ToolsField {
+    return if (requested.tools.state == .value) &requested.tools else &default_tools;
 }
 
-/// Whether `tools` names a tool some provider runs that `provider` does not.
-/// The parser admits only names the Host offers, so each is a built-in.
-fn providerToolMissing(provider: protocol.Provider, tools: *const protocol.ToolsField) bool {
+/// The tools a created Session gets when configuration omits them.
+pub const default_tools: protocol.ToolsField = blk: {
+    var names: []const []const u8 = &.{};
+    var each = std.mem.splitScalar(u8, product_defaults.tools, ',');
+    while (each.next()) |name| {
+        const index = tool_catalog.built_in.find(name) orelse @compileError("default tool " ++ name ++ " is no built-in");
+        // A creation that names no tools gets these on any provider.
+        if (tool_catalog.built_in.records[index].owner == .provider) for (std.enums.values(protocol.Provider)) |provider| {
+            if (!provider.runsTool(name)) @compileError(@tagName(provider) ++ " does not run default tool " ++ name);
+        };
+        names = names ++ .{name};
+    }
+    break :blk protocol.ToolsField.of(names) catch unreachable;
+};
+
+/// Why `tools` cannot be saved for a Session of `provider`: a name the
+/// Host's catalog lacks, or a tool some provider runs that `provider`
+/// does not.
+fn toolsRejection(catalog: *const tool_catalog.Catalog, provider: protocol.Provider, tools: *const protocol.ToolsField) ?protocol.ConfigurationRejection {
     var names = tools.iterator();
     while (names.next()) |name| {
-        if (tool_catalog.record(tool_catalog.builtIn(name).?).owner == .provider and !provider.runsTool(name)) return true;
+        const index = catalog.find(name) orelse return .unknown_tool;
+        if (catalog.records[index].owner == .provider and !provider.runsTool(name)) return .provider_tool_missing;
     }
-    return false;
+    return null;
 }
 
 /// Persisted session.permission_mode for a validated mode name.
@@ -93,18 +105,11 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
     if (!protocol.validLabel(label)) return error.CorruptStore;
 }
 
-/// A created Session's tools when configuration omits them.
+/// The default tools as a mask, for readers that still take one.
 pub const default_tools_mask: u8 = blk: {
     var mask: u8 = 0;
-    var names = std.mem.splitScalar(u8, product_defaults.tools, ',');
-    while (names.next()) |name| {
-        const tool = std.meta.stringToEnum(Tool, name).?;
-        // A creation that names no tools gets these on any provider.
-        if (tool_catalog.record(tool).owner == .provider) for (std.enums.values(protocol.Provider)) |provider| {
-            if (!provider.runsTool(name)) @compileError(@tagName(provider) ++ " does not run default tool " ++ name);
-        };
-        mask |= tool_catalog.toolBit(tool);
-    }
+    var names = default_tools.iterator();
+    while (names.next()) |name| mask |= tool_catalog.toolBit(tool_catalog.builtIn(name).?);
     break :blk mask;
 };
 
@@ -187,6 +192,7 @@ fn configurationTokens(field: @TypeOf(@as(protocol.Configuration, .{}).compactio
 }
 
 pub fn configurationBeforeWorkspace(
+    catalog: *const tool_catalog.Catalog,
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
 ) ?protocol.ConfigurationRejection {
@@ -212,8 +218,7 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !protocol.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value and
-        providerToolMissing(provider orelse current.?.provider, &requested.tools)) return .provider_tool_missing;
+    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse current.?.provider, &requested.tools)) |rejection| return rejection;
     if (requested.reasoning_effort.state == .value) {
         const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
@@ -256,11 +261,6 @@ pub fn planConfigurationUpdate(
 
     if (requested.provider.state == .value) next.provider = std.meta.stringToEnum(protocol.Provider, requested.provider.value.slice()).?;
     if (requested.model.state == .value) next.model = requested.model.value;
-    if (requested.tools.state == .value) {
-        next.tools_mask = 0;
-        var tools = requestedTools(requested).iterator();
-        while (tools.next()) |tool| next.tools_mask |= tool_catalog.toolBit(tool);
-    }
     if (requested.permission_mode.state == .value) {
         next.permission_mode = permissionModeCode(requested.permission_mode.value.slice());
     }
@@ -423,8 +423,9 @@ pub const ConfigurationReads = struct {
     empty: content_domain.Import = content_domain.empty_content,
     /// The rows `lookupPair` found, when round 1 needed two lookups.
     pair: ?content_domain.Pair = null,
-    /// The tool set a creation or a `tools` change saves, when it does.
-    tools: ?tool_set.Ensure = null,
+    /// The tool set a creation or a `tools` change saves, when it does;
+    /// null too when the catalog lacks a name, which the configure refuses.
+    tools: ?tool_set.Selection = null,
 
     /// The value the instructions import through: the requested content,
     /// or the empty default a creation imports.
@@ -578,8 +579,8 @@ pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *con
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating or configuration.tools.state == .value) {
-        reads.tools = .init(requestedTools(configuration));
-        tool_set.lookup(a, &reads.tools.?);
+        reads.tools = .of(a.store.catalog().catalog, requestedNames(configuration));
+        if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
     }
     const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
         reads.instructions = content_domain.sealedIdentity(&configuration.instructions);
@@ -638,7 +639,7 @@ pub fn applyConfiguration(
     }
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
-    if (configurationBeforeWorkspace(current_configuration, configuration)) |rejection| {
+    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration)) |rejection| {
         return .{ .rejected = rejection };
     }
 
@@ -686,7 +687,11 @@ pub fn applyConfiguration(
         },
         .clear => next.output_schema_id = null,
     }
-    if (reads.tools) |*tools| next.tool_set_id = try tool_set.finish(a, tools);
+    if (creating or configuration.tools.state == .value) {
+        // configurationBeforeWorkspace refused a name the catalog lacks.
+        const tools = &(reads.tools orelse return error.CorruptStore);
+        next.tool_set_id = try tool_set.finishSelection(a, tools, a.store.catalog().set_id);
+    }
     var target: protocol.Bounded(protocol.max_session_bytes) = .{};
     var head: rsql.SessionHead = undefined;
     if (created) {
