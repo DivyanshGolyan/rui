@@ -130,7 +130,12 @@ fn ended(self: *Request) Error!Outcome {
         .head => unreachable,
         .failed => |status| .{ .failed = .{ .status = status, .body = self.answer.buffered() } },
         .body => |body| switch (body) {
-            .json => .{ .answered = try reply.readMessage(self.answer.buffered(), self.id) },
+            .json => json: {
+                const message = try reply.readMessage(self.answer.buffered(), self.id);
+                // A body of only a notification answers nothing.
+                if (message == .notification) return error.NoAnswer;
+                break :json .{ .answered = message };
+            },
             // The stream closed before the answer: a lost request.
             .event_stream => error.NoAnswer,
         },
@@ -226,6 +231,13 @@ test "a JSON reply is read whole as the answer" {
     const outcome = try run(&script, &buffer);
     try std.testing.expectEqualStrings("{\"tools\":[]}", outcome.answered.result);
     try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "\r\nMcp-Method: tools/list\r\n") != null);
+}
+
+test "a JSON body of only a notification is not an answer" {
+    const note = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}";
+    var script: Script = .{ .reply = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{note.len}) ++ note };
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectError(error.NoAnswer, run(&script, &buffer));
 }
 
 test "an SSE reply skips progress and answers with the response event" {
