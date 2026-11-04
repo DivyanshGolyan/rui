@@ -15,8 +15,8 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import (CACHE_POLICY, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES, RENDERER_HARNESSES,
-                          execution_batches, matches, select, setup_requirements)
+from select_tests import (CACHE_POLICY, CHECK_COVERS, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES, RENDERER_HARNESSES,
+                          RULES, execution_batches, matches, select, setup_requirements)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -24,6 +24,45 @@ from host_process import dispose_all, wait_for
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
+
+
+def named_paths(patterns):
+    """Each path a rule's patterns name: a literal pattern itself, and every
+    tracked file a glob matches, less the rule's "!" exclusions."""
+    tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split()
+    included = [pattern for pattern in patterns if not pattern.startswith("!")]
+    named = {pattern for pattern in included if not any(char in pattern for char in "*?[")}
+    named |= {path for path in tracked if matches(path, patterns)}
+    return sorted(path for path in named if matches(path, patterns))
+
+
+def covered(target, targets):
+    """`target` runs when `targets` are selected, directly or inside check or check-full."""
+    return (target in targets or target in CHECK_COVERS and bool(targets & {"check", "check-full"})
+            or target in {"check", "stack-frames"} and "check-full" in targets
+            or target == "stack-frames" and "check" in targets)
+
+
+class RuleMatchTest(unittest.TestCase):
+    def test_a_lone_change_to_any_path_a_rule_names_selects_that_rule(self):
+        # A shortcut in select() may add to a path's selection but never skip
+        # its rules: the tests/ci shortcut once dropped live_engine_step.py's
+        # live rules (Codex P2 on #873), as the draft cut once dropped `test`.
+        failures = []
+        rules = [(rule, None) for rule in RULES[:len(RULES) - len(LIVE_RULES)]] + [(rule[:4], rule[4]) for rule in LIVE_RULES]
+        for (patterns, checks, _, reason), served_by in rules:
+            for path in named_paths(patterns):
+                for phase in ("development", "review"):
+                    targets = set(select([path], phase, AVAILABLE)["targets"])
+                    wanted = set(checks) if phase == "review" else set()
+                    if checks and not targets:
+                        failures.append((phase, path, reason, "selected nothing"))
+                    missing = {target for target in wanted if not covered(target, targets)}
+                    if missing:
+                        failures.append((phase, path, reason, sorted(missing)))
+                    if served_by and not targets & served_by:
+                        failures.append((phase, path, reason, "starts no server"))
+        self.assertEqual(failures, [])
 
 
 class SelectionTest(unittest.TestCase):
