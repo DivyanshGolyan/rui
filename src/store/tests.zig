@@ -6110,7 +6110,7 @@ test "every activity row is dated by the fact that owns it" {
                     .stop => 108,
                     // Asked when its call was made.
                     .approval_requested => 104,
-                    .hosted_call, .sent, .send_failed, .received => unreachable,
+                    .hosted_call, .sent, .send_failed, .received, .session_changed => unreachable,
                 };
                 try std.testing.expectEqual(expected, item.at);
                 seen.insert(item.value);
