@@ -1587,13 +1587,16 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
 pub fn renderFull(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
     try capture.append(",\"full\":{\"session_revisions\":[");
     try renderRevisions(a, session_ref, capture);
-    try renderRun(a, .{Messages}, session_ref, capture);
-    try renderRun(a, .{ Conversation, Turns, Operations }, session_ref, capture);
-    try renderRun(a, .{Calls}, session_ref, capture);
-    try renderRun(a, .{Actions}, session_ref, capture);
-    try renderRun(a, .{ Decisions, Stops, Interruptions, Results }, session_ref, capture);
+    inline for (full_runs) |run| try renderRun(a, run, session_ref, capture);
     try capture.append("]}");
 }
+
+/// The Full lists after the revisions, in main's order, as runs
+/// (`renderRun`). Every list pages by one rule: its keyset is the key
+/// order of the index its statement walks, so a chunk after the first
+/// seeks where the one before stopped and never sorts or rescans; the
+/// tests read every list's plan from here.
+pub const full_runs = .{ .{Messages}, .{ Conversation, Turns, Operations }, .{Calls}, .{Actions}, .{ Decisions, Stops, Interruptions, Results } };
 
 /// The rows a Full list renders per chunk. Each list's text reads one row
 /// more (`chunk_limit`), so a list of at most this many rows without
@@ -2211,7 +2214,7 @@ const unpositioned_message = rsql.Read(.{
 });
 
 pub const Messages = struct {
-    const S = full_messages;
+    pub const S = full_messages;
     const failed = error.MessageReadFailed;
     const header = "],\"messages\":[";
     pub const kept_rows = 4;
@@ -2319,7 +2322,7 @@ const full_conversation = rsql.Read(.{
 });
 
 pub const Conversation = struct {
-    const S = full_conversation;
+    pub const S = full_conversation;
     const failed = error.ConversationReadFailed;
     const header = "],\"conversation\":[";
     const State = NoState;
@@ -2392,7 +2395,7 @@ const full_turns = rsql.Read(.{
 });
 
 const Turns = struct {
-    const S = full_turns;
+    pub const S = full_turns;
     const failed = error.TurnReadFailed;
     const header = "],\"turns\":[";
     const State = NoState;
@@ -2451,7 +2454,7 @@ const full_operations = rsql.Read(.{
 });
 
 const Operations = struct {
-    const S = full_operations;
+    pub const S = full_operations;
     const failed = error.OperationReadFailed;
     const header = "],\"model_operations\":[";
     const State = NoState;
@@ -2499,21 +2502,33 @@ fn appendOptionalText(text: anytype, capture: *SessionReportCapture) !void {
     if (text.*) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
 }
 
-/// The Session's calls, by Operation and ordinal, each with its contents'
-/// metadata.
-const full_calls = rsql.Read(.{
-    .sql = "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.item_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
+/// A call's columns, its Operation named by `operation`: an arm walking
+/// the Session's Operations names the walked one, so SQLite sees the
+/// arm already in order.
+fn callColumns(comptime operation: []const u8) []const u8 {
+    return "SELECT " ++ operation ++ " AS operation_id,tool_call.call_ordinal,tool_call.item_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
         "tool_call.name_content_id AS name_id,name_content.byte_length AS name_length,name_content.digest AS name_digest," ++
         "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
         "tool_call.arguments_content_id AS arguments_id,arguments_content.byte_length AS arguments_length,arguments_content.digest AS arguments_digest," ++
-        "tool_call.rejection_content_id AS rejection_id,rejection_content.byte_length AS rejection_length,rejection_content.digest AS rejection_digest " ++
+        "tool_call.rejection_content_id AS rejection_id,rejection_content.byte_length AS rejection_length,rejection_content.digest AS rejection_digest ";
+}
+const call_contents = "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id " ++
+    "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+    "LEFT JOIN content arguments_content ON arguments_content.content_id=tool_call.arguments_content_id " ++
+    "LEFT JOIN content rejection_content ON rejection_content.content_id=tool_call.rejection_content_id ";
+
+/// The Session's calls, by Operation and ordinal, each with its contents'
+/// metadata: the rest of the Operation ?2 from ordinal ?3, a seek on its
+/// primary key, then the Operations after it, merged in that order, so a
+/// chunk inside one Operation reads no call an earlier chunk listed.
+pub const full_calls = rsql.Read(.{
+    .sql = callColumns("tool_call.operation_id") ++ "FROM model_tool_call tool_call " ++ call_contents ++
+        "WHERE tool_call.operation_id=?2 AND tool_call.session_ref=?1 AND tool_call.call_ordinal>=?3 " ++
+        "UNION ALL " ++ callColumns("operation.operation_id") ++
         "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
-        "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id " ++
-        "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
-        "LEFT JOIN content arguments_content ON arguments_content.content_id=tool_call.arguments_content_id " ++
-        "LEFT JOIN content rejection_content ON rejection_content.content_id=tool_call.rejection_content_id " ++
-        "WHERE operation.session_ref=?1 AND operation.operation_id>=?2 AND (operation.operation_id>?2 OR tool_call.call_ordinal>=?3) " ++
-        "ORDER BY operation.operation_id,tool_call.call_ordinal" ++ chunk_limit,
+        call_contents ++ "WHERE operation.session_ref=?1 AND operation.operation_id>?2 " ++
+        "ORDER BY operation_id,call_ordinal" ++ chunk_limit,
+    .compound = true,
     .Args = struct { session: []const u8, operation: u64 = 0, ordinal: u64 = 0 },
     .Row = struct {
         operation_id: rsql.Positive,
@@ -2538,7 +2553,7 @@ const full_calls = rsql.Read(.{
 });
 
 const Calls = struct {
-    const S = full_calls;
+    pub const S = full_calls;
     const failed = error.CallReadFailed;
     const header = "],\"tool_calls\":[";
     const State = NoState;
@@ -2597,7 +2612,7 @@ const full_actions = rsql.Read(.{
 });
 
 const Actions = struct {
-    const S = full_actions;
+    pub const S = full_actions;
     const failed = error.ActionReadFailed;
     const header = "],\"actions\":[";
     const State = NoState;
@@ -2651,7 +2666,7 @@ const full_decisions = rsql.Read(.{
 });
 
 const Decisions = struct {
-    const S = full_decisions;
+    pub const S = full_decisions;
     const failed = error.PermissionReadFailed;
     const header = "],\"permission_decisions\":[";
     const State = NoState;
@@ -2699,7 +2714,7 @@ pub const full_stops = rsql.Read(.{
 });
 
 const Stops = struct {
-    const S = full_stops;
+    pub const S = full_stops;
     const failed = error.SessionStopReadFailed;
     const header = "],\"session_stops\":[";
     const State = NoState;
@@ -2748,7 +2763,7 @@ pub const full_interruptions = rsql.Read(.{
 });
 
 const Interruptions = struct {
-    const S = full_interruptions;
+    pub const S = full_interruptions;
     const failed = error.InterruptionReadFailed;
     const header = "],\"model_interruptions\":[";
     const State = NoState;
@@ -2776,20 +2791,48 @@ const Interruptions = struct {
     }
 };
 
-/// The Session's Tool Results, by Operation, then acceptance and ordinal.
-pub const full_results = rsql.Read(.{
-    .sql = "SELECT tool_call.operation_id,tool_call.call_ordinal,coalesce(tool_call.acceptance_position,action.acceptance_position) AS acceptance_position," ++
+/// A rejected call's result and an Action's, their Operation named by
+/// `operation`, as `callColumns` names it.
+fn rejectedResult(comptime operation: []const u8) []const u8 {
+    return "SELECT " ++ operation ++ " AS operation_id,tool_call.call_ordinal,tool_call.acceptance_position," ++
         "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
-        "coalesce(tool_call.rejection_code,action.resolution_code) AS code," ++
-        "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS result_id,result.byte_length AS result_length,result.digest AS result_digest " ++
-        "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
-        "LEFT JOIN content result ON result.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
-        "WHERE operation.session_ref=?1 AND coalesce(tool_call.rejection_code,action.resolution_code) IS NOT NULL " ++
-        "AND operation.operation_id>=?2 AND (operation.operation_id>?2 OR coalesce(tool_call.acceptance_position,action.acceptance_position)>?3 " ++
-        "OR (coalesce(tool_call.acceptance_position,action.acceptance_position)=?3 AND tool_call.call_ordinal>=?4)) " ++
-        "ORDER BY operation.operation_id,coalesce(tool_call.acceptance_position,action.acceptance_position),tool_call.call_ordinal" ++ chunk_limit,
+        "tool_call.rejection_code AS code,tool_call.rejection_content_id AS result_id,result.byte_length AS result_length,result.digest AS result_digest ";
+}
+const rejected_contents = "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+    "LEFT JOIN content result ON result.content_id=tool_call.rejection_content_id ";
+fn resolvedResult(comptime operation: []const u8) []const u8 {
+    return "SELECT " ++ operation ++ " AS operation_id,action.call_ordinal,action.acceptance_position," ++
+        "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
+        "action.resolution_code AS code,action.resolution_content_id AS result_id,result.byte_length AS result_length,result.digest AS result_digest ";
+}
+const resolved_contents = "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+    "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+    "LEFT JOIN content result ON result.content_id=action.resolution_content_id ";
+
+/// The Session's Tool Results, by Operation, then acceptance and ordinal:
+/// a rejected call's result is its rejection, an accepted call's its
+/// Action's resolution (the tables' checks keep a rejected call without an
+/// Action). Four arms, each ordered by an index, merge in that order: the
+/// rejections and resolutions of the Operation ?2 from acceptance ?3 and
+/// ordinal ?4, then those of the Operations after it, so a chunk inside
+/// one Operation sorts nothing and reads no result an earlier chunk listed.
+pub const full_results = rsql.Read(.{
+    .sql = rejectedResult("tool_call.operation_id") ++ "FROM model_tool_call tool_call @index(model_tool_call_rejections) " ++ rejected_contents ++
+        "WHERE tool_call.operation_id=?2 AND tool_call.rejection_code IS NOT NULL AND tool_call.session_ref=?1 " ++
+        "AND tool_call.acceptance_position>=?3 AND (tool_call.acceptance_position>?3 OR tool_call.call_ordinal>=?4) " ++
+        "UNION ALL " ++ resolvedResult("action.parent_operation_id") ++ "FROM action_operation action @index(action_operation_results) " ++ resolved_contents ++
+        "WHERE action.parent_operation_id=?2 AND action.resolution_code IS NOT NULL AND action.session_ref=?1 " ++
+        "AND action.acceptance_position>=?3 AND (action.acceptance_position>?3 OR action.call_ordinal>=?4) " ++
+        "UNION ALL " ++ rejectedResult("operation.operation_id") ++
+        "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN model_tool_call tool_call @index(model_tool_call_rejections) " ++
+        "ON tool_call.operation_id=operation.operation_id " ++ rejected_contents ++
+        "WHERE operation.session_ref=?1 AND operation.operation_id>?2 AND tool_call.rejection_code IS NOT NULL " ++
+        "UNION ALL " ++ resolvedResult("operation.operation_id") ++
+        "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN action_operation action @index(action_operation_results) " ++
+        "ON action.parent_operation_id=operation.operation_id " ++ resolved_contents ++
+        "WHERE operation.session_ref=?1 AND operation.operation_id>?2 AND action.resolution_code IS NOT NULL " ++
+        "ORDER BY operation_id,acceptance_position,call_ordinal" ++ chunk_limit,
+    .compound = true,
     .Args = struct { session: []const u8, operation: u64 = 0, acceptance: u64 = 0, ordinal: u64 = 0 },
     .Row = struct {
         operation_id: rsql.Positive,
@@ -2807,7 +2850,7 @@ pub const full_results = rsql.Read(.{
 });
 
 const Results = struct {
-    const S = full_results;
+    pub const S = full_results;
     const failed = error.CallReadFailed;
     const header = "],\"tool_results\":[";
     const State = NoState;

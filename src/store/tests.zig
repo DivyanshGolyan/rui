@@ -14542,6 +14542,101 @@ test "Full interruptions seek their Session's commands, within 75% of main's ste
     }
 }
 
+/// Fails when `S`'s plan sorts (a temporary B-tree), scans a table, or
+/// starts a loop nest outside a subquery with anything but a range.
+fn expectSeekPlan(storage: *Store, comptime S: type) !void {
+    const text = "EXPLAIN QUERY PLAN " ++ S.sql;
+    var statement: ?*c.sqlite3_stmt = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_prepare_v2(storage.database, text.ptr, @intCast(text.len), &statement, null));
+    defer _ = c.sqlite3_finalize(statement);
+    var subqueries: [64]c_int = undefined;
+    var subquery_count: usize = 0;
+    var searched: [64]c_int = undefined;
+    var searched_count: usize = 0;
+    var plan: [4096]u8 = undefined;
+    var plan_length: usize = 0;
+    while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
+        const id = c.sqlite3_column_int(statement, 0);
+        const parent = c.sqlite3_column_int(statement, 1);
+        const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
+        if (std.fmt.bufPrint(plan[plan_length..], "  {d} {d} {s}\n", .{ id, parent, detail })) |line| plan_length += line.len else |_| {}
+        if (std.mem.indexOf(u8, detail, "TEMP B-TREE") != null or std.mem.startsWith(u8, detail, "SCAN ")) break;
+        if (std.mem.indexOf(u8, detail, "SUBQUERY") != null) {
+            subqueries[subquery_count] = id;
+            subquery_count += 1;
+            continue;
+        }
+        if (!std.mem.startsWith(u8, detail, "SEARCH ")) continue;
+        if (std.mem.indexOfScalar(c_int, subqueries[0..subquery_count], parent) != null) continue;
+        if (std.mem.indexOfScalar(c_int, searched[0..searched_count], parent) != null) continue;
+        searched[searched_count] = parent;
+        searched_count += 1;
+        if (std.mem.indexOf(u8, detail, ">?") == null) break;
+    } else {
+        if (searched_count > 0) return;
+    }
+    std.debug.print("{s}\n{s}", .{ S.sql, plan[0..plan_length] });
+    return error.TestUnexpectedResult;
+}
+
+test "every Full list pages in its index's key order: a chunk seeks, and sorts nothing" {
+    // The rule for every list: its keyset is the key order of the index
+    // its statement walks. A chunk that sorted, scanned, or searched a
+    // parent's rows without a range read again what the chunks before it
+    // listed: one Operation's 4096 rejected calls took 89777216 steps.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try expectSeekPlan(&storage, report_domain.full_revisions);
+    inline for (report_domain.full_runs) |run| inline for (run) |L| try expectSeekPlan(&storage, L.S);
+}
+
+test "Full calls and results of one Operation take a seek per chunk, within twice main's steps" {
+    // One Operation's 4096 rejected calls: main's two statements stepped
+    // 249888 times (origin/main 2e8e8353), and read each content's
+    // metadata apart, 245810 more; these read it in their rows. A chunk
+    // that searched the Operation's calls again took 89777216 steps for
+    // the report.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSessionAsk(&storage, "one-operation-config");
+    try submitTestMessage(&storage, &tmp, "one-operation-input", "one-operation-key", session.slice(), "many calls");
+    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const count = 4096;
+    const calls = try std.testing.allocator.alloc(TestingCall, count);
+    defer std.testing.allocator.free(calls);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for (calls, 0..) |*call, index| {
+        const id = try std.fmt.allocPrint(arena.allocator(), "one-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "one-operation", calls);
+    std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 256 * 1024 * 1024, .full));
+    _ = testingSteps(&storage, report_domain.full_calls);
+    _ = testingSteps(&storage, report_domain.full_results);
+    const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 256 * 1024 * 1024, .full);
+    defer std.testing.allocator.free(full);
+    const steps = testingSteps(&storage, report_domain.full_calls) + testingSteps(&storage, report_domain.full_results);
+    // 480136 when this was written.
+    try std.testing.expect(steps <= 2 * 249888);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+    defer parsed.deinit();
+    for ([_][]const u8{ "tool_calls", "tool_results" }) |name| {
+        const listed = parsed.value.object.get("full").?.object.get(name).?.array.items;
+        try std.testing.expectEqual(@as(usize, count), listed.len);
+        for (listed, 0..) |row, index| {
+            var ordinal: [16]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&ordinal, "{d}", .{index}), row.object.get("call_ordinal").?.string);
+        }
+    }
+}
+
 test "a Full list takes a statement per 256 rows, and lists each row once in order" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
