@@ -73,7 +73,9 @@ runs:
         echo "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
         # The build runner is compiled for the host CPU, which varies between
         # runners of one image, so its cache is only reusable per CPU model.
-        if [ "$(uname -s)" = Darwin ]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(grep -m1 '^model name' /proc/cpuinfo); fi
+        # x86 names the model; ARM Linux has no "model name" line, so the first implementer line stands in, and
+        # a /proc/cpuinfo with neither falls back to the machine type rather than failing the step.
+        if [ "$(uname -s)" = Darwin ]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo || uname -m); fi
         echo "cpu=$(printf '%s' "$cpu" | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
     - name: Name the build cache keys
       id: build-keys
