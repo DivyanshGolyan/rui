@@ -330,7 +330,7 @@ pub const HistoricalView = struct {
         out.* = .{ .view = self, .reference = reference };
         out.reader.open(location);
         out.reader.first = first;
-        out.reader.verified = reference.verified or reference.text_start != null;
+        out.reader.check.verified = reference.verified or reference.text_start != null;
         self.readers += 1;
     }
 
@@ -400,7 +400,7 @@ pub const HistoricalReader = struct {
     /// Replay reads in order, so its content reader checks every value's
     /// digest at its end.
     pub fn read(self: *HistoricalReader, start: u64, destination: []u8) !usize {
-        std.debug.assert(self.usable() and (self.reader.verified or start == self.reader.verified_position));
+        std.debug.assert(self.usable() and (self.reader.check.verified or start == self.reader.check.position));
         const base = self.reference.text_start orelse return self.reader.read(start, destination);
         const text = &self.view.output_parts.?.text.?;
         std.debug.assert(start <= self.reference.length and base + start == text.read);
