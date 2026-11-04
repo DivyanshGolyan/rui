@@ -95,6 +95,7 @@ Each line: id, size, what it builds, ledger refs, depends on.
 - **K5** (M) `read_transcript` without search. Outline by default, `kinds`, `before`/`limit`, `full` with chunking, over any Session. Refs D42, D163. Depends on K0, F1.
 - **K6** (S) Compaction makes room. When the compaction request would not fit, drop the oldest messages from it until it fits, and record the count on the feed. Refs D191. Depends on F1.
 - **K7** (S) Host pause. A control that holds every new Turn until resume, shown in Host status. Refs D193. Depends on nothing.
+- **K8** (S) Order-free request parsing. The Host accepts request JSON fields in any order. Refs D172, D212. Depends on nothing; lands before any non-TS client.
 - **F3** (M) Word search, shared by `/v1/conversation-page` and `read_transcript`'s `query`. Refs D13, D42. Depends on P2, K5.
 
 ### Lane M: MCP

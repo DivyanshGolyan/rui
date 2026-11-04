@@ -53,7 +53,7 @@ Owns the Host start in `cli.zig`, `host_launch.c`, the new `launch_frame.zig`, t
 
 Order: P0, A1 and A2. Then A3a, A3b, A3c, S2 and A4.
 
-A2 takes `store` as a SQLite directory. The Store thread's PR 9 adds the MySQL URL. A2 carries D181 and D196, and measures memory per waiting Turn in the #840 harness.
+A2 takes `store` as a SQLite directory. The Store thread's PR 9 adds the MySQL URL. A2 carries D181 and D196.
 
 A3a carries D183, D185 and D198. A3b carries pause and resume. A4 adds `rui-linux-arm64` (D186), and its first npm publish waits for Divyansh.
 

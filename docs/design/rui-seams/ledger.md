@@ -306,6 +306,10 @@ D209. (lane T question, my call) C1 lands after S1, which removes the default ef
 
 D210. (lane K question, my call) Refines D134, D168 and D170: the Host wire stays as it is. The TS client (A3c) encodes `entry.cursor` from each row's existing position and ordinal, and fills `entry.text` up to 16 KiB with `truncated` by reading each content row through the existing `/v1/activity-content`. Inlining on the Host would grow the Activity page reply buffer to about 1.5 MiB, a resident-memory cost. F1 is complete with #876.
 
+D211. (lane L calls, accepted) A refused launch writes one stdout line `{"rui_start_error":{"code","message"}}` and exits 1; a nonzero exit without it is `RuiUnavailableError`. A Host that exits later for a named reason (`store_fenced`) writes the same line first. A launched Host's socket is `runtimeDir/rui.sock` on every engine. `paused: true` is refused until K7 lands, then accepted.
+D212. (lane L question, my call) The Host's request parser accepts JSON fields in any order (new unit K8, lane K, `protocol.zig`), so generated clients in any language work as D172 intends. Until K8 lands, the TS client generates types only and its thin layer builds the bodies. K8 must land before the Python or Go clients.
+D213. Corrects lane-briefs.md: A2 does no memory measurement. The per-waiting-Turn figure for D181 is Rui's existing measurement (about 2.6 KB Private_Dirty per Turn waiting on the model). `/v1/inspect-session` gets its OpenAPI schema before A3b uses it for `status()`.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
