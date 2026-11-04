@@ -900,33 +900,38 @@ const unresolved_actions = rsql.Read(.{
 
 const Description = protocol.Bounded(protocol.max_tool_description_bytes);
 
-/// The publication of the tool group of the Operation `operation` names,
-/// as main's outcome facts gave it: its largest acceptance when every
-/// call has one, and none otherwise. The rule over `active_tool_calls`
-/// proved every call of each listed Operation valid in an earlier round
-/// of this Access, under the Entry that excludes every writer, so its
-/// Operation has as many calls as call items. By the schema's CHECKs a
-/// call has an acceptance exactly when it is rejected (`model_tool_call`'s)
-/// or its Action resolved (`action_operation`'s), main's terminal calls,
-/// so this counts what main counted.
-fn publicationSql(comptime operation: []const u8) []const u8 {
-    return "(SELECT CASE WHEN count(*)=count(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) " ++
-        "THEN max(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) END FROM model_tool_call sibling " ++
-        "LEFT JOIN action_operation sibling_action ON sibling_action.parent_operation_id=sibling.operation_id AND sibling_action.call_ordinal=sibling.call_ordinal " ++
-        "WHERE sibling.operation_id=" ++ operation ++ ") AS publication";
-}
+/// The CTE `publications`: each active Operation's tool group
+/// publication, as main's outcome facts gave it, its largest acceptance
+/// when every call has one and none otherwise. Grouped once per
+/// Operation, so a list joins it per row without rescanning the
+/// Operation's calls. The rule over `active_tool_calls` proved every
+/// call of each listed Operation valid in an earlier round of this
+/// Access, under the Entry that excludes every writer, so its Operation
+/// has as many calls as call items. By the schema's CHECKs a call has an
+/// acceptance exactly when it is rejected (`model_tool_call`'s) or its
+/// Action resolved (`action_operation`'s), main's terminal calls, so this
+/// counts what main counted.
+const publications_sql = "WITH publications AS (SELECT operation.operation_id," ++
+    "CASE WHEN count(*)=count(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) " ++
+    "THEN max(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) END AS publication " ++
+    "FROM turn active @index(turn_one_active_per_session) " ++
+    "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
+    "CROSS JOIN model_tool_call sibling ON sibling.operation_id=operation.operation_id " ++
+    "LEFT JOIN action_operation sibling_action ON sibling_action.parent_operation_id=sibling.operation_id AND sibling_action.call_ordinal=sibling.call_ordinal " ++
+    "WHERE active.session_ref=?1 AND active.outcome_code IS NULL GROUP BY operation.operation_id) ";
 
 /// The active Turn's resolved Actions, with each call's line and its
 /// group's publication for its presentation. An Action's call is its
 /// foreign key.
 const resolved_actions = rsql.Read(.{
-    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
-        "result.byte_length AS result_length,result.digest AS result_digest,tool_call.description," ++ publicationSql("a.parent_operation_id") ++ " " ++
+    .sql = publications_sql ++ "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
+        "result.byte_length AS result_length,result.digest AS result_digest,tool_call.description,publications.publication " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=operation.operation_id " ++
         "CROSS JOIN content result ON result.content_id=a.resolution_content_id " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
+        "LEFT JOIN publications ON publications.operation_id=operation.operation_id " ++
         "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NOT NULL ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -946,10 +951,10 @@ const resolved_actions = rsql.Read(.{
 /// The active Turn's rejected calls, with each one's line and its group's
 /// publication for its presentation.
 const rejected_calls = rsql.Read(.{
-    .sql = "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
+    .sql = publications_sql ++ "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
         "rejection.byte_length AS rejection_length,rejection.digest AS rejection_digest,name.byte_length AS name_length,name.digest AS name_digest," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "tool_call.description," ++ publicationSql("tool_call.operation_id") ++ " " ++
+        "tool_call.description,publications.publication " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
@@ -957,6 +962,7 @@ const rejected_calls = rsql.Read(.{
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
         "CROSS JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
+        "LEFT JOIN publications ON publications.operation_id=operation.operation_id " ++
         "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND tool_call.rejection_code IS NOT NULL " ++
         "ORDER BY tool_call.operation_id,tool_call.call_ordinal",
     .Args = struct { session: []const u8 },

@@ -14399,6 +14399,50 @@ test "a Current report and inspection do no more work than main at the cost fixt
     }
 }
 
+/// A Session whose active Turn's one Operation proposed `count` calls of
+/// an unknown tool, each rejected, so the report lists every one.
+fn rejectedCallsForTesting(storage: *Store, tmp: *std.testing.TmpDir, count: usize) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSession(storage, "one-operation-config");
+    try submitTestMessage(storage, tmp, "one-operation-input", "one-operation-key", session.slice(), "many calls");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var ids: [256][16]u8 = undefined;
+    var calls: [256]TestingCall = undefined;
+    for (calls[0..count], ids[0..count], 0..) |*call, *id_buffer, index| {
+        const id = try std.fmt.bufPrint(id_buffer, "call-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(storage, tmp, binding, "one-operation-calls", calls[0..count]);
+    return session;
+}
+
+test "a Current report's work grows linearly in one Operation's calls, as main's did" {
+    // Main's counts at 3b3d941a, each the second, cached, report: its
+    // statements and VM steps with 16, 64 and 256 rejected calls in one
+    // Operation. Each listed call's publication is its Operation's, read
+    // once per Operation, not once per call.
+    inline for (.{
+        .{ 16, [2]i64{ 93, 12411 } },
+        .{ 64, [2]i64{ 285, 47067 } },
+        .{ 256, [2]i64{ 1053, 185691 } },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try rejectedCallsForTesting(&storage, &tmp, case[0]);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        _ = cachedWorkForTesting(&storage);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+        const report = cachedWorkForTesting(&storage);
+        try std.testing.expect(report.statements > 0);
+        std.testing.expect(report.statements <= case[1][0] and report.steps <= case[1][1]) catch |err| {
+            std.debug.print("{d} calls: {d} statements, {d} steps\n", .{ case[0], report.statements, report.steps });
+            return err;
+        };
+    }
+}
+
 test "a Current report takes its reads' dependency depth in rounds, not its rows" {
     // Every shape: the saved Session; the facts' first round, with the
     // work's and compaction facts' latest Turn; the pending count with
