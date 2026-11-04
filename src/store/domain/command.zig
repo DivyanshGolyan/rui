@@ -1170,8 +1170,8 @@ const permission_target = rsql.Read(.{
 /// Round 1 reads the saved command. Its kind picks what round 2 reads,
 /// keyed on the command alone: a dependent round, one more network round
 /// trip, run only for a kind that saved more than its answer. A queued or
-/// processing Message's progress is its Session's work, read by unconverted
-/// code until the work read is converted.
+/// processing Message's progress is its Session's work, read in the rounds
+/// after (`readMessageProgress`).
 pub fn observeCommand(a: anytype, key: []const u8) !CommandObservation {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);

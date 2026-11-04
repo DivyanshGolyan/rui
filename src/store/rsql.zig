@@ -1,7 +1,12 @@
 //! Rui SQL: Store SQL text written once for every engine. Source text is SQLite
 //! SQL restricted to a portable subset, plus markers that each engine renders
-//! in its own spelling. The schema's checks and index predicates use it today;
-//! every statement the Store caches passes the checks its rules enable.
+//! in its own spelling. The schema's checks and index predicates and every
+//! typed statement (`Read`, `Write`) pass its checks. `Store.cachedTyped`,
+//! the one way a typed statement reaches SQLite, takes only a type `Read` or
+//! `Write` made (`isStatement`). The Store prepares other text in three
+//! places only: its transaction control (`Store.Control`), its test-only
+//! fixtures, and, at open, PRAGMAs, schema bootstrap and one sweep held to
+//! `portabilityError` alone.
 
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
@@ -9,26 +14,11 @@ const schema = @import("schema.zig");
 
 pub const Dialect = enum { sqlite };
 
-/// Which rule groups a check applies. Comments and double quotes are
-/// always refused: they would hide text from the other rules.
-pub const Rules = struct {
-    /// Reserved names and `rowid`: `reserved_names_checked`.
-    names: bool,
-    /// Words, `||` and `IS` that some engine reads differently.
-    dialect: bool,
-};
-
 /// A reserved word is a name, and refused, everywhere except the keyword
 /// places in `keywords`; text never names `rowid`. The schema's names,
-/// checks and predicates and every statement are held to this.
+/// checks and predicates, every typed statement and opening's sweep are
+/// held to this.
 pub const reserved_names_checked = true;
-
-pub const schema_rules: Rules = .{ .names = reserved_names_checked, .dialect = true };
-/// The `cached`/`execute` statements, which still use `unixepoch`, `GLOB`,
-/// `||` and `IS` comparisons. Typed statements (`Read`, `Write`) are held
-/// to `typed_rules`.
-pub const statement_rules: Rules = .{ .names = reserved_names_checked, .dialect = false };
-pub const typed_rules: Rules = .{ .names = reserved_names_checked, .dialect = true };
 
 /// Words reserved in at least one engine (SQLite 3.53, Postgres 17, MySQL 8.4).
 const reserved_names = [_][]const u8{
@@ -81,10 +71,12 @@ const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
     .{ .word = "ROLLBACK", .fix = "return the error; the entry point rolls back" },
 };
 
-/// Why `text` is not portable Rui SQL under `rules`, or null. String
-/// literals are not inspected; comments and quoted identifiers are refused,
-/// so nothing else escapes the scan.
-pub fn portabilityError(comptime text: []const u8, comptime rules: Rules) ?[]const u8 {
+/// Why `text` is not portable Rui SQL, or null; reserved names and
+/// `rowid` count only when `reserved`. String literals are not inspected;
+/// comments and quoted identifiers are refused, so nothing else escapes
+/// the scan.
+/// `reserved` mirrors `identifierError`'s on purpose: both take `reserved_names_checked`, one switch for names and text.
+pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]const u8 {
     comptime {
         @setEvalBranchQuota(100 * text.len + 1000);
         var index: usize = 0;
@@ -102,7 +94,7 @@ pub fn portabilityError(comptime text: []const u8, comptime rules: Rules) ?[]con
             }
             if (byte == '\'') {
                 index = literalEnd(text, index);
-            } else if (rules.dialect and std.mem.eql(u8, pair, "||")) {
+            } else if (std.mem.eql(u8, pair, "||")) {
                 return "rsql: '||' is OR on MySQL; compute the text in Zig";
             } else if (std.mem.eql(u8, pair, "--") or std.mem.eql(u8, pair, "/*")) {
                 return "rsql: '" ++ pair ++ "' comments hide text from this check; write the note as a Zig comment";
@@ -111,20 +103,18 @@ pub fn portabilityError(comptime text: []const u8, comptime rules: Rules) ?[]con
             } else if (isWordStart(byte)) {
                 const word = text[index..wordEnd(text, index)];
                 index += word.len;
-                if (rules.dialect) {
-                    for (forbidden_words) |forbidden| {
-                        if (std.ascii.eqlIgnoreCase(word, forbidden.word)) return "rsql: '" ++ word ++ "' is not portable; " ++ forbidden.fix;
-                    }
-                    if (std.ascii.eqlIgnoreCase(previous, "INSERT") and std.ascii.eqlIgnoreCase(word, "OR"))
-                        return "rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write";
+                for (forbidden_words) |forbidden| {
+                    if (std.ascii.eqlIgnoreCase(word, forbidden.word)) return "rsql: '" ++ word ++ "' is not portable; " ++ forbidden.fix;
                 }
-                if (rules.names) {
+                if (std.ascii.eqlIgnoreCase(previous, "INSERT") and std.ascii.eqlIgnoreCase(word, "OR"))
+                    return "rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write";
+                if (reserved) {
                     if (std.ascii.eqlIgnoreCase(word, "rowid")) return "rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column";
                     if (identifierError(word, true)) |message| {
                         if (!isKeyword(text, word, index, previous, window_depth != null and window_depth.? == depth)) return message;
                     }
                 }
-                if (rules.dialect and std.ascii.eqlIgnoreCase(word, "IS")) {
+                if (std.ascii.eqlIgnoreCase(word, "IS")) {
                     var next = nextWord(text, index);
                     if (std.ascii.eqlIgnoreCase(next, "NOT")) next = nextWord(text, skipSpace(text, index) + next.len);
                     if (!std.ascii.eqlIgnoreCase(next, "NULL")) return "rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)";
@@ -171,13 +161,6 @@ fn nextWord(comptime text: []const u8, comptime from: usize) []const u8 {
     return text[start..wordEnd(text, start)];
 }
 
-/// Fails the build on a statement that breaks `statement_rules`.
-pub fn checkStatement(comptime sql: []const u8) void {
-    comptime {
-        if (portabilityError(sql, statement_rules)) |message| @compileError(message ++ ": " ++ sql);
-    }
-}
-
 /// Why `name` cannot name a table, column or index on every engine, or null.
 pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]const u8 {
     if (!reserved) return null;
@@ -215,7 +198,7 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 /// reads as k intervals of one range.
 pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
     comptime {
-        if (portabilityError(text, schema_rules)) |message| @compileError(message ++ ": " ++ text);
+        if (portabilityError(text, reserved_names_checked)) |message| @compileError(message ++ ": " ++ text);
         return switch (dialect) {
             .sqlite => renderSqlite(text),
         };
@@ -341,6 +324,8 @@ pub fn Read(comptime spec: ReadSpec) type {
     }
     return struct {
         pub const kind: StatementKind = .read;
+        /// What `isStatement` checks this type was made from.
+        pub const made_from = spec;
         pub const Args = spec.Args;
         pub const Row = spec.Row;
         pub const cardinality = spec.cardinality;
@@ -364,6 +349,8 @@ pub fn Write(comptime spec: WriteSpec) type {
     comptime if (expectError(parsed.statement, spec.expect)) |message| @compileError(message ++ ": " ++ spec.sql);
     return struct {
         pub const kind: StatementKind = .write;
+        /// What `isStatement` checks this type was made from.
+        pub const made_from = spec;
         pub const Args = spec.Args;
         pub const expect = spec.expect;
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
@@ -375,6 +362,20 @@ pub fn Write(comptime spec: WriteSpec) type {
 }
 
 pub const StatementKind = enum { read, write };
+
+/// Whether `S` is the type `Read`, `Write` or `Page` made, so its text passed every
+/// check. A struct that copies a statement's declarations, `made_from`
+/// included, is not: `S` must be the very type its spec makes.
+pub fn isStatement(comptime S: type) bool {
+    comptime {
+        if (@typeInfo(S) != .@"struct" or !@hasDecl(S, "kind") or !@hasDecl(S, "made_from")) return false;
+        if (@TypeOf(S.kind) != StatementKind) return false;
+        return switch (S.kind) {
+            .read => if (@TypeOf(S.made_from) == ReadSpec) S == Read(S.made_from) else @TypeOf(S.made_from) == PageSpec and S == Page(S.made_from),
+            .write => @TypeOf(S.made_from) == WriteSpec and S == Write(S.made_from),
+        };
+    }
+}
 
 /// Whether a Row has a pointer field, which decodes into the caller's
 /// memory it points to, so the caller's struct fills in place without a
@@ -447,7 +448,7 @@ fn accepted(comptime kind: StatementKind, comptime sql: []const u8, comptime Arg
 fn check(comptime kind: StatementKind, comptime sql: []const u8, comptime Args: type, comptime Row: type, comptime compound: bool) Checked {
     comptime {
         @setEvalBranchQuota(1000 * sql.len + 20_000);
-        if (portabilityError(sql, typed_rules)) |message| return .{ .refused = message };
+        if (portabilityError(sql, reserved_names_checked)) |message| return .{ .refused = message };
         const parsed = switch (parse(sql)) {
             .refused => |message| return .{ .refused = message },
             .accepted => |parsed| parsed,
@@ -1989,6 +1990,9 @@ pub fn Page(comptime spec: PageSpec) type {
     });
     return struct {
         pub const kind = R.kind;
+        /// What `isStatement` checks this type was made from: its text is
+        /// a `Read`'s, checked as one.
+        pub const made_from = spec;
         pub const Args = R.Args;
         pub const Row = R.Row;
         pub const cardinality = R.cardinality;
@@ -2262,24 +2266,24 @@ test "markers nest, and text outside them is copied" {
 }
 
 test "non-portable text names its fix" {
-    try std.testing.expectEqualStrings("rsql: 'GLOB' is not portable; write @charset(column,'set') or @initial(column,'set')", comptime portabilityError("x NOT GLOB '*[^a]*'", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: 'typeof' is not portable; test IS NULL or IS NOT NULL", comptime portabilityError("typeof(x)='blob'", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; write @now, the Host's second", comptime portabilityError("at<=unixepoch()", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: '||' is OR on MySQL; compute the text in Zig", comptime portabilityError("a||b='ab'", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS 'x'", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS NOT 1", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column", comptime portabilityError("rowid>1", .{ .names = true, .dialect = true }).?);
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("rowid>1", .{ .names = false, .dialect = true }));
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("a IS NULL AND b IS NOT NULL AND c='GLOB || IS 1' AND isolated=1", .{ .names = true, .dialect = true }));
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("a-1>0 AND b/2<3 AND c='-- /* \"'", .{ .names = true, .dialect = true }));
+    try std.testing.expectEqualStrings("rsql: 'GLOB' is not portable; write @charset(column,'set') or @initial(column,'set')", comptime portabilityError("x NOT GLOB '*[^a]*'", false).?);
+    try std.testing.expectEqualStrings("rsql: 'typeof' is not portable; test IS NULL or IS NOT NULL", comptime portabilityError("typeof(x)='blob'", false).?);
+    try std.testing.expectEqualStrings("rsql: 'unixepoch' is not portable; write @now, the Host's second", comptime portabilityError("at<=unixepoch()", false).?);
+    try std.testing.expectEqualStrings("rsql: '||' is OR on MySQL; compute the text in Zig", comptime portabilityError("a||b='ab'", false).?);
+    try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS 'x'", false).?);
+    try std.testing.expectEqualStrings("rsql: 'IS' compares only with NULL; write @same(a,b) or @distinct(a,b)", comptime portabilityError("code IS NOT 1", false).?);
+    try std.testing.expectEqualStrings("rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column", comptime portabilityError("rowid>1", true).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("rowid>1", false));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("a IS NULL AND b IS NOT NULL AND c='GLOB || IS 1' AND isolated=1", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("a-1>0 AND b/2<3 AND c='-- /* \"'", true));
 }
 
 test "comments and double quotes cannot hide text from the check" {
     const comment = "rsql: '--' comments hide text from this check; write the note as a Zig comment";
-    try std.testing.expectEqualStrings(comment, comptime portabilityError("a>0 -- it's\n AND b GLOB 'x'", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings(comment, comptime portabilityError("a>0 --", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: '/*' comments hide text from this check; write the note as a Zig comment", comptime portabilityError("a>0 /* it's */ AND b GLOB 'x'", .{ .names = false, .dialect = true }).?);
-    try std.testing.expectEqualStrings("rsql: '\"' quotes a name on Postgres but a string on MySQL; write names bare and strings in single quotes", comptime portabilityError("\"a'\" GLOB 'x'", .{ .names = false, .dialect = true }).?);
+    try std.testing.expectEqualStrings(comment, comptime portabilityError("a>0 -- it's\n AND b GLOB 'x'", false).?);
+    try std.testing.expectEqualStrings(comment, comptime portabilityError("a>0 --", false).?);
+    try std.testing.expectEqualStrings("rsql: '/*' comments hide text from this check; write the note as a Zig comment", comptime portabilityError("a>0 /* it's */ AND b GLOB 'x'", false).?);
+    try std.testing.expectEqualStrings("rsql: '\"' quotes a name on Postgres but a string on MySQL; write names bare and strings in single quotes", comptime portabilityError("\"a'\" GLOB 'x'", false).?);
 }
 
 test "reserved names are refused once checked" {
@@ -2288,18 +2292,38 @@ test "reserved names are refused once checked" {
     try std.testing.expectEqual(@as(?[]const u8, null), comptime identifierError("meta_key", true));
 }
 
-test "statements are held to reserved names and rowid, not yet to the dialect rules" {
-    try std.testing.expectEqualStrings("rsql: 'call' is reserved on some engine; rename it", comptime portabilityError("SELECT call.x FROM model_tool_call call", statement_rules).?);
-    try std.testing.expectEqualStrings("rsql: 'groups' is reserved on some engine; rename it", comptime portabilityError("WITH groups AS (SELECT 1) SELECT * FROM groups", statement_rules).?);
-    try std.testing.expectEqualStrings("rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column", comptime portabilityError("SELECT max(rowid) FROM session", statement_rules).?);
-    try std.testing.expectEqualStrings("rsql: '--' comments hide text from this check; write the note as a Zig comment", comptime portabilityError("SELECT 1 -- call", statement_rules).?);
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError(
-        "WITH RECURSIVE n(i) AS (SELECT 1) SELECT tool_call.x FROM n WHERE a GLOB 'call' AND b IS 1 ORDER BY i LIMIT 1 OFFSET 2",
-        statement_rules,
-    ));
+test "statements are held to reserved names, rowid and comments" {
+    try std.testing.expectEqualStrings("rsql: 'call' is reserved on some engine; rename it", comptime portabilityError("SELECT call.x FROM model_tool_call call", reserved_names_checked).?);
+    try std.testing.expectEqualStrings("rsql: 'groups' is reserved on some engine; rename it", comptime portabilityError("WITH groups AS (SELECT 1) SELECT * FROM groups", reserved_names_checked).?);
+    try std.testing.expectEqualStrings("rsql: 'rowid' is SQLite's hidden key; name an explicit INTEGER key column", comptime portabilityError("SELECT max(rowid) FROM session", reserved_names_checked).?);
+    try std.testing.expectEqualStrings("rsql: '--' comments hide text from this check; write the note as a Zig comment", comptime portabilityError("SELECT 1 -- call", reserved_names_checked).?);
+}
+
+test "only a type Read, Write or Page made counts as a typed statement" {
+    const Real = Read(.{ .sql = "SELECT content_id FROM content WHERE content_id=?1", .Args = struct { content_id: u64 }, .Row = struct { content_id: Positive }, .cardinality = .optional });
+    const Written = Write(.{ .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2)", .Args = struct { turn_id: u64, session: SessionHead }, .expect = .{ .at_most = 1 } });
+    try std.testing.expect(comptime isStatement(Real));
+    try std.testing.expect(comptime isStatement(Written));
+    try std.testing.expect(comptime isStatement(TestCalls));
+    // Open text in a struct shaped like a statement.
+    try std.testing.expect(!comptime isStatement(struct {
+        pub const kind: StatementKind = .write;
+        pub const sql: [:0]const u8 = "ROLLBACK";
+    }));
+    // A copy of a real statement's declarations around other text.
+    try std.testing.expect(!comptime isStatement(struct {
+        pub const kind = Real.kind;
+        pub const made_from = Real.made_from;
+        pub const Args = Real.Args;
+        pub const Row = Real.Row;
+        pub const sql: [:0]const u8 = "DELETE FROM session";
+    }));
+    try std.testing.expect(!comptime isStatement(struct {}));
 }
 
 test "a reserved word is a keyword only in its own place, and a name anywhere else" {
+    // Its OVER texts scan past portabilityError's own quota of 100 per byte.
+    @setEvalBranchQuota(20_000);
     const Case = struct { sql: []const u8, word: []const u8 };
     inline for ([_]Case{
         .{ .sql = "SELECT o.x FROM model_operation offset", .word = "offset" },
@@ -2313,7 +2337,7 @@ test "a reserved word is a keyword only in its own place, and a name anywhere el
         .{ .sql = "SELECT x AS rows FROM turn", .word = "rows" },
         .{ .sql = "SELECT sum(x) OVER (ORDER BY (SELECT range FROM t)) FROM turn", .word = "range" },
     }) |case| {
-        try std.testing.expectEqualStrings("rsql: '" ++ case.word ++ "' is reserved on some engine; rename it", comptime portabilityError(case.sql, statement_rules).?);
+        try std.testing.expectEqualStrings("rsql: '" ++ case.word ++ "' is reserved on some engine; rename it", comptime portabilityError(case.sql, reserved_names_checked).?);
     }
     inline for ([_][]const u8{
         "SELECT x FROM turn ORDER BY x LIMIT ?1 OFFSET ?2",
@@ -2323,7 +2347,7 @@ test "a reserved word is a keyword only in its own place, and a name anywhere el
         "SELECT sum(x) OVER (ORDER BY z ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM turn",
         "SELECT sum(x) OVER (ORDER BY z RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM turn",
     }) |sql| {
-        try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError(sql, statement_rules));
+        try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError(sql, reserved_names_checked));
     }
 }
 

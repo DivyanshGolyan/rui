@@ -8,8 +8,6 @@ const Store = store_core.Store;
 const store_access = @import("../access.zig");
 const Access = store_access.Access;
 const rsql = @import("../rsql.zig");
-const sqlite = @import("../sqlite.zig");
-const c = sqlite.c;
 const Faults = store_core.Faults;
 const Ordinary = store_core.Ordinary;
 
@@ -272,12 +270,27 @@ pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, openContentIdentityLocked(self, reference, private));
+    const id = try entry.finish(Ordinary.none, readContentId(&entry, reference, private));
+    return .{ .store = self, .reference = reference, .content_id = id };
 }
 
-fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
-    const id = try resolveContentReference(self, reference, private);
-    return .{ .store = self, .reference = reference, .content_id = id };
+/// `contentIdOf` in its own read Access. Noinline keeps the Access off
+/// every caller's frame, as `model_settlement.readAttemptKind` does.
+noinline fn readContentId(entry: *const store_core.Entry, reference: ContentReference, private: bool) !i64 {
+    var a: Access(.read, error{}) = .open(entry);
+    defer a.deinit();
+    return contentIdOf(&a, reference, private);
+}
+
+/// The id of the row `reference` and `private` name, in one round. A
+/// reference names a row, so a missing one is `CorruptStore`, and so is a
+/// failed step, main's name for both. Public so a test counts its rounds.
+pub fn contentIdOf(a: anytype, reference: ContentReference, private: bool) !i64 {
+    var found: lookup_content.Result = undefined;
+    a.read(lookup_content, .{ .digest = reference.digest, .length = reference.length, .private = private }, &found);
+    try store_access.runAs(a, error.CorruptStore);
+    const row = found orelse return error.CorruptStore;
+    return @intCast(row.content_id.get());
 }
 
 fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
@@ -372,16 +385,6 @@ pub fn metadataOf(row: *const content_metadata.Row) ContentMetadata {
 pub fn publicMetadata(row: *const content_metadata.Row) error{CorruptStore}!ContentMetadata {
     if (row.private) return error.CorruptStore;
     return metadataOf(row);
-}
-
-fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
-    const statement = try store_core.cachedTyped(self, lookup_content);
-    defer sqlite.resetCached(statement);
-    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = reference.digest, .length = reference.length, .private = private }, 0);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    var row: lookup_content.Row = undefined;
-    try sqlite.decodeRow(lookup_content.Row, statement, &row);
-    return @intCast(row.content_id.get());
 }
 
 /// A content hash and one window of the bytes it hashes. Declared as

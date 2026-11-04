@@ -37,9 +37,6 @@ pub const Mode = enum {
     /// when the write runs. It takes no identities and claims no
     /// positions, and `commit` runs exactly one queued write.
     single,
-    /// Writes inside a transaction its caller opened, and ends with `apply`:
-    /// how unconverted code runs a rule that has an Access form.
-    nested,
 };
 
 /// What a round reports besides its guards' errors. Each one fences.
@@ -66,8 +63,8 @@ pub const Failure = error{
 };
 
 /// A Session's positions claimed by one Access, from its head as a round
-/// read it. `commit` (or `apply`) advances `next_position` once, by a
-/// compare-and-set against that head.
+/// read it. `commit` advances `next_position` once, by a compare-and-set
+/// against that head.
 pub const Positions = struct {
     head: rsql.SessionHead,
     taken: u64 = 0,
@@ -290,21 +287,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// An Access under `entry`'s lock.
         pub fn open(entry: *const store_core.Entry) Self {
-            comptime std.debug.assert(mode != .nested);
             return .{ .store = entry.store };
-        }
-
-        /// How unconverted code, under an Entry it already holds, runs a
-        /// rule that has an Access form. A `.nested` Access writes inside
-        /// the transaction its caller opened, which is asserted. A `.read`
-        /// one checks nothing: it is how unconverted code that holds the
-        /// Store, not the Entry `open` takes, reads through a converted
-        /// read (`readSaved`, `lookupCommand`, `readWindow`). Both go once
-        /// that code is converted (PR 5e).
-        pub fn within(store: *Store) Self {
-            comptime std.debug.assert(mode == .nested or mode == .read);
-            if (mode == .nested) std.debug.assert(c.sqlite3_get_autocommit(store.database) == 0);
-            return .{ .store = store };
         }
 
         /// Queues a read; `destination` is defined once the round runs.
@@ -547,13 +530,6 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             a.ended = true;
         }
 
-        /// `commit` without COMMIT: the caller's transaction stays open.
-        pub fn apply(a: *Self) Error!void {
-            comptime std.debug.assert(mode == .nested);
-            bump(&a.rounds);
-            try a.finishWrites();
-        }
-
         /// Ends a write Access without committing: drops what it queued
         /// and rolls back the transaction it opened, as the Entry would,
         /// `faults` included. A transition that finds no work calls it,
@@ -617,8 +593,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Records the change of `head`'s Session for the change ring. A
-        /// fifth Session makes the record "everything", as `Store.touch`
-        /// does; it never fails.
+        /// fifth Session makes the record "everything"
+        /// (`change_ring.Touched.needsEntry`); it never fails.
         fn touch(a: *Self, head: rsql.SessionHead) void {
             const touched = &a.store.touched;
             if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });

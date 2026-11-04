@@ -85,7 +85,7 @@ const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
 const submitTestMessage = store_testing.submitTestMessage;
 const testingPublicProjection = store_testing.testingPublicProjection;
 const testing_absent_model_evidence = store_testing.testing_absent_model_evidence;
-const tool_continuation_selection_sql = model_admission_domain.tool_continuation_selection_sql;
+const tool_continuation_selection = model_admission_domain.tool_continuation_selection;
 
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
@@ -328,12 +328,24 @@ fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
 
 /// A content row's length and digest, for a test's own checks.
 fn testingContentReference(storage: *Store, content_id: u64) !ContentReference {
-    var a = reads_domain.ReadAccess.within(storage);
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     var row: content_domain.content_metadata.Row = undefined;
     a.read(content_domain.content_metadata, .{ .content_id = content_id }, &row);
     try a.run();
     return .{ .length = row.byte_length, .digest = row.digest };
+}
+
+/// Records that the running entry point changed `session`, as an Access's
+/// `@session` tie does, for a test that writes its rows by hand. It
+/// repeats `Access.touch` because that is private to Access, so that only a
+/// typed write touches, and a hand-written row has no typed write.
+fn touchForTesting(storage: *Store, session: []const u8) !void {
+    var sql: [128]u8 = undefined;
+    const workspace = try queryU64(storage.database, try std.mem.printSentinel(&sql, "SELECT workspace_key FROM session WHERE session_ref='{s}'", .{session}, 0));
+    if (storage.touched.needsEntry(session)) storage.touched.add(.{ .session = session[0..change_ring.id_bytes].*, .workspace = workspace });
 }
 
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
@@ -1123,16 +1135,15 @@ test "a Session creation that rolls back never reaches a since listing" {
         const create = try completeConfiguration("rollback-create", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.execute(&storage, "BEGIN IMMEDIATE");
-        var a = store_access.Access(.nested, error{SessionUpdateFailed}).within(&storage);
+        var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer a.deinit();
         const reads = storage.configurationReads();
         reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         configuration_domain.prepareConfiguration(&a, "", &create.configuration, reads);
         try a.run();
         try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, .{}, reads) == .accepted);
-        try a.apply();
-        try store_core.rollbackAfterError(&storage, .{});
+        try a.run();
+        try a.abandon(.{});
     }
     // The rolled-back insert still moved the commit counter. The hint
     // forgot instead of naming a Session that does not exist.
@@ -1260,8 +1271,8 @@ test "a content sink opens only a content id its Access itself took, stepping it
     a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
     const first = try a.identity(.content_id);
     a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
-    // Taken by other code between this Access's own ids, as `.nested`
-    // callers may: inside the range of the ids it took, but not its own.
+    // Taken outside this Access between its own ids: inside the range of
+    // the ids it took, but not its own.
     const between = try store_core.takeIdentity(&storage, .content_id);
     const never = try a.identity(.content_id);
     const last = try a.identity(.content_id);
@@ -1476,14 +1487,14 @@ test "the touch oracle names a sender whose sent Message changed without its tou
         defer entry.release();
         try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='oracle-message'", .{sender.slice()}, 0));
         try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
-        try store_core.touch(&storage, recipient.slice());
-        try store_core.touch(&storage, sender.slice());
+        try touchForTesting(&storage, recipient.slice());
+        try touchForTesting(&storage, sender.slice());
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_core.touch(&storage, recipient.slice());
+        try touchForTesting(&storage, recipient.slice());
         // A column only the recipient reads.
         try sqlite.exec(storage.database, "UPDATE message_admission SET turn_id=NULL WHERE command_key='oracle-message'");
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
@@ -1491,7 +1502,7 @@ test "the touch oracle names a sender whose sent Message changed without its tou
         // and skips the sender.
         try sqlite.exec(storage.database, "UPDATE message_admission SET admitted_at=admitted_at+1 WHERE command_key='oracle-message'");
         try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
-        try store_core.touch(&storage, sender.slice());
+        try touchForTesting(&storage, sender.slice());
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
 }
@@ -1529,7 +1540,7 @@ test "an Access that touches a fifth Session records everything and still commit
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(DISTINCT created_at) FROM session"));
 }
 
-test "every Access in one transaction dates its rows with the transaction's second" {
+test "every round of a write Access dates its rows with the transaction's second" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1537,31 +1548,26 @@ test "every Access in one transaction dates its rows with the transaction's seco
     defer storage.close() catch unreachable;
     const first = try configureTestSession(&storage, "second-first");
     const second = try configureTestSession(&storage, "second-second");
-
-    const Nested = struct {
-        fn date(store: *Store, session: []const u8) !void {
-            var a = store_access.Access(.nested, error{TestingGuard}).within(store);
-            defer a.deinit();
-            var loaded: TestingRound.head.Result = undefined;
-            a.read(TestingRound.head, .{ .session_ref = session }, &loaded);
-            try a.run();
-            a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
-            try a.apply();
-        }
-
-        fn clockPassed(dated: i64) !bool {
+    const Clock = struct {
+        fn passed(dated: i64) !bool {
             return @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000) > dated;
         }
     };
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
-    try store_core.begin(&storage);
-    try Nested.date(&storage, first.slice());
+    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
+    defer a.deinit();
+    var heads: [2]TestingRound.head.Result = undefined;
+    a.read(TestingRound.head, .{ .session_ref = first.slice() }, &heads[0]);
+    a.read(TestingRound.head, .{ .session_ref = second.slice() }, &heads[1]);
+    try a.run();
+    a.write(TestingRound.date_session, .{ .session = heads[0].head, .revision = 1 });
+    try a.run();
     const dated = try store_core.transactionSecond(&storage);
-    // The clock moves on to a later second before the second Access dates.
-    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), dated, Nested.clockPassed);
-    try Nested.date(&storage, second.slice());
-    try store_core.commit(&storage);
+    // The clock moves on to a later second before the next round dates.
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), dated, Clock.passed);
+    a.write(TestingRound.date_session, .{ .session = heads[1].head, .revision = 1 });
+    try a.commit();
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(DISTINCT created_at) FROM session"));
     try std.testing.expectEqual(@as(u64, @intCast(dated)), try queryU64(storage.database, "SELECT max(created_at) FROM session"));
     // Commit cleared it: the next transaction reads the clock again.
@@ -1664,7 +1670,7 @@ test "the touch oracle names a Session whose rows changed without a touch" {
         var sql: [96]u8 = undefined;
         try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE session SET label='forgot' WHERE session_ref='{s}'", .{session}, 0));
         try std.testing.expectEqualStrings(session, &store_core.untouchedForTesting(&storage).?);
-        try store_core.touch(&storage, session);
+        try touchForTesting(&storage, session);
         try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     }
     // The touched write is recorded under the generation it advanced to.
@@ -1876,8 +1882,8 @@ test "a person's Message next to a position is a one-row page of admission rows,
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
         try sqlite.exec(storage.database, try std.mem.printSentinel(&sql, "UPDATE message_admission SET sender_session_ref='{s}',sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()}, 0));
-        try store_core.touch(&storage, session.slice());
-        try store_core.touch(&storage, peer.slice());
+        try touchForTesting(&storage, session.slice());
+        try touchForTesting(&storage, peer.slice());
     }
     var positions: [3]u64 = undefined;
     inline for (0..3) |index| positions[index] = try queryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission WHERE sender_session_ref IS NULL ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}));
@@ -3159,6 +3165,37 @@ test "canonical report and Action read failures fence later commands" {
     }
 }
 
+test "the Store prepares only typed statements, its transaction control and test fixtures" {
+    // Open text cannot reach SQLite beside `rsql`: the one prepare is
+    // `cachedStatic`, called only by these three, and `cachedTyped` takes
+    // only a type `rsql.Read` or `rsql.Write` made (`rsql.isStatement`).
+    const source = @embedFile("Store.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "sqlite3_" ++ "prepare"));
+    const callers = [_][]const u8{ "controlStatement", "cachedTyped", "fixtureStatement" };
+    var calls = std.mem.splitSequence(u8, source, "cachedStatic" ++ "(self, ");
+    var before = calls.first();
+    var found: usize = 0;
+    while (calls.next()) |rest| : (found += 1) {
+        const name_start = std.mem.lastIndexOf(u8, before, "fn ").? + 3;
+        const name = before[name_start .. name_start + std.mem.indexOfScalar(u8, before[name_start..], '(').?];
+        var allowed = false;
+        for (callers) |caller| allowed = allowed or std.mem.eql(u8, name, caller);
+        if (!allowed) std.debug.print("cachedStatic called from {s}\n", .{name});
+        try std.testing.expect(allowed);
+        before = rest;
+    }
+    try std.testing.expectEqual(callers.len, found);
+    // Opening's own text: engine settings, and one sweep held to
+    // `rsql.portabilityError`.
+    var execs = std.mem.splitSequence(u8, source, "sqlite.exec" ++ "(database.?, ");
+    _ = execs.first();
+    while (execs.next()) |rest| {
+        const allowed = std.mem.startsWith(u8, rest, "\"PRAGMA ") or std.mem.startsWith(u8, rest, "cache_size") or
+            std.mem.startsWith(u8, rest, "if (options.cache_spill) \"PRAGMA ") or std.mem.startsWith(u8, rest, "comptime portable(");
+        try std.testing.expect(allowed);
+    }
+}
+
 test "Store entry points lock and fence only through canonical access" {
     // Every entry point classifies its errors through `Entry`; a new path
     // cannot take the mutex, read or set the fence beside it, or enter
@@ -4087,7 +4124,7 @@ test "tool continuation admission runs its selection once" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "output", &calls);
 
-    const selection = try store_core.cached(&storage, tool_continuation_selection_sql);
+    const selection = try store_core.cachedTyped(&storage, tool_continuation_selection);
     const runs_before = c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0);
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
@@ -4212,7 +4249,7 @@ test "tool continuation selection never visits a Turn waiting for its tool resul
         const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
         try settleTwoActionsForTesting(&storage, &tmp, binding, config);
 
-        const select = try sqlite.prepare(storage.database, tool_continuation_selection_sql);
+        const select = try sqlite.prepare(storage.database, tool_continuation_selection.sql);
         defer _ = c.sqlite3_finalize(select);
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
         cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
@@ -5351,7 +5388,9 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         try sqlite.exec(storage.database, insert);
         var counted: reads_domain.First(command_domain.pending_messages.Row) = .{};
         {
-            var a = reads_domain.ReadAccess.within(&storage);
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
             defer a.deinit();
             a.readEach(command_domain.pending_messages, .{ .session = session.slice(), .cutoff = history }, 1, &counted);
             try a.run();
@@ -5718,8 +5757,8 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
     try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
     try std.testing.expectEqual(64, try queryU64(storage.database, "SELECT count(DISTINCT item_id_digest) FROM model_output_item"));
     const digest = protocol.contentDigest("item-63");
-    const statement = try store_core.cached(&storage, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
-    defer sqlite.resetCached(statement);
+    const statement = try sqlite.prepare(storage.database, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
+    defer _ = c.sqlite3_finalize(statement);
     try sqlite.bindBlob(statement, 1, &digest);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(1, c.sqlite3_column_int64(statement, 0));
@@ -11775,13 +11814,17 @@ fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, a
     var public_page: reads_domain.PublicConversationPage = undefined;
     var activity_page: protocol.ActivityFacts = undefined;
     {
-        var a = reads_domain.ReadAccess.within(storage);
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try reads_domain.publicConversationPage(&a, conversation, &public_page);
         result.rounds[0] = a.rounds;
     }
     {
-        var a = reads_domain.ReadAccess.within(storage);
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try reads_domain.activityPage(&a, activity, &activity_page);
         result.rounds[1] = a.rounds;
@@ -11862,7 +11905,9 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         const statement = try store_core.cachedTyped(&storage, reads_domain.queued);
         for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
             _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
-            var access = reads_domain.ReadAccess.within(&storage);
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var access: reads_domain.ReadAccess = .open(&entry);
             defer access.deinit();
             var waiting: reads_domain.QueuedMessages = .{};
             access.readEach(reads_domain.queued, .{ .session = "qu3u3d", .position = end }, std.math.maxInt(u64), &waiting);
@@ -14017,7 +14062,9 @@ fn listRoundsForTesting(count: usize) !u32 {
     var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
-    var a = reads_domain.ReadAccess.within(&storage);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     try report_domain.renderSessionList(&a, &.{}, &capture);
     var report = try capture.seal();
@@ -14240,7 +14287,9 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
-    var a = reads_domain.ReadAccess.within(&storage);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     try report_domain.renderSessionList(&a, &.{}, &capture);
     var report = try capture.seal();
@@ -14425,7 +14474,9 @@ fn reportRoundsForTesting(shape: TestingWorkShape) !u32 {
     var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
-    var a = reads_domain.ReadAccess.within(&storage);
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
     return a.rounds;
@@ -15408,4 +15459,172 @@ test "Full revisions show each content whole where it first occurs" {
             try std.testing.expectEqualStrings(texts[index][0..lengths[index]], row.object.get("instructions").?.object.get("text").?.string);
         }
     }
+}
+
+/// The statements and VM steps the Store's statements ran since the last
+/// call, without the test-only touch oracle's.
+fn statementWorkSince(database: *c.sqlite3) [2]i64 {
+    var work: [2]i64 = .{ 0, 0 };
+    var statement = c.sqlite3_next_stmt(database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(database, each)) {
+        const runs = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 1);
+        const steps = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 1);
+        if (std.mem.indexOf(u8, std.mem.span(c.sqlite3_sql(each)), "touched_oracle") != null) continue;
+        work[0] += runs;
+        work[1] += steps;
+    }
+    return work;
+}
+
+/// A Store holding one admitted Attempt, its Message's content and a seal.
+const TestingAttempt = struct {
+    binding: AttemptBinding,
+    content: ContentReference,
+    const seal: historical_domain.PrefixSeal = .{ .anchor = null, .admission_position = 1, .span_length = 0, .digest = @splat(0) };
+
+    fn admit(storage: *Store, tmp: *std.testing.TmpDir) !TestingAttempt {
+        const session = try configureTestSession(storage, "attempt-config");
+        try submitTestMessage(storage, tmp, "attempt-input", "attempt-message", session.slice(), "work");
+        return .{
+            .binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding,
+            .content = (try storage.observeCommand("attempt-message")).message.?.content,
+        };
+    }
+
+    fn handoff(_: void) !void {}
+};
+
+test "Attempt checks, prefix seals and content lookups do no more work than main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    // Main's statements and VM steps at 72db6de9 and again at 2e8e8353,
+    // each on its warm second call: opening a view, its Attempt check,
+    // recording a seal, the Operation's kind, a dispatch handoff and a
+    // content lookup.
+    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
+    for (0..2) |call| {
+        var work: [main_work.len][2]i64 = undefined;
+        _ = statementWorkSince(storage.database);
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(attempt.binding, &view);
+        defer view.close();
+        work[0] = statementWorkSince(storage.database);
+        try view.checkAttempt();
+        work[1] = statementWorkSince(storage.database);
+        try view.recordPrefixSeal(&TestingAttempt.seal);
+        work[2] = statementWorkSince(storage.database);
+        _ = try storage.modelOperationKind(attempt.binding);
+        work[3] = statementWorkSince(storage.database);
+        try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
+        work[4] = statementWorkSince(storage.database);
+        _ = try storage.openContent(attempt.content);
+        work[5] = statementWorkSince(storage.database);
+        if (call == 0) continue;
+        for (work, main_work) |measured, main| {
+            try std.testing.expect(measured[0] <= main[0]);
+            try std.testing.expect(measured[1] <= main[1]);
+        }
+    }
+    // Rounds, where main took 2 for a view, a check or a handoff, 3 for
+    // the Operation's kind, 5 for a seal and 1 for a content lookup: each
+    // Attempt check is one read, a seal one read and its commit.
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    {
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        _ = try model_settlement_domain.attemptKind(&a, attempt.binding);
+        try std.testing.expectEqual(1, a.rounds);
+    }
+    {
+        var a: store_access.Access(.write, error{}) = .open(&entry);
+        defer a.deinit();
+        try historical_domain.sealOn(&a, attempt.binding, &TestingAttempt.seal);
+        try std.testing.expectEqual(2, a.rounds);
+    }
+    {
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        _ = try content_domain.contentIdOf(&a, attempt.content, false);
+        try std.testing.expectEqual(1, a.rounds);
+    }
+}
+
+test "a prefix seal is recorded only while its Attempt is current" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    try view.recordPrefixSeal(&TestingAttempt.seal);
+    try std.testing.expectEqualDeep(TestingAttempt.seal, (try storage.prefixSealForTesting(attempt.binding)).?);
+    try storage.settleModelAttemptFailure(attempt.binding, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+    var later = TestingAttempt.seal;
+    later.span_length = 1;
+    try std.testing.expectError(error.StaleAttemptBinding, view.recordPrefixSeal(&later));
+    try std.testing.expectEqualDeep(TestingAttempt.seal, (try storage.prefixSealForTesting(attempt.binding)).?);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "an Attempt check reads no Session, and a prefix seal's Session read answers OperationReadFailed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    // Main touched the Session in each check, so a faulted session row
+    // answered SessionReadFailed there; only the seal's write reads it now.
+    try failAtStepForTesting(storage.database, "session");
+    try view.checkAttempt();
+    try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(attempt.binding));
+    try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectError(error.OperationReadFailed, view.recordPrefixSeal(&TestingAttempt.seal));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    // The seal rewrites a few bytes of one Session row in place, which a
+    // capped file still holds, so a trigger grows the file as it writes.
+    try sqlite.exec(storage.database, "CREATE TABLE ballast(b BLOB)");
+    const page_count = try sqlite.pragmaInt(storage.database, "PRAGMA page_count");
+    var limit_buffer: [64:0]u8 = undefined;
+    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count}, 0));
+    try sqlite.exec(storage.database, "CREATE TEMP TRIGGER seal_grows AFTER UPDATE OF prefix_seal ON main.session BEGIN INSERT INTO main.ballast VALUES(zeroblob(65536)); END");
+    try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "a content lookup's failed step answers CorruptStore, as on main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    try failAtStepForTesting(storage.database, "content");
+    try std.testing.expectError(error.CorruptStore, storage.openContent(attempt.content));
+    try std.testing.expect(storage.isFenced());
 }
