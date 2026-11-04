@@ -90,3 +90,71 @@ test("a paused Host takes Messages and resumes", { skip }, async () => {
 		await rui.close();
 	}
 });
+
+test("the feed lists entries, continues after a cursor, and reads long text", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:feed" });
+		const long = "é".repeat(20_000);
+		await session.send("first", { idempotencyKey: "msg:a" });
+		await session.send(long, { idempotencyKey: "msg:b" });
+
+		const all = [];
+		for await (const entry of session.listActivity({ kinds: ["admission"] })) all.push(entry);
+		assert.equal(all.length, 2);
+		assert.equal(all[0]?.kind, "admission");
+		assert.equal(all[0]?.text, "first");
+		assert.equal(all[0]?.key, "msg:a");
+		assert.equal(all[1]?.truncated, true);
+		assert.equal(all[1]?.text, undefined);
+		assert.equal(await session.readContent(all[1] as never), long);
+		assert.deepEqual(await session.readContentBytes(all[1] as never), Buffer.from(long));
+
+		const rest = [];
+		for await (const entry of session.listActivity({ kinds: ["admission"], after: all[0]?.cursor as string })) rest.push(entry);
+		assert.deepEqual(rest.map((entry) => entry.cursor), [all[1]?.cursor]);
+
+		// Following never ends: it yields what arrives and stops when the consumer does.
+		const followed = session.listActivity({ kinds: ["admission"], after: all[1]?.cursor as string, follow: true });
+		const next = followed.next();
+		await session.send("third", { idempotencyKey: "msg:c" });
+		assert.equal((await next).value?.text, "third");
+		await followed.return(undefined);
+	} finally {
+		await rui.close();
+	}
+});
+
+test("an idle following feed ends when its signal aborts", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:abort" });
+		const controller = new AbortController();
+		const followed = session.listActivity({ follow: true, signal: controller.signal });
+		const pending = followed.next(); // nothing will arrive
+		setTimeout(() => controller.abort(), 300);
+		const result = await Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("hung"), 5_000))]);
+		assert.deepEqual(result, { value: undefined, done: true });
+	} finally {
+		await rui.close();
+	}
+});
+
+test("inline text keeps its last character and kind filters may come in any order", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:tail" });
+		const texts = ["tail é", "tail €", "tail 😀"];
+		for (const [index, text] of texts.entries()) await session.send(text, { idempotencyKey: `msg:${index}` });
+		const seen = [];
+		for await (const entry of session.listActivity({ kinds: ["stop", "admission", "admission"] })) {
+			if (entry.kind === "admission") seen.push(entry.text);
+		}
+		assert.deepEqual(seen, texts);
+	} finally {
+		await rui.close();
+	}
+});

@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 
 import { RuiRequestError } from "./errors.ts";
+import { listActivity, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import type { ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -139,6 +140,24 @@ export class Session {
 	constructor(link: Link, id: string) {
 		this.#link = link;
 		this.id = id;
+	}
+
+	/**
+	 * The Session's feed, in order, as an async iterator (D9). Without `follow`
+	 * it ends at the current end of the feed; with it, it never ends.
+	 */
+	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
+		return listActivity(this.#link, this.id, options);
+	}
+
+	/** The whole text of an entry (D134). Past about 512 MiB a string cannot hold it and this throws: use `readContentBytes`. */
+	readContent(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<string> {
+		return readContent(this.#link, this.id, entry);
+	}
+
+	/** The whole text of an entry as UTF-8 bytes, up to the Host's limit of about 1 GiB. */
+	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<Buffer> {
+		return readContentBytes(this.#link, this.id, entry);
 	}
 
 	/** Sends a Message. The receipt is its admission number; the answer arrives in the feed (D8). */

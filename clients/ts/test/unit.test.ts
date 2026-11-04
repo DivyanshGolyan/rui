@@ -7,7 +7,8 @@ import { test } from "node:test";
 
 import { encodeFrame, startError } from "../src/client.ts";
 import { RuiStartError } from "../src/errors.ts";
-import { environmentBytes } from "../src/sessions.ts";
+import { listActivity } from "../src/feed.ts";
+import { environmentBytes, type Link } from "../src/sessions.ts";
 import { ConnectionError, post, WIRE_VERSION } from "../src/transport.ts";
 
 test("the wire version is the one openapi.json describes", () => {
@@ -34,6 +35,31 @@ test("the refusal line becomes a RuiStartError", () => {
 test("environment entries the Host would refuse are left out, never split", () => {
 	const bytes = environmentBytes({ SAFE: "ok\0OTHER=value", "A=B": "x", "": "y", RUI_X: "z", GOOD: "1", ALSO: "two" });
 	assert.equal(bytes.toString("utf8"), "GOOD=1\0ALSO=two\0");
+});
+
+function pageOf(rows: number): Buffer {
+	const items = Array.from({ length: rows }, (_, index) => ({ position: String(index + 1), ordinal: "0", at: "t", value: { stop: {} } }));
+	return Buffer.from(JSON.stringify({ items, more: false, end: String(rows) }));
+}
+
+test("an aborted feed stops between the entries of one page", async () => {
+	const link: Link = { exchange: async () => pageOf(2) };
+	const controller = new AbortController();
+	const feed = listActivity(link, "s", { signal: controller.signal });
+	assert.equal((await feed.next()).done, false);
+	controller.abort();
+	assert.equal((await feed.next()).done, true);
+});
+
+test("an aborted feed drops the page its pending read returns", async () => {
+	let release = () => {};
+	const gate = new Promise<void>((done) => (release = done));
+	const link: Link = { exchange: async () => (await gate, pageOf(2)) };
+	const controller = new AbortController();
+	const pending = listActivity(link, "s", { signal: controller.signal }).next();
+	controller.abort();
+	release();
+	assert.equal((await pending).done, true);
 });
 
 async function stalledHost(reply: string): Promise<{ socketPath: string; close: () => void }> {
@@ -67,4 +93,19 @@ test("a reply that stops partway ends the call after the idle budget", async () 
 	} finally {
 		host.close();
 	}
+});
+
+test("a followed feed resumes from the end of an exhausted page", async () => {
+	const bodies: string[] = [];
+	const controller = new AbortController();
+	const link: Link = {
+		exchange: async (_path, build) => {
+			bodies.push(build("/s"));
+			if (bodies.length === 2) controller.abort();
+			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9" }));
+		},
+	};
+	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
+	assert.equal(bodies.length, 2);
+	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });

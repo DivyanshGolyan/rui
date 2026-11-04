@@ -11,3 +11,4 @@ export {
 	type SessionUpdate,
 	type WriteOptions,
 } from "./sessions.ts";
+export { FEED_KINDS, INLINE_TEXT_BYTES, type FeedEntry, type FeedKind, type ListActivityOptions } from "./feed.ts";
