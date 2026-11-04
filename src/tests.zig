@@ -13,6 +13,7 @@ test {
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("launch_frame.zig");
+    _ = @import("http1/Exchange.zig");
     _ = @import("protocol.zig");
     _ = @import("protocol_reply.zig");
     _ = @import("platform.zig");

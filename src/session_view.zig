@@ -1451,12 +1451,12 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 if (!historical and (value.sender != null or value.admission <= drawn.admission)) continue;
                 try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
             },
-            .assistant => |reference| {
+            .assistant => |assistant| {
                 compact_tools.* = false;
                 try sink.feed("\n");
                 var answer: Answer(@TypeOf(sink)) = undefined;
                 answer.init(sink);
-                try content(requests, store, session, item, reference, &answer);
+                try content(requests, store, session, item, assistant.content, &answer);
                 try answer.finish();
                 try sink.feed("\n");
             },
@@ -1487,15 +1487,15 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             // Hidden call rows use admission-certified page metadata. Exact
             // proposal and permission inspection authenticate originals instead.
             .call => {},
-            .outcome => |outcome| {
-                // Successful content aggregates assistant rows, never a second answer.
-                if (outcome.code.eql("completed")) continue;
+            .turn_ended => |ended| {
+                // A done Turn's answer is its final assistant row, never a second answer.
+                if (ended.ending == .done) continue;
                 compact_tools.* = false;
-                // A failed outcome's content is its report.
+                // A failed Turn's content is its report.
                 var report: ReportBytes = undefined;
                 report.len = 0;
-                if (outcome.content) |reference| try content(requests, store, session, item, reference, &report);
-                try workEnded(sink, provider, outcome.code.slice(), if (outcome.content != null) report.bytes[0..report.len] else null);
+                if (ended.content) |reference| try content(requests, store, session, item, reference, &report);
+                try workEnded(sink, provider, ended.code.slice(), if (ended.content != null) report.bytes[0..report.len] else null);
             },
             .stop => {
                 compact_tools.* = false;
