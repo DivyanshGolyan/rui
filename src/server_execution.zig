@@ -1152,7 +1152,7 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
 noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     const arguments_bytes = host.allocator.alloc(u8, std.math.cast(usize, input.arguments.length) orelse return .retry_later) catch return .retry_later;
     defer host.allocator.free(arguments_bytes);
-    readCoreArguments(host, input, arguments_bytes) catch |err| {
+    host.store.readCoreArguments(input, arguments_bytes) catch |err| {
         fenceDispatch(host, "core tool input", err);
         return .retry_later;
     };
@@ -1208,7 +1208,7 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
         .{ .rejected = std.fmt.comptimePrint("the arguments take more than {d} bytes", .{tools.core_tools.start_agent_max_argument_bytes}) }
     else check: {
         const bytes = arena.alloc(u8, @intCast(input.arguments.length)) catch return .retry_later;
-        readCoreArguments(host, input, bytes) catch |err| {
+        host.store.readCoreArguments(input, bytes) catch |err| {
             fenceDispatch(host, "core tool input", err);
             return .retry_later;
         };
@@ -1254,21 +1254,6 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
         },
     };
     return .admitted;
-}
-
-/// Reads a core call's whole arguments into `bytes`, which holds exactly
-/// their length.
-fn readCoreArguments(host: *Host, input: *const store_module.CoreActionInput, bytes: []u8) !void {
-    const location = try host.store.openContent(input.arguments);
-    var reader: store_module.ContentReader = undefined;
-    reader.open(location);
-    defer reader.close();
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const count = try reader.read(offset, bytes[offset..]);
-        if (count == 0) return error.ShortCanonicalRead;
-        offset += count;
-    }
 }
 
 fn admitBashAttempt(
