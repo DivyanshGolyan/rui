@@ -187,11 +187,12 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
             "WHERE session_ref=?1 AND item_kind=3 AND " ++ on(4) ++ " AND " ++ range("session_position", "0") ++ order,
         // A tool group's results sit at its last acceptance, one per call,
-        // ordered by call.
-        "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last " ++
+        // ordered by call. Each `last` names its acceptance index, as
+        // `call_candidates_sql`.
+        "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last @index(model_tool_call_acceptance) " ++
             "JOIN model_tool_call tool_call ON tool_call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id") ++
-            " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last " ++
+            " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last @index(action_operation_acceptance) " ++
             "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
             " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn @index(turn_outcome_position) WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ on(6) ++ " AND " ++ range("outcome_position", "0") ++
@@ -655,26 +656,34 @@ pub const missing_assistant_entry = rsql.Read(.{
 });
 
 /// A read of Conversation entries `e`: `SELECT columns`, then a
-/// `consistent` column, `FROM conversation_entry e` with the rows that
-/// make an entry public, then `rest` (its WHERE and order). An entry is
-/// consistent when `also` holds (an SQL condition and `OR`, or empty), or
-/// when it is public: its content is, and its message or assistant
-/// provenance agrees with it. Its joins are LEFT JOINs, which keep damage
-/// instead of hiding a missing row, under the aliases t, m, o, item and c,
-/// which `columns` and `rest` may also read.
+/// `consistent` column (`publicEntryColumns`), `FROM conversation_entry e`
+/// with the rows that make an entry public (`public_entry_joins`), then
+/// `rest` (its WHERE and order).
 pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, comptime rest: []const u8) []const u8 {
-    return "SELECT " ++ columns ++ ",CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+    return "SELECT " ++ columns ++ "," ++ publicEntryColumns(also) ++ " FROM conversation_entry e " ++ public_entry_joins ++ " " ++ rest;
+}
+
+/// The `consistent` column of an entry `e` joined by `public_entry_joins`.
+/// An entry is consistent when `also` holds (an SQL condition and `OR`, or
+/// empty), or when it is public: its content is, and its message or
+/// assistant provenance agrees with it.
+pub fn publicEntryColumns(comptime also: []const u8) []const u8 {
+    return "CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
         "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
         "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
         "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
         "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
-        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent " ++
-        "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
-        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
-        "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
-        "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
-        "LEFT JOIN content c ON c.content_id=e.content_id " ++ rest;
+        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent";
 }
+
+/// The rows that make an entry `e` public. LEFT JOINs, which keep damage
+/// instead of hiding a missing row, under the aliases t, m, o, item and c,
+/// which a read's columns and WHERE may also read.
+pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+    "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+    "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+    "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+    "LEFT JOIN content c ON c.content_id=e.content_id";
 
 /// An ordinary entry at a position, with the provenance that makes it
 /// public. One indexed ordinary identity owns provenance for pages,
@@ -691,9 +700,9 @@ const public_entry = rsql.Read(.{
 /// its group has public provenance and when the group completed.
 const public_tool_result = rsql.Read(.{
     // Only an Operation with an acceptance at the position can complete
-    // there.
-    .sql = "WITH last AS (SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position=?2 " ++
-        "UNION ALL SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position=?2) " ++
+    // there. Each arm names its acceptance index, as `call_candidates_sql`.
+    .sql = "WITH last AS (SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position=?2 " ++
+        "UNION ALL SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position=?2) " ++
         "SELECT coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id,NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
         "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
         "LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
@@ -1072,10 +1081,13 @@ const ItemAt = struct { position: u64, ordinal: u64 };
 /// (?2, ?3), with each group's position, and their calls after it, as the
 /// CTE `candidates`. A group still waiting has an Action without its
 /// result; one that completes after the page has an acceptance after it.
-/// Only those Operations are grouped, not the Session's history.
+/// Only those Operations are grouped, not the Session's history. Each
+/// acceptance read names its acceptance index: the Full results' indexes
+/// hold the same rows, keyed by Operation first, and SQLite would walk
+/// the Session's whole range of one of them.
 const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
-    "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
-    "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
+    "UNION SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2 " ++
+    "UNION SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2), " ++
     "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
     "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
