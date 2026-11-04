@@ -126,6 +126,7 @@ pub const read_failures = .{
     .{ hosted_call, error.ActivityReadFailed },
     .{ activity_item, error.ActivityReadFailed },
     .{ answer_entry, error.ActivityReadFailed },
+    .{ approval_request, error.ActivityReadFailed },
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
@@ -204,12 +205,19 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
         "SELECT sender_position AS position,0 AS ordinal,8 AS kind,admission_id AS id FROM message_admission WHERE sender_session_ref=?1 AND " ++ on(8) ++ " AND " ++ range("sender_position", "0") ++
             " UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ on(9) ++ " AND " ++ range("sender_position", "0") ++
             " UNION ALL SELECT session_position,0,10,NULL FROM model_output_item @index(model_output_hosted_history) " ++
-            "WHERE session_ref=?1 AND item_kind=5 AND " ++ on(10) ++ " AND " ++ range("session_position", "0") ++ order,
+            "WHERE session_ref=?1 AND item_kind=5 AND " ++ on(10) ++ " AND " ++ range("session_position", "0") ++
+            // A call made while the Session asked for approval: its Action
+            // was saved under an `ask` revision, whatever was decided since.
+            " UNION ALL SELECT item.session_position,1,12,action.action_id FROM model_output_item item @index(model_output_call_history) " ++
+            "JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
+            "JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+            "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
+            "WHERE item.session_ref=?1 AND item.item_kind=3 AND revision.permission_mode=0 AND " ++ on(12) ++ " AND " ++ range("item.session_position", "1") ++ order,
     };
 }
 
 /// Every kind, for a read of one known row.
-const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 12) - 2});
+const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 13) - 2});
 
 /// The kind codes the sources number, for each Activity kind.
 fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
@@ -225,6 +233,7 @@ fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
         .send_failed => 9,
         .hosted_call => 10,
         .received => 11,
+        .approval_requested => 12,
     };
 }
 
@@ -1378,6 +1387,16 @@ const activity_message = rsql.Read(.{
 });
 
 /// When the Operation of a call proposed in the Session resolved.
+/// The call Action ?1 of Session ?2 waits on, dated by its Operation's
+/// settlement, which saved the Action with the request for approval.
+const approval_request = rsql.Read(.{
+    .sql = "SELECT action.parent_operation_id AS operation,action.call_ordinal,op.resolved_at FROM action_operation action " ++
+        "JOIN model_operation op ON op.operation_id=action.parent_operation_id AND op.session_ref=action.session_ref WHERE action.action_id=?1 AND action.session_ref=?2",
+    .Args = struct { action: u64, session: []const u8 },
+    .Row = struct { operation: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive },
+    .cardinality = .optional,
+});
+
 const call_resolved = rsql.Read(.{
     .sql = "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
     .Args = struct { operation: u64, session: []const u8 },
@@ -1635,6 +1654,7 @@ const ItemRead = struct {
         failure: struct { read: FailureRead, label: LabelRead = undefined },
         outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
         stop: StopRead,
+        approval: approval_request.Result,
     } = undefined,
 
     fn queue(read: *ItemRead, a: *ReadAccess, session: []const u8, end: u64) void {
@@ -1702,6 +1722,7 @@ const ItemRead = struct {
                 if (read.round == 1) outcome.read.queue(a, session) else a.read(content_metadata, .{ .content_id = outcome.read.content_id.? }, &outcome.metadata);
             },
             7 => read.state.stop.queue(a, session),
+            12 => a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &read.state.approval),
             else => unreachable,
         }
     }
@@ -1802,6 +1823,12 @@ const ItemRead = struct {
                 if (!try read.state.stop.count.found()) return error.CorruptStore;
                 item.at = read.state.stop.at;
             },
+            12 => {
+                const row = read.state.approval orelse return error.CorruptStore;
+                item.value.approval_requested.operation = row.operation.get();
+                item.value.approval_requested.call_ordinal = row.call_ordinal;
+                item.at = row.resolved_at.get();
+            },
             else => unreachable,
         }
         read.done = true;
@@ -1856,6 +1883,10 @@ const ItemRead = struct {
             7 => {
                 item.value = .{ .stop = undefined };
                 read.state = .{ .stop = .{ .position = read.position, .end = undefined, .stop = &item.value.stop } };
+            },
+            12 => {
+                item.value = .{ .approval_requested = .{ .action = (row.id orelse return error.CorruptStore).get(), .operation = undefined, .call_ordinal = undefined } };
+                read.state = .{ .approval = null };
             },
             else => return error.CorruptStore,
         }
@@ -1913,7 +1944,8 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
     a.read(activity_sequence_guard, .{ .session = request.session.slice() }, &guard);
     a.run() catch |err| return store_core.fence(a.store, if (err == error.StatementFailed) error.CorruptStore else err);
     if (guard != null) return store_core.fence(a.store, error.CorruptStore);
-    // Only Tool Results have nonzero ordinals. Byte readers need their
+    // Only Tool Results have nonzero ordinals and content (an approval
+    // request's ordinal 1 has none). Byte readers need their
     // canonical identity, not a second scan of the original arguments.
     const content: Located = if (request.ordinal != 0) located: {
         const found = publicConversationContent(a, request.session.slice(), request.position, request.ordinal) catch |err| switch (err) {

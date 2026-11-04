@@ -3103,6 +3103,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
+        .{ .approval_requested = .{ .action = max, .operation = max, .call_ordinal = max } },
     };
     try std.testing.expectEqual(std.meta.tags(std.meta.Tag(protocol.ActivityItem.Value)).len, values.len);
     var longest_item: protocol.ActivityItem = undefined;

@@ -408,6 +408,14 @@ fn configureTestSessionAsk(
     storage: *Store,
     key: []const u8,
 ) !protocol.Bounded(protocol.max_session_bytes) {
+    return configureTestSessionWithMode(storage, key, "ask");
+}
+
+fn configureTestSessionWithMode(
+    storage: *Store,
+    key: []const u8,
+    mode: []const u8,
+) !protocol.Bounded(protocol.max_session_bytes) {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration(key, "", workspace, "model-a");
@@ -415,7 +423,7 @@ fn configureTestSessionAsk(
     command.configuration.tools.count = 1;
     command.configuration.tools.values[0] = .bash;
     command.configuration.permission_mode.state = .value;
-    try command.configuration.permission_mode.value.set("ask");
+    try command.configuration.permission_mode.value.set(mode);
     const reply = storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
@@ -11933,13 +11941,55 @@ test "every activity row is dated by the fact that owns it" {
             .tool_result => 106,
             .turn_ended => 107,
             .stop => 108,
+            // Asked when its call was made.
+            .approval_requested => 104,
             .hosted_call, .sent, .send_failed, .received => unreachable,
         };
         try std.testing.expectEqual(expected, item.at);
         seen.insert(item.value);
     }
-    try std.testing.expectEqual(@as(usize, 7), seen.count());
+    try std.testing.expectEqual(@as(usize, 8), seen.count());
     try std.testing.expect(!storage.isFenced());
+}
+
+test "a call made while the Session asks follows with its approval request, and one under bypass has none" {
+    for ([_][]const u8{ "ask", "bypass" }) |mode| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionWithMode(&storage, "approval-config", mode);
+        try submitTestMessage(&storage, &tmp, "approval-input", "approval-input", session.slice(), "propose");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleTwoActionsForTesting(&storage, &tmp, binding, "approval-calls");
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        const page = try store_core.activityPageForTesting(&storage, request);
+        var calls: usize = 0;
+        var approvals: usize = 0;
+        for (page.items[0..page.count], 0..) |item, index| switch (item.value) {
+            .call => calls += 1,
+            .approval_requested => |approval| {
+                approvals += 1;
+                // It sits right after its call, at the call's position.
+                const call = page.items[index - 1];
+                try std.testing.expectEqual(call.position, item.position);
+                try std.testing.expectEqual(@as(u64, 1), item.ordinal);
+                try std.testing.expectEqual(call.value.call.action.?, approval.action);
+                try std.testing.expectEqual(call.value.call.operation, approval.operation);
+                try std.testing.expectEqual(call.value.call.call_ordinal, approval.call_ordinal);
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, 2), calls);
+        try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, mode, "ask")) 2 else 0), approvals);
+        // A page of approval requests alone names each by its own row.
+        request.kinds = .initOne(.approval_requested);
+        const only = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(approvals, only.count);
+        try std.testing.expect(!storage.isFenced());
+    }
 }
 
 test "a Tool Result is dated by its group's last acceptance, even when the clock stepped back" {
