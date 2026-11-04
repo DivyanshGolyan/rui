@@ -467,6 +467,22 @@ pub fn answerTestTurn(
     try storage.settleModelSuccess(binding, &output, .{});
 }
 
+/// Gives compaction Operation `operation` the floor at the position of
+/// the conversation entry of its Session whose text is `text`, at `level`,
+/// as admission would for a compaction that makes room (D217).
+pub fn setHistoryFloorForTesting(storage: *Store, operation: u64, text: []const u8, level: u64) !void {
+    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+    const digest = protocol.contentDigest(text);
+    try exec(storage, "UPDATE model_operation SET history_floor=(SELECT e.session_position FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
+        "WHERE e.session_ref=model_operation.session_ref AND c.digest=?2 AND c.private=0),history_level=?3,history_dropped=0 WHERE operation_id=?1", .{ operation, Blob{ .bytes = &digest }, level });
+}
+
+/// Whether Turn `turn` ended with `outcome`.
+pub fn turnEndedForTesting(storage: *Store, turn: u64, outcome: []const u8) !bool {
+    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+    return try queryU64(storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND outcome_code=?2", .{ turn, outcome }) == 1;
+}
+
 pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, kinds: []const OutputItemKind) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const source = try tmp.dir.createFile(std.testing.io, "compaction-output", .{ .read = true });

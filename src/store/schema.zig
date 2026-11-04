@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x8382406a3bf20730 },
+    .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -554,6 +554,16 @@ pub const tables = [_]Table{
             .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
             .{ .name = "retry_scheduled_at", .type = .int, .nullable = true, .check = "retry_scheduled_at IS NULL OR retry_scheduled_at>0" },
             .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
+            // A compaction that makes room (D217): it and every request on
+            // its base omit the drop units that begin at or below the
+            // floor, a Session position; the level, 1 to 3, sets how much
+            // room it aimed for.
+            .{ .name = "history_floor", .type = .int, .nullable = true, .check = "history_floor IS NULL OR history_floor>0" },
+            .{ .name = "history_level", .type = .int, .nullable = true, .check = "history_level IS NULL OR history_level BETWEEN 1 AND 3" },
+            // The conversation entries the floor dropped beyond its base's
+            // or the compaction before it; the feed's `compacted` row shows
+            // it, and zero for a compaction without a floor.
+            .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
@@ -576,6 +586,10 @@ pub const tables = [_]Table{
                 "(resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)",
             "(@same(resolution_code,'interrupted') AND interrupted_by_command_key IS NOT NULL) OR " ++
                 "(coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)",
+            // A level and its dropped count are the room a compaction made;
+            // one that made none keeps its base's floor.
+            "(history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND purpose=1 AND " ++
+                "((history_level IS NULL AND history_dropped IS NULL) OR (history_level IS NOT NULL AND history_dropped IS NOT NULL)))",
         },
     },
     .{
@@ -813,6 +827,7 @@ pub const indexes = [_]Index{
     .{ .name = "model_output_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" } },
     .{ .name = "model_output_call_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" }, .where = "item_kind=3" },
     .{ .name = "model_output_hosted_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" }, .where = "item_kind=5" },
+    .{ .name = "model_output_compaction_history", .table = "model_output_item", .columns = &.{ "session_ref", "session_position" }, .where = "item_kind=4" },
     .{ .name = "model_output_compaction_anchor", .table = "model_output_item", .columns = &.{ "operation_id", "item_ordinal" }, .where = "item_kind=4" },
     .{ .name = "turn_session_latest", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" } },
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },

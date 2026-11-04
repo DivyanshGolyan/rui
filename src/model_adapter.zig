@@ -1105,6 +1105,8 @@ pub const Preparation = struct {
     /// stay out of the frame every history item uses.
     noinline fn startSpan(self: *Preparation) !Next {
         self.state.span = .{ .start = self.writer.offset };
+        // A compaction's own floor drops history its base's memo holds.
+        if ((try self.view.coverage()).floor.own) return .pending;
         const memos = self.state.memos orelse return .pending;
         const memo = memos.held(self.settings.session.slice()) orelse return .pending;
         const key = try self.memoKey();
@@ -1190,6 +1192,9 @@ pub const Preparation = struct {
     /// memo once the request seals.
     fn endSpan(self: *Preparation) !void {
         const span = &(self.state.span orelse return);
+        // No later request shares a span under a compaction's own floor:
+        // it neither seals nor keeps a memo.
+        if ((try self.view.coverage()).floor.own) return;
         span.next = .{
             .key = try self.memoKey(),
             .admission_position = self.view.admissionPosition(),
@@ -3428,6 +3433,170 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "covered-private") == null);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "compaction_trigger") == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+/// The texts of `request`'s input items, in order: a message's first
+/// text, else its type.
+fn inputTextsForTesting(request: []const u8, out: [][]const u8) ![]const []const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request, .{});
+    defer parsed.deinit();
+    const input = parsed.value.object.get("input").?.array.items;
+    std.debug.assert(input.len <= out.len);
+    for (input, 0..) |item, index| {
+        const label = if (item.object.get("content")) |content| content.array.items[0].object.get("text").?.string else item.object.get("type").?.string;
+        out[index] = try std.testing.allocator.dupe(u8, label);
+    }
+    return out[0..input.len];
+}
+
+fn expectInputTexts(request: []const u8, expected: []const []const u8) !void {
+    var buffer: [32][]const u8 = undefined;
+    const texts = try inputTextsForTesting(request, &buffer);
+    defer for (texts) |text| std.testing.allocator.free(text);
+    try std.testing.expectEqual(expected.len, texts.len);
+    for (expected, texts) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
+test "a compaction's floor drops whole exchanges and every request on its base respects it" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    // Positions: "do work", Operation 1 (reasoning and two calls, then their
+    // denied results), its successor's answer, then "second message", the
+    // new instructions, "answer two" and "third message".
+    const composed = try establishComposedHistory(&setup);
+    const session = composed.session;
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, composed.binding, &.{"{\"type\":\"message\",\"id\":\"a1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer one\"}]}"}, "answer one");
+    try setup.submit("floor-second", "floor-second-key", session.slice(), "second message");
+    {
+        const rules = "new rules";
+        const file = try setup.tmp.dir.createFile(std.testing.io, "floor-rules", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, rules);
+        try file.sync(std.testing.io);
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("floor-rules-config");
+        command.session = session;
+        command.configuration.instructions = .{ .state = .value, .file = file, .length = rules.len, .digest = protocol.contentDigest(rules) };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+    }
+    var third = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const third_binding = try third.permit.consume();
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, third_binding, &.{"{\"type\":\"message\",\"id\":\"a2\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer two\"}]}"}, "answer two");
+    try setup.submit("floor-third", "floor-third-key", session.slice(), "third message");
+    var fourth = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const fourth_binding = try fourth.permit.consume();
+    var memo_entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const full = try prepareMemoForTesting(&setup, fourth_binding, &memos, .{});
+    defer std.testing.allocator.free(full.bytes);
+    try expectInputTexts(full.bytes, &.{ "do work", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output", "answer one", "second message", "new rules", "answer two", "third message" });
+    const kept = memo_entries[0].memo.?;
+    try setup.storage.settleModelAttemptFailure(fourth_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const compact_binding = try compact.permit.consume();
+    // The floor sits on the instruction entry: "second message" and every
+    // Operation admitted before it go, with Operation 1's results; the first
+    // Message and the instructions stay.
+    try store.setHistoryFloorForTesting(&setup.storage, compact_binding.operation_id, "new rules", 1);
+    const compaction = try prepareMemoForTesting(&setup, compact_binding, &memos, .{});
+    defer std.testing.allocator.free(compaction.bytes);
+    try expectInputTexts(compaction.bytes, &.{ "do work", "new rules", "answer two", "third message", "compaction_trigger" });
+    // The base's memo spans dropped history: the compaction rebuilds and
+    // keeps no memo of its own floor.
+    try std.testing.expectEqual(@as(usize, 0), compaction.copied);
+    try std.testing.expect(memo_entries[0].memo.?.identical(&kept));
+    try store.settleCompactionForTesting(&setup.storage, &setup.tmp, compact_binding, &.{ .compaction, .message });
+    try setup.submit("floor-later", "floor-later-key", session.slice(), "later message");
+    var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const successor_binding = try successor.permit.consume();
+    const after = try prepareMemoForTesting(&setup, successor_binding, &memos, .{});
+    defer std.testing.allocator.free(after.bytes);
+    try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message" });
+    // Requests on the base share its floor, so their memo serves again.
+    try std.testing.expect(try expectMemoRebuildEqual(&setup, successor_binding, &memos, .{}) > 0);
+    // A later compaction that makes no room keeps the floor, and so does
+    // every request on the base it becomes.
+    try setup.storage.settleModelAttemptFailure(successor_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    var again = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const again_binding = try again.permit.consume();
+    const again_request = try prepareMemoForTesting(&setup, again_binding, &memos, .{});
+    defer std.testing.allocator.free(again_request.bytes);
+    try expectInputTexts(again_request.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "compaction_trigger" });
+    try store.settleCompactionForTesting(&setup.storage, &setup.tmp, again_binding, &.{.compaction});
+    try setup.submit("floor-last", "floor-last-key", session.slice(), "last message");
+    var last = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const last_binding = try last.permit.consume();
+    const last_request = try prepareMemoForTesting(&setup, last_binding, &memos, .{});
+    defer std.testing.allocator.free(last_request.bytes);
+    try expectInputTexts(last_request.bytes, &.{ "do work", "new rules", "third message", "later message", "compaction", "last message" });
+}
+
+test "a compaction that overflows makes room a level at a time, then the Turn ends context_full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("room-config");
+    // model-a is unlisted: a 128k window and no reservation, so the levels
+    // aim at 512,000, 128,000 and 32,000 bytes. Newest first, the Messages
+    // reach 40,000, 140,000 and 540,000 bytes at m4, m3 and m2.
+    const sizes = [_]usize{ 1, 400_000, 100_000, 30_000, 10_000 };
+    var texts: [sizes.len][]u8 = undefined;
+    for (&texts, sizes, 0..) |*text, size, index| {
+        text.* = try std.testing.allocator.alloc(u8, size);
+        @memset(text.*, @intCast('a' + index));
+    }
+    defer for (texts) |text| std.testing.allocator.free(text);
+    for (texts, 0..) |text, index| {
+        var name: [16]u8 = undefined;
+        const key = try std.fmt.bufPrint(&name, "room-m{d}", .{index + 1});
+        try setup.submit(key, key, session.slice(), text);
+    }
+    var call = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const call_binding = try call.permit.consume();
+    try setup.storage.settleModelAttemptFailure(call_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    // The full compaction, then levels 1 to 3, each dropping one more
+    // Message; the first Message always stays.
+    const expected = [_][]const []const u8{
+        &.{ texts[0], texts[1], texts[2], texts[3], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[2], texts[3], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[3], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[4], "compaction_trigger" },
+    };
+    for (expected) |inputs| {
+        var compact = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedCompaction;
+        const binding = try compact.permit.consume();
+        try std.testing.expectEqual(call_binding.turn_id, binding.turn_id);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        try setup.storage.openHistoricalView(binding, &prep.view);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        const request = try drainPreparation(&prep, 64 * 1024, 64, 4096);
+        defer std.testing.allocator.free(request.bytes);
+        try expectInputTexts(request.bytes, inputs);
+        try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    }
+    try std.testing.expect(try setup.storage.admitNextModelAttempt(.{}) == null);
+    try std.testing.expect(try store.turnEndedForTesting(&setup.storage, call_binding.turn_id, "ResourceExceeded"));
+}
+
+test "a compaction that overflows with nothing left to drop ends its Turn context_full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("no-room-config");
+    try setup.submit("no-room-first", "no-room-first", session.slice(), "first");
+    try setup.submit("no-room-second", "no-room-second", session.slice(), "second");
+    var call = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const call_binding = try call.permit.consume();
+    try setup.storage.settleModelAttemptFailure(call_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
+    try setup.storage.settleModelAttemptFailure(try compact.permit.consume(), .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    try std.testing.expect(try setup.storage.admitNextModelAttempt(.{}) == null);
+    try std.testing.expect(try store.turnEndedForTesting(&setup.storage, call_binding.turn_id, "ResourceExceeded"));
 }
 
 test "compaction public preparation rejects incompatible selected base and suffix bindings" {

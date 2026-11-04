@@ -15,6 +15,7 @@ test {
     _ = @import("launch_frame.zig");
     _ = @import("openapi.zig");
     _ = @import("http1/Exchange.zig");
+    _ = @import("mcp/Call.zig");
     _ = @import("mcp/Listing.zig");
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");

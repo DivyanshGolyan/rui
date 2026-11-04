@@ -17,6 +17,7 @@ const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const historical_domain = @import("historical.zig");
+const history_floor_domain = @import("history_floor.zig");
 const model_admission_domain = @import("model_admission.zig");
 const sqlite = @import("../sqlite.zig");
 const store_access = @import("../access.zig");
@@ -394,12 +395,14 @@ pub fn settleModelAttemptFailure(
     const session = row.session;
     switch (disposition) {
         .ordinary, .context_overflow => {
+            // An overflowing call compacts; an overflowing compaction makes
+            // room with a deeper floor while one drops more (D217).
             const compact = disposition == .context_overflow and compact: {
+                if (row.compaction) break :compact try history_floor_domain.deeperFloor(a, binding.operation_id) != null;
                 var changed: context_changed.Result = undefined;
                 a.read(context_changed, .{ .session = &session.ref, .boundary = row.admission_position.get() }, &changed);
                 try a.run();
-                const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
-                break :compact turn_policy.recoversOverflow(purpose, changed.changed);
+                break :compact turn_policy.recoversOverflow(.assistant_response, changed.changed);
             };
             if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
             const diagnostic_id = try content.importDiagnostic(a, &failure);
