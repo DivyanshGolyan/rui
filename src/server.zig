@@ -3106,11 +3106,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     const values = [_]protocol.ActivityItem.Value{
         .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
         .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .assistant = reference },
+        .{ .assistant = .{ .content = reference, .final = false } },
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field) } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
-        .{ .outcome = .{ .turn = max, .operation = max, .code = code, .content = reference } },
+        .{ .turn_ended = .{ .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
