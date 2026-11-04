@@ -27,6 +27,13 @@ from model_fixture import (
 )
 
 
+def history(items):
+    """A request's input without its tool declarations, which
+    openai-responses/2 writes at each Operation that offers new tools; the
+    projection test checks them."""
+    return [item for item in items if item.get("type") != "additional_tools"]
+
+
 def without_prose(schema):
     """Tool wording is prompt prose; compare the schema without it."""
     if isinstance(schema, list):
@@ -408,7 +415,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert result["answer"]["status"] == "accepted", result
 
     def user_texts(request):
-        return [item["content"][0]["text"] for item in request["input"] if item.get("role") == "user"]
+        return [item["content"][0]["text"] for item in history(request["input"]) if item.get("role") == "user"]
 
     overflow_request_id = 'overflow-"quoted"\\request'
     overflow_http = ResponseSpec(
@@ -432,7 +439,7 @@ def compaction_cases(state, processes, endpoints, releases):
         message(state, store, f"{route}-first", session, "covered user input")
         wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
         compaction = json.loads(endpoint.requests[1])
-        assert compaction["input"][-1] == {"type": "compaction_trigger"}, compaction
+        assert history(compaction["input"])[-1] == {"type": "compaction_trigger"}, compaction
         # The originating Operation's address and baseline survive overflow
         # into its compaction Operation.
         address = model_instructions(ROOT, "baseline", store=store, session=session)
@@ -454,11 +461,11 @@ def compaction_cases(state, processes, endpoints, releases):
         successor = json.loads(endpoint.requests[2])
         assert user_texts(successor) == ["covered user input", "pending input"], successor
         assert successor["instructions"] == address, successor
-        assert [item["content"][0]["text"] for item in successor["input"] if item.get("role") == "developer"] == ["arrived during compaction"], successor
-        assert not any(item.get("id") == items[0]["id"] for item in successor["input"]), successor
+        assert [item["content"][0]["text"] for item in history(successor["input"]) if item.get("role") == "developer"] == ["arrived during compaction"], successor
+        assert not any(item.get("id") == items[0]["id"] for item in history(successor["input"])), successor
         replay_anchor = dict(items[1])
         replay_anchor.pop("created_by")
-        assert successor["input"][1:3] == [replay_anchor, items[2]], successor
+        assert history(successor["input"])[1:3] == [replay_anchor, items[2]], successor
         report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
         assert report["actions"]["count"] == "0", report
         assert b"private compaction tail" not in json.dumps(report).encode(), report
@@ -488,7 +495,7 @@ def compaction_cases(state, processes, endpoints, releases):
         wait_for(lambda: completed_observation(store, f"{route}-followup-input"), "reconstructed base after restart")
         assert read_result(store, f"{route}-followup-input") == b"after restart"
         restarted = json.loads(endpoint.requests[3])
-        assert replay_anchor in restarted["input"] and items[2] in restarted["input"], restarted
+        assert replay_anchor in history(restarted["input"]) and items[2] in history(restarted["input"]), restarted
         assert user_texts(restarted) == ["covered user input", "pending input", "followup input"], restarted
         assert restarted["instructions"] == address, restarted
         execution = wait_for(lambda: (value := command("session", "inspect", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" and value, "compaction custody release")
@@ -809,7 +816,7 @@ def empty_answer_cases(state, processes, endpoints):
             host = start_host(store, url)
             processes.append(host)
             assert read_result(store, key) == expected
-        replay = json.loads(endpoint.requests[2])["input"]
+        replay = history(json.loads(endpoint.requests[2])["input"])
         assert replay[1:3] == items[:2] and replay[4:6] == items[2:4], replay
         assert len(endpoint.requests) == 3, "empty answers continued without new input"
         assert failed_response_records(store) == [], "completed empty answers became failed responses"
@@ -955,7 +962,7 @@ def refusal_cases(state, processes, endpoints):
         later, answer, _ = wait_for_result_release(store, label + "-next", session, time.monotonic() + 10)
         assert later["result"]["status"] == "completed" and answer == b"Next answer", later
         assert read_result(store, label) == expected
-        replay = json.loads(endpoint.requests[1])["input"]
+        replay = history(json.loads(endpoint.requests[1])["input"])
         assert replay[1] == {key: value for key, value in item.items() if key != "created_by"}, replay
         stop_host(host)
         processes.remove(host)
@@ -1010,7 +1017,7 @@ def sse_framing_cases(state, processes, endpoints):
     message(state, store, "sse-next", session, "second")
     result, answer, _ = wait_for_result_release(store, "sse-next", session, time.monotonic() + 10)
     assert result["result"]["status"] == "completed" and answer == b"Next", (result, answer)
-    replayed = json.loads(endpoint.requests[1])["input"]
+    replayed = history(json.loads(endpoint.requests[1])["input"])
     assert json.loads(reasoning) in replayed and json.loads(item) in replayed, ("replayed items changed", replayed)
     assert len(endpoint.requests) == 2 and failed_response_records(store) == []
     stop_host(host)
@@ -1122,7 +1129,7 @@ def phased_message_cases(state, processes, endpoints):
         wait_for_execution_release(lambda remaining: command("session", "inspect", "--store", store,
                                    "--session", session, timeout=remaining)["execution"], deadline)
         assert not forbidden.exists(), "denied Bash was launched"
-        replay = json.loads(endpoint.requests[1])["input"]
+        replay = history(json.loads(endpoint.requests[1])["input"])
         assert replay[1:6] == first_items, replay
         assert replay[6:] == [
             {"type": "function_call_output", "call_id": "first-call", "output": "Permission denied."},
@@ -1165,7 +1172,7 @@ def phased_message_cases(state, processes, endpoints):
         wait_for(lambda: completed_observation(store, f"{label}-newer"), "newer answer")
         assert read_result(store, f"{label}-newer") == b"Newer answer"
         assert read_result(store, key) == "Canonical answer é".encode()
-        restarted = json.loads(endpoint.requests[2])["input"]
+        restarted = history(json.loads(endpoint.requests[2])["input"])
         assert restarted[1:6] == first_items, restarted
         assert restarted[6:8] == replay[6:], restarted
         assert restarted[8:11] == final_items, restarted
@@ -1256,7 +1263,7 @@ def held_message_denial_cases(state, processes, endpoints):
         assert not forbidden.exists(), "denied Bash was launched"
         # One continuation request, carrying the denial and the reason together.
         assert len(endpoint.requests) == 2, endpoint.requests
-        continuation = json.loads(endpoint.requests[1])["input"]
+        continuation = history(json.loads(endpoint.requests[1])["input"])
         outputs = [item for item in continuation if item.get("type") == "function_call_output"]
         tail = continuation[-(siblings + 1):]
         assert tail[:siblings] == outputs, continuation
@@ -1714,7 +1721,7 @@ def main(mode="all", correlation_case="all"):
         )
         assert read_result(continuation_store, "continuation-first") == continuation_answer
         continuation_request = json.loads(continuation_endpoint.requests[1])
-        continuation_input = continuation_request["input"]
+        continuation_input = history(continuation_request["input"])
         output_items = [item for item in continuation_input if item.get("type") == "function_call_output"]
         assert [item["call_id"] for item in output_items] == [call[1] for call in continuation_calls], output_items
         assert [item["output"] for item in output_items] == [
@@ -1835,7 +1842,7 @@ def main(mode="all", correlation_case="all"):
         )
         assert read_result(continuation_store, "queued-first") == queued_answer
         assert read_result(continuation_store, "queued-second") == queued_answer
-        queued_input = json.loads(continuation_endpoint.requests[3])["input"]
+        queued_input = history(json.loads(continuation_endpoint.requests[3])["input"])
         queued_outputs = [item for item in queued_input if item.get("type") == "function_call_output"]
         assert [item["call_id"] for item in queued_outputs] == [call[1] for call in queued_calls], queued_outputs
         assert [item["output"] for item in queued_outputs] == [
@@ -2006,17 +2013,17 @@ def main(mode="all", correlation_case="all"):
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
         assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT, store=success_store, session=success_session)
-        assert first_request["input"] == [
+        assert history(first_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
         expected_reasoning = dict(first_reasoning)
         expected_reasoning.pop("created_by")
-        assert second_request["input"] == [
+        assert history(second_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
             expected_reasoning,
             first_message_item,
             {"role": "user", "content": [{"type": "input_text", "text": "second question"}]},
-        ], second_request["input"]
+        ], history(second_request["input"])
         stop_host(success_host)
         processes.remove(success_host)
 
@@ -2439,12 +2446,12 @@ def main(mode="all", correlation_case="all"):
         ), frozen_retry
         expected_private = dict(continued_reasoning)
         expected_private.pop("created_by")
-        assert expected_private in frozen_retry["input"], frozen_retry["input"]
-        assert continued_message in frozen_retry["input"], frozen_retry["input"]
+        assert expected_private in history(frozen_retry["input"]), history(frozen_retry["input"])
+        assert continued_message in history(frozen_retry["input"]), history(frozen_retry["input"])
         assert not any(
             item.get("role") == "developer"
             and item.get("content", [{}])[0].get("text") == "new instructions"
-            for item in frozen_retry["input"]
+            for item in history(frozen_retry["input"])
         )
         wait_for(
             lambda: completed_observation(continued_store, "continued-later-message"),
@@ -2704,7 +2711,7 @@ def main(mode="all", correlation_case="all"):
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
         assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session)
-        assert pending_request["input"] == [
+        assert history(pending_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
             pending_message_item,
@@ -3414,7 +3421,7 @@ def main(mode="all", correlation_case="all"):
         message(state, projection_store, "projection-second", projection_session, projected_answer.decode())
         wait_for(lambda: completed_observation(projection_store, "projection-second"), "deduplicated answer")
         assert read_result(projection_store, "projection-second") == b"caller-first"
-        replay = json.loads(projection_endpoint.requests[1])["input"]
+        replay = history(json.loads(projection_endpoint.requests[1])["input"])
         assert replay[-1]["content"][0]["text"] == projected_answer.decode(), replay
         assert replay[-2]["content"][0]["text"] == projected_answer.decode(), replay
         stop_host(host)
@@ -3561,8 +3568,9 @@ def main(mode="all", correlation_case="all"):
                 {"role": "developer", "content": [{"type": "input_text", "text": "B"}]},
                 {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
                 {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
-            ],
-            "tools": [
+                # openai-responses/2 declares function tools in the history,
+                # at the Operation that first offers them.
+                {"type": "additional_tools", "role": "developer", "tools": [
                 {
                     "type": "function",
                     "name": "bash",
@@ -3583,7 +3591,10 @@ def main(mode="all", correlation_case="all"):
                         "additionalProperties": False,
                     },
                 },
+            ]},
             ],
+            # Only provider-run tools stay at the top.
+            "tools": [],
             "text": {
                 "verbosity": "low",
                 "format": {
@@ -3594,7 +3605,7 @@ def main(mode="all", correlation_case="all"):
                 }
             },
         }
-        observed["tools"] = without_prose(observed["tools"])
+        observed["input"] = without_prose(observed["input"])
         assert observed == expected, (observed, expected)
         stop_host(host)
         frozen_peers.finish(time.monotonic() + 5)
@@ -3615,6 +3626,7 @@ def main(mode="all", correlation_case="all"):
         # the prior failed Turn's messages and each distinct instruction
         # update, including repeated equal text and reversals.
         successor = json.loads(endpoint.requests[1])
+        successor["input"] = without_prose(successor["input"])
         later_input = expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ]
@@ -3630,6 +3642,7 @@ def main(mode="all", correlation_case="all"):
         processes.append(host)
         wait_for(lambda: len(endpoint.requests) == 3, "post-restart successor request")
         restarted = json.loads(endpoint.requests[2])
+        restarted["input"] = without_prose(restarted["input"])
         assert restarted["input"] == later_input + [
             {"role": "user", "content": [{"type": "input_text", "text": "after restart"}]}
         ], restarted
@@ -4199,7 +4212,7 @@ def main(mode="all", correlation_case="all"):
         released_request = json.loads(stale_endpoint.requests[3])
         released_user_text = next(
             content["text"]
-            for item in released_request["input"]
+            for item in history(released_request["input"])
             if item.get("role") == "user"
             for content in item["content"]
             if content.get("type") == "input_text"
@@ -4292,7 +4305,7 @@ def main(mode="all", correlation_case="all"):
         selected_request = json.loads(backlog_endpoint.requests[2])
         selected_user_text = next(
             content["text"]
-            for item in selected_request["input"]
+            for item in history(selected_request["input"])
             if item.get("role") == "user"
             for content in item["content"]
             if content.get("type") == "input_text"

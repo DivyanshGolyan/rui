@@ -98,6 +98,18 @@ pub const HistoricalEntry = struct {
     sender: ?protocol.Bounded(protocol.max_session_bytes) = null,
     /// An Operation entry's frozen effort.
     effort: ?protocol.ReasoningEffort = null,
+    /// An Operation entry's frozen tool set, and whether its boundary
+    /// declares any function tool (`HistoricalView.nextDeclaredTool`).
+    tool_set_id: u64 = 0,
+    declares: bool = false,
+};
+
+/// An Operation boundary's declaration being read: the set it declares
+/// from, its boundary's position, and the member ordinal to read from.
+pub const Declaration = struct {
+    tool_set_id: u64,
+    position: u64,
+    next_ordinal: u64 = 0,
 };
 
 /// One saved output item in Rui's own form, as a request writer reads it:
@@ -156,6 +168,10 @@ pub const HistoricalView = struct {
     tool_set_id: u64 = 0,
     tool_count: u64 = 0,
     next_tool: u64 = 0,
+    /// The set's provider-run members, which `nextProviderTool` reads, and
+    /// how many it has read, past the ordinal `next_tool`.
+    provider_tool_count: u64 = 0,
+    provider_tools_read: u64 = 0,
     // Ordinary entries copied from one ranged read. Plain values, never a
     // statement: history below the admission boundary is immutable.
     entries: [entry_batch]HistoricalEntry = undefined,
@@ -221,6 +237,8 @@ pub const HistoricalView = struct {
         std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
         if (bytes_left.* == 0 or items_left.* == 0) return .pending;
         items_left.* -= 1;
+        // An Operation entry's declaration depends on the selected base.
+        _ = try self.coverage();
         return readHistoricalEntry(self.store, self, after_position) catch |err| switch (err) {
             error.HistoricalPending => .pending,
             else => return err,
@@ -232,6 +250,32 @@ pub const HistoricalView = struct {
     pub fn checkAttempt(self: *HistoricalView) !void {
         std.debug.assert(self.active);
         _ = try model_settlement_domain.checkAttempt(self.store, self.binding);
+    }
+
+    /// Fills `out` with the next function tool `declaration` declares, in
+    /// set order, and says whether there was one. `coverage` must have run.
+    pub fn nextDeclaredTool(self: *HistoricalView, declaration: *Declaration, out: *HistoricalTool) !bool {
+        std.debug.assert(self.active and self.selected_coverage != null);
+        return readDeclaredTool(self.store, self, declaration, out);
+    }
+
+    /// The current Operation's declaration: its frozen set at its
+    /// admission. `settings` and `coverage` must have run.
+    pub fn currentDeclaration(self: *const HistoricalView) Declaration {
+        std.debug.assert(self.tool_set_id != 0 and self.output_boundary != 0);
+        return .{ .tool_set_id = self.tool_set_id, .position = self.output_boundary };
+    }
+
+    /// Fills `out` with the frozen settings' next provider-run tool, in set
+    /// order, and says whether there was one: the tools stage of a codec
+    /// that declares function tools in the history. `settings` must have
+    /// run, and `nextTool` not.
+    pub fn nextProviderTool(self: *HistoricalView, out: *HistoricalTool) !bool {
+        std.debug.assert(self.active and self.tool_set_id != 0);
+        if (self.provider_tools_read == self.provider_tool_count) return false;
+        try readProviderTool(self.store, self, out);
+        self.provider_tools_read += 1;
+        return true;
     }
 
     /// Fills `out` with the frozen settings' next tool, in set order, and
@@ -478,6 +522,94 @@ const historical_tool = rsql.Read(.{
     .cardinality = .optional,
 });
 
+/// The next function tool a boundary declares, at or after ordinal ?3.
+const historical_declared_tool = rsql.Read(.{
+    .sql = "SELECT member.ordinal,tool.name,tool.owner,tool.description_content_id AS description_id,description.byte_length AS description_length," ++
+        "description.digest AS description_digest,description.private AS description_private,tool.input_schema_content_id AS schema_id," ++
+        "input_schema.byte_length AS schema_length,input_schema.digest AS schema_digest,input_schema.private AS schema_private " ++
+        "FROM model_operation current JOIN " ++ declared_members_from ++ " " ++
+        "JOIN content description ON description.content_id=tool.description_content_id " ++
+        "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
+        "WHERE current.operation_id=?1 AND member.ordinal>=?3 AND " ++ declared_members_where("?2", "?4", "?5") ++ " ORDER BY member.ordinal LIMIT 1",
+    .Args = struct { operation: u64, set: u64, ordinal: u64, position: u64, anchor: u64 },
+    .Row = struct {
+        ordinal: u64,
+        name: *protocol.Bounded(tool_catalog.max_name_bytes),
+        owner: tool_catalog.Owner,
+        description_id: rsql.Positive,
+        description_length: u64,
+        description_digest: [32]u8,
+        description_private: bool,
+        schema_id: rsql.Positive,
+        schema_length: u64,
+        schema_digest: [32]u8,
+        schema_private: bool,
+    },
+    .cardinality = .optional,
+});
+
+fn readDeclaredTool(self: *Store, view: *HistoricalView, declaration: *Declaration, out: *HistoricalTool) !bool {
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, declaredToolOf(&access, view, declaration, out));
+}
+
+/// One round reads the declaration's next member; private text is
+/// `CorruptStore`.
+fn declaredToolOf(a: *ReadAccess, view: *HistoricalView, declaration: *Declaration, out: *HistoricalTool) !bool {
+    var row: historical_declared_tool.Row = undefined;
+    row.name = &out.name;
+    var found: store_access.Found = undefined;
+    a.readInto(historical_declared_tool, .{
+        .operation = view.binding.operation_id,
+        .set = declaration.tool_set_id,
+        .ordinal = declaration.next_ordinal,
+        .position = declaration.position,
+        .anchor = view.selected_coverage.?.anchor orelse 0,
+    }, &row, &found);
+    try store_access.runAs(a, error.CorruptStore);
+    if (!found.get()) return false;
+    if (row.description_private or row.schema_private or row.owner != .rui) return error.CorruptStore;
+    declaration.next_ordinal = row.ordinal + 1;
+    out.owner = row.owner;
+    out.description = .{ .view = view, .content_id = @intCast(row.description_id.get()), .length = row.description_length, .digest = row.description_digest };
+    out.input_schema = .{ .view = view, .content_id = @intCast(row.schema_id.get()), .length = row.schema_length, .digest = row.schema_digest };
+    return true;
+}
+
+/// The set's next provider-run member at or after ordinal ?2. Its record
+/// carries no text: the codec names the tool.
+const historical_provider_tool = rsql.Read(.{
+    .sql = "SELECT member.ordinal,tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "WHERE member.tool_set_id=?1 AND member.ordinal>=?2 AND tool.owner='provider' ORDER BY member.ordinal LIMIT 1",
+    .Args = struct { set: u64, ordinal: u64 },
+    .Row = struct { ordinal: u64, name: *protocol.Bounded(tool_catalog.max_name_bytes) },
+    .cardinality = .optional,
+});
+
+fn readProviderTool(self: *Store, view: *HistoricalView, out: *HistoricalTool) !void {
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, providerToolOf(&access, view, out));
+}
+
+/// One round reads the next provider-run member; a missing one is
+/// `CorruptStore`, since the settings counted it.
+fn providerToolOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalTool) !void {
+    var row: historical_provider_tool.Row = undefined;
+    row.name = &out.name;
+    var found: store_access.Found = undefined;
+    a.readInto(historical_provider_tool, .{ .set = view.tool_set_id, .ordinal = view.next_tool }, &row, &found);
+    try store_access.runAs(a, error.CorruptStore);
+    if (!found.get()) return error.CorruptStore;
+    view.next_tool = row.ordinal + 1;
+    out.owner = .provider;
+}
+
 fn readHistoricalTool(self: *Store, view: *HistoricalView, out: *HistoricalTool) !void {
     return self.queue().run(readHistoricalToolHeld, .{ self, view, out });
 }
@@ -519,7 +651,9 @@ fn readHistoricalSettingsHeld(self: *Store, view: *HistoricalView, out: *Histori
 /// The settings an Operation's request froze, with its Session's binding.
 /// The texts decode straight into the caller's settings.
 const historical_settings = rsql.Read(.{
-    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tool_set_id,tool_set.member_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tool_set_id,tool_set.member_count," ++
+        "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "WHERE member.tool_set_id=r.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
@@ -531,6 +665,7 @@ const historical_settings = rsql.Read(.{
         output_schema_content_id: ?rsql.Positive,
         tool_set_id: rsql.Positive,
         member_count: u64,
+        provider_count: u64,
         provider: protocol.Provider,
         session_ref: *protocol.Bounded(protocol.max_session_bytes),
         workspace: *protocol.Bounded(protocol.max_workspace_bytes),
@@ -557,9 +692,10 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, &row, &found);
     try store_access.runAs(a, error.CorruptStore);
     if (!found.get()) return error.CorruptStore;
-    if (row.member_count > tool_catalog.max_tools) return error.CorruptStore;
+    if (row.member_count > tool_catalog.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
     view.tool_set_id = row.tool_set_id.get();
     view.tool_count = row.member_count;
+    view.provider_tool_count = row.provider_count;
     view.next_tool = 0;
     out.tool_count = row.member_count;
     var instructions: content_metadata.Row = undefined;
@@ -829,7 +965,8 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
 /// order.
 const historical_entries = rsql.Read(.{
     .sql = "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS consistent," ++
-        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort " ++
+        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
+        "NULL AS tool_set_id,NULL AS declares " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
@@ -840,7 +977,7 @@ const historical_entries = rsql.Read(.{
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
         "AND owner.admission_position<current.admission_position AND " ++
         "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL " ++
+        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
@@ -848,11 +985,14 @@ const historical_entries = rsql.Read(.{
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position UNION ALL " ++
         // Every earlier Operation of the Session, whatever its outcome:
         // its request carried its own boundary, so later ones do too.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort " ++
+        // With each, its tool set and whether it declares any tool.
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort,revision.tool_set_id," ++
+        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("revision.tool_set_id", "earlier.admission_position", "?3") ++ ") " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
+        "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
         "WHERE current.operation_id=?1 AND earlier.admission_position>?2 AND earlier.admission_position<current.admission_position " ++
         std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{HistoricalView.entry_batch}),
-    .Args = struct { operation: u64, after: u64 },
+    .Args = struct { operation: u64, after: u64, anchor: u64 },
     .Row = struct {
         session_position: rsql.Positive,
         entry_kind: u8,
@@ -867,10 +1007,28 @@ const historical_entries = rsql.Read(.{
         consistent: ?bool,
         sender: ?protocol.Bounded(protocol.max_session_bytes),
         effort: ?protocol.ReasoningEffort,
+        tool_set_id: ?rsql.Positive,
+        declares: ?bool,
     },
     .cardinality = .each,
     .compound = true,
 });
+
+/// The function tools `set` declares at the Operation boundary at
+/// `position`: its rui-run members that the set of the last earlier
+/// Operation at or after `anchor` lacks, or all of them when there is
+/// none. `member` and `tool` name the member and its record, and the
+/// Operation `current` names gives the Session.
+const declared_members_from = "tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id";
+
+fn declared_members_where(comptime set: []const u8, comptime position: []const u8, comptime anchor: []const u8) []const u8 {
+    return "member.tool_set_id=" ++ set ++ " AND tool.owner='rui' AND member.tool_record_id NOT IN (" ++
+        "SELECT previous_member.tool_record_id FROM tool_set_member previous_member WHERE previous_member.tool_set_id=coalesce((" ++
+        "SELECT previous_revision.tool_set_id FROM model_operation previous JOIN session_revision previous_revision " ++
+        "ON previous_revision.session_ref=previous.session_ref AND previous_revision.revision=previous.settings_revision " ++
+        "WHERE previous.session_ref=current.session_ref AND previous.admission_position<" ++ position ++
+        " AND previous.admission_position>=" ++ anchor ++ " ORDER BY previous.admission_position DESC LIMIT 1),0))";
+}
 
 /// Fills the view's read-ahead with each row a `historical_entries` read
 /// steps, as its entry. The first row that is not one stops the read, and
@@ -901,7 +1059,8 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_posi
     view.entries_end = 0;
     errdefer view.entries_end = 0;
     var batch: EntryBatch = .{ .view = view };
-    a.readEach(historical_entries, .{ .operation = view.binding.operation_id, .after = after_position }, HistoricalView.entry_batch, &batch);
+    const anchor = view.selected_coverage.?.anchor orelse 0;
+    a.readEach(historical_entries, .{ .operation = view.binding.operation_id, .after = after_position, .anchor = anchor }, HistoricalView.entry_batch, &batch);
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
     if (batch.failure) |err| return err;
     return if (view.entries_end == 0) null else &view.entries[0];
@@ -915,7 +1074,13 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
         4 => .operation,
         else => return error.CorruptStore,
     };
-    if (kind == .operation) return .{ .position = row.session_position.get(), .kind = .operation, .effort = row.effort };
+    if (kind == .operation) return .{
+        .position = row.session_position.get(),
+        .kind = .operation,
+        .effort = row.effort,
+        .tool_set_id = (row.tool_set_id orelse return error.CorruptStore).get(),
+        .declares = row.declares orelse return error.CorruptStore,
+    };
     var content: ?HistoricalContent = null;
     var requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null;
     if (kind == .provider_output) {

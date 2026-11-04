@@ -34,9 +34,12 @@ pub const ObservedHeaders = struct {
 
 /// The neutral items of a request, in the order the Host yields them:
 /// settings, instructions, the history items, history_end, the current
-/// Operation's boundary, compaction_trigger (compaction requests only),
-/// tools_start, one tool or web_search per enabled tool, text_format,
-/// request_end.
+/// Operation's boundary and its declaration, compaction_trigger
+/// (compaction requests only), tools_start, one tool or web_search per
+/// enabled tool, text_format, request_end. For a codec that declares tools
+/// in the history (`codecs.declaresTools`), each Operation boundary is
+/// followed by a declaration of the function tools it adds or rewords,
+/// and the tools stage holds only the provider-run tools.
 pub const ItemKind = enum(u8) {
     /// The frozen settings, the model included. Handle 0: that same model,
     /// which the codec writes by a content piece so the Host escapes it.
@@ -59,6 +62,15 @@ pub const ItemKind = enum(u8) {
     /// element at each earlier Operation's place, and once more after
     /// `history_end` for the Operation being prepared. No handles.
     operation,
+    /// After an Operation boundary, a declaration of the function tools
+    /// that Operation offers and the last earlier one since the span's
+    /// start did not: every one at the first. One `declared_tool` per
+    /// tool follows, then `declare_close`. No handles.
+    declare_open,
+    /// Handles 0-2: name, description, parameter schema (JSON text).
+    declared_tool,
+    /// Ends a declaration. No handles.
+    declare_close,
     /// After the last history item: the end of the append-only span.
     history_end,
     compaction_trigger,
@@ -75,7 +87,7 @@ pub const ItemKind = enum(u8) {
     /// The items the Host resumes the codec from its carry before.
     pub fn resumes(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_open, .tool_result, .operation, .history_end => true,
+            .message, .output_open, .tool_result, .operation, .declare_open, .history_end => true,
             else => false,
         };
     }
@@ -84,7 +96,7 @@ pub const ItemKind = enum(u8) {
     /// the codec's carry.
     pub fn endsElement(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_close, .tool_result, .operation => true,
+            .message, .output_close, .tool_result, .operation, .declare_close => true,
             else => false,
         };
     }
@@ -113,6 +125,9 @@ pub const Item = union(ItemKind) {
     tool_result,
     /// The Operation's frozen effort; null when its binding has none.
     operation: ?Effort,
+    declare_open,
+    declared_tool,
+    declare_close,
     history_end,
     compaction_trigger,
     tools_start,

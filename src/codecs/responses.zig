@@ -3,6 +3,10 @@
 //! costs the prompt cache. `openai-responses/2` keeps the Session's
 //! starting effort at the top and changes it inside the history with a
 //! `configuration_update` item at the Operation that changed it (D75-D77).
+//! It also declares function tools inside the history, with an
+//! `additional_tools` item at each Operation that adds or rewords one, so a
+//! tool change keeps the cache too; its top-level `tools` holds only the
+//! provider-run tools, which the provider ignores anywhere else.
 const std = @import("std");
 const codec_abi = @import("../codec_abi.zig");
 const json = @import("json.zig");
@@ -167,24 +171,34 @@ pub const Encoder = struct {
                 });
                 self.carry.effort = changed;
             },
+            .declare_open => {
+                if (self.carry.version != .two) return error.Declined;
+                self.separateInput(out);
+                self.tool_comma = false;
+                out.literal("{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[");
+            },
+            .declared_tool => {
+                if (self.carry.version != .two) return error.Declined;
+                self.functionTool(out);
+            },
+            .declare_close => {
+                if (self.carry.version != .two) return error.Declined;
+                self.tool_comma = false;
+                out.literal("]}");
+            },
             .history_end => {},
             .compaction_trigger => {
                 self.separateInput(out);
                 out.literal("{\"type\":\"compaction_trigger\"}");
             },
-            .tools_start => out.literal("],\"tools\":["),
+            .tools_start => {
+                self.tool_comma = false;
+                out.literal("],\"tools\":[");
+            },
+            // Version two declares function tools in the history instead.
             .tool => {
-                if (self.tool_comma) out.literal(",");
-                self.tool_comma = true;
-                out.literal("{\"type\":\"function\",\"name\":\"");
-                out.content(0, .json_string_v1);
-                out.literal("\",\"description\":\"");
-                out.content(1, .json_string_v1);
-                // Explicit: an omitted `strict` lets the provider make the
-                // schema strict, requiring every field; Rui checks calls.
-                out.literal("\",\"strict\":false,\"parameters\":");
-                out.content(2, .verbatim);
-                out.literal("}");
+                if (self.carry.version != .one) return error.Declined;
+                self.functionTool(out);
             },
             // OpenAI runs the search and may open live pages; its results
             // come back as web_search_call items.
@@ -201,6 +215,21 @@ pub const Encoder = struct {
             } else out.literal("],\"text\":{\"verbosity\":\"low\"}"),
             .request_end => out.literal("}"),
         }
+    }
+
+    /// One function tool from handles 0-2, after a comma unless first.
+    fn functionTool(self: *Encoder, out: *Pieces) void {
+        if (self.tool_comma) out.literal(",");
+        self.tool_comma = true;
+        out.literal("{\"type\":\"function\",\"name\":\"");
+        out.content(0, .json_string_v1);
+        out.literal("\",\"description\":\"");
+        out.content(1, .json_string_v1);
+        // Explicit: an omitted `strict` lets the provider make the schema
+        // strict, requiring every field; Rui checks calls.
+        out.literal("\",\"strict\":false,\"parameters\":");
+        out.content(2, .verbatim);
+        out.literal("}");
     }
 
     /// An input item after another takes a comma.
@@ -1921,6 +1950,9 @@ test "every item at its longest fits max_pieces and names only handles it has" {
         .{ .item = .compaction_trigger, .handles = &.{0} },
         .{ .item = .tools_start, .handles = &.{0} },
         .{ .item = .tool, .handles = &.{0b111} },
+        .{ .item = .declare_open, .handles = &.{0} },
+        .{ .item = .declared_tool, .handles = &.{0b111} },
+        .{ .item = .declare_close, .handles = &.{0} },
         .{ .item = .text_format, .handles = &.{ 0, 0b1 } },
         .{ .item = .request_end, .handles = &.{0} },
     }) |case| {
@@ -1933,9 +1965,15 @@ test "every item at its longest fits max_pieces and names only handles it has" {
             var encoder: Encoder = .{ .carry = .{ .input_comma = comma, .version = version, .effort = .low }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
             const header: ItemHeader = .{ .item = case.item, .handles = handles };
             var pieces: Pieces = .{ .len = 0 };
-            // A boundary back to no effort is the one item version two
-            // declines.
-            if (case.item == .operation and case.item.operation == null and version == .two) {
+            // Version two declines a boundary back to no effort and a
+            // tools-stage function tool; version one, a declaration.
+            const declined = switch (case.item) {
+                .operation => |value| value == null and version == .two,
+                .tool => version == .two,
+                .declare_open, .declared_tool, .declare_close => version == .one,
+                else => false,
+            };
+            if (declined) {
                 try std.testing.expectError(error.Declined, encoder.encodeItem(&header, &pieces));
                 continue;
             }
@@ -2276,4 +2314,25 @@ test "a web search call reads as its action, its strings and its outcome" {
             if (expected) |text| try std.testing.expectEqualStrings(text, slice(case.item, range.?)) else try std.testing.expect(range == null);
         }
     }
+}
+
+test "version two declares function tools in the history and keeps only provider-run tools at the top" {
+    var pieces: Pieces = .{ .len = 0 };
+    var two: Encoder = .{ .carry = .{ .input_comma = true, .version = .two } };
+    try two.encodeItem(&.{ .item = .declare_open, .handles = 0 }, &pieces);
+    try std.testing.expectEqualStrings(",", pieces.items[0].literal);
+    try std.testing.expectEqualStrings("{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[", pieces.items[1].literal);
+    try two.encodeItem(&.{ .item = .declared_tool, .handles = 0b111 }, &pieces);
+    try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"", pieces.items[0].literal);
+    try two.encodeItem(&.{ .item = .declared_tool, .handles = 0b111 }, &pieces);
+    try std.testing.expectEqualStrings(",", pieces.items[0].literal);
+    try two.encodeItem(&.{ .item = .declare_close, .handles = 0 }, &pieces);
+    try std.testing.expectEqualStrings("]}", pieces.items[0].literal);
+    // The top-level tools array starts fresh after a declaration.
+    try two.encodeItem(&.{ .item = .tools_start, .handles = 0 }, &pieces);
+    try two.encodeItem(&.{ .item = .web_search, .handles = 0 }, &pieces);
+    try std.testing.expectEqualStrings("{\"type\":\"web_search\",\"external_web_access\":true}", pieces.items[0].literal);
+    try std.testing.expectError(error.Declined, two.encodeItem(&.{ .item = .tool, .handles = 0b111 }, &pieces));
+    var one: Encoder = .{ .carry = .{ .version = .one } };
+    try std.testing.expectError(error.Declined, one.encodeItem(&.{ .item = .declare_open, .handles = 0 }, &pieces));
 }
