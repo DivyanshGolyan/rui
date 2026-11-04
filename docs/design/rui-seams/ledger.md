@@ -278,6 +278,8 @@ D191. (Divyansh 07:02Z idea, "proceed" 07:03Z) When the compaction request itsel
 
 D192. (Divyansh 07:05Z, card) Replaces D29's "only the model is fixed" and D113's update exclusion of `model`. `session.update({model})` may change a running Session's model within the same provider. The next model request rebuilds from the visible conversation (messages, calls, tool results), dropping the old model's hidden reasoning and compacted items. It costs one cache miss, which a new model cannot avoid. The Session ID and its attached children carry on. The change is a revision with its `session_changed` row.
 
+D193. (Divyansh 07:07Z, card) Rui gets a Host-wide pause. `rui.pause()` lets running Turns finish and holds every new Turn (from callers, `start_agent`, agent messages and child deliveries); Messages are still accepted and queue. `rui.resume()` starts them in the usual order. The scheduler treats a pause as capacity zero for new Turns. Host status shows it.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.

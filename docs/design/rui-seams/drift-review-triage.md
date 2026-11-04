@@ -22,10 +22,11 @@ Each finding gets one outcome: my technical call (a new D line in ledger.md), a 
 | 34 | `GET /v1/models` on Marlin unprobed | D189. Drift probes it before the port. If Marlin does not serve it, D80 is revisited then, not before. |
 | 30 | #840 numbers | D190. Measured: 249.3 MiB idle, 282.1 (1 agent), 285.7 (8), 298.0 (9), 312.8 three minutes after release (Private_Dirty median). |
 
-## Questions for Divyansh, one at a time
+## Divyansh's calls
 
-1. Item 2: what happens to a map's workers when the map root's context is full, or when Drift moves a map to a new model.
-2. Item 6: whether Rui gets a "hold all new Turns" switch for Drift's operators.
+- Item 2, context full: D191, drop the oldest messages until compaction fits; the Session and its workers carry on.
+- Item 2, model changes: D192, a running Session may switch model, rebuilt from the visible conversation.
+- Item 6, pause: D193, a Host-wide pause and resume.
 
 ## Facts taken as given (no Rui change)
 
@@ -37,4 +38,3 @@ Each finding gets one outcome: my technical call (a new D line in ledger.md), a 
 ## Build plan impact
 
 - M3b gains D177, D182, D184. F2 gains D179 and D180. A2 gains D181. A3a gains D183 and D185. A4 gains D186. K1 gains D178.
-- Question 1's answer may change K2 (stop cascade).

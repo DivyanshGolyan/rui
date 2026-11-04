@@ -7,7 +7,7 @@ Every unit cites the ledger decisions it builds; a builder reads those, not this
 ## The short version
 
 - The design holds together. Mapping it onto the code found four corrections and no contradictions; they are D173 to D176 below.
-- The work is 32 PRs in four new lanes, beside the DB thread's own series. Eight of them depend on nothing and can start today.
+- The work is 35 PRs in four new lanes, beside the DB thread's own series. Eight of them depend on nothing and can start today.
 - The real limit is not the amount of work. It is a handful of large shared files (`protocol.zig`, `configuration.zig`, `schema.zig`, `model_settlement.zig`, `command.zig`). PRs that edit the same file must land one after another (rule A), so the plan gives each shared file one owning lane and keeps every other PR in new files.
 - Critical path for the whole design: tool records in memory, then tool records stored, then the core-tool runner, then `start_agent`, then the stop cascade, then child answers delivered. Six PRs.
 - Critical path for Drift is the DB thread's series: the open PRs 5e-2b to 6b, then PR 7 Store thread, PR 8 MySQL, PR 9 Host wiring. Drift runs only on MySQL (Divyansh, 06:46Z). Everything else Drift needs (tool records, MCP tools, launch frame, spec, presets, TS client) is two chains of four PRs in other lanes and must land before PR 9 so it never becomes the wait.
@@ -40,8 +40,8 @@ A lane owns its shared files: another lane's PR that must touch one of them land
 
 | Lane | Owns | Units |
 | --- | --- | --- |
-| T, Tools and codec | `tools.zig`, `model_adapter.zig`, `codecs/`, `codec_abi.zig`, `model_settlement.zig`, `historical.zig`, `model_capability.zig` | T1a, T1b, T1c, T2, T3, T4, C1, C2, C3 |
-| K, Core, feed and agents | `protocol.zig`, `configuration.zig`, `command.zig`, `reads.zig`, `session_view.zig`, `turn.zig` | F1, F2, F3, S1, K0, K1, K2, K3, K4, K5 |
+| T, Tools and codec | `tools.zig`, `model_adapter.zig`, `codecs/`, `codec_abi.zig`, `model_settlement.zig`, `historical.zig`, `model_capability.zig` | T1a, T1b, T1c, T2, T3, T4, T5, C1, C2, C3 |
+| K, Core, feed and agents | `protocol.zig`, `configuration.zig`, `command.zig`, `reads.zig`, `session_view.zig`, `turn.zig` | F1, F2, F3, S1, K0, K1, K2, K3, K4, K5, K6, K7 |
 | M, MCP | new `src/http1/`, new `src/mcp/` | M1, M2, M3a, M3b, M4 |
 | L, Launch and clients | `cli.zig` Host start, `host_launch.c`, new `launch_frame.zig`, new OpenAPI emitter, new `clients/ts/`, release scripts | P0, A1, A2, S2, A3a, A3b, A3c, A4 |
 | D, Store (existing DB thread) | `src/store/` engine files, `Store.zig`, `access.zig`, `rsql.zig` | 5e-2b, 5e-3, 6a, 6b, 7, 8, 9 |
@@ -77,6 +77,7 @@ Each line: id, size, what it builds, ledger refs, depends on.
 - **T2** (M) Codec `openai-responses/2` for effort. Top-level effort fixed to the Session's starting effort; a `configuration_update` item at each Operation where frozen effort changed; an "Operation boundary" element in the history view; a refused change retried without the item and recorded as a revision note. Extends the cache proof tests. Refs D29, D75, D76, D77, D137, D165, D174. Depends on T1a (same files). Merge gated by P1.
 - **T3** (M) Tool changes without a cache miss. Tool added, removed or reworded becomes a revision (core-made key, D174); the codec emits `additional_tools` at that Operation; a removed tool keeps its description and a call to it returns "this tool was removed". Format bump for core-made keys. Refs D53, D54, D55, D138, A-D76. Depends on T1b, T2. Merge gated by P1.
 - **T4** (M) `find_tools` and `loadedTools`. A core tool that matches words against names and descriptions and loads matches through T3's path; `loadedTools` defaults to all of `tools`. Refs D52, D160. Depends on T3, K0.
+- **T5** (M) Model switch. `update` may change the model within the provider; the next request rebuilds from the visible conversation. Refs D192. Depends on T2, S1.
 - **C1** (M) Shipped catalog. A build step turns a models.dev snapshot into a compact table of effort levels and context window per model id; `model_capability.zig`'s hand-copied Codex rows go away while its functions keep their callers. Refs D78, D79, A-D79, D151, D154. Depends on nothing.
 - **C2** (M) Catalog refresh. Fetch `models.dev/api.json` at Host start and on each model-list request with ETag (checked: served over HTTP/2, so the existing h2 client on the Reactor does it), save the slim result in the Store, fall back to saved then shipped. Format bump. Refs D79, D80, D153. Depends on C1.
 - **C3** (S) The model picker groups the same id across providers. Refs D81. Depends on C1.
@@ -92,6 +93,8 @@ Each line: id, size, what it builds, ledger refs, depends on.
 - **K3** (M) Child endings delivered. Every child ending except one caused by the parent's stop is admitted to the parent as a message and wakes it. Refs D39, D122, D139, D161. Depends on K2 (same file), F1.
 - **K4** (S) Approvals up the tree. A child's `approval_requested` appears in every ancestor's feed, and `decide` on any ancestor routes to the child. Refs D135. Depends on K1, F2.
 - **K5** (M) `read_transcript` without search. Outline by default, `kinds`, `before`/`limit`, `full` with chunking, over any Session. Refs D42, D163. Depends on K0, F1.
+- **K6** (S) Compaction makes room. When the compaction request would not fit, drop the oldest messages from it until it fits, and record the count on the feed. Refs D191. Depends on F1.
+- **K7** (S) Host pause. A control that holds every new Turn until resume, shown in Host status. Refs D193. Depends on nothing.
 - **F3** (M) Word search, shared by `/v1/conversation-page` and `read_transcript`'s `query`. Refs D13, D42. Depends on P2, K5.
 
 ### Lane M: MCP
@@ -121,7 +124,7 @@ Each line: id, size, what it builds, ledger refs, depends on.
 
 ### Start today (no dependencies)
 
-T1a, C1 (lane T); F1 (lane K); M1, M2 (lane M); P0, A1, A2 (lane L); plus P1 for Divyansh whenever convenient.
+T1a, C1 (lane T); F1, K7 (lane K); M1, M2 (lane M); P0, A1, A2 (lane L); plus P1 for Divyansh whenever convenient.
 Within a lane, builders are pipelined: PR N+1's builder starts when PR N's builder hands back (orchestration rule 1).
 
 ### Dependency graph
@@ -166,3 +169,7 @@ Four build threads plus the existing DB thread:
 The DB thread gets D175 (PR 9 extends the launch frame instead of creating it).
 
 Each thread writes a brief per PR from the ledger decisions the unit cites, follows rui-pr-workflow and rui-orchestration-rules, and checks this plan's lane table before touching a shared file.
+
+## Drift's review
+
+Folded in on 2026-11-04: D177 to D193 (drift-review-triage.md). Unit changes: M3b gains D177, D182, D184; F2 gains D179, D180; A2 gains D181; A3a gains D183, D185; A3b gains `pause`/`resume`; A4 gains D186; K1 gains D178; new units T5, K6, K7.
