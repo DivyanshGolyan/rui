@@ -2944,7 +2944,8 @@ A person's Messages alone are one seek in the index of Messages without a Sessio
 Null end captures the current committed end; zero freezes empty history.
 Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
 Only complete Tool Result groups share positions, using one-based call ordinals; an `approval_requested` row shares its call's position at ordinal 1; other rows use zero.
-An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action. That settlement stores the call's position on the Action as `approval_position` (Store format 52; the migration backfills it from the revision that judged each Action), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
+An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
+That settlement stores the call's position on the Action as `approval_position` (Store format 52; the migration backfills it from the revision that judged each Action), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
 A nonnull ordinal identifies an actual row in this Session and end.
 Continue from the last returned row with that ordinal and the same end/direction.
 Null ordinal denotes a sequence boundary, excluding all rows at position; position zero starts either traversal.
