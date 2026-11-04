@@ -30,7 +30,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x65f259f9c7614afb },
-    .{ .schema_version = 52, .digest = 0x3af6ba701ed46098 },
+    .{ .schema_version = 52, .digest = 0x161b494630068daa },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -695,6 +695,9 @@ pub const indexes = [_]Index{
     .{ .name = "model_operation_retry_exhausted", .table = "model_operation", .columns = &.{"operation_id"}, .where = retry_exhausted_sql },
     .{ .name = "model_operation_session_history", .table = "model_operation", .columns = &.{ "session_ref", "operation_id" } },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
+    // Every Operation by admission, whatever its outcome: request history
+    // places each earlier Operation's effort boundary (codec /2).
+    .{ .name = "model_operation_admission", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "model_operation_context_history", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = oneOf("resolution_code", &accepted_resolutions) },
     .{ .name = "model_operation_compaction_bases", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = "purpose=1 AND " ++ resolutionIs("resolution_code", .compacted) },
     .{ .name = "conversation_entry_history", .table = "conversation_entry", .columns = &.{ "session_ref", "session_position" } },

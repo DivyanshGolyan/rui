@@ -2352,6 +2352,7 @@ test "Store entry points lock and fence only through canonical access" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("rsql.zig"),
         @embedFile("schema.zig"),
@@ -7852,6 +7853,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
