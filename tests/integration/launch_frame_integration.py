@@ -57,15 +57,21 @@ def post(path, route, request, extra=b""):
     return json.loads(payload)
 
 
+def output(process):
+    """What the Host wrote, without communicate(): the test may have closed stdin already."""
+    return process.stdout.read(), process.stderr.read()
+
+
 def wait_for_socket(path, process):
     def ready():
-        assert process.poll() is None, process.communicate()
+        assert process.poll() is None, "the Host exited before its socket appeared"
         return path.exists()
     host_process.wait_for(ready, "the socket in runtimeDir", timeout=20)
 
 
 def refusal(process):
-    out, err = process.communicate(timeout=20)
+    out, err = output(process)
+    process.wait(timeout=20)
     assert process.returncode != 0, (out, err)
     lines = out.decode().splitlines()
     assert len(lines) == 1, (out, err)
@@ -122,7 +128,7 @@ def main():
     # Closing stdin stops the Host; its socket goes with it.
     started = time.monotonic()
     host.stdin.close()
-    assert host.wait(timeout=30) == 0, host.communicate()
+    assert host.wait(timeout=30) == 0, output(host)
     elapsed = time.monotonic() - started
     assert elapsed < 10, elapsed
     assert not sock.exists()
@@ -131,7 +137,7 @@ def main():
     host = launch(frame(good))
     wait_for_socket(sock, host)
     host_stop(sock, str(store), host_info(sock, str(store))["instance"])
-    assert host.wait(timeout=30) == 0, host.communicate()
+    assert host.wait(timeout=30) == 0, output(host)
     assert not sock.exists()
 
     for raw, message in [
