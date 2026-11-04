@@ -167,10 +167,12 @@ export class Session {
 	}
 
 	/**
-	 * Cuts off the current model call while the Session keeps going. Resolves
-	 * without sending anything when no model call is current (D167, D171).
+	 * Cuts off the model call that is current now while the Session keeps going.
+	 * It takes no key: each call names the work it sees at that moment, so a
+	 * repeat is a new cut, not a replay. Resolves without effect when no model
+	 * call is current, or when the call ended before the cut arrived (D167, D171).
 	 */
-	async interrupt(options?: WriteOptions): Promise<void> {
+	async interrupt(): Promise<void> {
 		const page = parse<Schemas["ActivityPageReply"]>(
 			await this.#link.exchange(
 				"/v1/activity-page",
@@ -180,14 +182,14 @@ export class Session {
 		);
 		const { turn, operation } = page.work;
 		if (turn === null || operation === null || !modelCallCurrent(page.work.state.kind)) return;
-		const idempotencyKey = key(options);
+		const idempotencyKey = randomUUID();
 		const body = (store: string) =>
 			`{"version":"8","kind":"model_interruption","store":${JSON.stringify(store)},"key":${JSON.stringify(idempotencyKey)},"target":{"session":${JSON.stringify(this.id)},"turn":${JSON.stringify(turn)},"operation":${JSON.stringify(operation)}}}`;
 		try {
 			accepted(parse<Schemas["ModelInterruptionReply"]>(await this.#link.exchange("/v1/control/model-interruption", body)).answer);
 		} catch (error) {
-			// The call ended before the cut reached it, or this key already cut an earlier call: nothing is left to do.
-			const gone = error instanceof RuiRequestError && (error.code === "operation_resolved" || error.code === "target_mismatch" || error.code === "idempotency_key_conflict");
+			// The call ended before the cut reached it: nothing is left to cut.
+			const gone = error instanceof RuiRequestError && (error.code === "operation_resolved" || error.code === "target_mismatch");
 			if (!gone) throw error;
 		}
 	}
@@ -239,7 +241,7 @@ export class Sessions {
 			for (const row of page.sessions) {
 				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: null });
 			}
-			if (page.next === null || !("after" in page.next)) return summaries;
+			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;
 			ceiling = page.next.ceiling;
 		}

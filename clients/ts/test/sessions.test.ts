@@ -59,6 +59,17 @@ test("create, list, send, update, interrupt and stop a Session", { skip }, async
 	}
 });
 
+test("list returns newest first across page boundaries", { skip }, async () => {
+	const rui = await connect();
+	try {
+		const ids = [];
+		for (let index = 0; index < 11; index++) ids.push((await rui.sessions.create(spec, { idempotencyKey: `chat:order-${index}` })).id);
+		assert.deepEqual((await rui.sessions.list()).map((each) => each.id), ids.reverse());
+	} finally {
+		await rui.close();
+	}
+});
+
 test("models lists each provider's models", { skip }, async () => {
 	const rui = await connect();
 	try {
