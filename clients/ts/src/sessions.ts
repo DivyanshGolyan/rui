@@ -251,7 +251,10 @@ export class Sessions {
 /** The models each provider offers (D128). */
 export async function models(link: Link): Promise<ModelSummary[]> {
 	const reply = parse<Schemas["ModelListReply"]>(
-		await link.exchange("/v1/model-list", (store) => `{"version":"8","kind":"model_list","store":${JSON.stringify(store)}}`),
+		await link.exchange("/v1/model-list", (store) => `{"version":"8","kind":"model_list","store":${JSON.stringify(store)}}`, undefined, {
+			// A live provider list can take longer than the default response wait.
+			responseMs: 30_000,
+		}),
 	);
 	return reply.providers.flatMap((entry) => entry.models.map((model) => ({ provider: entry.provider, id: model.id, known: model.known })));
 }
