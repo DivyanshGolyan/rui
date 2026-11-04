@@ -12,13 +12,13 @@
 //! `deinit`; an outcome's slices point into the answer buffer.
 const std = @import("std");
 const Request = @import("Request.zig");
-const request = @import("request.zig");
+const post = @import("post.zig");
 const reply = @import("reply.zig");
 const arguments = @import("arguments.zig");
 
 const Call = @This();
 
-pub const Error = Request.Error || request.Error || error{
+pub const Error = Request.Error || post.Error || error{
     /// The filtered request outgrew its buffer.
     NoRoom,
 };
@@ -38,14 +38,14 @@ current: Request,
 description: ?[]const u8,
 
 pub const Input = struct {
-    server: request.Server,
-    client: request.Client,
+    server: post.Server,
+    client: post.Client,
     /// The tool's name, decoded, and its saved schema.
     name: []const u8,
     input_schema: []const u8,
     /// The model's arguments, a checked JSON object.
     arguments: []const u8,
-    caller: request.Caller,
+    caller: post.Caller,
     id: u64,
     /// Room for the filtered arguments, then for the request.
     scratch: []u8,
@@ -57,7 +57,7 @@ pub fn init(self: *Call, input: Input) Error!void {
     var filtered: std.Io.Writer = .fixed(input.scratch);
     const split = arguments.writeForServer(&filtered, input.input_schema, input.arguments) catch return error.NoRoom;
     var writer: std.Io.Writer = .fixed(input.request);
-    request.writeCall(&writer, input.server, input.client, input.id, .{
+    post.writeCall(&writer, input.server, input.client, input.id, .{
         .name = input.name,
         .input_schema = input.input_schema,
         .arguments = filtered.buffered(),
@@ -103,7 +103,7 @@ pub fn advance(self: *Call) Error!Outcome {
 const Script = @import("test_server.zig");
 const http1 = @import("../http1/request.zig");
 
-const caller: request.Caller = .{ .session_id = "s1", .parent_session_id = null, .root_session_id = "s1", .turn_id = "t1" };
+const caller: post.Caller = .{ .session_id = "s1", .parent_session_id = null, .root_session_id = "s1", .turn_id = "t1" };
 const saved_schema = "{\"properties\":{\"q\":{},\"rui_call_description\":{}}}";
 
 /// Sends a call to `script` and drives it to its outcome.
