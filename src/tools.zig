@@ -33,20 +33,37 @@ pub const max_name_bytes = protocol.max_tool_name_bytes;
 /// The most tools one set offers.
 pub const max_tools = protocol.max_tools;
 
-/// The identity of an ordered set of records, which the Store saves once:
-/// each member's name, owner and the content digests of its description
-/// and input schema, in order.
-pub fn setDigest(records: []const *const Record) [32]u8 {
+/// A record's identity: its name, owner and the content digests of its
+/// description and input schema.
+pub fn recordDigest(member: *const Record) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hashField(&hash, "rui/tool-set/v1");
-    for (records) |member| {
-        hashField(&hash, member.name);
-        hashField(&hash, @tagName(member.owner));
-        hash.update(&protocol.contentDigest(member.description));
-        hash.update(&protocol.contentDigest(member.input_schema));
-    }
+    hashField(&hash, "rui/tool-record/v1");
+    hashField(&hash, member.name);
+    hashField(&hash, @tagName(member.owner));
+    hash.update(&protocol.contentDigest(member.description));
+    hash.update(&protocol.contentDigest(member.input_schema));
     return hash.finalResult();
 }
+
+/// The identity of an ordered set of records, which the Store saves once:
+/// its members' `recordDigest`s, in order.
+pub const SetDigest = struct {
+    hash: std.crypto.hash.sha2.Sha256,
+
+    pub fn init() SetDigest {
+        var out: SetDigest = .{ .hash = .init(.{}) };
+        hashField(&out.hash, "rui/tool-set/v2");
+        return out;
+    }
+
+    pub fn add(self: *SetDigest, member: *const [32]u8) void {
+        self.hash.update(member);
+    }
+
+    pub fn final(self: *SetDigest) [32]u8 {
+        return self.hash.finalResult();
+    }
+};
 
 fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     var length: [8]u8 = undefined;
@@ -54,6 +71,47 @@ fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     hash.update(&length);
     hash.update(value);
 }
+
+/// The tools a Host offers, sorted by name with no name twice: what a
+/// Session's tool names resolve against. The Store saves it as one set
+/// when it opens, and a Session's set takes its members from that one.
+/// Today the built-ins; MCP tools join it at Host start (M3a).
+pub const Catalog = struct {
+    records: []const Record,
+    /// Each record's `recordDigest`, in the same order.
+    digests: []const [32]u8,
+
+    /// The index of the record named `name`.
+    pub fn find(self: *const Catalog, name: []const u8) ?usize {
+        var low: usize = 0;
+        var high = self.records.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            switch (std.mem.order(u8, self.records[middle].name, name)) {
+                .eq => return middle,
+                .lt => low = middle + 1,
+                .gt => high = middle,
+            }
+        }
+        return null;
+    }
+
+    /// Whether the records are sorted by name, each named once, and each
+    /// digest is its record's.
+    pub fn valid(self: *const Catalog) bool {
+        if (self.records.len != self.digests.len or self.records.len > max_catalog_records) return false;
+        for (self.records, self.digests, 0..) |*each, digest, index| {
+            if (!protocol.validToolName(each.name)) return false;
+            if (index != 0 and std.mem.order(u8, self.records[index - 1].name, each.name) != .lt) return false;
+            if (!std.mem.eql(u8, &digest, &recordDigest(each))) return false;
+        }
+        return true;
+    }
+};
+
+/// The most records a Host's catalog holds: the Store saves it as a tool
+/// set, which holds at most `max_tools`.
+pub const max_catalog_records = max_tools;
 
 pub const bash_record: Record = .{
     .name = "bash",
@@ -78,6 +136,29 @@ pub fn record(tool: Tool) *const Record {
     };
 }
 
+/// The built-ins, as the catalog of a Host with no other tools.
+pub const built_in: Catalog = .{ .records = &built_in_records, .digests = &built_in_digests };
+
+const built_in_records = blk: {
+    var out: [std.enums.values(Tool).len]Record = undefined;
+    for (std.enums.values(Tool), &out) |tool, *each| each.* = record(tool).*;
+    break :blk out;
+};
+
+const built_in_digests = blk: {
+    @setEvalBranchQuota(1_000_000);
+    var out: [built_in_records.len][32]u8 = undefined;
+    for (&built_in_records, &out) |*each, *digest| digest.* = recordDigest(each);
+    break :blk out;
+};
+
+test "the built-in catalog is valid and finds each built-in by name" {
+    try std.testing.expect(built_in.valid());
+    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in.find(@tagName(tool)));
+    try std.testing.expectEqual(@as(?usize, null), built_in.find("bas"));
+    try std.testing.expectEqual(@as(?usize, null), built_in.find("edit"));
+}
+
 comptime {
     for (std.enums.values(Tool)) |tool| {
         const r = record(tool);
@@ -85,27 +166,13 @@ comptime {
     }
 }
 
-/// The most content rows a new tool set of built-ins adds to a
-/// transaction: its records' distinct nonempty texts. Empty text is the
-/// configuration's empty default, already counted by the Store.
-pub const max_new_texts = blk: {
-    var texts: []const []const u8 = &.{};
-    for (std.enums.values(Tool)) |tool| {
-        const r = record(tool);
-        for ([_][]const u8{ r.description, r.input_schema }) |text| {
-            if (text.len == 0) continue;
-            for (texts) |seen| {
-                if (std.mem.eql(u8, seen, text)) break;
-            } else texts = texts ++ .{text};
-        }
-    }
-    break :blk texts.len;
-};
-
 /// The records a request offers, in a fixed order.
 pub const Offered = struct {
     records: [std.enums.values(Tool).len]*const Record = undefined,
     len: usize = 0,
+    /// The tools the Session offered at an earlier revision and this
+    /// request does not: a call to one gets "This tool was removed." (D54).
+    withdrawn: ToolSet = .empty,
 
     pub fn of(set: ToolSet) Offered {
         var out: Offered = .{};
@@ -125,6 +192,13 @@ pub const Offered = struct {
 
     pub fn slice(self: *const Offered) []const *const Record {
         return self.records[0..self.len];
+    }
+
+    /// `set`, with the tools of `ever` it lacks withdrawn.
+    pub fn since(set: ToolSet, ever: ToolSet) Offered {
+        var out = of(set);
+        out.withdrawn = ever.differenceWith(set);
+        return out;
     }
 };
 
@@ -362,6 +436,8 @@ pub const CallFacts = struct {
     /// A call named bash's checked arguments, offered or not; null for any
     /// other name.
     bash: ?BashCheck,
+    /// Whether an unknown call names a tool the Session withdrew.
+    removed: bool = false,
 
     /// The arguments of a bash call the parser accepted.
     pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
@@ -407,7 +483,7 @@ pub const BashProblem = enum {
 /// Inspect certified decoded sources against the records the request
 /// offered (D49). The caller retains the sources' storage and calls this
 /// under the transaction that publishes the proposal and Action.
-pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, offered: []const *const Record) !CallFacts {
+pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, offered: *const Offered) !CallFacts {
     var name: [max_name_bytes]u8 = undefined;
     var length: usize = 0;
     if (name_length <= name.len) {
@@ -415,10 +491,11 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
-    const tool = if (complete) offeredFunction(offered, name[0..length]) else null;
+    const tool = if (complete) offeredFunction(offered.slice(), name[0..length]) else null;
+    const removed = tool == null and complete and withdrawnFunction(offered.withdrawn, name[0..length]);
     // A Bash call's arguments are read whether or not it was offered, so a
     // rejected call keeps its description for presentation.
-    return .{ .tool = tool, .bash = if (named) try checkBashArguments(arguments) else null };
+    return .{ .tool = tool, .bash = if (named) try checkBashArguments(arguments) else null, .removed = removed };
 }
 
 /// The offered record a function call named `name` resolves to. A
@@ -431,6 +508,18 @@ fn offeredFunction(offered: []const *const Record, name: []const u8) ?*const Rec
     return null;
 }
 
+/// Whether `name` is a function tool in `withdrawn`.
+fn withdrawnFunction(withdrawn: ToolSet, name: []const u8) bool {
+    var tools = withdrawn.iterator();
+    while (tools.next()) |tool| {
+        const candidate = record(tool);
+        if (candidate.owner == .rui and std.mem.eql(u8, candidate.name, name)) return true;
+    }
+    return false;
+}
+
+pub const removed_tool_result = "This tool was removed.";
+
 /// A rejected call's result text, from `classifyCall`'s code for `facts`.
 pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
@@ -438,6 +527,7 @@ pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts
             inline else => |value| "Invalid arguments for tool 'bash': " ++ comptime value.text() ++ ".",
         },
         .unknown_tool => {
+            if (facts.removed) return removed_tool_result;
             var prefix: [32]u8 = undefined;
             var prefix_length: usize = 0;
             while (prefix_length < prefix.len) {
@@ -471,7 +561,7 @@ test "a call is checked against the offered records before its arguments" {
             return self.bytes[self.index];
         }
     };
-    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection, described: bool = false };
+    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection, described: bool = false, ever: ToolSet = .empty, removed: bool = false };
     const valid = "{\"cmd\":\"true\",\"description\":\"Run true\"}";
     const bash_only = ToolSet.initOne(.bash);
     for ([_]Case{
@@ -485,13 +575,18 @@ test "a call is checked against the offered records before its arguments" {
         .{ .name = "bas", .arguments = valid, .offered = .full, .expected = .unknown_tool },
         .{ .name = "bashx", .arguments = valid, .offered = .full, .expected = .unknown_tool },
         .{ .name = &(@as([max_name_bytes + 1]u8, @splat('b'))), .arguments = valid, .offered = .full, .expected = .unknown_tool },
+        // A tool the Session offered before and withdrew is removed, not
+        // unknown; a provider-run one never runs as a call either way.
+        .{ .name = "bash", .arguments = valid, .offered = .empty, .ever = .full, .expected = .unknown_tool, .described = true, .removed = true },
+        .{ .name = "web_search", .arguments = "{}", .offered = .empty, .ever = .full, .expected = .unknown_tool },
     }) |case| {
         var name: Source = .{ .bytes = case.name };
         var arguments: TestSource = .{ .bytes = case.arguments };
-        const offered = Offered.of(case.offered);
-        const facts = try inspectCall(&name, case.name.len, &arguments, offered.slice());
+        const offered = Offered.since(case.offered, case.ever);
+        const facts = try inspectCall(&name, case.name.len, &arguments, &offered);
         try std.testing.expectEqual(case.expected, classifyCall(&facts));
         try std.testing.expectEqual(case.described, facts.bashArguments() != null);
+        try std.testing.expectEqual(case.removed, facts.removed);
     }
 }
 

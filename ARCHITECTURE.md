@@ -861,6 +861,15 @@ At an Operation whose effort differs from the one in force, the codec writes `{"
 A compaction base covers the Operation elements before its anchor with the output it covers, so effort there is the top's again.
 Every Operation is placed, whatever its outcome, because its own request carried its boundary; effort is null for a whole Session or for none of it, so a boundary never returns to no effort.
 
+#### Tools inside the history
+
+Under `openai-responses/2` function tools are declared inside the history too, so adding, rewording or removing one keeps the provider cache (D53-D55, D75).
+After each Operation element the history view declares, with `{"type":"additional_tools","role":"developer","tools":[…]}`, the function tools that Operation's frozen set holds and the set of the last earlier Operation since the span's start lacks; a tool record is saved once, so a reworded tool is a new record and is declared again.
+The first Operation after the span's start, or after a compaction base's anchor, declares its whole set, since the base covers the earlier declarations.
+A removed tool stays declared in the history, and a call to it gets the tool result `This tool was removed.`: settlement offers the Operation's own set and withdraws every tool an earlier revision of the Session offered.
+The top-level `tools` holds only the provider-run tools (web search), which OpenAI ignores inside the history ([live check](research/responses-tools-probe/README.md)); turning one on or off changes the top and costs that one request the cache.
+Under `openai-responses/1` the top-level `tools` holds the Operation's whole set, as before.
+
 ### Codex wire binding
 
 Every request sets `text.verbosity` to `low` and `parallel_tool_calls` to `true`, for every model.

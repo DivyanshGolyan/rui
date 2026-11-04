@@ -459,7 +459,7 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             text = f"h2-{capacity}-{wave}-{index}"
             stream, body = requests[text]
             expected.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
-            assert json.loads(body)["input"] == expected, f"complete request history for {text}"
+            assert [item for item in json.loads(body)["input"] if item.get("type") != "additional_tools"] == expected, f"complete request history for {text}"
             # Reconstruct fixture emissions, never expectations from Host input.
             _, reasoning, message = dispatch.sse_answer(
                 f"response-{stream}", f"reasoning-{stream}", f"message-{stream}", answers[text].decode(),

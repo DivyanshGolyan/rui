@@ -23,7 +23,6 @@ const change_ring = @import("../change_ring.zig");
 const store_core = @import("Store.zig");
 const Store = store_core.Store;
 const rsql = @import("rsql.zig");
-const tool_catalog = @import("../tools.zig");
 const engine = @import("engine.zig");
 const sqlite = @import("sqlite.zig");
 
@@ -208,9 +207,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         inserted_count: u8 = 0,
 
         /// The most content rows one Access inserts: a creating Message's
-        /// instructions, output schema, empty default and text, and a new
-        /// tool set's texts. MCP tools (M3a) must widen this.
-        const max_inserted = 4 + tool_catalog.max_new_texts;
+        /// instructions, output schema, empty default and text, or the two
+        /// texts of each record one catalog transaction saves.
+        const max_inserted = 4;
+        comptime {
+            std.debug.assert(2 * @import("domain/tool_set.zig").records_per_transaction <= max_inserted);
+        }
         /// How many of its latest content ids an Access can open a sink
         /// on. Every caller opens one right after taking its id.
         const max_taken = max_inserted;

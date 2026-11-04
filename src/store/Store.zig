@@ -11,6 +11,8 @@ const action_domain = @import("domain/action.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const content_domain = @import("domain/content.zig");
+const tool_set_domain = @import("domain/tool_set.zig");
+const tool_catalog = @import("../tools.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
@@ -186,6 +188,46 @@ pub const Store = struct {
         try self.engine.sqlite.prepareRollback();
         try loadIdentities(self, .full);
         self.queue().opened();
+        try self.saveCatalog(options.catalog);
+    }
+
+    /// The tools the Host offers, and the id of their saved set.
+    pub fn catalog(self: *Store) *const HostTools {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        return &owned.tools;
+    }
+
+    /// Saves `offered` as the catalog set, if no set holds it yet: its
+    /// records a few to a transaction, then the set in one more. Once per
+    /// open, before any request.
+    pub fn saveCatalog(self: *Store, offered: *const tool_catalog.Catalog) !void {
+        if (!offered.valid()) return error.InvalidToolCatalog;
+        for (std.enums.values(tool_catalog.Tool)) |tool| {
+            const index = offered.find(@tagName(tool)) orelse return error.InvalidToolCatalog;
+            if (!std.mem.eql(u8, &offered.digests[index], &tool_catalog.built_in.digests[@backingInt(tool)])) return error.InvalidToolCatalog;
+        }
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        owned.tools = .{ .catalog = offered, .set_id = 0 };
+        const digest = tool_set_domain.catalogDigest(offered);
+        if (try self.queue().write(saveCatalogHeld, .{ self, offered, &digest, @as(?usize, null) })) |set_id| {
+            owned.tools.set_id = set_id;
+            return;
+        }
+        var start: usize = 0;
+        while (start < offered.records.len) : (start += tool_set_domain.records_per_transaction)
+            _ = try self.queue().write(saveCatalogHeld, .{ self, offered, &digest, start });
+        owned.tools.set_id = (try self.queue().write(saveCatalogHeld, .{ self, offered, &digest, offered.records.len })).?;
+    }
+
+    /// One transaction of `saveCatalog`: with `start` null, the saved set's
+    /// id, or null when none holds `offered`; below the record count, the
+    /// records from `start`; at it, the set, whose id it returns.
+    fn saveCatalogHeld(self: *Store, offered: *const tool_catalog.Catalog, digest: *const [32]u8, start: ?usize) !?u64 {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, saveCatalogStep(&access, offered, digest, start)));
     }
 
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
@@ -909,6 +951,8 @@ pub const OpenOptions = struct {
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
+    /// The tools the Host offers, which it keeps for the Store's life.
+    catalog: *const tool_catalog.Catalog = &tool_catalog.built_in,
 };
 
 pub const SqliteDiagnostic = struct {
@@ -956,6 +1000,7 @@ const OutOfLine = struct {
     ring: change_ring.Ring,
     queue: Queue,
     ids: HostValues,
+    tools: HostTools,
     scratch: Scratch align(scratch_align),
 };
 
@@ -975,9 +1020,9 @@ const accepted_settlement_growth = 10240;
 
 comptime {
     // The settlement batch is the larger use: 14480 bytes, 9120 beyond the
-    // configure reads, 5360 with the tool set a configure may save. Exact,
+    // configure reads, 4960 with the tool set a configure may save. Exact,
     // so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 5360 or scratch_bytes != 14480)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 4960 or scratch_bytes != 14480)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -987,7 +1032,7 @@ comptime {
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
 /// resident for the Store's life: at most 14480 bytes, a settlement
-/// batch's size, of which a configure writes 5360.
+/// batch's size, of which a configure writes 4960.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -1334,6 +1379,33 @@ pub const Identity = enum { turn_id, operation_id, action_id, content_id, create
 /// a rolled-back transaction took from. Correct because one Host owns the
 /// Store; the primary or unique key still refuses a duplicate, and a
 /// refused write fences.
+fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *const [32]u8, start: ?usize) !?u64 {
+    const at = start orelse {
+        var set: tool_set_domain.CatalogSet = null;
+        tool_set_domain.lookupCatalog(a, digest, &set);
+        try a.run();
+        try a.abandon(.{});
+        return if (set) |row| row.tool_set_id.get() else null;
+    };
+    if (at < offered.records.len) {
+        var reads: tool_set_domain.RecordReads = undefined;
+        try tool_set_domain.ensureRecords(a, offered.records[at..@min(offered.records.len, at + tool_set_domain.records_per_transaction)], &reads);
+        try a.commit();
+        return null;
+    }
+    const set_id = try a.identity(.tool_set_id);
+    tool_set_domain.insertCatalog(a, offered, digest, set_id);
+    try a.commit();
+    return set_id;
+}
+
+/// The tools the Host offers and the id of their saved set, which
+/// configure resolves a Session's tool names against.
+const HostTools = struct {
+    catalog: *const tool_catalog.Catalog,
+    set_id: u64,
+};
+
 const HostValues = struct {
     next: std.EnumArray(Identity, u64),
     /// The columns that handed out a value since `begin`.
