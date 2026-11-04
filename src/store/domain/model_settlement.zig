@@ -4,6 +4,7 @@
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const tool_catalog = @import("../../tools.zig");
+const tool_set = @import("tool_set.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
@@ -530,7 +531,7 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
 /// `StaleAttemptBinding`), the Session's permission mode and revision,
 /// and the last Conversation ordinal.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT r.tools_mask,s.permission_mode,s.revision," ++
+    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("r.tool_set_id") ++ " END AS tools_mask,s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
@@ -749,10 +750,12 @@ const insert_call = rsql.Write(.{
 });
 
 /// An accepted call's Action, decided now when the revision bypasses asks.
+/// Under an `ask` revision it keeps its call's position as the feed's
+/// approval request.
 const insert_action = rsql.Write(.{
-    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at) " ++
-        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END)",
-    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64 },
+    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position) " ++
+        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8)",
+    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1614,6 +1617,7 @@ fn Settlement(comptime A: type) type {
                 .revision = s.settling.revision.get(),
                 .authorized = s.settling.permission_mode,
                 .timeout_ms = call_facts.bashArguments().?.timeout_ms,
+                .approval_position = if (s.settling.permission_mode) null else s.first_item_position + record.ordinal,
             });
         }
     };

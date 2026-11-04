@@ -648,7 +648,7 @@ pub const ActivityItem = struct {
     value: Value,
     /// `admission` is a Message a person or script sent; `received` one
     /// another Session sent, which always names it as `sender`.
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message };
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
@@ -673,6 +673,10 @@ pub const ActivityItem = struct {
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
     pub const SendFailed = struct { key: Bounded(max_key_bytes), target: NamedPeer, code: Bounded(max_code_bytes) };
+    /// A call that waits on a person's decision because the Session asked
+    /// for approval when it was made: `action` is the id a
+    /// `permission_decision` names. The row follows its call at ordinal 1.
+    pub const ApprovalRequested = struct { action: u64, operation: u64, call_ordinal: u64 };
 
     /// Holes: position, ordinal, at; then the value's shape, then `tail`.
     pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
@@ -702,6 +706,8 @@ pub const ActivityItem = struct {
         pub const sent = .{ "{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"target\":", Hole{ .json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
         /// Holes: key, target, code.
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+        /// Holes: action, operation, call ordinal.
+        pub const approval_requested = .{ "{\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
     };
     pub const max_json_bytes = blk: {
         @setEvalBranchQuota(10_000);
@@ -721,6 +727,7 @@ pub const ActivityItem = struct {
             }),
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
+            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.action, request.operation, request.call_ordinal }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{presentation}),
@@ -1921,7 +1928,7 @@ const Parser = struct {
                 out.kinds = .empty;
                 var last: ?ActivityItem.Kind = null;
                 if (!try self.consumeIf(']')) while (true) {
-                    var name: Bounded(16) = .{};
+                    var name: Bounded(32) = .{};
                     try self.readSmallString(&name);
                     const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
                     if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
@@ -3274,6 +3281,8 @@ test "an activity page names its kinds once each, in order, and a limit from 1 t
     const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
         .{ .body = "[\"admission\"],\"limit\":\"1\"" },
         .{ .body = "[\"admission\",\"received\"],\"limit\":\"16\"" },
+        // The longest kind name.
+        .{ .body = "[\"received\",\"approval_requested\"],\"limit\":\"1\"" },
         .{ .body = "[\"received\",\"admission\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
         .{ .body = "[\"user\",\"user\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
         .{ .body = "[\"unknown\"],\"limit\":\"1\"", .failure = error.InvalidCursor },

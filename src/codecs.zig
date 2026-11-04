@@ -10,7 +10,33 @@ const responses = @import("codecs/responses.zig");
 /// added: everything below is derived from it.
 fn module(comptime codec: protocol.Codec) type {
     return switch (codec) {
-        .@"openai-responses/1" => responses,
+        .@"openai-responses/1" => Responses(.one),
+        .@"openai-responses/2" => Responses(.two),
+    };
+}
+
+/// A version of the Responses codec: one grammar, read the same way, whose
+/// versions differ only in where effort is written.
+fn Responses(comptime version: responses.Version) type {
+    return struct {
+        pub const manifest = responses.manifest;
+        pub const RequestHeader = responses.RequestHeader;
+        pub const requestHeaders = responses.requestHeaders;
+        pub const Encoder = responses.Encoder;
+        pub const Carry = responses.Carry;
+        pub const ClassifyScratch = responses.ClassifyScratch;
+        pub const classify = responses.classify;
+        pub const Stream = responses.Stream;
+        pub const InterpretScratch = responses.InterpretScratch;
+        pub const begin = responses.begin;
+        pub const interpretEvent = responses.interpretEvent;
+        pub const nextMember = responses.nextMember;
+        pub const hostedCall = responses.hostedCall;
+        pub const finish = responses.finish;
+
+        pub fn initial(starting_effort: ?codec_abi.Effort) responses.Carry {
+            return responses.initial(version, starting_effort);
+        }
     };
 }
 
@@ -67,10 +93,11 @@ fn EachCodec(comptime name: []const u8) type {
     return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
 
-/// The carry before a request's first history element.
-pub fn initialCarry(codec: protocol.Codec) Carry {
+/// The carry before a request's first history element, for a Session
+/// whose first Operation froze `starting_effort`.
+pub fn initialCarry(codec: protocol.Codec, starting_effort: ?codec_abi.Effort) Carry {
     return switch (codec) {
-        inline else => |tag| @unionInit(Carry, @tagName(tag), module(tag).initial),
+        inline else => |tag| @unionInit(Carry, @tagName(tag), module(tag).initial(starting_effort)),
     };
 }
 
@@ -200,7 +227,7 @@ fn encodeForTesting(encoder: *Encoder, carry: ?*Carry, items: []const TestItem, 
     }
 }
 
-const responses_initial = initialCarry(.@"openai-responses/1");
+const responses_initial = initialCarry(.@"openai-responses/1", null);
 
 test "a tool entry escapes its name and description as JSON strings" {
     var encoder = resumeFrom(responses_initial);

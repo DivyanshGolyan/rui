@@ -399,11 +399,16 @@ const ModelListWork = struct {
     response: ?[]u8,
 };
 
-/// The codec whose headers the Reactor observes: every provider's, so far.
+/// The codec whose headers the Reactor observes: every codec's, so far,
+/// since each one served observes the same headers.
 const observed_codec = blk: {
     const codec = std.enums.values(protocol.Provider)[0].codec();
-    for (std.enums.values(protocol.Provider)) |served| {
-        if (served.codec() != codec) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a second codec");
+    const observed = codecs.manifest(codec).observe;
+    for (std.enums.values(protocol.Codec)) |served| {
+        const other = codecs.manifest(served).observe;
+        for (std.meta.fieldNames(@TypeOf(observed))) |name| {
+            if (!std.mem.eql(u8, @field(observed, name), @field(other, name))) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a codec that reads others");
+        }
     }
     break :blk codec;
 };

@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import { encodeFrame, startError } from "../src/client.ts";
 import { RuiStartError } from "../src/errors.ts";
-import { listActivity } from "../src/feed.ts";
+import { FEED_KINDS, listActivity } from "../src/feed.ts";
 import { environmentBytes, type Link } from "../src/sessions.ts";
 import { ConnectionError, post, WIRE_VERSION } from "../src/transport.ts";
 
@@ -60,6 +60,22 @@ test("an aborted feed drops the page its pending read returns", async () => {
 	controller.abort();
 	release();
 	assert.equal((await pending).done, true);
+});
+
+test("the feed asks for every kind by default and keeps approval requests when asked for them alone", async () => {
+	const bodies: string[] = [];
+	const row = { position: "1", ordinal: "1", at: "t", value: { approval_requested: { action: "7", operation: "2", call_ordinal: "0" } } };
+	const link: Link = {
+		exchange: async (_path, body) => {
+			bodies.push(body("store"));
+			return Buffer.from(JSON.stringify({ items: [row], more: false, end: "1" }));
+		},
+	};
+	assert.equal((await listActivity(link, "s").next()).value?.kind, "approval_requested");
+	const only = await listActivity(link, "s", { kinds: ["approval_requested"] }).next();
+	assert.equal(only.value?.kind, "approval_requested");
+	assert.deepEqual(JSON.parse(bodies[0] ?? "{}").kinds, [...FEED_KINDS]);
+	assert.deepEqual(JSON.parse(bodies[1] ?? "{}").kinds, ["approval_requested"]);
 });
 
 async function stalledHost(reply: string): Promise<{ socketPath: string; close: () => void }> {

@@ -6,6 +6,7 @@ const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
 const model_capability = @import("../../model_capability.zig");
 const tool_catalog = @import("../../tools.zig");
+const tool_set = @import("tool_set.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const session_work = @import("../../session_work.zig");
 const Quota = @import("../../transport_policy.zig").Quota;
@@ -529,7 +530,7 @@ const first_message = rsql.Read(.{
     .cardinality = .optional,
 });
 
-const settings_columns = "s.session_ref,s.workspace,s.provider,s.model,s.tools_mask,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
+const settings_columns = "s.session_ref,s.workspace,s.provider,s.model," ++ tool_set.maskSql("s.tool_set_id") ++ " AS tools_mask,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
     "(" ++ person_message_sql ++ ") AS from_person_at,";
 
 /// One list row: the Session's settings, its latest Message from no
@@ -2040,7 +2041,7 @@ pub const full_revisions = rsql.Page(.{
         .on = .{ .primary_key = "session_revision" },
         .alias = "r",
         .columns = "(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
-            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.tools_mask,r.permission_mode," ++
+            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.maskSql("r.tool_set_id") ++ " AS tools_mask,r.permission_mode," ++
             "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
             "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
             owner_column("instructions") ++ " AS instructions_owner," ++ owner_column("output_schema") ++ " AS output_schema_owner",

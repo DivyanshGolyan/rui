@@ -334,6 +334,14 @@ pub fn configureTestSessionAsk(
     storage: *Store,
     key: []const u8,
 ) !protocol.Bounded(protocol.max_session_bytes) {
+    return configureTestSessionWithMode(storage, key, "ask");
+}
+
+fn configureTestSessionWithMode(
+    storage: *Store,
+    key: []const u8,
+    mode: []const u8,
+) !protocol.Bounded(protocol.max_session_bytes) {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration(key, "", workspace, "model-a");
@@ -341,7 +349,7 @@ pub fn configureTestSessionAsk(
     command.configuration.tools.count = 1;
     command.configuration.tools.values[0] = .bash;
     command.configuration.permission_mode.state = .value;
-    try command.configuration.permission_mode.value.set("ask");
+    try command.configuration.permission_mode.value.set(mode);
     const reply = storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
@@ -1607,7 +1615,7 @@ test "a configure whose instructions and output schema are the same new bytes im
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            const rows = "SELECT count(*) FROM content";
+            const rows = store_testing.content_beside_tools;
 
             const create_bytes = "{\"title\":\"same-create\"}";
             var create = try completeConfiguration("same-create", "", workspace, "model-a");
@@ -2355,6 +2363,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("rsql.zig"),
         @embedFile("schema.zig"),
@@ -3133,7 +3142,7 @@ test "historical tool-result EOF revalidates complete canonical coverage" {
             defer view.close();
             var position: u64 = 0;
             while (true) {
-                const entry = (try view.nextEntry(position)) orelse return error.MissingToolResultGroup;
+                const entry = (try nextTestingItem(&view, position)) orelse return error.MissingToolResultGroup;
                 position = entry.position;
                 if (entry.kind == .tool_results) break;
             }
@@ -5305,7 +5314,7 @@ test "multiwindow content import and deduplication preserve all bytes" {
             try command.key.set("second");
             command.session = created_session_0;
             try std.testing.expect(storage.configure(&command, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
             const observation = try storage.inspectSessionForTesting(created_session_0.slice());
             try std.testing.expectEqual(@as(u64, 2), observation.revision);
             var reader: ContentReader = undefined;
@@ -5619,7 +5628,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try std.testing.expect(exhausted_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
 
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND (primary_content_id IS NOT NULL OR secondary_content_id IS NOT NULL)", .{}));
 
             try storage.close();
@@ -5639,7 +5648,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try changed_kind.session.set("absent");
             changed_kind.text = unknown_message.text;
             try std.testing.expect(storage.submitMessageWithModel(&changed_kind, null, .{}) == .conflict);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
         }
     }.run);
 }
@@ -6102,13 +6111,64 @@ test "every activity row is dated by the fact that owns it" {
                     .tool_result => 106,
                     .turn_ended => 107,
                     .stop => 108,
+                    // Asked when its call was made.
+                    .approval_requested => 104,
                     .hosted_call, .sent, .send_failed, .received => unreachable,
                 };
                 try std.testing.expectEqual(expected, item.at);
                 seen.insert(item.value);
             }
-            try std.testing.expectEqual(@as(usize, 7), seen.count());
+            try std.testing.expectEqual(@as(usize, 8), seen.count());
             try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "a call made while the Session asks follows with its approval request, and one under bypass has none" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_][]const u8{ "ask", "bypass" }) |mode| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionWithMode(&storage, "approval-config", mode);
+                try submitTestMessage(&storage, &tmp, "approval-input", "approval-input", session.slice(), "propose");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, binding, "approval-calls");
+                var request: protocol.ActivityPage = .{};
+                try request.session.set(session.slice());
+                const page = try store_core.activityPageForTesting(&storage, request);
+                var calls: usize = 0;
+                var approvals: usize = 0;
+                for (page.items[0..page.count], 0..) |item, index| switch (item.value) {
+                    .call => calls += 1,
+                    .approval_requested => |approval| {
+                        approvals += 1;
+                        // It sits right after its call, at the call's position.
+                        const call = page.items[index - 1];
+                        try std.testing.expectEqual(call.position, item.position);
+                        try std.testing.expectEqual(@as(u64, 1), item.ordinal);
+                        try std.testing.expectEqual(call.value.call.action.?, approval.action);
+                        try std.testing.expectEqual(call.value.call.operation, approval.operation);
+                        try std.testing.expectEqual(call.value.call.call_ordinal, approval.call_ordinal);
+                    },
+                    else => {},
+                };
+                try std.testing.expectEqual(@as(usize, 2), calls);
+                try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, mode, "ask")) 2 else 0), approvals);
+                // A page of approval requests alone names each by its own row.
+                request.kinds = .initOne(.approval_requested);
+                const only = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(approvals, only.count);
+                // Backward, from the end, the same rows come in reverse.
+                request.kinds = .full;
+                request.direction = .backward;
+                const backward = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(page.count, backward.count);
+                try std.testing.expect(!storage.isFenced());
+            }
         }
     }.run);
 }
@@ -6263,9 +6323,9 @@ test "completed tool labels trust admission while model replay authenticates pay
             defer view.close();
             // Discovery trusts the labels; the first call's name fences when it is
             // read for replay.
-            const first = (try view.nextEntry(0)).?;
+            const first = (try nextTestingItem(&view, 0)).?;
             try std.testing.expectEqual(HistoricalEntryKind.user, first.kind);
-            const call = (try view.nextEntry(first.position)).?;
+            const call = (try nextTestingItem(&view, first.position)).?;
             try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3", .{}), call.position);
             const name = (try view.openOutput(call.position)).call.?[0];
             var reader: HistoricalReader = undefined;
@@ -6458,9 +6518,9 @@ test "compaction overflow admits a new Operation without losing applied input" {
             defer view.close();
             try std.testing.expectEqual(ModelOperationKind.compaction, (try testSettings(&view)).operation);
             try std.testing.expect((try view.coverage()).anchor == null);
-            const input = (try view.nextEntry(0)).?;
+            const input = (try nextTestingItem(&view, 0)).?;
             try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
-            try std.testing.expect((try view.nextEntry(input.position)) == null);
+            try std.testing.expect((try nextTestingItem(&view, input.position)) == null);
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
             const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024, .full);
             defer std.testing.allocator.free(bytes);
@@ -6489,9 +6549,14 @@ pub fn readTestingContent(view: *HistoricalView, content: HistoricalContent, out
 }
 
 /// Renders a historical entry as the Store holds it: a user entry's text,
-/// or an output item's kind, bag, call fields and parts (`array.kind=text{bag}`).
+/// an earlier Operation's effort (`operation.high`), or an output item's
+/// kind, bag, call fields and parts (`array.kind=text{bag}`).
 pub fn renderTestingEntry(view: *HistoricalView, entry: HistoricalEntry, buffer: []u8) ![]const u8 {
     var out = std.Io.Writer.fixed(buffer);
+    if (entry.kind == .operation) {
+        try out.print("operation.{s}", .{if (entry.effort) |effort| @tagName(effort) else "default"});
+        return out.buffered();
+    }
     if (entry.kind != .provider_output) {
         try readTestingContent(view, entry.content.?, &out);
         return out.buffered();
@@ -6522,11 +6587,23 @@ pub const TestingHistoryCursor = struct {
     position: u64 = 0,
 
     pub fn next(self: *@This(), view: *HistoricalView) !?HistoricalEntry {
-        const entry = try view.nextEntry(self.position);
+        const entry = try nextTestingItem(view, self.position);
         if (entry) |item| self.position = item.position;
         return entry;
     }
 };
+
+/// The next history entry after `after` that is no earlier Operation's
+/// effort boundary: the history these tests check, without the boundaries
+/// the codec places between it (tested on their own).
+fn nextTestingItem(view: *HistoricalView, after: u64) !?HistoricalEntry {
+    var position = after;
+    while (try view.nextEntry(position)) |entry| {
+        if (entry.kind != .operation) return entry;
+        position = entry.position;
+    }
+    return null;
+}
 
 test "compaction success retains host inputs and ordered anchor suffix across reopen" {
     try store_testing.forEachEngine(struct {
@@ -6884,9 +6961,9 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try std.testing.expectEqual(@as(u64, 1), frozen.compaction_trigger);
             try std.testing.expectEqual(@as(u64, 1), frozen.output_reservation);
             try std.testing.expect((try view.coverage()).anchor == null);
-            const input = (try view.nextEntry(0)).?;
+            const input = (try nextTestingItem(&view, 0)).?;
             try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
-            try std.testing.expect((try view.nextEntry(input.position)) == null);
+            try std.testing.expect((try nextTestingItem(&view, input.position)) == null);
             try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
             try patch.key.set("updated-heuristics");
             try patch.configuration.compaction_trigger.value.set("999");
@@ -7040,7 +7117,7 @@ test "compaction selected newest base corruption fences rather than using an old
                     try std.testing.expectError(error.CorruptStore, view.coverage());
                 } else {
                     const anchor = (try view.coverage()).anchor.?;
-                    const selected = (try view.nextEntry(anchor - 1)).?;
+                    const selected = (try nextTestingItem(&view, anchor - 1)).?;
                     try std.testing.expectEqual(anchor, selected.position);
                     var reader: HistoricalReader = undefined;
                     try view.openContent((try view.openOutput(selected.position)).bag.?, &reader);
@@ -8250,6 +8327,7 @@ const EntryPoint = enum {
     readHistoricalOutput,
     readHistoricalPart,
     readHistoricalToolResult,
+    readHistoricalTool,
     checkAttempt,
 };
 
@@ -8300,6 +8378,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readHistoricalOutput = 2,
     .readHistoricalPart = 1,
     .readHistoricalToolResult = 2,
+    .readHistoricalTool = 1,
     .checkAttempt = 1,
 });
 
@@ -8337,6 +8416,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("rsql.zig"),
         @embedFile("schema.zig"),
@@ -8360,8 +8440,14 @@ test "every function that enters the Store has a round budget" {
             const fn_at = @max(std.mem.lastIndexOf(u8, before, " fn ") orelse 0, std.mem.lastIndexOf(u8, before, "\nfn ") orelse 0) + " fn ".len;
             var end = fn_at;
             while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
-            // The body a public entry point queues.
-            const name = if (std.mem.endsWith(u8, source[fn_at..end], "Held")) source[fn_at .. end - "Held".len] else source[fn_at..end];
+            // The body a public entry point queues; only a test fixture
+            // enters outside one, holding the Store for itself.
+            const held = std.mem.endsWith(u8, source[fn_at..end], "Held");
+            const name = if (held) source[fn_at .. end - "Held".len] else source[fn_at..end];
+            if (!held and !std.mem.endsWith(u8, name, "ForTesting")) {
+                std.debug.print("{s} enters the Store outside the queue; give it a body named {s}Held\n", .{ name, name });
+                return error.EnterOutsideQueue;
+            }
             if (std.mem.endsWith(u8, name, "ForTesting")) {
                 const listed = for (entering_fixtures, 0..) |fixture, position| {
                     if (std.mem.eql(u8, fixture, name)) break position;
@@ -8585,10 +8671,14 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 try view.settings(&settings);
                 meter.stop(.readHistoricalSettings);
+                var tool: historical_domain.HistoricalTool = .{};
+                meter.start();
+                try std.testing.expect(try view.nextTool(&tool));
+                meter.stop(.readHistoricalTool);
                 meter.start();
                 var entry = (try view.nextEntry(0)).?;
                 meter.stop(.readHistoricalEntry);
-                entry = (try view.nextEntry(entry.position)).?;
+                entry = (try nextTestingItem(&view, entry.position)).?;
                 try std.testing.expectEqual(HistoricalEntryKind.provider_output, entry.kind);
                 meter.start();
                 _ = try view.openOutput(entry.position);
@@ -8596,7 +8686,7 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 _ = try view.nextOutputPart();
                 meter.stop(.readHistoricalPart);
-                while (entry.kind != .tool_results) entry = (try view.nextEntry(entry.position)).?;
+                while (entry.kind != .tool_results) entry = (try nextTestingItem(&view, entry.position)).?;
                 meter.start();
                 _ = (try view.nextToolResult()).?;
                 meter.stop(.readHistoricalToolResult);
@@ -8732,10 +8822,10 @@ test "creating a Session takes the same work however many Sessions exist, in rou
             const few = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-few");
             const few_rounds = few.taken();
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
                 "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
                 "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
-                "SELECT 100000+value,'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+                "SELECT 100000+value,'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
             const many = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-many");
             try std.testing.expectEqual(few_rounds, many.taken());

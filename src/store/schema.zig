@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x48066d4b9a27fab9 },
+    .{ .schema_version = 51, .digest = 0x9dc0d23fd8743bd4 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -79,6 +79,7 @@ pub const Migration = struct {
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
 /// chain grows. Only a step past the released schema_version may change.
 pub const migrations = [_]Migration{};
+
 comptime {
     if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
     for (migrations, 0..) |step, position| {
@@ -225,7 +226,8 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
 
 // A label's syntax, not a provider list, so a new provider is no format change.
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
-const tools_mask_column: Column = .{ .name = "tools_mask", .type = .int, .check = std.fmt.comptimePrint("tools_mask BETWEEN 0 AND {d}", .{tool_catalog.all_tools_mask}) };
+// The tool records a Session's settings offer (D48), saved once by content.
+const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
@@ -256,6 +258,51 @@ pub const tables = [_]Table{
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
     },
+    // One tool as the model is told about it (D48): its name, who owns it
+    // (`rui`, or `provider` for a tool the provider runs, whose text the
+    // codec writes), and its description and input schema as content.
+    .{
+        .name = "tool_record",
+        .columns = &.{
+            .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_catalog.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
+            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider" } } },
+            .{ .name = "description_content_id", .type = .int },
+            .{ .name = "input_schema_content_id", .type = .int },
+        },
+        .primary_key = &.{"tool_record_id"},
+        .uniques = &.{&.{ "name", "owner", "description_content_id", "input_schema_content_id" }},
+        .foreign_keys = &.{
+            references("description_content_id", "content", content_reference),
+            references("input_schema_content_id", "content", content_reference),
+        },
+    },
+    // An ordered set of tool records, saved once: `digest` names its
+    // members' content (tools.zig `setDigest`).
+    .{
+        .name = "tool_set",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
+            .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
+            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_tools}) },
+        },
+        .primary_key = &.{"tool_set_id"},
+        .uniques = &.{&.{"digest"}},
+    },
+    .{
+        .name = "tool_set_member",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "tool_record_id", .type = .int },
+        },
+        .primary_key = &.{ "tool_set_id", "ordinal" },
+        .foreign_keys = &.{
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
+            references("tool_record_id", "tool_record", &.{"tool_record_id"}),
+        },
+        .without_rowid = true,
+    },
     .{
         .name = "session",
         .columns = &.{
@@ -269,7 +316,7 @@ pub const tables = [_]Table{
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
             .{ .name = "model", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "instructions_content_id", .type = .int },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             .{ .name = "revision", .type = .int, .check = "revision>0" },
@@ -293,6 +340,7 @@ pub const tables = [_]Table{
         .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
     },
@@ -331,7 +379,7 @@ pub const tables = [_]Table{
             .{ .name = "model", .type = .{ .text = null } },
             .{ .name = "instructions_content_id", .type = .int },
             .{ .name = "instructions_updated", .type = .flag },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             compaction_trigger_column,
@@ -345,6 +393,7 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
         .without_rowid = true,
@@ -655,6 +704,10 @@ pub const tables = [_]Table{
             .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
             .{ .name = "decided_at", .type = .int, .nullable = true, .check = "decided_at IS NULL OR decided_at>0" },
             .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
+            // The position of the call that asked a person, written by the
+            // insert under an `ask` revision and never changed. Stored
+            // because the feed seeks it and no index can see the revision.
+            .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},
@@ -715,6 +768,7 @@ pub const indexes = [_]Index{
     // Results walk it (`report.full_results`): the predicate holds exactly
     // for a resolved Action (action_operation's CHECK).
     .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
+    .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     // Calls walk it (`report.full_calls`).
@@ -727,6 +781,9 @@ pub const indexes = [_]Index{
     .{ .name = "model_operation_retry_exhausted", .table = "model_operation", .columns = &.{"operation_id"}, .where = retry_exhausted_sql },
     .{ .name = "model_operation_session_history", .table = "model_operation", .columns = &.{ "session_ref", "operation_id" } },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
+    // Every Operation by admission, whatever its outcome: request history
+    // places each earlier Operation's effort boundary (codec /2).
+    .{ .name = "model_operation_admission", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "model_operation_context_history", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = oneOf("resolution_code", &accepted_resolutions) },
     .{ .name = "model_operation_compaction_bases", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = "purpose=1 AND " ++ resolutionIs("resolution_code", .compacted) },
     .{ .name = "conversation_entry_history", .table = "conversation_entry", .columns = &.{ "session_ref", "session_position" } },
@@ -745,6 +802,7 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
+    @setEvalBranchQuota(2000);
     return tableCarriesSessions(tables[tablePosition(&tables, table)]);
 }
 
@@ -1240,7 +1298,7 @@ pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !voi
 /// (`validateCurrent`) and every foreign key holds. A Store whose
 /// store_meta format is not `from` is a WrongStoreVersion, and any failure
 /// leaves the Store as it was.
-pub fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
     try migrationBackup(io, database);
     // Both outside the transaction, where PRAGMA foreign_keys takes effect.
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
@@ -1297,8 +1355,10 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
     // Iterable, so the handle is a real descriptor (not O_PATH) that fsync takes.
     var directory = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
     defer directory.close(io);
-    var backup_buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
-    const backup = try std.fmt.bufPrintSentinel(&backup_buffer, "{s}" ++ backup_extension, .{path[0 .. path.len - store_extension.len]}, 0);
+    // SQLite's allocator, not a path-sized stack buffer: the Host's stack frame budget.
+    const backup_text = c.sqlite3_mprintf("%.*s" ++ backup_extension, @as(c_int, @intCast(path.len - store_extension.len)), path.ptr) orelse return error.MigrationBackupFailed;
+    defer c.sqlite3_free(backup_text);
+    const backup = std.mem.span(backup_text);
     const backup_name = backup[directory_path.len + 1 ..];
     directory.deleteFile(io, backup_name) catch |err| switch (err) {
         error.FileNotFound => {},

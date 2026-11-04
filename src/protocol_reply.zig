@@ -149,8 +149,9 @@ pub const ActivityPage = struct {
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
         const TurnEnded = struct { turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
+        const ApprovalRequested = struct { action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -199,7 +200,9 @@ pub const ActivityPage = struct {
             const after = fact.position > position or (ordinal != null and fact.position == position and fact.ordinal > ordinal.?);
             const before = fact.position < position or (ordinal != null and fact.position == position and fact.ordinal < ordinal.?);
             if (fact.position > page.facts.end or (position != 0 and !(if (cursor.direction == .forward) after else before)) or
-                ((item.value == .tool_result) != (fact.ordinal != 0)) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
+                // Only a Tool Result has an ordinal of its own; an approval
+                // request follows its call at ordinal 1.
+                (if (item.value == .approval_requested) fact.ordinal != 1 else (item.value == .tool_result) != (fact.ordinal != 0)) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
                     const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
@@ -213,6 +216,7 @@ pub const ActivityPage = struct {
                     fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } };
                     if (fact.at != fact.value.sent.admitted_at) return error.InvalidActivityPage;
                 },
+                .approval_requested => |request| fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .call_ordinal = try id(request.call_ordinal, true) } },
                 .send_failed => |failed| {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = try failed.target.peer(), .code = failed.code.value } };

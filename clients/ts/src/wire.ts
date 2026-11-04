@@ -487,6 +487,17 @@ export interface components {
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
+        } | {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            at: components["schemas"]["Decimal"];
+            value: {
+                approval_requested: {
+                    action: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    call_ordinal: components["schemas"]["Decimal"];
+                };
+            };
         };
         ActivityItemContent: {
             bytes: components["schemas"]["Decimal"];
@@ -519,7 +530,7 @@ export interface components {
             /** @enum {string} */
             direction: "forward" | "backward";
             /** @description Each at most once, in the order the enum lists them. */
-            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received")[];
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested")[];
             limit: components["schemas"]["Decimal"];
         };
         CallActivity: {

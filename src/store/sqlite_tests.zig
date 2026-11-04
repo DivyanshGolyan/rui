@@ -10,6 +10,7 @@ const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
+const tool_catalog = @import("../tools.zig");
 const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -249,9 +250,9 @@ test "creating a Session takes the same work however many Sessions exist" {
     const few = try Creation.steps(&storage, "creation-steps-few");
     // Above the Host's next created_seq, which these rows bypass.
     try store_testing.sqlite_only.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
-        "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+        "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
         "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-        "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+        "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
     // Changing foreign_keys expires prepared statements: prepare them again.
     _ = try configureTestSession(&storage, "creation-steps-prepare-again");
     try std.testing.expectEqual(few, try Creation.steps(&storage, "creation-steps-many"));
@@ -392,6 +393,8 @@ fn takeEveryIdentityForTesting(storage: *Store) ![std.enums.values(store_core.Id
         "SELECT max(created_seq) FROM session",
         "SELECT max(command_seq) FROM core_command",
         "SELECT max(admission_id) FROM message_admission",
+        "SELECT max(tool_record_id) FROM tool_record",
+        "SELECT max(tool_set_id) FROM tool_set",
     };
     var taken: [maxima.len]u64 = undefined;
     const entry = try store_core.enter(storage, .none);
@@ -413,7 +416,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    // Entry points commit rows in all seven columns.
+    // Entry points commit rows in every column.
     const first_session = try configureTestSessionAsk(&storage, "identity-config");
     try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", first_session.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-first");
@@ -423,6 +426,15 @@ test "a rolled-back transaction's identities are handed out again, a committed o
 
     // Committing the given-back values in every column: none is handed out again.
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
+    // Web search too: a new tool set, and its record, commit.
+    var tools: protocol.ConfigureCommand = .{};
+    try tools.key.set("identity-later-tools");
+    tools.session = second_session;
+    tools.configuration.tools.state = .value;
+    tools.configuration.tools.count = 2;
+    tools.configuration.tools.values[0] = .bash;
+    tools.configuration.tools.values[1] = .web_search;
+    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
     // New text, so content commits a new row too.
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-second");
@@ -1081,6 +1093,109 @@ fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
     return if (c.sqlite3_extended_errcode(database) == c.SQLITE_CONSTRAINT_CHECK) .check_violation else .other_failure;
 }
 
+test "a fresh Store creates a Session with instructions, an output schema and the default tools" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration("fresh-tool-texts", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
+    command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    // Five new content rows in one transaction: both values, Bash's two
+    // texts and web search's empty text.
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 5), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+}
+
+test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const Tools = struct {
+        fn set(store: *Store, key: []const u8, session: protocol.Bounded(protocol.max_session_bytes), offered: []const tool_catalog.Tool) !void {
+            var command: protocol.ConfigureCommand = .{};
+            try command.key.set(key);
+            command.session = session;
+            command.configuration.tools.state = .value;
+            command.configuration.tools.count = @intCast(offered.len);
+            @memcpy(command.configuration.tools.values[0..offered.len], offered);
+            try std.testing.expect(store.configure(&command, .{}) == .accepted);
+        }
+        fn counts(store: *Store) ![3]u64 {
+            return .{
+                try store_testing.queryU64(store, "SELECT count(*) FROM tool_set", .{}),
+                try store_testing.queryU64(store, "SELECT count(*) FROM tool_record", .{}),
+                try store_testing.queryU64(store, "SELECT count(*) FROM tool_set_member", .{}),
+            };
+        }
+    };
+    // Two Sessions offering Bash share one set and one record.
+    const first = try configureTestSessionAsk(&storage, "saved-tools-first");
+    const second = try configureTestSessionAsk(&storage, "saved-tools-second");
+    try std.testing.expectEqual([3]u64{ 1, 1, 1 }, try Tools.counts(&storage));
+    // A new set reuses the records it shares with a saved one.
+    try Tools.set(&storage, "saved-tools-both", second, &.{ .bash, .web_search });
+    try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
+    try Tools.set(&storage, "saved-tools-none", first, &.{});
+    try std.testing.expectEqual([3]u64{ 3, 2, 3 }, try Tools.counts(&storage));
+    // Each revision keeps the set it was saved with.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
+        "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
+
+    // A reworded built-in changes no saved set: the saved text is what an
+    // Operation offers.
+    const reworded = "Reworded description.";
+    try submitTestMessage(&storage, &tmp, "saved-tools-message", "saved-tools-message", second.slice(), reworded);
+    try sqlite.exec(storage.database, "UPDATE tool_record SET description_content_id=(SELECT content_id FROM content WHERE CAST(payload AS TEXT)='Reworded description.') WHERE name='bash'");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(binding, &view);
+    defer view.close();
+    var settings: HistoricalSettings = undefined;
+    try view.settings(&settings);
+    try std.testing.expectEqual(@as(u64, 2), settings.tool_count);
+    var tool: historical_domain.HistoricalTool = .{};
+    try std.testing.expect(try view.nextTool(&tool));
+    try std.testing.expectEqualStrings("bash", tool.name.slice());
+    try std.testing.expectEqual(tool_catalog.Owner.rui, tool.owner);
+    try std.testing.expectEqual(protocol.contentDigest(reworded), tool.description.digest);
+    try std.testing.expectEqual(protocol.contentDigest(tool_catalog.bash_record.input_schema), tool.input_schema.digest);
+    try std.testing.expect(try view.nextTool(&tool));
+    try std.testing.expectEqualStrings("web_search", tool.name.slice());
+    try std.testing.expectEqual(tool_catalog.Owner.provider, tool.owner);
+    try std.testing.expect(!try view.nextTool(&tool));
+}
+
+test "a Bash call the Operation did not offer is rejected and keeps its description" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools.count = 0;
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    try submitTestMessage(&storage, &tmp, "unoffered-message", "unoffered-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "unoffered-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+}
+
 test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itself" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1570,6 +1685,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     var position: u64 = 0;
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
     position = (try view.nextEntry(position)).?.position;
+    // The Operation that proposed the calls, at its admission position.
+    const proposing = (try view.nextEntry(position)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.operation, proposing.kind);
+    position = proposing.position;
     for (0..calls.len) |_| {
         const item = (try view.nextEntry(position)).?;
         try std.testing.expectEqual(HistoricalEntryKind.provider_output, item.kind);
@@ -1824,9 +1943,10 @@ test "historical preparation yields covered group populations under small allowa
         try testingHistoricalStep(&view, &after, &bytes, &items);
         if (after != before) served += 1;
     }
-    // One user input, 8 groups of 16 calls, their 8 result groups and the
-    // end, each served by its own step after discovery yields.
-    try std.testing.expectEqual(@as(usize, 1 + 8 * calls.len + 8 + 1), served);
+    // One user input, 8 Operations each with its group of 16 calls, their
+    // 8 result groups and the end, each served by its own step after
+    // discovery yields.
+    try std.testing.expectEqual(@as(usize, 1 + 8 + 8 * calls.len + 8 + 1), served);
     try std.testing.expect(turns > served);
     try std.testing.expect(!storage.isFenced());
 }
@@ -1939,7 +2059,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
                         // The view never reaches its end, so no request seals.
                         if (!bytes_fault) return error.MissingCorruptionFailure;
                         served = entry.?.*;
-                        if (served.?.kind == .user) continue;
+                        if (served.?.kind == .user or served.?.kind == .operation) continue;
                         try std.testing.expectEqual(HistoricalEntryKind.provider_output, served.?.kind);
                         const output = try view.openOutput(served.?.position);
                         try std.testing.expectEqual(OutputItemKind.function_call, output.kind);
@@ -2940,7 +3060,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session", .{}));
     for ([_][:0]const u8{
         "UPDATE session SET provider='Codex' WHERE session_ref=?1",
         "UPDATE session_revision SET provider='9codex' WHERE session_ref=?1",
@@ -2959,7 +3079,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
 test "a Session pinned to a codec this Host cannot build fences its settings" {
     for ([_]?[:0]const u8{
         null,
-        "UPDATE session SET codec='openai-responses/2' WHERE session_ref=?1",
+        "UPDATE session SET codec='openai-responses/3' WHERE session_ref=?1",
         "UPDATE session SET codec_options=x'00' WHERE session_ref=?1",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
@@ -2968,7 +3088,7 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session", .{}));
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try store_testing.sqliteExec(storage.database, sql, .{session.slice()});
@@ -4732,7 +4852,17 @@ test "one committed selection freezes its settings and input prefix" {
     try view.settings(&settings);
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
-    try std.testing.expectEqual(configuration_domain.default_tools_mask, settings.tools_mask);
+    // The frozen tools come back as the Store saved them, in set order.
+    const offered = tool_catalog.Offered.ofMask(configuration_domain.default_tools_mask);
+    try std.testing.expectEqual(@as(u64, offered.len), settings.tool_count);
+    var tool: historical_domain.HistoricalTool = .{};
+    for (offered.slice()) |expected| {
+        try std.testing.expect(try view.nextTool(&tool));
+        try std.testing.expectEqualStrings(expected.name, tool.name.slice());
+        try std.testing.expectEqual(expected.owner, tool.owner);
+        try std.testing.expectEqual(@as(u64, expected.description.len), tool.description.length);
+    }
+    try std.testing.expect(!try view.nextTool(&tool));
     const first_input = (try view.nextEntry(0)).?;
     const second_input = (try view.nextEntry(first_input.position)).?;
     const instruction = (try view.nextEntry(second_input.position)).?;
@@ -4791,9 +4921,10 @@ test "one committed selection freezes its settings and input prefix" {
     try later_view.settings(&later_settings);
     try std.testing.expectEqual(protocol.Provider.codex, later_settings.provider);
     try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
-    try std.testing.expectEqual(@as(u8, 0), later_settings.tools_mask);
+    try std.testing.expectEqual(@as(u64, 0), later_settings.tool_count);
     var position: u64 = 0;
-    for ([_]HistoricalEntryKind{ .user, .user, .instruction, .user }) |kind| {
+    // The failed first Operation keeps its boundary between the inputs.
+    for ([_]HistoricalEntryKind{ .user, .user, .instruction, .operation, .user }) |kind| {
         const entry = (try later_view.nextEntry(position)).?;
         try std.testing.expectEqual(kind, entry.kind);
         position = entry.position;
@@ -5401,9 +5532,9 @@ test "runnable discovery measures eligible ineligible and history populations in
             if (ineligible != 0) {
                 try sqlite.exec(
                     database,
-                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
                         "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
+                        "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
@@ -5419,9 +5550,9 @@ test "runnable discovery measures eligible ineligible and history populations in
             }
             const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
-                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
                     "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
+                    "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
                     "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
@@ -5567,9 +5698,9 @@ test "retry admission and exhausted recovery use their selection indexes" {
 fn insertTestingSessionsForOperations(database: *c.sqlite3) !void {
     try sqlite.exec(
         database,
-        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask," ++
+        "INSERT OR IGNORE INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id," ++
             "permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,0,0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
+            "SELECT session_ref,'/w','codex','openai-responses/1','m',1,1,0,1,1,1,base+row_number() OVER (ORDER BY session_ref),zeroblob(32),base+1 " ++
             "FROM (SELECT DISTINCT session_ref FROM model_operation),(SELECT coalesce(max(created_seq),0) AS base FROM session)",
     );
 }
@@ -8026,9 +8157,9 @@ fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
     }
 }
 
-/// A fresh Store at `path` that then gets `baseline_rows` and opens once
-/// more, as a migrated Store did.
-fn freshStoreWithBaselineRows(path: []const u8, root: []const u8) !void {
+/// A fresh Store at `path` that then gets `expected_rows`, which must meet
+/// its foreign keys, and opens once more.
+fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     try storage.close();
@@ -8036,7 +8167,10 @@ fn freshStoreWithBaselineRows(path: []const u8, root: []const u8) !void {
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
-        try sqlite.exec(raw, store_testing.baseline_rows);
+        try sqlite.exec(raw, store_testing.expected_rows);
+        const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
+        defer _ = c.sqlite3_finalize(violations);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(violations));
     }
     try storage.open(std.testing.io, path, root);
     try storage.close();
@@ -8070,7 +8204,7 @@ test "a Store at the migration baseline with its rows takes every migration at o
         return err;
     };
     try storage.close();
-    try freshStoreWithBaselineRows(fresh, root);
+    try freshStoreWithExpectedRows(fresh, root);
 
     var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer migrated_rows.deinit();
@@ -8235,4 +8369,51 @@ test "a migration that leaves other text than bootstrap's, or a broken reference
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_table_info('session') WHERE name='migration_probe'"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
     }
+}
+
+test "a page of approval requests costs the same however many calls ran without asking" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionAsk(&storage, "approval-steps-config");
+    try submitTestMessage(&storage, &tmp, "approval-steps-input", "approval-steps-input", session.slice(), "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try tests.settleTwoActionsForTesting(&storage, &tmp, binding, "approval-steps-calls");
+    var request: protocol.ActivityPage = .{ .kinds = .initOne(.approval_requested) };
+    try request.session.set(session.slice());
+    const Page = struct {
+        fn steps(store: *Store, page_request: protocol.ActivityPage) !u64 {
+            // The first read prepares the page's statements.
+            _ = try store_core.activityPageForTesting(store, page_request);
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
+            const page = try store_core.activityPageForTesting(store, page_request);
+            try std.testing.expectEqual(@as(usize, 2), page.count);
+            return counter.steps;
+        }
+        /// `copies` more of the Session's calls and Actions that never
+        /// asked: copies of its own, without an approval position.
+        fn addBypassed(store: *Store, ref: []const u8, comptime first: u64) !void {
+            const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) " ++
+                "SELECT operation_id+value*1000,item_ordinal,session_ref,session_position+value*10+1000000,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed " ++
+                "FROM model_output_item CROSS JOIN sequence WHERE session_ref=?1 AND item_kind=3 AND operation_id<1000", .{ref});
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,decided_at) " ++
+                "SELECT action_id+value*1000,parent_operation_id+value*1000,call_ordinal,session_ref,tool_kind,permission_revision,1,1 FROM action_operation CROSS JOIN sequence WHERE session_ref=?1 AND action_id<1000", .{ref});
+        }
+    };
+    const few = try Page.steps(&storage, request);
+    try Page.addBypassed(&storage, session.slice(), 1);
+    const thousand = try Page.steps(&storage, request);
+    try Page.addBypassed(&storage, session.slice(), 1001);
+    try std.testing.expectEqual(@as(u64, 4002), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM action_operation", .{}));
+    // A fixed cost: the seek past the bypassed rows is one step, whatever
+    // their number.
+    try std.testing.expect(thousand - few <= 1);
+    try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
 }
