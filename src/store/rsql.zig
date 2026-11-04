@@ -11,8 +11,9 @@
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
 const schema = @import("schema.zig");
+const provider_name = @import("../provider_name.zig");
 
-pub const Dialect = enum { sqlite };
+pub const Dialect = enum { sqlite, mysql };
 
 /// A reserved word is a name, and refused, everywhere except the keyword
 /// places in `keywords`; text never names `rowid`. The schema's names,
@@ -171,7 +172,8 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 }
 
 /// `text` in `dialect`'s spelling. Fails the build on text that is not
-/// portable or on an unknown or malformed marker:
+/// portable or on an unknown or malformed marker. SQLite's spelling of
+/// each marker:
 ///
 ///   @octets(x)           bytes in x: `length(CAST(x AS BLOB))`
 ///   @charset(c,'set')    only these characters: `(c NOT GLOB '*[^set]*' AND
@@ -183,14 +185,21 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///   @distinct(a,b)       its negation: `(a IS NOT b)`
 ///   @count_where(c)      the rows where c holds: `count(*) FILTER (WHERE c)`
 ///   @max_where(x,c)      the greatest x of those rows: `max(x) FILTER (WHERE c)`
+///   @served(x)           the opening serves provider x: `rui_served(x)`,
+///                        the function each opening registers
 ///
-/// Only SQLite renders today. MySQL has no FILTER; its spelling would be
-/// `count(CASE WHEN c THEN 1 END)` and `max(CASE WHEN c THEN x END)`.
+/// MySQL's are `mysqlTemplate`'s. Text rendered here binds nothing, so
+/// MySQL text with a slot fails the build too.
 pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
     comptime {
         if (portabilityError(text, reserved_names_checked)) |message| @compileError(message ++ ": " ++ text);
         return switch (dialect) {
             .sqlite => renderSqlite(text),
+            .mysql => {
+                const template = mysqlTemplate(text);
+                if (template.slots.len != 0) @compileError("rsql: this text binds nothing: " ++ text);
+                return template.parts[0];
+            },
         };
     }
 }
@@ -326,6 +335,9 @@ pub fn Read(comptime spec: ReadSpec) type {
             .each => void,
         };
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
+        /// The text in MySQL's spelling (`mysqlRendering`), rendered only
+        /// where something reads it: `Store.cachedTyped` in test builds.
+        pub const mysql: Template = mysqlTemplate(spec.sql);
         pub const uses_now = parsed.uses_now;
         /// Whether the text alone limits the result to one row
         /// (`returnsOneRow`), so a read need not step again to prove there
@@ -344,6 +356,9 @@ pub fn Write(comptime spec: WriteSpec) type {
         pub const Args = spec.Args;
         pub const expect = spec.expect;
         pub const sql = renderStatement(spec.sql, fieldCount(Args));
+        /// The text in MySQL's spelling (`mysqlRendering`), rendered only
+        /// where something reads it: `Store.cachedTyped` in test builds.
+        pub const mysql: Template = mysqlTemplate(spec.sql);
         pub const uses_now = parsed.uses_now;
         /// The Args fields the write's `@session` markers bind, in Args'
         /// order: none, or one per Session it names.
@@ -563,6 +578,8 @@ const Expr = union(enum) {
 const Token = struct {
     kind: enum { word, parameter, number, literal, marker, symbol, end },
     text: []const u8,
+    /// Where `text` starts in the tokenized text.
+    start: usize = 0,
 
     fn is(token: Token, word: []const u8) bool {
         return token.kind == .word and std.ascii.eqlIgnoreCase(token.text, word);
@@ -609,7 +626,7 @@ fn tokenize(comptime sql: []const u8) []const Token {
                     if (std.mem.startsWith(u8, sql[start..], symbol)) index = start + 2;
                 }
             }
-            tokens = tokens ++ .{Token{ .kind = kind, .text = sql[start..index] }};
+            tokens = tokens ++ .{Token{ .kind = kind, .text = sql[start..index], .start = start }};
         }
         return tokens;
     }
@@ -664,7 +681,10 @@ const Refused = error{Refused};
 /// [ASC|DESC], ...)`, which every engine runs. Anything else (a named
 /// parameter, `*` as a column, a comma join, an unknown table, LIKE,
 /// BETWEEN, COLLATE, another window) is refused with the token it stopped
-/// at.
+/// at. Two more refusals hold on every dialect, for MySQL's sake: a call
+/// to `length`, which counts characters there and bytes on MySQL; and an
+/// UPDATE whose SET value reads a column an earlier assignment of the same
+/// SET writes (`readsAssigned`), because MySQL reads the new value.
 const Parser = struct {
     tokens: []const Token,
     at: usize = 0,
@@ -679,6 +699,8 @@ const Parser = struct {
     /// The id of the query whose text is being parsed.
     scope: ?usize = null,
     next_query: usize = 0,
+    /// Every column the text names as an operand, in order.
+    columns: []const Column = &.{},
 
     const Opened = struct { id: usize, parent: ?usize };
 
@@ -779,9 +801,13 @@ const Parser = struct {
             try p.expect("SET");
             var assigned: []const []const u8 = &.{};
             while (true) {
-                assigned = assigned ++ .{try p.name()};
+                const column = try p.name();
                 try p.expectSymbol("=");
+                const read_from = p.columns.len;
                 _ = try p.expr();
+                if (readsAssigned(p.columns[read_from..], target, assigned)) |read|
+                    return p.refuseWith("rsql: SET reads " ++ read ++ " after assigning it, and MySQL assigns left to right; read it before the write or assign it last");
+                assigned = assigned ++ .{column};
                 if (!p.acceptSymbol(",")) break;
             }
             try p.expect("WHERE");
@@ -1065,6 +1091,8 @@ const Parser = struct {
         }
         const first = try p.name();
         if (p.acceptSymbol("(")) {
+            if (std.ascii.eqlIgnoreCase(first, "length"))
+                return p.refuseWith("rsql: length() counts characters of text on SQLite and bytes on MySQL; write @octets(x)");
             const arguments = !p.peek().isSymbol(")");
             if (!p.acceptSymbol("*") and arguments) {
                 _ = p.accept("DISTINCT");
@@ -1074,8 +1102,9 @@ const Parser = struct {
             if (p.accept("OVER")) try p.window(std.ascii.eqlIgnoreCase(first, "row_number") and !arguments);
             return .other;
         }
-        if (p.acceptSymbol(".")) return .{ .column = .{ .table = first, .name = try p.name() } };
-        return .{ .column = .{ .table = null, .name = first } };
+        const column: Column = if (p.acceptSymbol(".")) .{ .table = first, .name = try p.name() } else .{ .table = null, .name = first };
+        p.columns = p.columns ++ .{column};
+        return .{ .column = column };
     }
 
     /// The `(ORDER BY expr [ASC|DESC], ...)` after `OVER`, which only
@@ -1104,7 +1133,7 @@ const Parser = struct {
     }
 
     /// A marker in an expression: `@now` takes no arguments; `@session`
-    /// takes one parameter ?k; `@octets` and `@count_where` one expression;
+    /// takes one parameter ?k; `@octets`, `@count_where` and `@served` one expression;
     /// `@charset`, `@initial`, `@same`, `@distinct` and `@max_where` two. `@index` stands only after
     /// a table (`source`), and any other name is refused.
     fn marker(p: *Parser) Refused!Expr {
@@ -1125,7 +1154,7 @@ const Parser = struct {
             p.sessions = p.sessions ++ .{k};
             return .{ .session = k };
         }
-        const arity: usize = for ([_][]const u8{ "octets", "count_where" }) |single| {
+        const arity: usize = for ([_][]const u8{ "octets", "count_where", "served" }) |single| {
             if (std.mem.eql(u8, marker_name, single)) break 1;
         } else for ([_][]const u8{ "charset", "initial", "same", "distinct", "max_where" }) |binary| {
             if (std.mem.eql(u8, marker_name, binary)) break 2;
@@ -1137,6 +1166,18 @@ const Parser = struct {
         return .other;
     }
 };
+
+/// The first of `read` that an UPDATE of `table` reads after an earlier
+/// assignment of `assigned` wrote it, or null. It compares names: a column
+/// read bare, or qualified by `table`, anywhere in the value, subqueries
+/// included, so a subquery's own column of that name counts too.
+fn readsAssigned(comptime read: []const Column, comptime table: []const u8, comptime assigned: []const []const u8) ?[]const u8 {
+    for (read) |column| {
+        if (column.table) |qualifier| if (!std.mem.eql(u8, qualifier, table)) continue;
+        for (assigned) |name| if (std.mem.eql(u8, name, column.name)) return name;
+    }
+    return null;
+}
 
 fn fieldCount(comptime T: type) usize {
     return @typeInfo(T).@"struct".field_names.len;
@@ -1695,9 +1736,9 @@ fn renderSqlite(comptime text: []const u8) []const u8 {
 }
 
 fn marker(comptime name: []const u8, comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
-    const Marker = enum { octets, charset, initial, same, distinct, count_where, max_where };
+    const Marker = enum { octets, charset, initial, same, distinct, count_where, max_where, served };
     const kind = std.meta.stringToEnum(Marker, name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
-    const arity: usize = if (kind == .octets or kind == .count_where) 1 else 2;
+    const arity: usize = if (kind == .octets or kind == .count_where or kind == .served) 1 else 2;
     if (arguments.len != arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{arity}) ++ " arguments: " ++ text);
     const first = renderSqlite(arguments[0]);
     return switch (kind) {
@@ -1708,7 +1749,286 @@ fn marker(comptime name: []const u8, comptime arguments: []const []const u8, com
         .distinct => "(" ++ first ++ " IS NOT " ++ renderSqlite(arguments[1]) ++ ")",
         .count_where => "count(*) FILTER (WHERE " ++ first ++ ")",
         .max_where => "max(" ++ first ++ ") FILTER (WHERE " ++ renderSqlite(arguments[1]) ++ ")",
+        .served => "rui_served(" ++ first ++ ")",
     };
+}
+
+/// A place in MySQL text where PR 8's engine writes a literal, and where
+/// PREPARE writes `?`.
+pub const Slot = union(enum) {
+    /// Args field k-1, for `?k` and for `@session(?k)`'s reference.
+    argument: usize,
+    /// The Access's second, for `@now`.
+    now,
+    /// This provider's place in `@served(x)`'s list.
+    served: provider_name.Provider,
+};
+
+/// Text in MySQL 8.4's spelling, with a slot between each two parts.
+pub const Template = struct {
+    /// One more than `slots`.
+    parts: []const []const u8,
+    slots: []const Slot,
+
+    /// The parts joined with `?`, the text MySQL PREPAREs.
+    pub fn prepared(comptime template: Template) [:0]const u8 {
+        comptime {
+            var text: []const u8 = template.parts[0];
+            for (template.parts[1..]) |part| text = text ++ "?" ++ part;
+            const terminated = text ++ "\x00";
+            return terminated[0..text.len :0];
+        }
+    }
+};
+
+pub const MysqlRendering = union(enum) { refused: []const u8, rendered: Template };
+
+/// `text` in MySQL's spelling, failing the build where `mysqlRendering`
+/// refuses it.
+fn mysqlTemplate(comptime text: []const u8) Template {
+    return switch (comptime mysqlRendering(text)) {
+        .refused => |message| @compileError(message ++ ": " ++ text),
+        .rendered => |template| template,
+    };
+}
+
+/// Portable Rui SQL in MySQL 8.4's spelling, or why it has none. Text
+/// between tokens is copied, and string literals are copied whole. It
+/// replaces:
+///
+///   ?k, @session(?k)     a slot for Args field k-1
+///   @now                 a slot for the Access's second
+///   @index(name)         nothing: MySQL plans alone until PR 8 reads EXPLAIN
+///   @served(x)           `(x IN (?,...))`, a slot per `provider_name.Provider`
+///   @octets(x)           `OCTET_LENGTH(x)`
+///   @charset(c,'set')    `(NOT REGEXP_LIKE(c,'[^set]','c'))`: no character
+///                        outside the set; `'c'` compares case-sensitively
+///   @initial(c,'set')    `REGEXP_LIKE(c,'^[set]','c')`
+///   @same(a,b)           `(a <=> b)`
+///   @distinct(a,b)       `(NOT (a <=> b))`
+///   @count_where(c)      `count(CASE WHEN c THEN 1 END)`
+///   @max_where(x,c)      `max(CASE WHEN c THEN x END)`
+///   ==                   `=`
+///   /                    ` DIV `: SQLite divides two integers to an integer,
+///                        truncated, as DIV does, where MySQL's `/` gives a
+///                        decimal. Rui SQL divides only integers: the grammar
+///                        reads no decimal literal and the schema has no REAL
+///                        column
+///   a function call      its `functions` entry's MySQL name
+///
+/// It refuses text `portabilityError` refuses, a call no `functions` entry
+/// names with that many arguments, CAST, and an unknown or malformed marker.
+pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
+    comptime {
+        @setEvalBranchQuota(200 * text.len + 10_000);
+        if (portabilityError(text, reserved_names_checked)) |message| return .{ .refused = message };
+        const tokens = tokenize(text);
+        var renderer: MysqlRenderer = .{ .text = text, .tokens = tokens };
+        renderer.range(0, tokens.len) catch return .{ .refused = renderer.message };
+        return .{ .rendered = .{ .parts = renderer.parts ++ .{renderer.current}, .slots = renderer.slots } };
+    }
+}
+
+/// The functions Rui SQL may call, by name and argument count (null: any),
+/// with each one's MySQL name and the arguments MySQL's takes before
+/// Rui SQL's. MySQL rendering refuses any other call. `zeroblob(n)` is
+/// `REPEAT(X'00',n)`, the same n zero bytes, built where SQLite reserves
+/// them; PR 8 writes MySQL content in chunks instead.
+/// `length` counts characters of text on SQLite and bytes on MySQL, so a
+/// typed statement may not call it (`Parser.operand`); the schema's
+/// `.bytes` bounds do.
+const functions = [_]struct { name: []const u8, arguments: ?usize, mysql: []const u8, leading: []const u8 = "" }{
+    .{ .name = "abs", .arguments = 1, .mysql = "abs" },
+    .{ .name = "coalesce", .arguments = null, .mysql = "coalesce" },
+    .{ .name = "count", .arguments = 1, .mysql = "count" },
+    .{ .name = "length", .arguments = 1, .mysql = "length" },
+    .{ .name = "max", .arguments = 1, .mysql = "max" },
+    .{ .name = "max", .arguments = 2, .mysql = "GREATEST" },
+    .{ .name = "min", .arguments = 1, .mysql = "min" },
+    .{ .name = "min", .arguments = 2, .mysql = "LEAST" },
+    .{ .name = "row_number", .arguments = 0, .mysql = "row_number" },
+    .{ .name = "sum", .arguments = 1, .mysql = "sum" },
+    .{ .name = "zeroblob", .arguments = 1, .mysql = "REPEAT", .leading = "X'00'," },
+};
+
+const MysqlRenderer = struct {
+    text: []const u8,
+    tokens: []const Token,
+    parts: []const []const u8 = &.{},
+    current: []const u8 = "",
+    slots: []const Slot = &.{},
+    message: []const u8 = "",
+
+    fn emit(r: *MysqlRenderer, text: []const u8) void {
+        r.current = r.current ++ text;
+    }
+
+    fn slot(r: *MysqlRenderer, which: Slot) void {
+        r.parts = r.parts ++ .{r.current};
+        r.current = "";
+        r.slots = r.slots ++ .{which};
+    }
+
+    fn refuse(r: *MysqlRenderer, message: []const u8) error{Refused} {
+        r.message = message;
+        return error.Refused;
+    }
+
+    /// Renders `tokens[from..to]`, with the text between them copied.
+    fn range(r: *MysqlRenderer, from: usize, to: usize) Refused!void {
+        var at = from;
+        while (at < to) {
+            if (at > from) {
+                const previous = r.tokens[at - 1];
+                r.emit(r.text[previous.start + previous.text.len .. r.tokens[at].start]);
+            }
+            at = try r.token(at, to);
+        }
+    }
+
+    /// Renders the token at `at` and any it governs; returns the index after them.
+    fn token(r: *MysqlRenderer, at: usize, to: usize) Refused!usize {
+        const current = r.tokens[at];
+        switch (current.kind) {
+            .parameter => {
+                const number = std.fmt.parseInt(usize, current.text[1..], 10) catch return r.refuse("rsql: write parameters as ?N");
+                if (number == 0) return r.refuse("rsql: write parameters as ?N");
+                r.slot(.{ .argument = number - 1 });
+                return at + 1;
+            },
+            .marker => return r.marker(at, to),
+            .word => {
+                if (current.is("CAST")) return r.refuse("rsql: CAST converts differently on each engine; MySQL rendering refuses it");
+                if (isCall(r.tokens, at, to)) {
+                    const arguments = argumentRanges(r.tokens, at + 1, closingToken(r.tokens, at + 1, to).?).len;
+                    for (functions) |function| {
+                        if (!std.ascii.eqlIgnoreCase(function.name, current.text)) continue;
+                        if (function.arguments) |count| if (count != arguments) continue;
+                        r.emit(function.mysql ++ "(" ++ function.leading);
+                        return at + 2;
+                    }
+                    return r.refuse(std.fmt.comptimePrint("rsql: MySQL rendering knows no function {s} of {d} arguments", .{ current.text, arguments }));
+                }
+            },
+            .symbol => {
+                if (current.isSymbol("==")) {
+                    r.emit("=");
+                    return at + 1;
+                }
+                if (current.isSymbol("/")) {
+                    r.emit(" DIV ");
+                    return at + 1;
+                }
+            },
+            .number, .literal, .end => {},
+        }
+        r.emit(current.text);
+        return at + 1;
+    }
+
+    fn marker(r: *MysqlRenderer, at: usize, to: usize) Refused!usize {
+        const name = r.tokens[at].text[1..];
+        if (std.mem.eql(u8, name, "now")) {
+            r.slot(.now);
+            return at + 1;
+        }
+        const close = if (at + 1 < to and r.tokens[at + 1].isSymbol("(")) closingToken(r.tokens, at + 1, to) else null;
+        const end = close orelse return r.refuse("rsql: @" ++ name ++ " needs its arguments in parentheses");
+        const Marker = enum { index, session, served, octets, charset, initial, same, distinct, count_where, max_where };
+        const kind = std.meta.stringToEnum(Marker, name) orelse return r.refuse("rsql: unknown marker @" ++ name);
+        const arguments = argumentRanges(r.tokens, at + 1, end);
+        const arity: usize = switch (kind) {
+            .index, .session, .served, .octets, .count_where => 1,
+            .charset, .initial, .same, .distinct, .max_where => 2,
+        };
+        if (arguments.len != arity) return r.refuse(std.fmt.comptimePrint("rsql: @{s} takes {d} arguments", .{ name, arity }));
+        const a = arguments[0];
+        switch (kind) {
+            .index => {},
+            .session => try r.range(a[0], a[1]),
+            .served => {
+                r.emit("(");
+                try r.range(a[0], a[1]);
+                r.emit(" IN (");
+                for (std.enums.values(provider_name.Provider), 0..) |provider, index| {
+                    if (index != 0) r.emit(",");
+                    r.slot(.{ .served = provider });
+                }
+                r.emit("))");
+            },
+            .octets => try r.wrap("OCTET_LENGTH(", a, ")"),
+            .charset => try r.wrap("(NOT REGEXP_LIKE(", a, ",'[^" ++ try r.set(arguments[1]) ++ "]','c'))"),
+            .initial => try r.wrap("REGEXP_LIKE(", a, ",'^[" ++ try r.set(arguments[1]) ++ "]','c')"),
+            .same, .distinct => {
+                r.emit(if (kind == .same) "(" else "(NOT (");
+                try r.range(a[0], a[1]);
+                try r.wrap(" <=> ", arguments[1], if (kind == .same) ")" else "))");
+            },
+            .count_where => try r.wrap("count(CASE WHEN ", a, " THEN 1 END)"),
+            .max_where => {
+                try r.wrap("max(CASE WHEN ", arguments[1], " THEN ");
+                try r.wrap("", a, " END)");
+            },
+        }
+        return end + 1;
+    }
+
+    fn wrap(r: *MysqlRenderer, before: []const u8, argument: [2]usize, after: []const u8) Refused!void {
+        r.emit(before);
+        try r.range(argument[0], argument[1]);
+        r.emit(after);
+    }
+
+    /// A character set argument: one literal, held to `characterSet`.
+    fn set(r: *MysqlRenderer, argument: [2]usize) Refused![]const u8 {
+        if (argument[1] != argument[0] + 1 or r.tokens[argument[0]].kind != .literal) return r.refuse("rsql: a character set is one quoted literal");
+        return characterSet(r.tokens[argument[0]].text, r.text);
+    }
+};
+
+/// Whether the word at `at` calls a function: a name that is no grammar
+/// word, before `(`, and neither the table of `INTO table(` nor a WITH
+/// name before its column list (`name(...) AS (`).
+fn isCall(comptime tokens: []const Token, comptime at: usize, comptime to: usize) bool {
+    const word = tokens[at];
+    if (word.kind != .word or isGrammarWord(word.text)) return false;
+    if (at + 1 >= to or !tokens[at + 1].isSymbol("(")) return false;
+    if (at > 0 and tokens[at - 1].is("INTO")) return false;
+    const close = closingToken(tokens, at + 1, to) orelse return false;
+    return !(close + 2 < to and tokens[close + 1].is("AS") and tokens[close + 2].isSymbol("("));
+}
+
+/// The index of the `)` that closes the `(` at `open`, before `to`.
+fn closingToken(comptime tokens: []const Token, comptime open: usize, comptime to: usize) ?usize {
+    var depth: usize = 0;
+    for (tokens[open..to], open..) |each, index| {
+        if (each.isSymbol("(")) depth += 1;
+        if (each.isSymbol(")")) {
+            depth -= 1;
+            if (depth == 0) return index;
+        }
+    }
+    return null;
+}
+
+/// The token ranges of the arguments between `(` at `open` and `)` at
+/// `close`, split at their own commas; none when nothing stands between.
+fn argumentRanges(comptime tokens: []const Token, comptime open: usize, comptime close: usize) []const [2]usize {
+    comptime {
+        if (close == open + 1) return &.{};
+        var ranges: []const [2]usize = &.{};
+        var depth: usize = 0;
+        var start = open + 1;
+        for (tokens[open + 1 .. close], open + 1..) |each, index| {
+            if (each.isSymbol("(")) depth += 1;
+            if (each.isSymbol(")")) depth -= 1;
+            if (depth == 0 and each.isSymbol(",")) {
+                ranges = ranges ++ .{[2]usize{ start, index }};
+                start = index + 1;
+            }
+        }
+        return ranges ++ .{[2]usize{ start, close }};
+    }
 }
 
 /// The characters of a set literal such as 'a-z0-9_-': ranges and single
@@ -1815,6 +2135,79 @@ test "markers nest, and text outside them is copied" {
         comptime render(.sqlite, "x IS NULL OR (@octets(x)=6 AND @charset(x,'a-f')) AND '@octets(y)'='@'"),
     );
     try std.testing.expectEqualStrings("(length(CAST(a AS BLOB)) IS b)", comptime render(.sqlite, "@same(@octets(a), b)"));
+}
+
+test "each marker renders its MySQL spelling" {
+    try std.testing.expectEqualStrings("OCTET_LENGTH(workspace)<=4096", comptime render(.mysql, "@octets(workspace)<=4096"));
+    try std.testing.expectEqualStrings("(NOT REGEXP_LIKE(provider,'[^a-z0-9_-]','c'))", comptime render(.mysql, "@charset(provider,'a-z0-9_-')"));
+    try std.testing.expectEqualStrings("REGEXP_LIKE(provider,'^[a-z]','c')", comptime render(.mysql, "@initial(provider,'a-z')"));
+    try std.testing.expectEqualStrings("(action_kind <=> 1)", comptime render(.mysql, "@same(action_kind,1)"));
+    try std.testing.expectEqualStrings("(NOT (resolution_code <=> 'denied'))", comptime render(.mysql, "@distinct(resolution_code,'denied')"));
+    try std.testing.expectEqualStrings("count(CASE WHEN a.authorized=0 AND (x <=> 1) THEN 1 END)", comptime render(.mysql, "@count_where(a.authorized=0 AND @same(x,1))"));
+    try std.testing.expectEqualStrings("max(CASE WHEN r.permission_mode=0 THEN a.decided_at END)", comptime render(.mysql, "@max_where(a.decided_at,r.permission_mode=0)"));
+    try std.testing.expectEqualStrings("GREATEST(a, b)>LEAST(c,d) AND max(e)=1 AND f='@octets(g)'", comptime render(.mysql, "max(a, b)>min(c,d) AND max(e)==1 AND f='@octets(g)'"));
+}
+
+test "a statement's MySQL text has a slot for each parameter, @now and @session, and drops @index" {
+    const W = Write(.{
+        .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2) AND operation_id>?1",
+        .Args = struct { turn_id: u64, session: SessionHead },
+        .expect = .{ .at_most = 1 },
+    });
+    try std.testing.expectEqualStrings("UPDATE turn SET outcome_at=? WHERE turn_id=? AND session_ref=? AND operation_id>?", comptime W.mysql.prepared());
+    try std.testing.expectEqualDeep(@as([]const Slot, &.{ .now, .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 0 } }), W.mysql.slots);
+    const S = Read(.{
+        .sql = "SELECT action_id FROM action_operation @index(action_operation_executable) WHERE action_id>?1",
+        .Args = struct { after: u64 },
+        .Row = struct { action_id: Positive },
+        .cardinality = .optional,
+    });
+    try std.testing.expectEqualStrings("SELECT action_id FROM action_operation  WHERE action_id>?", comptime S.mysql.prepared());
+}
+
+test "@served is the opening's function on SQLite and a slot per provider on MySQL" {
+    const S = Read(.{
+        .sql = "SELECT created_seq FROM session WHERE @served(provider) AND created_seq>?1",
+        .Args = struct { after: u64 },
+        .Row = struct { created_seq: u64 },
+        .cardinality = .optional,
+    });
+    try std.testing.expectEqualStrings("SELECT created_seq FROM session WHERE rui_served(provider) AND created_seq>?1", S.sql);
+    const providers = comptime std.enums.values(provider_name.Provider);
+    comptime var list: []const u8 = "";
+    comptime var slots: []const Slot = &.{};
+    inline for (providers, 0..) |provider, index| {
+        list = list ++ (if (index == 0) "?" else ",?");
+        slots = slots ++ .{Slot{ .served = provider }};
+    }
+    try std.testing.expectEqualStrings("SELECT created_seq FROM session WHERE (provider IN (" ++ list ++ ")) AND created_seq>?", comptime S.mysql.prepared());
+    try std.testing.expectEqualDeep(slots ++ &[_]Slot{.{ .argument = 0 }}, S.mysql.slots);
+}
+
+test "MySQL rendering calls only the functions it knows, by argument count" {
+    try std.testing.expectEqualStrings("rsql: MySQL rendering knows no function rui_served of 1 arguments", comptime mysqlRendering("rui_served(provider)=1").refused);
+    try std.testing.expectEqualStrings("rsql: MySQL rendering knows no function max of 3 arguments", comptime mysqlRendering("max(a,b,c)>0").refused);
+    try std.testing.expectEqualStrings("payload=REPEAT(X'00',byte_length)", comptime render(.mysql, "payload=zeroblob(byte_length)"));
+    // Neither a WITH name's column list nor an INSERT's table is a call.
+    const text = "WITH recent(turn_id) AS (SELECT count(*) AS n FROM turn) INSERT INTO turn(turn_id) SELECT turn_id FROM recent";
+    try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
+}
+
+test "MySQL rendering refuses CAST and divides integers with DIV" {
+    try std.testing.expectEqualStrings("rsql: CAST converts differently on each engine; MySQL rendering refuses it", comptime mysqlRendering("CAST(payload AS TEXT)='x'").refused);
+    try std.testing.expectEqualStrings("(mask DIV 2)%2=1", comptime render(.mysql, "(mask/2)%2=1"));
+}
+
+test "length() and an UPDATE that reads what its SET already wrote are refused on every dialect" {
+    const Id = struct { id: u64 };
+    try std.testing.expectEqualStrings(
+        "rsql: length() counts characters of text on SQLite and bytes on MySQL; write @octets(x)",
+        comptime statementError(.read, "SELECT length(digest) AS n FROM content WHERE content_id=?1", Id, struct { n: u64 }).?,
+    );
+    const reads = "rsql: SET reads private after assigning it, and MySQL assigns left to right; read it before the write or assign it last";
+    try std.testing.expectEqualStrings(reads, comptime statementError(.write, "UPDATE content SET private=1,byte_length=private WHERE content_id=?1", Id, void).?);
+    try std.testing.expectEqualStrings(reads, comptime statementError(.write, "UPDATE content SET private=1,byte_length=(SELECT content.private) WHERE content_id=?1", Id, void).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.write, "UPDATE content SET byte_length=private,private=1 WHERE private=0 AND content_id=?1", Id, void));
 }
 
 test "non-portable text names its fix" {

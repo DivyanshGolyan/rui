@@ -18,12 +18,6 @@ const c = sqlite.c;
 const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
 
-/// Whether the Host serves the provider `column` names, through the
-/// `rui_served` function each opening registers over its own served set.
-pub fn servedProviderSql(comptime column: []const u8) []const u8 {
-    return "rui_served(" ++ column ++ ")";
-}
-
 pub const AcceptedConfiguration = struct {
     replayed: bool,
     revision: u64 = 0,

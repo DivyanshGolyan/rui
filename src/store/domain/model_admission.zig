@@ -88,7 +88,7 @@ const Selection = struct {
 const runnable_selection = rsql.Read(.{
     .sql = "WITH candidate AS (" ++
         "SELECT m.session_ref FROM message_admission m @index(message_admission_pending) WHERE " ++
-        configuration_domain.servedProviderSql("(SELECT provider FROM session WHERE session_ref=m.session_ref)") ++ " AND " ++ runnable_eligibility_sql ++
+        "@served((SELECT provider FROM session WHERE session_ref=m.session_ref))" ++ " AND " ++ runnable_eligibility_sql ++
         " ORDER BY m.admission_id LIMIT 1) " ++
         "SELECT " ++ rsql.session_head_columns ++ ",min(m.admission_id) AS first_admission,max(m.admission_id) AS cutoff,count(*) AS selected," ++
         "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
@@ -113,7 +113,7 @@ pub const runnable_selection_sql = runnable_selection.sql;
 pub const tool_continuation_selection = rsql.Read(.{
     .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,active.turn_id " ++
         "FROM turn active @index(turn_tool_continuation) JOIN session s ON s.session_ref=active.session_ref " ++
-        "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ configuration_domain.servedProviderSql("s.provider") ++
+        "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ "@served(s.provider)" ++
         " AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
         "WHERE m.session_ref=active.session_ref AND " ++ queued_input_sql ++
         ") ORDER BY active.operation_id LIMIT 1",
@@ -136,7 +136,7 @@ const retry_admission_select_text = std.fmt.comptimePrint(
     "SELECT o.turn_id,o.operation_id,o.attempt_ordinal,o.retry_due_at_ms," ++ rsql.session_head_columns ++ " " ++
         "FROM model_operation o @index(model_operation_retry_due) JOIN session s ON s.session_ref=o.session_ref " ++
         "WHERE o.resolution_code IS NULL AND o." ++ retry_allowance_open_sql ++ " " ++
-        "AND o.retry_due_at_ms<=?1 AND o.operation_id>?2 AND " ++ configuration_domain.servedProviderSql("s.provider") ++
+        "AND o.retry_due_at_ms<=?1 AND o.operation_id>?2 AND " ++ "@served(s.provider)" ++
         " ORDER BY o.operation_id LIMIT {d}",
     .{retry_admission_page_rows},
 );

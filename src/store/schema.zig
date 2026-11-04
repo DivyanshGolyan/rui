@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 50;
+pub const schema_version: u32 = 51;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -29,6 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
+    .{ .schema_version = 51, .digest = 0x468844fb8174b4ec },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -166,7 +167,7 @@ pub const tables = [_]Table{
     .{
         .name = "store_meta",
         .columns = &.{
-            .{ .name = "meta_key", .type = .{ .text = null } },
+            .{ .name = "meta_key", .type = .{ .text = .{ .max = 64 } } },
             .{ .name = "meta_value", .type = .{ .text = null } },
         },
         .primary_key = &.{"meta_key"},
@@ -186,7 +187,7 @@ pub const tables = [_]Table{
     .{
         .name = "session",
         .columns = &.{
-            .{ .name = "session_ref", .type = .{ .text = null }, .check = "@octets(session_ref)=6 AND @charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
+            .{ .name = "session_ref", .type = .{ .text = .{ .min = 6, .max = 6 } }, .check = "@charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
             // The Session's immutable binding: grammar version and its options.
@@ -761,18 +762,202 @@ pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     };
 }
 
-pub const Object = struct { kind: enum { table, index }, name: []const u8, sql: []const u8 };
+/// `foreign_key`: only on MySQL (`mysqlObjects`).
+pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
-/// Every table and named index, each with the statement that creates it.
+/// Every table and named index, each with the statement that creates it,
+/// and on MySQL the foreign keys `mysqlObjects` adds after them.
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
         // Format 47's 51 tables and indexes take about 129,000 branches (measured).
         @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
+        if (dialect == .mysql) break :blk switch (mysqlObjects(&tables, &indexes)) {
+            .refused => |message| @compileError(message),
+            .objects => |result| result,
+        };
         var result: []const Object = &.{};
-        for (tables) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(dialect, table) }};
-        for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(dialect, index) }};
+        for (tables) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table) }};
+        for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(index) }};
         break :blk result;
     };
+}
+
+/// What MySQL sessions on a Store set before their first statement: the
+/// collation the DDL's keys compare in, and a strict `sql_mode` with
+/// ONLY_FULL_GROUP_BY and NO_BACKSLASH_ESCAPES. Nothing in this PR runs
+/// it; the live dialect check and PR 8's engine do.
+pub const mysql_session = [_][:0]const u8{
+    "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
+    "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
+};
+
+const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };
+
+/// The MySQL 8.4 DDL of `all` and `all_indexes`, or why it has none.
+/// Each table is InnoDB in utf8mb4_0900_bin, with each column typed by
+/// `mysqlColumnType` and every key, CHECK and foreign key at table level:
+/// MySQL ignores a column's inline REFERENCES, and refuses a column CHECK
+/// that names another column. A foreign key to a table created later
+/// (the turn and admission cycle) is an ALTER TABLE after every table and
+/// index. Each index takes its `mysqlIndexForm`.
+fn mysqlObjects(comptime all: []const Table, comptime all_indexes: []const Index) MysqlObjects {
+    comptime {
+        @setEvalBranchQuota(50_000 * (all.len + all_indexes.len));
+        var result: []const Object = &.{};
+        var later: []const Object = &.{};
+        for (all, 0..) |table, position| {
+            var lines: []const []const u8 = &.{};
+            var checks: []const []const u8 = &.{};
+            for (table.columns) |column| {
+                const column_type = switch (mysqlColumnType(all, all_indexes, table, column)) {
+                    .refused => |message| return .{ .refused = message },
+                    .name => |name| name,
+                };
+                lines = lines ++ .{" " ++ column.name ++ " " ++ column_type ++ (if (column.nullable) "" else " NOT NULL") ++
+                    (if (column.default) |value| " DEFAULT " ++ value else "")};
+                if (columnCheck(column)) |check| checks = checks ++ .{check};
+            }
+            lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
+            for (table.uniques) |unique| lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
+            for (table.foreign_keys) |key| {
+                const clause = "FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key);
+                if (tablePosition(all, key.references) <= position) {
+                    lines = lines ++ .{" " ++ clause};
+                } else later = later ++ .{Object{ .kind = .foreign_key, .name = table.name ++ "(" ++ list(key.columns) ++ ")", .sql = "ALTER TABLE " ++ table.name ++ " ADD " ++ clause }};
+            }
+            for (checks ++ table.checks) |check| lines = lines ++ .{" CHECK(" ++ rsql.render(.mysql, check) ++ ")"};
+            result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = "CREATE TABLE " ++ table.name ++ "(\n" ++ joinLines(lines) ++
+                "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin" }};
+        }
+        for (all_indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createMysqlIndex(index) }};
+        return .{ .objects = result ++ later };
+    }
+}
+
+const MysqlColumnType = union(enum) { refused: []const u8, name: []const u8 };
+
+/// `column`'s MySQL type. A column of a foreign key takes the type of the
+/// column it references. Otherwise `.int` is BIGINT, `.flag` TINYINT and
+/// `.tag` VARCHAR of its longest tag; bounded `.text` and `.bytes` are
+/// VARCHAR and VARBINARY of their bound when `mysqlKeyed`, else TEXT and
+/// BLOB up to 65,535 bytes and LONGTEXT and LONGBLOB past it. An unbounded
+/// Session column (session_ref or sender_session_ref of a table that
+/// carries Sessions) takes session.session_ref's type, because rsql's
+/// write rules give it only a SessionHead's reference or a copy of one
+/// (`rsql.sessionError`). Other unbounded text and bytes are LONGTEXT and
+/// LONGBLOB, and refused when keyed: MySQL keys only bounded values.
+fn mysqlColumnType(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime column: Column) MysqlColumnType {
+    comptime {
+        for (table.foreign_keys) |key| for (key.columns, key.referenced) |name, referenced| if (std.mem.eql(u8, name, column.name)) {
+            const parent = all[tablePosition(all, key.references)];
+            return mysqlColumnType(all, all_indexes, parent, columnNamed(parent, referenced));
+        };
+        const keyed = mysqlKeyed(all, all_indexes, table, column.name);
+        const octets, const text = switch (column.type) {
+            .int => return .{ .name = "BIGINT" },
+            .flag => return .{ .name = "TINYINT" },
+            .tag => |values| {
+                var longest: usize = 0;
+                for (values) |value| longest = @max(longest, value.len);
+                return .{ .name = std.fmt.comptimePrint("VARCHAR({d})", .{longest}) };
+            },
+            .text => |bound| .{ bound, true },
+            .bytes => |bound| .{ bound, false },
+        };
+        if (octets) |bounds| return .{ .name = if (keyed)
+            std.fmt.comptimePrint("{s}({d})", .{ if (text) "VARCHAR" else "VARBINARY", bounds.max })
+        else if (bounds.max <= 65_535)
+            (if (text) "TEXT" else "BLOB")
+        else if (text) "LONGTEXT" else "LONGBLOB" };
+        const session_column = std.mem.eql(u8, column.name, "session_ref") or std.mem.eql(u8, column.name, "sender_session_ref");
+        if (session_column and carriesSessions(table.name)) {
+            const session = all[tablePosition(all, "session")];
+            return mysqlColumnType(all, all_indexes, session, columnNamed(session, "session_ref"));
+        }
+        if (keyed) return .{ .refused = "schema: " ++ table.name ++ "." ++ column.name ++ " is in a key with no bound; MySQL keys only bounded values: give its type a .max" };
+        return .{ .name = if (text) "LONGTEXT" else "LONGBLOB" };
+    }
+}
+
+/// Whether MySQL indexes `table`'s column `name` by its value: it is in
+/// the table's primary key, a unique, an index's columns, or the columns
+/// another table's foreign key references.
+fn mysqlKeyed(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime name: []const u8) bool {
+    comptime {
+        if (contains(table.primary_key, name)) return true;
+        for (table.uniques) |unique| if (contains(unique, name)) return true;
+        for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
+            for (index.columns) |column| if (std.mem.eql(u8, indexColumn(column).name, name)) return true;
+        };
+        for (all) |other| for (other.foreign_keys) |key| {
+            if (std.mem.eql(u8, key.references, table.name) and contains(key.referenced, name)) return true;
+        };
+        return false;
+    }
+}
+
+/// How MySQL, which has no partial index, holds a partial one. Each is
+/// derived from the index alone.
+pub const MysqlIndexForm = enum {
+    /// Not unique: the plain index on its columns. Its predicate only
+    /// narrowed what SQLite stores, never what it allows.
+    leading,
+    /// Unique, and its predicate is exactly the text `c IS NOT NULL` for
+    /// one of its columns c: a plain unique index, since MySQL never finds
+    /// two NULLs equal, so rows the predicate excludes never collide.
+    plain_unique,
+    /// Any other unique partial index: a unique index on
+    /// `(CASE WHEN predicate THEN c END)` for each column c, NULL, and so
+    /// never colliding, where the predicate fails.
+    unique_when,
+};
+
+/// `index`'s MySQL form, or null when it has no predicate.
+pub fn mysqlIndexForm(comptime index: Index) ?MysqlIndexForm {
+    const where = index.where orelse return null;
+    if (!index.unique) return .leading;
+    for (index.columns) |column| if (std.mem.eql(u8, where, column ++ " IS NOT NULL")) return .plain_unique;
+    return .unique_when;
+}
+
+fn createMysqlIndex(comptime index: Index) []const u8 {
+    checkIdentifier(index.name);
+    var parts: []const u8 = list(index.columns);
+    if (mysqlIndexForm(index) == .unique_when) {
+        parts = "";
+        for (index.columns, 0..) |column, position| {
+            const part = indexColumn(column);
+            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ rsql.render(.mysql, index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
+        }
+    }
+    return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";
+}
+
+/// An index column's name, and its order as written after it (" DESC" or "").
+fn indexColumn(comptime column: []const u8) struct { name: []const u8, order: []const u8 } {
+    const space = std.mem.indexOfScalar(u8, column, ' ') orelse return .{ .name = column, .order = "" };
+    return .{ .name = column[0..space], .order = column[space..] };
+}
+
+fn tablePosition(comptime all: []const Table, comptime name: []const u8) usize {
+    for (all, 0..) |table, position| if (std.mem.eql(u8, table.name, name)) return position;
+    @compileError("schema: no table named " ++ name);
+}
+
+fn columnNamed(comptime table: Table, comptime name: []const u8) Column {
+    for (table.columns) |column| if (std.mem.eql(u8, column.name, name)) return column;
+    @compileError("schema: no column " ++ name ++ " in " ++ table.name);
+}
+
+fn contains(comptime names: []const []const u8, comptime name: []const u8) bool {
+    for (names) |each| if (std.mem.eql(u8, each, name)) return true;
+    return false;
+}
+
+fn joinLines(comptime lines: []const []const u8) []const u8 {
+    var body: []const u8 = "";
+    for (lines, 0..) |line, position| body = body ++ (if (position == 0) "" else ",\n") ++ line;
+    return body;
 }
 
 /// FNV-1a over every statement `bootstrap` executes, in order, so changing
@@ -797,9 +982,9 @@ const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++ format_text ++ "')";
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
-fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8 {
+fn createTable(comptime table: Table) []const u8 {
     var lines: []const []const u8 = &.{};
-    for (table.columns) |column| lines = lines ++ .{columnDefinition(dialect, table, column)};
+    for (table.columns) |column| lines = lines ++ .{columnDefinition(table, column)};
     if (table.primary_key.len > 1) lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
     for (table.uniques) |unique| {
         if (unique.len > 1) lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
@@ -807,14 +992,13 @@ fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8
     for (table.foreign_keys) |key| {
         if (key.columns.len > 1) lines = lines ++ .{" FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key)};
     }
-    for (table.checks) |check| lines = lines ++ .{" CHECK(" ++ rsql.render(dialect, check) ++ ")"};
-    var body: []const u8 = "";
-    for (lines, 0..) |line, position| body = body ++ (if (position == 0) "" else ",\n") ++ line;
+    for (table.checks) |check| lines = lines ++ .{" CHECK(" ++ rsql.render(.sqlite, check) ++ ")"};
+    const body = joinLines(lines);
     checkIdentifier(table.name);
     return "CREATE TABLE " ++ table.name ++ "(\n" ++ body ++ "\n) STRICT" ++ (if (table.without_rowid) ", WITHOUT ROWID" else "");
 }
 
-fn columnDefinition(comptime dialect: rsql.Dialect, comptime table: Table, comptime column: Column) []const u8 {
+fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
     checkIdentifier(column.name);
     const only = &[_][]const u8{column.name};
     const primary = eqlList(table.primary_key, only);
@@ -834,7 +1018,7 @@ fn columnDefinition(comptime dialect: rsql.Dialect, comptime table: Table, compt
     for (table.foreign_keys) |key| {
         if (eqlList(key.columns, only)) text = text ++ " " ++ referenceClause(key);
     }
-    if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ rsql.render(dialect, check) ++ ")";
+    if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ rsql.render(.sqlite, check) ++ ")";
     return text;
 }
 
@@ -864,10 +1048,10 @@ fn referenceClause(comptime key: ForeignKey) []const u8 {
     return "REFERENCES " ++ key.references ++ "(" ++ list(key.referenced) ++ ")";
 }
 
-fn createIndex(comptime dialect: rsql.Dialect, comptime index: Index) []const u8 {
+fn createIndex(comptime index: Index) []const u8 {
     checkIdentifier(index.name);
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ list(index.columns) ++ ")" ++
-        (if (index.where) |where| " WHERE " ++ rsql.render(dialect, where) else "");
+        (if (index.where) |where| " WHERE " ++ rsql.render(.sqlite, where) else "");
 }
 
 fn checkIdentifier(comptime name: []const u8) void {
@@ -975,4 +1159,93 @@ fn metaEquals(database: *c.sqlite3, comptime key: []const u8, expected: []const 
     if (c.sqlite3_column_type(statement, 0) != c.SQLITE_TEXT) return false;
     const text = c.sqlite3_column_text(statement, 0) orelse return error.OutOfMemory;
     return std.mem.eql(u8, text[0..@intCast(c.sqlite3_column_bytes(statement, 0))], expected);
+}
+
+// Two tables whose keys reference each other, for the MySQL DDL test.
+const mysql_test_order: Table = .{
+    .name = "turn",
+    .columns = &.{
+        .{ .name = "turn_id", .type = .int },
+        .{ .name = "code", .type = .{ .text = null } },
+        .{ .name = "live", .type = .flag, .default = "0" },
+    },
+    .primary_key = &.{"turn_id"},
+    .foreign_keys = &.{references("code", "content", &.{"label"})},
+};
+const mysql_test_label: Table = .{
+    .name = "content",
+    .columns = &.{
+        .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 8 } } },
+        .{ .name = "note", .type = .{ .text = .{ .max = 100 } }, .nullable = true },
+        .{ .name = "body", .type = .{ .bytes = null }, .check = "length(body)<10" },
+        .{ .name = "first_turn", .type = .int },
+    },
+    .primary_key = &.{"label"},
+    .foreign_keys = &.{references("first_turn", "turn", &.{"turn_id"})},
+};
+
+test "MySQL types come from foreign keys, bounds and keys, and a key cycle closes after its tables" {
+    const rendered = comptime mysqlObjects(&[_]Table{ mysql_test_order, mysql_test_label }, &.{}).objects;
+    try std.testing.expectEqual(3, rendered.len);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE turn(\n turn_id BIGINT NOT NULL,\n code VARCHAR(8) NOT NULL,\n live TINYINT NOT NULL DEFAULT 0,\n PRIMARY KEY(turn_id),\n" ++
+            " CHECK(live IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        rendered[0].sql,
+    );
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE content(\n label VARCHAR(8) NOT NULL,\n note TEXT,\n body LONGBLOB NOT NULL,\n first_turn BIGINT NOT NULL,\n PRIMARY KEY(label),\n" ++
+            " FOREIGN KEY(first_turn) REFERENCES turn(turn_id),\n CHECK(OCTET_LENGTH(label) BETWEEN 1 AND 8),\n" ++
+            " CHECK(note IS NULL OR OCTET_LENGTH(note)<=100),\n CHECK(length(body)<10)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        rendered[1].sql,
+    );
+    try std.testing.expectEqualStrings("ALTER TABLE turn ADD FOREIGN KEY(code) REFERENCES content(label)", rendered[2].sql);
+    const unbounded = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = null } }}, .primary_key = &.{"label"} }};
+    try std.testing.expectEqualStrings(
+        "schema: content.label is in a key with no bound; MySQL keys only bounded values: give its type a .max",
+        comptime mysqlObjects(&unbounded, &.{}).refused,
+    );
+}
+
+test "each partial index takes its MySQL form" {
+    try std.testing.expectEqualStrings("CREATE INDEX open ON turn(session_ref)", comptime createMysqlIndex(.{ .name = "open", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_code IS NULL" }));
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX handle ON action_operation(sender_handle,action_id)",
+        comptime createMysqlIndex(.{ .name = "handle", .table = "action_operation", .columns = &.{ "sender_handle", "action_id" }, .unique = true, .where = "sender_handle IS NOT NULL" }),
+    );
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX active ON turn((CASE WHEN outcome_code IS NULL THEN session_ref END),(CASE WHEN outcome_code IS NULL THEN turn_id END) DESC)",
+        comptime createMysqlIndex(.{ .name = "active", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" }, .unique = true, .where = "outcome_code IS NULL" }),
+    );
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX other ON turn((CASE WHEN outcome_code IS NOT NULL THEN session_ref END))",
+        comptime createMysqlIndex(.{ .name = "other", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NOT NULL" }),
+    );
+}
+
+test "the schema's MySQL DDL keeps each foreign key once and no SQLite spelling" {
+    const rendered = comptime objects(.mysql);
+    for (rendered) |object| {
+        for ([_][]const u8{ "STRICT", "ROWID", "GLOB", "FILTER", "rui_served", "INDEXED", "WHERE" }) |sqlite_only| {
+            try std.testing.expect(std.mem.indexOf(u8, object.sql, sqlite_only) == null);
+        }
+    }
+    inline for (tables) |table| {
+        inline for (table.foreign_keys) |key| {
+            const clause = comptime "FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key);
+            var found: usize = 0;
+            for (rendered) |object| {
+                const owner = switch (object.kind) {
+                    .table => std.mem.eql(u8, object.name, table.name),
+                    .foreign_key => std.mem.startsWith(u8, object.sql, "ALTER TABLE " ++ table.name ++ " "),
+                    .index => false,
+                };
+                if (owner) found += std.mem.count(u8, object.sql, clause);
+            }
+            try std.testing.expectEqual(@as(usize, 1), found);
+        }
+    }
+    const output_items = for (rendered) |object| {
+        if (std.mem.eql(u8, object.name, "model_output_item")) break object.sql;
+    } else unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, output_items, " session_ref VARCHAR(6) NOT NULL,") != null);
 }
