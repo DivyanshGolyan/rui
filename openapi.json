@@ -61,7 +61,7 @@
             "$ref": "#/components/parameters/WireVersion"
           },
           {
-            "$ref": "#/components/parameters/HostInstance"
+            "$ref": "#/components/parameters/HostInstanceRequired"
           }
         ],
         "requestBody": {
@@ -131,6 +131,23 @@
               }
             }
           },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ConfigureConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "default": {
             "description": "A refusal or failure.",
             "content": {
@@ -176,6 +193,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MessageReply"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/MessageConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
                 }
               }
             }
@@ -226,6 +260,23 @@
               }
             }
           },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionStopConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "default": {
             "description": "A refusal or failure.",
             "content": {
@@ -272,6 +323,23 @@
               }
             }
           },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ModelInterruptionConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "default": {
             "description": "A refusal or failure.",
             "content": {
@@ -314,6 +382,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PermissionDecisionReply"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PermissionDecisionConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
                 }
               }
             }
@@ -401,12 +486,11 @@
         },
         "responses": {
           "200": {
-            "description": "The content bytes, from the requested offset.",
+            "description": "The content, as text.",
             "content": {
-              "application/octet-stream": {
+              "text/plain": {
                 "schema": {
-                  "type": "string",
-                  "format": "binary"
+                  "type": "string"
                 }
               }
             }
@@ -448,12 +532,11 @@
         },
         "responses": {
           "200": {
-            "description": "The content bytes, from the requested offset.",
+            "description": "The content, as text.",
             "content": {
-              "application/octet-stream": {
+              "text/plain": {
                 "schema": {
-                  "type": "string",
-                  "format": "binary"
+                  "type": "string"
                 }
               }
             }
@@ -495,12 +578,11 @@
         },
         "responses": {
           "200": {
-            "description": "The content bytes, from the requested offset.",
+            "description": "The content, as text.",
             "content": {
-              "application/octet-stream": {
+              "text/plain": {
                 "schema": {
-                  "type": "string",
-                  "format": "binary"
+                  "type": "string"
                 }
               }
             }
@@ -542,8 +624,11 @@
         },
         "responses": {
           "200": {
-            "description": "The Session report (JSON), or the failed response's bytes. The report's schema is not described yet.",
+            "description": "The Session report (JSON; its schema is not described yet), or, for a failed response export, that response's bytes.",
             "content": {
+              "application/json": {
+                "schema": {}
+              },
               "application/octet-stream": {
                 "schema": {
                   "type": "string",
@@ -2242,6 +2327,66 @@
         ],
         "additionalProperties": false
       },
+      "ConfigureConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "type": {
+            "const": "configuration_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "session",
+              "code"
+            ],
+            "additionalProperties": false
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              },
+              "reason": {
+                "const": "direct_reply_does_not_wait_for_model_processing"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer",
+          "execution"
+        ],
+        "additionalProperties": false
+      },
       "ConfigureReply": {
         "anyOf": [
           {
@@ -2352,66 +2497,6 @@
                       "model_is_immutable",
                       "revision_exhausted"
                     ]
-                  }
-                },
-                "required": [
-                  "status",
-                  "replayed",
-                  "session",
-                  "code"
-                ],
-                "additionalProperties": false
-              },
-              "execution": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "unavailable"
-                  },
-                  "reason": {
-                    "const": "direct_reply_does_not_wait_for_model_processing"
-                  }
-                },
-                "required": [
-                  "status",
-                  "reason"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "type",
-              "answer",
-              "execution"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "8"
-              },
-              "type": {
-                "const": "configuration_reply"
-              },
-              "answer": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "conflict"
-                  },
-                  "replayed": {
-                    "const": false
-                  },
-                  "session": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "x-rui-max-bytes": 128
-                  },
-                  "code": {
-                    "const": "idempotency_key_conflict"
                   }
                 },
                 "required": [
@@ -4311,6 +4396,62 @@
         ],
         "additionalProperties": false
       },
+      "MessageConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "type": {
+            "const": "message_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "session",
+              "code"
+            ],
+            "additionalProperties": false
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "queued"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer",
+          "execution"
+        ],
+        "additionalProperties": false
+      },
       "MessageReply": {
         "anyOf": [
           {
@@ -4502,62 +4643,6 @@
               "type",
               "answer",
               "input",
-              "execution"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "8"
-              },
-              "type": {
-                "const": "message_reply"
-              },
-              "answer": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "conflict"
-                  },
-                  "replayed": {
-                    "const": false
-                  },
-                  "session": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "x-rui-max-bytes": 128
-                  },
-                  "code": {
-                    "const": "idempotency_key_conflict"
-                  }
-                },
-                "required": [
-                  "status",
-                  "replayed",
-                  "session",
-                  "code"
-                ],
-                "additionalProperties": false
-              },
-              "execution": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "queued"
-                  }
-                },
-                "required": [
-                  "status"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "type",
-              "answer",
               "execution"
             ],
             "additionalProperties": false
@@ -4873,6 +4958,66 @@
           }
         ]
       },
+      "ModelInterruptionConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "type": {
+            "const": "model_interruption_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "turn": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "operation": {
+                    "$ref": "#/components/schemas/Decimal"
+                  }
+                },
+                "required": [
+                  "session",
+                  "turn",
+                  "operation"
+                ],
+                "additionalProperties": false
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "target",
+              "code"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer"
+        ],
+        "additionalProperties": false
+      },
       "ModelInterruptionReply": {
         "anyOf": [
           {
@@ -4981,66 +5126,6 @@
                       "target_mismatch",
                       "operation_resolved"
                     ]
-                  }
-                },
-                "required": [
-                  "status",
-                  "replayed",
-                  "target",
-                  "code"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "type",
-              "answer"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "8"
-              },
-              "type": {
-                "const": "model_interruption_reply"
-              },
-              "answer": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "conflict"
-                  },
-                  "replayed": {
-                    "const": false
-                  },
-                  "target": {
-                    "type": "object",
-                    "properties": {
-                      "session": {
-                        "type": "string",
-                        "maxLength": 128,
-                        "x-rui-max-bytes": 128
-                      },
-                      "turn": {
-                        "$ref": "#/components/schemas/Decimal"
-                      },
-                      "operation": {
-                        "$ref": "#/components/schemas/Decimal"
-                      }
-                    },
-                    "required": [
-                      "session",
-                      "turn",
-                      "operation"
-                    ],
-                    "additionalProperties": false
-                  },
-                  "code": {
-                    "const": "idempotency_key_conflict"
                   }
                 },
                 "required": [
@@ -7966,6 +8051,61 @@
         ],
         "additionalProperties": false
       },
+      "PermissionDecisionConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "type": {
+            "const": "permission_decision_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "allow_once",
+                  "deny"
+                ]
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "session",
+              "action",
+              "decision",
+              "code"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer"
+        ],
+        "additionalProperties": false
+      },
       "PermissionDecisionReply": {
         "anyOf": [
           {
@@ -8062,61 +8202,6 @@
                       "target_mismatch",
                       "action_not_pending"
                     ]
-                  }
-                },
-                "required": [
-                  "status",
-                  "replayed",
-                  "session",
-                  "action",
-                  "decision",
-                  "code"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "type",
-              "answer"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "8"
-              },
-              "type": {
-                "const": "permission_decision_reply"
-              },
-              "answer": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "conflict"
-                  },
-                  "replayed": {
-                    "const": false
-                  },
-                  "session": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "x-rui-max-bytes": 128
-                  },
-                  "action": {
-                    "$ref": "#/components/schemas/Decimal"
-                  },
-                  "decision": {
-                    "type": "string",
-                    "enum": [
-                      "allow_once",
-                      "deny"
-                    ]
-                  },
-                  "code": {
-                    "const": "idempotency_key_conflict"
                   }
                 },
                 "required": [
@@ -8400,6 +8485,62 @@
         ],
         "additionalProperties": false
       },
+      "SessionStopConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "type": {
+            "const": "session_stop_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "session",
+              "code"
+            ],
+            "additionalProperties": false
+          },
+          "completion": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer",
+          "completion"
+        ],
+        "additionalProperties": false
+      },
       "SessionStopReply": {
         "anyOf": [
           {
@@ -8511,62 +8652,6 @@
                       "invalid_session_reference",
                       "unknown_session"
                     ]
-                  }
-                },
-                "required": [
-                  "status",
-                  "replayed",
-                  "session",
-                  "code"
-                ],
-                "additionalProperties": false
-              },
-              "completion": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "unavailable"
-                  }
-                },
-                "required": [
-                  "status"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "type",
-              "answer",
-              "completion"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "8"
-              },
-              "type": {
-                "const": "session_stop_reply"
-              },
-              "answer": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "const": "conflict"
-                  },
-                  "replayed": {
-                    "const": false
-                  },
-                  "session": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "x-rui-max-bytes": 128
-                  },
-                  "code": {
-                    "const": "idempotency_key_conflict"
                   }
                 },
                 "required": [
@@ -8944,6 +9029,16 @@
         "in": "header",
         "required": false,
         "description": "The Host instance (from host-info) the request is meant for; a different instance refuses it.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "HostInstanceRequired": {
+        "name": "X-Rui-Host-Instance",
+        "in": "header",
+        "required": true,
+        "description": "The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused.",
         "schema": {
           "type": "string",
           "pattern": "^[0-9a-f]{32}$"

@@ -26,6 +26,8 @@ const Route = struct {
     /// Each a request shape; the request schema is any one of them.
     variants: []const Variant,
     reply: Reply,
+    /// The reply under HTTP 409 when a retried key meets different input.
+    conflict: ?Reply = null,
 };
 
 /// A request shape, kept as its two uses so `Route` stays a runtime value.
@@ -50,9 +52,12 @@ fn variant(comptime shape: anytype, comptime examples: anytype) Variant {
 const Reply = union(enum) {
     /// A JSON reply, any one of these.
     json: *const fn (*Document) anyerror!Value,
-    /// Raw content bytes.
+    /// Raw content bytes (`application/octet-stream`).
     bytes,
-    /// A Session report, whose schema is not described yet.
+    /// Text content (`text/plain`), as the result and Action reads send it.
+    text,
+    /// A Session report (JSON, schema not described yet), or the failed
+    /// response's bytes.
     report,
 };
 
@@ -91,7 +96,8 @@ pub const routes = [_]Route{
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.tail, .{}),
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.require_model_tail, .{}),
         },
-        .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.rejected, protocol.configuration_reply.conflict }),
+        .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.rejected }),
+        .conflict = jsonReply(.{protocol.configuration_reply.conflict}),
     },
     .{
         .path = protocol.CommandKind.message.route(),
@@ -105,28 +111,32 @@ pub const routes = [_]Route{
             variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{.{ 2, "\"\"" }}),
             variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.require_model_tail, .{.{ 2, "\"\"" }}),
         },
-        .reply = jsonReply(.{ protocol.message_reply.accepted, protocol.message_reply.rejected, protocol.message_reply.conflict }),
+        .reply = jsonReply(.{ protocol.message_reply.accepted, protocol.message_reply.rejected }),
+        .conflict = jsonReply(.{protocol.message_reply.conflict}),
     },
     .{
         .path = protocol.CommandKind.session_stop.route(),
         .kind = .session_stop,
         .summary = "Stops a Session's current and queued work. Retried by its key.",
         .variants = &.{variant(protocol.session_stop_request, .{})},
-        .reply = jsonReply(.{ protocol.session_stop_reply.accepted, protocol.session_stop_reply.rejected, protocol.session_stop_reply.conflict }),
+        .reply = jsonReply(.{ protocol.session_stop_reply.accepted, protocol.session_stop_reply.rejected }),
+        .conflict = jsonReply(.{protocol.session_stop_reply.conflict}),
     },
     .{
         .path = protocol.CommandKind.model_interruption.route(),
         .kind = .model_interruption,
         .summary = "Interrupts one model Operation. Retried by its key.",
         .variants = &.{variant(protocol.model_interruption_request, .{})},
-        .reply = jsonReply(.{ protocol.model_interruption_reply.accepted, protocol.model_interruption_reply.rejected, protocol.model_interruption_reply.conflict }),
+        .reply = jsonReply(.{ protocol.model_interruption_reply.accepted, protocol.model_interruption_reply.rejected }),
+        .conflict = jsonReply(.{protocol.model_interruption_reply.conflict}),
     },
     .{
         .path = protocol.CommandKind.permission_decision.route(),
         .kind = .permission_decision,
         .summary = "Allows or denies one Action that waits for permission. Retried by its key.",
         .variants = &.{variant(protocol.permission_decision_request, .{})},
-        .reply = jsonReply(.{ protocol.permission_decision_reply.accepted, protocol.permission_decision_reply.rejected, protocol.permission_decision_reply.conflict }),
+        .reply = jsonReply(.{ protocol.permission_decision_reply.accepted, protocol.permission_decision_reply.rejected }),
+        .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
     },
     .{
         .path = "/v1/observe-command",
@@ -140,21 +150,21 @@ pub const routes = [_]Route{
         .kind = .read_result,
         .summary = "The answer text of the Message sent with this key.",
         .variants = &.{variant(protocol.read_result_request, .{})},
-        .reply = .bytes,
+        .reply = .text,
     },
     .{
         .path = "/v1/read-action-call-id",
         .kind = .read_action_call_id,
         .summary = "The provider's call id of one Action.",
         .variants = &.{variant(protocol.read_action_call_id_request, .{})},
-        .reply = .bytes,
+        .reply = .text,
     },
     .{
         .path = "/v1/read-action-arguments",
         .kind = .read_action_arguments,
         .summary = "The arguments of one Action.",
         .variants = &.{variant(protocol.read_action_arguments_request, .{})},
-        .reply = .bytes,
+        .reply = .text,
     },
     .{
         .path = "/v1/inspect-session",
@@ -643,13 +653,28 @@ pub const Document = struct {
                     try d.schemas.put(d.arena, reply_name, try schema(d));
                     try responses.put(d.arena, "200", try d.response("The reply.", "application/json", try d.ref(reply_name)));
                 },
-                .bytes => try responses.put(d.arena, "200", try d.response("The content bytes, from the requested offset.", "application/octet-stream", try d.object(.{ .type = Value{ .string = "string" }, .format = Value{ .string = "binary" } }))),
-                .report => try responses.put(d.arena, "200", try d.response("The Session report (JSON), or the failed response's bytes. The report's schema is not described yet.", "application/octet-stream", try d.object(.{ .type = Value{ .string = "string" }, .format = Value{ .string = "binary" } }))),
+                .bytes => try responses.put(d.arena, "200", try d.response("The content bytes, from the requested offset.", "application/octet-stream", try d.binary())),
+                .text => try responses.put(d.arena, "200", try d.response("The content, as text.", "text/plain", try d.object(.{ .type = Value{ .string = "string" } }))),
+                .report => {
+                    var content: ObjectMap = .empty;
+                    try content.put(d.arena, "application/json", try d.object(.{ .schema = try d.object(.{}) }));
+                    try content.put(d.arena, "application/octet-stream", try d.object(.{ .schema = try d.binary() }));
+                    try responses.put(d.arena, "200", try d.object(.{
+                        .description = Value{ .string = "The Session report (JSON; its schema is not described yet), or, for a failed response export, that response's bytes." },
+                        .content = Value{ .object = content },
+                    }));
+                },
+            }
+            if (route.conflict) |conflict| {
+                const conflict_name = try std.fmt.allocPrint(d.arena, "{s}ConflictReply", .{base});
+                try d.schemas.put(d.arena, conflict_name, try conflict.json(d));
+                try responses.put(d.arena, "409", try d.response("The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).", "application/json", try d.anyOf(&.{ try d.ref(conflict_name), try d.ref("ErrorReply") })));
             }
             try responses.put(d.arena, "default", try d.response("A refusal or failure.", "application/json", try d.ref("ErrorReply")));
             var route_parameters: std.json.Array = .init(d.arena);
             try route_parameters.append(try d.object(.{ .@"$ref" = Value{ .string = "#/components/parameters/WireVersion" } }));
-            try route_parameters.append(try d.object(.{ .@"$ref" = Value{ .string = "#/components/parameters/HostInstance" } }));
+            const instance = if (route.kind == .host_stop) "HostInstanceRequired" else "HostInstance";
+            try route_parameters.append(try d.object(.{ .@"$ref" = Value{ .string = try std.fmt.allocPrint(d.arena, "#/components/parameters/{s}", .{instance}) } }));
             if (route.kind == .message) try route_parameters.append(try d.object(.{ .@"$ref" = Value{ .string = "#/components/parameters/EnvironmentBytes" } }));
             const operation = try d.object(.{
                 .operationId = Value{ .string = try camel(d.arena, @tagName(route.kind)) },
@@ -680,6 +705,10 @@ pub const Document = struct {
         });
     }
 
+    fn binary(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "string" }, .format = Value{ .string = "binary" } });
+    }
+
     fn response(d: *Document, text: []const u8, media: []const u8, schema: Value) !Value {
         var content: ObjectMap = .empty;
         try content.put(d.arena, media, try d.object(.{ .schema = schema }));
@@ -700,6 +729,13 @@ pub const Document = struct {
                 .in = Value{ .string = "header" },
                 .required = Value{ .bool = false },
                 .description = Value{ .string = "The Host instance (from host-info) the request is meant for; a different instance refuses it." },
+                .schema = try d.object(.{ .type = Value{ .string = "string" }, .pattern = Value{ .string = std.fmt.comptimePrint("^[0-9a-f]{{{d}}}$", .{2 * @typeInfo(protocol.InstanceId).array.len}) } }),
+            }),
+            .HostInstanceRequired = try d.object(.{
+                .name = Value{ .string = "X-Rui-Host-Instance" },
+                .in = Value{ .string = "header" },
+                .required = Value{ .bool = true },
+                .description = Value{ .string = "The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused." },
                 .schema = try d.object(.{ .type = Value{ .string = "string" }, .pattern = Value{ .string = std.fmt.comptimePrint("^[0-9a-f]{{{d}}}$", .{2 * @typeInfo(protocol.InstanceId).array.len}) } }),
             }),
             .EnvironmentBytes = try d.object(.{
@@ -1017,4 +1053,36 @@ test "replies the Host renders conform to their schemas" {
     try row.writeJson(&out.writer);
     try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
+}
+
+test "statuses, media types and required headers match what the Host sends" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    const built = try document.build();
+    const paths = built.object.get("paths").?.object;
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .model_interruption, .permission_decision };
+    for (mutations) |kind| {
+        const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
+        try std.testing.expect(responses.contains("409"));
+        try std.testing.expect(responses.get("200").?.object.get("content").?.object.contains("application/json"));
+    }
+    const media = [_]struct { path: []const u8, type: []const u8 }{
+        .{ .path = "/v1/read-result", .type = "text/plain" },
+        .{ .path = "/v1/read-action-call-id", .type = "text/plain" },
+        .{ .path = "/v1/read-action-arguments", .type = "text/plain" },
+        .{ .path = "/v1/conversation-content", .type = "application/octet-stream" },
+        .{ .path = "/v1/activity-content", .type = "application/octet-stream" },
+        .{ .path = "/v1/inspect-session", .type = "application/json" },
+    };
+    for (media) |each| {
+        const responses = paths.get(each.path).?.object.get("post").?.object.get("responses").?.object;
+        try std.testing.expect(responses.get("200").?.object.get("content").?.object.contains(each.type));
+    }
+    const stop = paths.get("/v1/control/host-stop").?.object.get("post").?.object.get("parameters").?.array;
+    var required = false;
+    for (stop.items) |parameter| {
+        if (std.mem.endsWith(u8, parameter.object.get("$ref").?.string, "/HostInstanceRequired")) required = true;
+    }
+    try std.testing.expect(required);
 }
