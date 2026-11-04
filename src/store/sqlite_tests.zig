@@ -8538,3 +8538,26 @@ test "a compaction's floor read costs the same however long its Session's histor
     try std.testing.expectEqual(@as(u64, 2002), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM conversation_entry", .{}));
     try std.testing.expectEqual(thousand, try Walk.steps(&storage, compaction.operation_id));
 }
+
+test "a catalog past a Session's tool limit saves and opens again" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const count = tool_catalog.max_tools + 72;
+    var names: [count][8]u8 = undefined;
+    var records: [count + 2]tool_catalog.Record = undefined;
+    var digests: [count + 2][32]u8 = undefined;
+    records[0] = tool_catalog.bash_record;
+    for (&names, records[1 .. count + 1], 0..) |*name, *record, index| {
+        _ = try std.fmt.bufPrint(name, "tool_{d:0>3}", .{index});
+        record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
+    }
+    records[count + 1] = tool_catalog.web_search_record;
+    for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+    const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    try storage.close();
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, count + 2), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+}

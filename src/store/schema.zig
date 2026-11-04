@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
+    .{ .schema_version = 51, .digest = 0xb011a129fabf32a9 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -278,13 +278,14 @@ pub const tables = [_]Table{
         },
     },
     // An ordered set of tool records, saved once: `digest` names its
-    // members' content (tools.zig `setDigest`).
+    // members' content (tools.zig `SetDigest`). A Session's set holds at
+    // most max_tools; the Host's catalog set holds up to its own bound.
     .{
         .name = "tool_set",
         .columns = &.{
             .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
             .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
-            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_tools}) },
+            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_catalog_records}) },
         },
         .primary_key = &.{"tool_set_id"},
         .uniques = &.{&.{"digest"}},

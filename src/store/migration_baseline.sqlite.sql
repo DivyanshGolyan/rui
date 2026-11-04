@@ -21,7 +21,7 @@ CREATE TABLE tool_record(
 CREATE TABLE tool_set(
  tool_set_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_set_id>0),
  digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),
- member_count INTEGER NOT NULL CHECK(member_count BETWEEN 0 AND 128)
+ member_count INTEGER NOT NULL CHECK(member_count BETWEEN 0 AND 1024)
 ) STRICT;
 CREATE TABLE tool_set_member(
  tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),
