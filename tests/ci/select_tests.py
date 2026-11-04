@@ -82,6 +82,8 @@ RULES = (
     (("src/server*.zig", "tests/integration/admission_integration.sh"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
+    (("src/launch_frame.zig", "tests/integration/launch_frame*"), ("test", "launch-frame-integration"),
+     ("test", "launch-frame-integration"), "The launch frame a program uses to start its own Host"),
     (("src/protocol.zig", "src/provider_name.zig", "src/platform.zig",
       "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
       "src/named_scratch.zig", "src/output_retention.zig", "src/HostDiagnostics.zig"),
