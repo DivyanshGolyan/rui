@@ -5529,6 +5529,40 @@ test "while new Turns are held, waiting input joins only an open Turn" {
     try std.testing.expect(!storage.isFenced());
 }
 
+test "the final row is the answer phase selection picked, even when later text repeats it or it is blank" {
+    const final_then_commentary = [_][]const u8{
+        "{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"same\"}]}",
+        "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"same\"}]}",
+    };
+    const blank = [_][]const u8{
+        "{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"working\"}]}",
+        "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"  \"}]}",
+    };
+    const Case = struct { items: []const []const u8, selected: u64, answer: []const u8 };
+    for ([_]Case{
+        .{ .items = &final_then_commentary, .selected = 0, .answer = "same" },
+        // A blank answer saves as empty content; its row keeps the blank text.
+        .{ .items = &blank, .selected = 1, .answer = "" },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "selected-config");
+        try submitTestMessage(&storage, &tmp, "selected-input", "selected-key", session.slice(), "answer");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try store_testing.settleSelectedItemsForTesting(&storage, &tmp, binding, case.items, case.selected, case.answer);
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        request.kinds = .initMany(&.{ .assistant, .turn_ended });
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(@as(usize, 3), page.count);
+        try std.testing.expectEqual(protocol.TurnEnding.done, page.items[2].value.turn_ended.ending);
+        for (page.items[0..2], 0..) |item, index| try std.testing.expectEqual(index == case.selected, item.value.assistant.final);
+    }
+}
+
 test "a done Turn marks its answer final once its ending is within the page" {
     // Three messages, the last the answer; with one text repeated, only
     // the answer itself, the last, is final.
