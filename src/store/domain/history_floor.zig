@@ -5,14 +5,17 @@
 //! A drop unit is a host Message after the Session's first, or a model
 //! Operation with its tool results; it begins at the Message's position or
 //! the Operation's admission position, and a floor drops every unit that
-//! begins at or below it (`historical.HistoricalView.Floor`). Each level
+//! begins at or below it (`historical.HistoricalView.Floor`). A floor once
+//! reached stays: every later compaction keeps its base's floor or goes
+//! deeper (`inheritedFloor`). Each level
 //! aims at a quarter of the room the level before it did: level 1 at the
 //! context window less the output reservation, at four bytes per token as
 //! `turn_policy.comparedPressure` counts, so a catalog window larger than
-//! the one served (D207) still recovers by level 3. A Message counts its
-//! text's bytes and an Operation four bytes per output token plus its tool
-//! results' bytes; what is always kept is not counted. The newest unit is
-//! always kept: it is the work in hand.
+//! the one served (D207) still recovers by level 3. A unit counts the bytes
+//! the request sends for it: a Message its text, an Operation its output
+//! items (`item_bytes_sql`) and its tool results. An Operation the base
+//! covers sends neither, so it is no unit; what is always kept is not
+//! counted. The newest unit is always kept: it is the work in hand.
 
 const std = @import("std");
 const model_capability = @import("../../model_capability.zig");
@@ -93,10 +96,10 @@ pub const Walk = struct {
 };
 
 /// What the walk from compaction Operation ?1 starts from: its own floor
-/// and level, its selected base's floor, the Session's first
+/// and level, its selected base's position and floor, the Session's first
 /// user Message, and the model and reservation it was admitted with.
 const floor_facts = rsql.Read(.{
-    .sql = "SELECT current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor," ++
+    .sql = "SELECT current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
         "coalesce((SELECT min(first.session_position) FROM conversation_entry first @index(conversation_entry_history) " ++
         "WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) AS first_message," ++
         "current.output_reservation,r.model FROM model_operation current " ++
@@ -112,6 +115,7 @@ const floor_facts = rsql.Read(.{
         history_floor: ?rsql.Positive,
         history_level: ?u8,
         base_floor: ?rsql.Positive,
+        frontier: u64,
         first_message: u64,
         output_reservation: u64,
         model: protocol.Bounded(protocol.max_model_bytes),
@@ -121,27 +125,59 @@ const floor_facts = rsql.Read(.{
 
 const page_rows = 16;
 
+/// The bytes output item `i` takes in a request: its bag, its parts' text
+/// and bags, and a call's three fields. A message part's text is a length
+/// of its message text. Admission's uncovered bytes count the same.
+pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WHERE bag.content_id=i.extras_content_id),0) + " ++
+    "(SELECT coalesce(sum(coalesce(p.text_length,text.byte_length,0)+coalesce(bag.byte_length,0)),0) FROM model_output_part p " ++
+    "LEFT JOIN content text ON text.content_id=p.text_content_id LEFT JOIN content bag ON bag.content_id=p.extras_content_id " ++
+    "WHERE p.operation_id=i.operation_id AND p.item_ordinal=i.item_ordinal) + " ++
+    "coalesce((SELECT name.byte_length+call_id.byte_length+arguments.byte_length FROM model_tool_call tool_call " ++
+    "JOIN content name ON name.content_id=tool_call.name_content_id JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
+    "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
+    "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal),0)";
+
 /// The drop units of Operation ?1's Session that begin below ?2 and above
-/// ?3, newest first: Messages but the first (?4), and the calls whose
-/// output later requests send. A failed call holds nothing, and a
-/// compaction's output is sent only while it is the base, which is kept.
+/// ?3, newest first: Messages but the first (?4), and the calls after the
+/// base (?5) whose output later requests send. A failed call holds nothing,
+/// and a compaction's output is sent only while it is the base, which is kept.
 const units = rsql.Read(.{
     .sql = "SELECT e.session_position AS start,content.byte_length AS size FROM model_operation current " ++
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
         "JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position<?2 AND e.session_position>?3 AND e.entry_kind=1 AND e.session_position!=?4 UNION ALL " ++
-        "SELECT o.admission_position," ++ std.fmt.comptimePrint("coalesce(o.usage_output_tokens,0)*{d}", .{bytes_per_token}) ++ "+" ++
+        "SELECT o.admission_position,(SELECT coalesce(sum(" ++ item_bytes_sql ++ "),0) FROM model_output_item i WHERE i.operation_id=o.operation_id)+" ++
         "coalesce((SELECT sum(result.byte_length) FROM action_operation a JOIN content result ON result.content_id=a.resolution_content_id " ++
         "WHERE a.parent_operation_id=o.operation_id),0) FROM model_operation current " ++
         "JOIN model_operation o @index(model_operation_context_history) ON o.session_ref=current.session_ref " ++
-        "WHERE current.operation_id=?1 AND o.admission_position<?2 AND o.admission_position>?3 AND " ++
+        "WHERE current.operation_id=?1 AND o.admission_position<?2 AND o.admission_position>?3 AND o.admission_position>?5 AND " ++
         store_schema.oneOf("o.resolution_code", &store_schema.accepted_resolutions) ++ " AND o.purpose=0 " ++
         std.fmt.comptimePrint("ORDER BY 1 DESC LIMIT {d}", .{page_rows}),
-    .Args = struct { operation: u64, below: u64, above: u64, first_message: u64 },
+    .Args = struct { operation: u64, below: u64, above: u64, first_message: u64, frontier: u64 },
     .Row = struct { start: rsql.Positive, size: u64 },
     .cardinality = .each,
     .compound = true,
 });
+
+/// The floor of the Session ?1's newest compaction base below position ?2.
+const base_floor_read = rsql.Read(.{
+    .sql = "SELECT history_floor FROM model_operation @index(model_operation_compaction_bases) WHERE session_ref=?1 AND purpose=1 AND " ++
+        store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1",
+    .Args = struct { session: []const u8, boundary: u64 },
+    .Row = struct { history_floor: ?rsql.Positive },
+    .cardinality = .optional,
+});
+
+/// The floor a compaction that makes no room keeps: its base's, so a
+/// later base drops what the one it replaces dropped. A failed step is
+/// `CorruptStore`.
+pub fn inheritedFloor(a: anytype, session: []const u8, boundary: u64) !?u64 {
+    var found: base_floor_read.Result = undefined;
+    a.read(base_floor_read, .{ .session = session, .boundary = boundary }, &found);
+    try store_access.runAs(a, error.CorruptStore);
+    const row = found orelse return null;
+    return if (row.history_floor) |floor| floor.get() else null;
+}
 
 /// The floor and level the compaction after compaction Operation
 /// `operation` overflowed goes to, or null when no level drops more: only
@@ -167,6 +203,7 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Room {
             .below = walk.cursor,
             .above = base_floor,
             .first_message = facts.first_message,
+            .frontier = facts.frontier,
         }, page_rows, &walk);
         try store_access.runAs(a, error.CorruptStore);
         if (walk.page_rows < page_rows) break;

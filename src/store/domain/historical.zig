@@ -760,12 +760,12 @@ fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
         view.output_frontier = row.frontier;
         const base_floor: u64 = if (row.base_floor) |floor| floor.get() else 0;
         const own_floor: u64 = if (row.own_floor) |floor| floor.get() else 0;
-        // A deeper floor only ever drops more of the base's history.
-        if (own_floor != 0 and own_floor <= base_floor) return error.CorruptStore;
+        // A compaction keeps its base's floor or goes deeper.
+        if (own_floor != 0 and own_floor < base_floor) return error.CorruptStore;
         view.floor = .{
             .position = @max(own_floor, base_floor),
             .first_message = row.first_message,
-            .own = own_floor != 0,
+            .own = own_floor > base_floor,
         };
         return false;
     }

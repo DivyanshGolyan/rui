@@ -3448,6 +3448,21 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message" });
     // Requests on the base share its floor, so their memo serves again.
     try std.testing.expect(try expectMemoRebuildEqual(&setup, successor_binding, &memos, .{}) > 0);
+    // A later compaction that makes no room keeps the floor, and so does
+    // every request on the base it becomes.
+    try setup.storage.settleModelAttemptFailure(successor_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    var again = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const again_binding = try again.permit.consume();
+    const again_request = try prepareMemoForTesting(&setup, again_binding, &memos, .{});
+    defer std.testing.allocator.free(again_request.bytes);
+    try expectInputTexts(again_request.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "compaction_trigger" });
+    try store.settleCompactionForTesting(&setup.storage, &setup.tmp, again_binding, &.{.compaction});
+    try setup.submit("floor-last", "floor-last-key", session.slice(), "last message");
+    var last = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const last_binding = try last.permit.consume();
+    const last_request = try prepareMemoForTesting(&setup, last_binding, &memos, .{});
+    defer std.testing.allocator.free(last_request.bytes);
+    try expectInputTexts(last_request.bytes, &.{ "do work", "new rules", "third message", "later message", "compaction", "last message" });
 }
 
 test "a compaction that overflows makes room a level at a time, then the Turn ends context_full" {

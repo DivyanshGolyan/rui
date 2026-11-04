@@ -8414,6 +8414,51 @@ test "a page of approval requests costs the same however many calls ran without 
     try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
 }
 
+test "a compaction's floor counts the output bytes a request sends, and none its base covers" {
+    // A 200,000-byte answer with no usage passes level 2's 128,000 bytes,
+    // unless a compaction base covers it and the request sends none of it.
+    const answer = try std.testing.allocator.alloc(u8, 200_000);
+    defer std.testing.allocator.free(answer);
+    @memset(answer, 'a');
+    const item = try std.fmt.allocPrint(std.testing.allocator, "{{\"type\":\"message\",\"id\":\"a1\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{s}\"}}]}}", .{answer});
+    defer std.testing.allocator.free(item);
+    for ([_]bool{ false, true }) |covered| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try tests.configureTestSessionAsk(&storage, "floor-bytes-config");
+        try submitTestMessage(&storage, &tmp, "floor-bytes-first", "floor-bytes-first", session.slice(), "first");
+        const answered = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleItemsForTesting(&storage, &tmp, answered, &.{item}, answer);
+        if (covered) {
+            try submitTestMessage(&storage, &tmp, "floor-bytes-covered", "floor-bytes-covered", session.slice(), "c");
+            const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+        }
+        try submitTestMessage(&storage, &tmp, "floor-bytes-small", "floor-bytes-small", session.slice(), "small");
+        const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+        const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: historical_domain.ReadAccess = .open(&entry);
+        defer a.deinit();
+        const room = try history_floor_domain.deeperFloor(&a, compaction.operation_id);
+        if (covered) {
+            try std.testing.expect(room == null);
+        } else {
+            // The floor drops the answer and keeps "small" above it.
+            const position = try store_testing.sqliteQueryU64(storage.database, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{answered.operation_id});
+            try std.testing.expectEqual(@as(u8, 2), room.?.choice.level);
+            try std.testing.expect(room.?.choice.floor >= position);
+        }
+    }
+}
+
 test "a compaction's floor read costs the same however long its Session's history" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
