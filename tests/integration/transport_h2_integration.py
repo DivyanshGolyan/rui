@@ -204,18 +204,11 @@ def host_physical_peak(pid):
     return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
 
 
-def open_descriptors(pid):
-    if os.path.isdir(f"/proc/{pid}/fd"):
-        return len(os.listdir(f"/proc/{pid}/fd"))
-    rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)],
-                                   text=True).splitlines()
-    return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) for row in rows[1:])
-
-
 # SQLite names its temp files etilqs_*. A Store write's statement journal
-# that spilled to one stays open for the life of the EXCLUSIVE connection;
-# descriptor_capacity budgets it among SQLite's four.
-def idle_store_independent_descriptors(pid):
+# that spilled to one stays open for the life of the EXCLUSIVE connection,
+# and descriptor_capacity budgets it among SQLite's four, so counts that
+# compare rounds leave it out.
+def open_descriptors(pid):
     if os.path.isdir(f"/proc/{pid}/fd"):
         names = []
         for fd in os.listdir(f"/proc/{pid}/fd"):
@@ -529,7 +522,7 @@ class HostRequests:
     def idle_descriptors(self, deadline):
         self.diagnostics.borrower_census(deadline, self.routes)
         assert time.monotonic() < deadline, "exchange retirement exceeded original deadline"
-        return idle_store_independent_descriptors(self.host.pid)
+        return open_descriptors(self.host.pid)
 
 
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
