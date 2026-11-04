@@ -929,11 +929,11 @@ const TestSource = struct {
     bytes: []const u8,
     position: usize = 0,
 
-    fn peek(self: *TestSource) !?u8 {
+    pub fn peek(self: *TestSource) !?u8 {
         return if (self.position == self.bytes.len) null else self.bytes[self.position];
     }
 
-    fn take(self: *TestSource) !u8 {
+    pub fn take(self: *TestSource) !u8 {
         const byte = (try self.peek()) orelse return error.ShortCanonicalRead;
         self.position += 1;
         return byte;

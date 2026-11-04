@@ -144,8 +144,8 @@ const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
 const saved_identity = &[_][]const u8{ "store", "store-hex", "key", "key-hex" };
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),                                          value("instructions", "-"), value("tools", "bash,message_agent,web_search|none"),        value("permission-mode", "bypass|ask"),
-    value("output-schema", "FILE|-"),                                    flag("text-output"),        value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
+    value("workspace", "PATH"),                                          value("instructions", "-"), value("tools", "bash,message_agent,web_search|none"), value("permission-mode", "bypass|ask"),
+    value("output-schema", "FILE|-"),                                    flag("text-output"),        value("compaction-trigger", "TOKENS|default"),        value("output-reservation", "TOKENS|default"),
     value("reasoning-effort", "none|low|medium|high|xhigh|max|default"), value("label", "TEXT"),
 };
 const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7], settings[8], settings[9] };
