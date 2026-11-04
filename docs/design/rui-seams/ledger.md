@@ -289,6 +289,12 @@ D197. D191 never drops the Session's instructions or its first User Message; it 
 D198. `lockWaitMs` is a `Rui.connect` option (default 120 s, D183). Drift's readiness does not wait for Rui.
 D199. Stage's MySQL has `innodb_doublewrite=OFF`, so Rui refuses to open there with `durability_innodb_doublewrite` (D156, no opt-out) until the server's administrator turns it on.
 
+D200. (Divyansh 08:06Z, card) Replaces D199 and D156's doublewrite clause. Rui opens with `innodb_doublewrite=OFF` and shows it in Host status; Rui cannot tell storage that writes pages atomically (RDS Optimized Writes, Aurora) from storage that does not. `innodb_flush_log_at_trx_commit=1` and `sync_binlog=1` are still refused otherwise. No setting.
+
+D201. (Drift 08:12Z withdrew the prefix ask; card closed as "own database only") D82's separate database stands, created by the DB team.
+D202. Rui needs only SELECT, INSERT and UPDATE on its MySQL database while running, plus `GET_LOCK` (no grant). Checked on main and the 6b branch: no runtime statement deletes rows, and the only DELETE is a test-build oracle. rsql refuses DELETE in runtime statements, so this stays true as a compile error, not a promise.
+D203. Replaces D155's "all privileges". On MySQL, Rui never creates or changes tables. `rui store schema --engine mysql` prints the DDL for that build as one SQL file, which the DB team applies once to the empty database. At open, Rui checks the schema version and digest and refuses with `RuiStartError store_schema_missing` or `store_schema_behind`. SQLite keeps creating its own file.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
