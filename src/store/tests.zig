@@ -9589,3 +9589,62 @@ test "a Current report's work grows linearly in one Operation's calls, as main's
         }
     }.run);
 }
+
+test "each setting a revision changes is one session_changed row at the position it was accepted" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("change-create", "", workspace, "model-a");
+            const session = storage.configure(&create, .{}).accepted.session;
+            var request: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
+            try request.session.set(session.slice());
+            // A creation is no change.
+            try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
+            try submitTestMessage(&storage, &tmp, "change-before", "change-before", session.slice(), "before");
+            var change = try completeConfiguration("change-mode-label", session.slice(), workspace, "model-a");
+            change.configuration.permission_mode.state = .value;
+            // The default is bypass.
+            try change.configuration.permission_mode.value.set("ask");
+            change.configuration.label.state = .value;
+            try change.configuration.label.value.set("renamed");
+            try std.testing.expect(storage.configure(&change, .{}) == .accepted);
+            // A revision that changes nothing writes no row.
+            var same = try completeConfiguration("change-same", session.slice(), workspace, "model-a");
+            try std.testing.expect(storage.configure(&same, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "change-after", "change-after", session.slice(), "after");
+            const page = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 2), page.count);
+            const expected = [_]protocol.SessionField{ .permission_mode, .label };
+            for (page.items[0..2], expected, 0..) |item, field, ordinal| {
+                try std.testing.expectEqual(page.items[0].position, item.position);
+                try std.testing.expectEqual(@as(u64, ordinal), item.ordinal);
+                try std.testing.expectEqual(@as(u64, 2), item.value.session_changed.revision);
+                try std.testing.expectEqual(field, item.value.session_changed.field);
+            }
+            // The rows sit between the Messages admitted before and after.
+            var all: protocol.ActivityPage = .{};
+            try all.session.set(session.slice());
+            const every = try store_core.activityPageForTesting(&storage, all);
+            var admissions: [2]u64 = undefined;
+            var seen: usize = 0;
+            for (every.items[0..every.count]) |item| if (item.value == .admission) {
+                admissions[seen] = item.position;
+                seen += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 2), seen);
+            try std.testing.expect(admissions[0] < page.items[0].position and page.items[0].position < admissions[1]);
+            // Backward from the end, the same rows come in reverse.
+            request.direction = .backward;
+            const backward = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 2), backward.count);
+            try std.testing.expectEqual(protocol.SessionField.label, backward.items[0].value.session_changed.field);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}

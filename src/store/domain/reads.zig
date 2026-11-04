@@ -125,6 +125,7 @@ pub const read_failures = .{
     .{ activity_item, error.ActivityReadFailed },
     .{ answer_entry, error.ActivityReadFailed },
     .{ approval_request, error.ActivityReadFailed },
+    .{ session_change, error.ActivityReadFailed },
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
@@ -171,7 +172,7 @@ fn toolGroupCompletesAtLast(comptime operation: []const u8) []const u8 {
 /// received ones (kind 11), and otherwise share one source with them, as
 /// every unfiltered page reads Messages. The sources come in three groups,
 /// each within the Store's four-term compound limit.
-fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) [3][]const u8 {
+fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) [4][]const u8 {
     const Kinds = struct {
         fn on(comptime kind: u5) []const u8 {
             return std.fmt.comptimePrint("({s}/{d})%2=1", .{ kinds, @as(u64, 1) << kind });
@@ -210,11 +211,13 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             // whatever was decided since.
             " UNION ALL SELECT approval_position,1,12,action_id FROM action_operation @index(action_operation_approval) " ++
             "WHERE session_ref=?1 AND approval_position IS NOT NULL AND " ++ on(12) ++ " AND " ++ range("approval_position", "1") ++ order,
+        // Each setting a revision changed, at the position it was accepted.
+        "SELECT position,ordinal,13 AS kind,revision AS id FROM session_change WHERE session_ref=?1 AND " ++ on(13) ++ " AND " ++ range("position", "ordinal") ++ order,
     };
 }
 
 /// Every kind, for a read of one known row.
-const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 13) - 2});
+const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 14) - 2});
 
 /// The kind codes the sources number, for each Activity kind.
 fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
@@ -231,6 +234,7 @@ fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
         .hosted_call => 10,
         .received => 11,
         .approval_requested => 12,
+        .session_changed => 13,
     };
 }
 
@@ -252,9 +256,10 @@ fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const 
 const activity_item = blk: {
     const sources = activitySources(anyActivityPosition, all_activity_kinds, "");
     break :blk rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}), " ++
-            "activity AS (SELECT position,ordinal,kind,id FROM entries UNION ALL SELECT position,ordinal,kind,id FROM completions UNION ALL SELECT position,ordinal,kind,id FROM others) " ++
-            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ sources[0], sources[1], sources[2] }),
+        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}), " ++
+            "activity AS (SELECT position,ordinal,kind,id FROM entries UNION ALL SELECT position,ordinal,kind,id FROM completions UNION ALL SELECT position,ordinal,kind,id FROM others " ++
+            "UNION ALL SELECT position,ordinal,kind,id FROM changes) " ++
+            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ sources[0], sources[1], sources[2], sources[3] }),
         .Args = struct { session: []const u8, end: u64, position: u64, ordinal: u64 },
         .Row = struct { kind: u8, id: ?rsql.Positive },
         .cardinality = .optional,
@@ -280,8 +285,8 @@ fn ActivityPage(comptime forward: bool) type {
     const order = if (forward) " ORDER BY 1,2 LIMIT 17" else " ORDER BY 1 DESC,2 DESC LIMIT 17";
     const sources = activitySources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order);
     return rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}) SELECT position,ordinal FROM entries " ++
-            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others{s}", .{ sources[0], sources[1], sources[2], order }),
+        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}) SELECT position,ordinal FROM entries " ++
+            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others UNION ALL SELECT position,ordinal FROM changes{s}", .{ sources[0], sources[1], sources[2], sources[3], order }),
         .Args = if (forward) struct { session: []const u8, end: u64, position: u64, ordinal: u64, kinds: u64 } else struct { session: []const u8, position: u64, ordinal: u64, kinds: u64 },
         .Row = ActivityPageRow,
         .cardinality = .each,
@@ -1306,6 +1311,14 @@ const approval_request = rsql.Read(.{
     .cardinality = .optional,
 });
 
+/// The setting Session ?1 changed at position ?2, ordinal ?3.
+const session_change = rsql.Read(.{
+    .sql = "SELECT revision,field,changed_at FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
+    .Args = struct { session: []const u8, position: u64, ordinal: u64 },
+    .Row = struct { revision: rsql.Positive, field: protocol.SessionField, changed_at: rsql.Positive },
+    .cardinality = .one,
+});
+
 const call_resolved = rsql.Read(.{
     .sql = "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
     .Args = struct { operation: u64, session: []const u8 },
@@ -1564,6 +1577,7 @@ const ItemRead = struct {
         outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
         stop: StopRead,
         approval: approval_request.Result,
+        change: session_change.Row,
     } = undefined,
 
     fn queue(read: *ItemRead, a: *ReadAccess, session: []const u8, end: u64) void {
@@ -1632,6 +1646,7 @@ const ItemRead = struct {
             },
             7 => read.state.stop.queue(a, session),
             12 => a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &read.state.approval),
+            13 => a.read(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &read.state.change),
             else => unreachable,
         }
     }
@@ -1738,6 +1753,12 @@ const ItemRead = struct {
                 item.value.approval_requested.call_ordinal = row.call_ordinal;
                 item.at = row.resolved_at.get();
             },
+            13 => {
+                const row = &read.state.change;
+                if (row.revision.get() != item.value.session_changed.revision) return error.CorruptStore;
+                item.value.session_changed.field = row.field;
+                item.at = row.changed_at.get();
+            },
             else => unreachable,
         }
         read.done = true;
@@ -1796,6 +1817,10 @@ const ItemRead = struct {
             12 => {
                 item.value = .{ .approval_requested = .{ .action = (row.id orelse return error.CorruptStore).get(), .operation = undefined, .call_ordinal = undefined } };
                 read.state = .{ .approval = null };
+            },
+            13 => {
+                item.value = .{ .session_changed = .{ .revision = (row.id orelse return error.CorruptStore).get(), .field = undefined } };
+                read.state = .{ .change = undefined };
             },
             else => return error.CorruptStore,
         }

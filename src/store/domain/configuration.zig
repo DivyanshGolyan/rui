@@ -328,6 +328,55 @@ pub const Applied = struct {
     instructions_id: ?u64,
     output_schema_id: ?u64,
     instructions_updated: bool,
+    /// The settings this revision changed; empty for a creation.
+    changes: std.EnumSet(protocol.SessionField) = .empty,
+};
+
+/// The settings a revision can change, as `next` holds them before and
+/// after it applies (the Workspace never changes).
+const Settings = struct {
+    provider: protocol.Provider,
+    model: protocol.Bounded(protocol.max_model_bytes),
+    instructions_id: ?i64,
+    tool_set_id: u64,
+    permission_mode: u8,
+    output_schema_id: ?i64,
+    compaction_trigger: ?u64,
+    output_reservation: ?u64,
+    reasoning_effort: ?protocol.ReasoningEffort,
+    label: ?protocol.Bounded(protocol.max_label_bytes),
+
+    fn of(current: *const CurrentConfiguration) Settings {
+        return .{
+            .provider = current.provider,
+            .model = current.model,
+            .instructions_id = current.instructions_id,
+            .tool_set_id = current.tool_set_id,
+            .permission_mode = current.permission_mode,
+            .output_schema_id = current.output_schema_id,
+            .compaction_trigger = current.compaction_trigger,
+            .output_reservation = current.output_reservation,
+            .reasoning_effort = current.reasoning_effort,
+            .label = current.label,
+        };
+    }
+
+    /// Each field whose value differs, by its name in `SessionField`.
+    fn changed(before: *const Settings, after: *const Settings) std.EnumSet(protocol.SessionField) {
+        var fields: std.EnumSet(protocol.SessionField) = .empty;
+        fields.setPresent(.provider, before.provider != after.provider);
+        fields.setPresent(.model, !before.model.eql(after.model.slice()));
+        fields.setPresent(.instructions, before.instructions_id != after.instructions_id);
+        fields.setPresent(.tools, before.tool_set_id != after.tool_set_id);
+        fields.setPresent(.permission_mode, before.permission_mode != after.permission_mode);
+        fields.setPresent(.output_schema, before.output_schema_id != after.output_schema_id);
+        fields.setPresent(.compaction_trigger, before.compaction_trigger != after.compaction_trigger);
+        fields.setPresent(.output_reservation, before.output_reservation != after.output_reservation);
+        fields.setPresent(.reasoning_effort, before.reasoning_effort != after.reasoning_effort);
+        const same_label = if (before.label) |label| (if (after.label) |next| label.eql(next.slice()) else false) else after.label == null;
+        fields.setPresent(.label, !same_label);
+        return fields;
+    }
 };
 
 pub const Application = union(enum) {
@@ -586,6 +635,7 @@ pub fn applyConfiguration(
     } else null;
 
     const created = !reads.found.get();
+    const before: ?Settings = if (created) null else .of(next);
     const content_actions = switch (planConfigurationUpdate(
         current_configuration,
         configuration,
@@ -661,6 +711,7 @@ pub fn applyConfiguration(
         .instructions_id = command_instructions_id,
         .output_schema_id = command_output_schema_id,
         .instructions_updated = created or configuration.instructions.state == .value,
+        .changes = if (before) |*saved| saved.changed(&Settings.of(next)) else .empty,
     } };
 }
 
@@ -704,7 +755,25 @@ pub fn queueConfiguredCommand(
 ) !void {
     try command_domain.queueCommand(a, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
     a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated });
+    if (applied.changes.count() == 0) return;
+    const position = try (try a.positions(applied.head)).take(1);
+    var fields = applied.changes.iterator();
+    var ordinal: u64 = 0;
+    while (fields.next()) |field| : (ordinal += 1) a.write(insert_change, .{
+        .session = applied.head,
+        .position = position,
+        .ordinal = ordinal,
+        .revision = applied.revision,
+        .field = @tagName(field),
+    });
 }
+
+/// One setting the revision just inserted changed (`session_change`).
+const insert_change = rsql.Write(.{
+    .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) VALUES(@session(?1),?2,?3,?4,?5,@now)",
+    .Args = struct { session: rsql.SessionHead, position: u64, ordinal: u64, revision: u64, field: []const u8 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
 
 /// Whether `supplied` canonicalizes to `existing`. Its canonical path
 /// buffer lives in this call's frame only, never in the configure frame

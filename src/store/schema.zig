@@ -30,7 +30,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x48066d4b9a27fab9 },
-    .{ .schema_version = 52, .digest = 0x5eac7f0c0c95cc68 },
+    .{ .schema_version = 52, .digest = 0xb2a6104912a6abc4 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -125,6 +125,8 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position) WHERE approval_position IS NOT NULL",
             "CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
             "CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1",
+            // F2: the change list each later revision writes.
+            "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision)\n) STRICT, WITHOUT ROWID",
         },
         .mysql = &.{
             "CREATE TABLE tool_record(\n tool_record_id BIGINT NOT NULL,\n name VARCHAR(64) NOT NULL,\n owner VARCHAR(8) NOT NULL,\n description_content_id BIGINT NOT NULL,\n input_schema_content_id BIGINT NOT NULL,\n PRIMARY KEY(tool_record_id),\n UNIQUE(name,owner,description_content_id,input_schema_content_id),\n FOREIGN KEY(description_content_id) REFERENCES content(content_id),\n FOREIGN KEY(input_schema_content_id) REFERENCES content(content_id),\n CHECK(tool_record_id>0),\n CHECK(OCTET_LENGTH(name) BETWEEN 1 AND 64 AND (NOT REGEXP_LIKE(name,'[^A-Za-z0-9_-]','c'))),\n CHECK(owner IN ('rui','provider'))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -148,6 +150,7 @@ pub const migrations = [_]Migration{
             "ALTER TABLE action_operation ADD COLUMN approval_position BIGINT, ADD CHECK(approval_position IS NULL OR approval_position>0)",
             "UPDATE action_operation SET approval_position=(SELECT item.session_position FROM model_tool_call tool_call JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal WHERE tool_call.operation_id=action_operation.parent_operation_id AND tool_call.call_ordinal=action_operation.call_ordinal) WHERE EXISTS(SELECT 1 FROM session_revision revision WHERE revision.session_ref=action_operation.session_ref AND revision.revision=action_operation.permission_revision AND revision.permission_mode=0)",
             "CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position)",
+            "CREATE TABLE session_change(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n revision BIGINT NOT NULL,\n field VARCHAR(18) NOT NULL,\n changed_at BIGINT NOT NULL,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK(position>0),\n CHECK(ordinal>=0),\n CHECK(revision>1),\n CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label')),\n CHECK(changed_at>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
 };
@@ -466,6 +469,29 @@ pub const tables = [_]Table{
             references("instructions_content_id", "content", content_reference),
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
+        // The feed's change list (D138, D218): one row per setting a
+        // revision changed, written in the revision's own commit and never
+        // edited. The revision keeps the current values; a row records
+        // when its change was accepted. A revision's rows share one
+        // position, one ordinal each.
+        .name = "session_change",
+        .columns = &.{
+            .{ .name = "session_ref", .type = .{ .text = null } },
+            .{ .name = "position", .type = .int, .check = "position>0" },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "revision", .type = .int, .check = "revision>1" },
+            .{ .name = "field", .type = .{ .tag = &.{ "provider", "model", "instructions", "tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation", "reasoning_effort", "label" } } },
+            .{ .name = "changed_at", .type = .int, .check = "changed_at>0" },
+        },
+        .primary_key = &.{ "session_ref", "position", "ordinal" },
+        .uniques = &.{&.{ "session_ref", "revision", "field" }},
+        .foreign_keys = &.{
+            references("session_ref", "session", session_reference),
+            .{ .columns = &.{ "session_ref", "revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
         },
         .without_rowid = true,
     },
