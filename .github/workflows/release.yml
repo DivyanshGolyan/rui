@@ -57,6 +57,9 @@ jobs:
           - os: ubuntu-24.04
             platform: linux-x86_64
             target: x86_64-linux-gnu.2.34
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            target: aarch64-linux-gnu.2.34
           - os: macos-15
             platform: darwin-arm64
             target: aarch64-macos
@@ -101,8 +104,54 @@ jobs:
           path: dist/*.tar.gz
           retention-days: 3
           if-no-files-found: error
-  publish:
+  npm:
+    # The npm tarballs: the compiled client and one package per platform. Nothing is published to npm.
     needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Pack the tarballs from the built executables
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          for delay in 10 30 ''; do
+            rm -rf "$RUNNER_TEMP/artifacts"
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts" && break
+            test -n "$delay" || exit 1
+            echo "::warning::Artifact download failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          executables=()
+          for platform in linux-x86_64 linux-arm64 darwin-arm64; do
+            name="rui-$VERSION-$platform"
+            mkdir -p "$RUNNER_TEMP/unpacked"
+            tar -xzf "$(find "$RUNNER_TEMP/artifacts" -name "$name.tar.gz")" -C "$RUNNER_TEMP/unpacked"
+            executables+=("$platform=$RUNNER_TEMP/unpacked/$name/bin/rui")
+          done
+          cd clients/ts
+          npm ci --ignore-scripts --no-audit --no-fund
+          node scripts/pack.mjs "$VERSION" "$RUNNER_TEMP/npm" "${executables[@]}"
+          ls -l "$RUNNER_TEMP/npm"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rui-npm
+          path: ${{ runner.temp }}/npm/*.tgz
+          retention-days: 3
+          if-no-files-found: error
+  publish:
+    needs: [plan, build, npm]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -129,7 +178,8 @@ jobs:
           done
           mkdir dist
           find "$RUNNER_TEMP/artifacts" -name "rui-$VERSION-*.tar.gz" -exec mv {} dist/ \;
-          (cd dist && sha256sum rui-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          find "$RUNNER_TEMP/artifacts" -name "rui-*$VERSION.tgz" -exec mv {} dist/ \;
+          (cd dist && sha256sum rui-*.tar.gz rui-*.tgz > SHA256SUMS && cat SHA256SUMS)
           python3 -B tests/ci/release.py installer "$VERSION" dist/SHA256SUMS dist/install.sh
           schema=$(echo "$VERSION" | cut -d . -f 2)
           {
@@ -142,6 +192,8 @@ jobs:
             echo '```'
             echo
             echo "Releases 0.$schema.x open the same Stores. A different middle number needs a fresh Store."
+            echo
+            echo "Also attached: the Linux ARM64 archive, and the npm tarballs (the TypeScript client and one executable package per platform). npm publishing is manual."
             echo
             echo "The Linux executables ship without debug info. For readable crash traces, add it"
             echo "to the installed build (again after each update, which installs a new build):"
