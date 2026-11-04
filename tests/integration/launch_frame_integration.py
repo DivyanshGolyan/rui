@@ -142,6 +142,18 @@ def main():
     assert host.wait(timeout=30) == 0, output(host)
     assert not sock.exists()
 
+    # A Host launched paused reports it, and host_pause can lift it.
+    host = launch(frame(dict(good, paused=True)))
+    wait_for_socket(sock, host)
+    info = host_info(sock, str(store))
+    assert info["paused"] is True, info
+    lifted = post(sock, "control/host-pause", {"version": WIRE, "kind": "host_pause", "store": str(store), "paused": False},
+                  b"X-Rui-Host-Instance: " + info["instance"].encode() + b"\r\n")
+    assert lifted["paused"] is False, lifted
+    assert host_info(sock, str(store))["paused"] is False
+    host.stdin.close()
+    assert host.wait(timeout=30) == 0, output(host)
+
     for raw, message in [
         (frame(dict(good, v=2)), "v must be 1"),
         (frame(dict(good, runtimeDir="relative")), "runtimeDir must be an absolute path"),
@@ -153,7 +165,7 @@ def main():
         refused = refusal(process)
         assert refused["code"] == "launch_frame_invalid", refused
         assert message in refused["message"], refused
-    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, four refusals")
+    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, four refusals")
 
 
 if __name__ == "__main__":

@@ -64,6 +64,22 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	await assert.rejects(hostInfo(rui), RuiUnavailableError);
 });
 
+test("a Host opened paused holds Turns until resume, and a restarted one opens paused again", { skip }, async () => {
+	const rui = await Rui.connect(options(newStore(), { paused: true }));
+	try {
+		assert.equal((await hostInfo(rui)).paused, true);
+		await rui.resume();
+		assert.equal((await hostInfo(rui)).paused, false);
+		const exited = once(rui, "exit");
+		process.kill(rui.pid!, "SIGKILL");
+		const retried = hostInfo(rui);
+		await exited;
+		assert.equal((await retried).paused, true);
+	} finally {
+		await rui.close();
+	}
+});
+
 test("a crashed Host restarts and the call in flight is sent again", { skip }, async () => {
 	const rui = await Rui.connect(options(newStore()));
 	try {

@@ -27,6 +27,8 @@ export interface ConnectOptions {
 	activeCapacity?: number;
 	/** How long connect keeps retrying while another Host holds the Store (D183, D198). Default 120 000. */
 	lockWaitMs?: number;
+	/** Opens the Host with Turns held, as if `rui.pause()` had just run (D196); `rui.resume()` lifts it. A restarted Host opens paused again. */
+	paused?: boolean;
 	/** The `rui` executable. Default: the one from the installed platform package, else `rui` on PATH. */
 	binary?: string;
 }
@@ -293,6 +295,7 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		store,
 		runtimeDir,
 		...(options.activeCapacity === undefined ? {} : { activeCapacity: options.activeCapacity }),
+		...(options.paused ? { paused: true } : {}),
 		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
 	};
 	// The child gets only what it needs to find programs and its home (D185).
