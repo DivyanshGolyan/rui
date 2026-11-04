@@ -8726,10 +8726,10 @@ test "creating a Session takes the same work however many Sessions exist, in rou
             const few = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-few");
             const few_rounds = few.taken();
-            try store_testing.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
+            try store_testing.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
                 "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
                 "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
-                "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+                "SELECT 100000+value,'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
             const many = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-many");
             try std.testing.expectEqual(few_rounds, many.taken());
@@ -8939,7 +8939,7 @@ test "complete historical tool-result traversal scales with groups and calls, in
 
 /// A bound fixture statement that adds `?1` failed Operations after
 /// Operation `?2`, in its Turn.
-const failed_operations_sql = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+const failed_operations_sql = "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL " ++
     "SELECT value+1 FROM sequence WHERE value<?1) " ++
     "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
     "attempt_ordinal,output_reservation,resolution_code,resolved_at) " ++
@@ -8947,7 +8947,7 @@ const failed_operations_sql = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNIO
     "1,0,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 /// `failed_operations_sql`, the Operations alternating in purpose.
-const failed_purpose_operations_sql = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+const failed_purpose_operations_sql = "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL " ++
     "SELECT value+1 FROM sequence WHERE value<?1) " ++
     "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
     "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
@@ -9089,11 +9089,12 @@ test "Full Message projection work does not multiply Messages by stops, in round
                 try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
                     "VALUES(?1,?2,?3,1,NULL,1,?4)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
             }
+            const last_command = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0) FROM core_command", .{});
             for (1..stop_count + 1) |index| {
                 var key: [32]u8 = undefined;
                 const command = try std.fmt.bufPrint(&key, "stop-{d}", .{index});
                 try store_testing.withoutForeignKeys(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
-                    "VALUES(?1,3,?2,zeroblob(32),NULL,NULL,1,'accepted',0,0,(SELECT coalesce(max(command_seq),0)+1 FROM core_command))", .{ command, session.slice() });
+                    "VALUES(?1,3,?2,zeroblob(32),NULL,NULL,1,'accepted',0,0,?3)", .{ command, session.slice(), last_command + index });
                 try store_testing.withoutForeignKeys(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) " ++
                     "VALUES(?1,?2,NULL,?3,?4,1)", .{ command, session.slice(), message_count, index });
             }
@@ -9107,7 +9108,7 @@ test "Full Message projection work does not multiply Messages by stops, in round
 }
 
 /// The head of a fixture statement over `value` 1 through `?1`.
-const sequence_to_first_argument = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
+const sequence_to_first_argument = "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
 
 test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in rounds" {
     try store_testing.forEachEngine(struct {
@@ -9134,7 +9135,7 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             // before the Turn row exists.
             try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
-                "SELECT value,?2,printf('history-%d',value),?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
+                "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
             try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
                 "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1 FROM sequence", .{ history, session.slice(), start });
@@ -9201,7 +9202,7 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
-                "SELECT 1000+value,?2,printf('received-%d',value),?4,?3+value-1,1,?5,value FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,value FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
@@ -9280,7 +9281,7 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
             // The waiting Messages have no commands.
             try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
-                "SELECT 1000+value,?2,printf('waiting-%d',value),?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");
