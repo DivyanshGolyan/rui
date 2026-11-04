@@ -1040,7 +1040,7 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// each call's name, call_id and arguments, and, when the catalog rejects
 /// it, its rejection text. A call imports at most four identities, so
 /// `batch_items` calls always fit `batch_identities`.
-fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, frozen_tools: tool_catalog.ToolSet) void {
+fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_catalog.Offered) void {
     comptime std.debug.assert(batch_identities >= 4 * batch_items);
     batch.reset(.calls, start);
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
@@ -1068,8 +1068,8 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                 // The write walk inspects the call again and returns a
                 // failure here, or of its rejection text, where main does;
                 // collecting only needs the text's identity.
-                if (inspectOutputCall(io, output.source, name_record, record)) |facts| {
-                    if (tool_catalog.classifyCall(&facts, frozen_tools)) |code| {
+                if (inspectOutputCall(io, output.source, name_record, record, offered)) |facts| {
+                    if (tool_catalog.classifyCall(&facts)) |code| {
                         var buffer: [192]u8 = undefined;
                         if (rejectionText(io, output, code, &facts, name_record, &buffer)) |text| {
                             const fits = batch.add(.ofBytes(text, false));
@@ -1164,7 +1164,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .positions = positions,
         .first_item_position = try positions.take(output.item_count),
         .purpose = purpose,
-        .tools = try configuration_domain.toolSet(tools_mask),
+        .tools = .of(try configuration_domain.toolSet(tools_mask)),
         .settling = settling,
         .call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count),
     };
@@ -1217,7 +1217,7 @@ fn Settlement(comptime A: type) type {
         positions: *store_access.Positions,
         first_item_position: u64,
         purpose: ModelOperationKind,
-        tools: tool_catalog.ToolSet,
+        tools: tool_catalog.Offered,
         settling: success_facts.Row,
         imported_items: u64 = 0,
         imported_calls: u64 = 0,
@@ -1240,13 +1240,13 @@ fn Settlement(comptime A: type) type {
                         try s.writeItems(batch);
                         if (batch.last) {
                             try s.itemsDone();
-                            collectCalls(batch, s.output, s.io, 0, s.tools);
+                            collectCalls(batch, s.output, s.io, 0, &s.tools);
                         } else collectItems(batch, s.output, s.io, batch.end);
                     },
                     .calls => {
                         try s.writeCalls(batch);
                         if (batch.last) break;
-                        collectCalls(batch, s.output, s.io, batch.end, s.tools);
+                        collectCalls(batch, s.output, s.io, batch.end, &s.tools);
                     },
                 }
                 // A batch with nothing to read has nothing to write.
@@ -1546,8 +1546,8 @@ fn Settlement(comptime A: type) type {
             const call_id_content_id = try s.importDecoded(batch, call_id);
             const arguments_content_id = try s.importDecoded(batch, record);
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-            const call_facts = try inspectOutputCall(s.io, s.output.source, name, record);
-            const rejection_code = tool_catalog.classifyCall(&call_facts, s.tools);
+            const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
+            const rejection_code = tool_catalog.classifyCall(&call_facts);
             const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
                 var buffer: [192]u8 = undefined;
                 const text = try rejectionText(s.io, s.output, code, &call_facts, name, &buffer);
@@ -1722,12 +1722,12 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
 /// One function call's catalog facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
-noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord) !tool_catalog.CallFacts {
+noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_catalog.Offered) !tool_catalog.CallFacts {
     var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
     var encoded: output_format.JsonStringSource = .{
         .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },
     };
-    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded);
+    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded, offered.slice());
 }
 
 /// noinline: its read buffer serves the rare schema check, not every
