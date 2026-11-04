@@ -313,7 +313,8 @@ pub const CallFacts = struct {
     /// The offered record the call names; null when it names none that
     /// Rui runs, so it is an unknown tool.
     tool: ?*const Record,
-    /// A bash call's checked arguments; null for any other tool.
+    /// A call named bash's checked arguments, offered or not; null for any
+    /// other name.
     bash: ?BashCheck,
 
     /// The arguments of a bash call the parser accepted.
@@ -365,8 +366,11 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
         while (length < name_length) : (length += 1) name[length] = (try name_source.next()) orelse break;
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
+    const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
     const tool = if (complete) offeredFunction(offered, name[0..length]) else null;
-    return .{ .tool = tool, .bash = if (tool != null and tool.? == &bash_record) try checkBashArguments(arguments) else null };
+    // A Bash call's arguments are read whether or not it was offered, so a
+    // rejected call keeps its description for presentation.
+    return .{ .tool = tool, .bash = if (named) try checkBashArguments(arguments) else null };
 }
 
 /// The offered record a function call named `name` resolves to. A
@@ -419,13 +423,14 @@ test "a call is checked against the offered records before its arguments" {
             return self.bytes[self.index];
         }
     };
-    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection };
+    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection, described: bool = false };
     const valid = "{\"cmd\":\"true\",\"description\":\"Run true\"}";
     const bash_only = ToolSet.initOne(.bash);
     for ([_]Case{
-        .{ .name = "bash", .arguments = valid, .offered = bash_only, .expected = null },
+        .{ .name = "bash", .arguments = valid, .offered = bash_only, .expected = null, .described = true },
         .{ .name = "bash", .arguments = "{}", .offered = bash_only, .expected = .invalid_arguments },
-        .{ .name = "bash", .arguments = valid, .offered = .empty, .expected = .unknown_tool },
+        // A Bash call that was not offered keeps its description.
+        .{ .name = "bash", .arguments = valid, .offered = .empty, .expected = .unknown_tool, .described = true },
         .{ .name = "bash", .arguments = "{}", .offered = ToolSet.initOne(.web_search), .expected = .unknown_tool },
         // A provider-run tool never runs as a function call.
         .{ .name = "web_search", .arguments = "{}", .offered = .full, .expected = .unknown_tool },
@@ -438,7 +443,7 @@ test "a call is checked against the offered records before its arguments" {
         const offered = Offered.of(case.offered);
         const facts = try inspectCall(&name, case.name.len, &arguments, offered.slice());
         try std.testing.expectEqual(case.expected, classifyCall(&facts));
-        try std.testing.expectEqual(case.expected == null, facts.bashArguments() != null);
+        try std.testing.expectEqual(case.described, facts.bashArguments() != null);
     }
 }
 

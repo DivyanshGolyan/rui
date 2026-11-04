@@ -1567,7 +1567,8 @@ fn Settlement(comptime A: type) type {
                 std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
                 @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
-            // A call the catalog did not accept has no description.
+            // A Bash call has its description whether or not it was offered;
+            // one whose arguments the parser rejected has none.
             const description: ?tool_catalog.Description = if (call_facts.bashArguments()) |arguments| tool_catalog.describe(.{ .bash = arguments }) else null;
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
