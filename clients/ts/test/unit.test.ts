@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,7 +37,8 @@ test("environment entries the Host would refuse are left out, never split", () =
 });
 
 async function stalledHost(reply: string): Promise<{ socketPath: string; close: () => void }> {
-	const socketPath = join(mkdtempSync(join(tmpdir(), "rui-ts-stall-")), "s");
+	const directory = mkdtempSync(join(tmpdir(), "rui-ts-stall-"));
+	const socketPath = join(directory, "s");
 	const open = new Set<import("node:net").Socket>();
 	const server = createServer((socket) => {
 		open.add(socket);
@@ -45,7 +46,7 @@ async function stalledHost(reply: string): Promise<{ socketPath: string; close: 
 		socket.on("data", () => reply && socket.write(reply));
 	});
 	await new Promise<void>((ready) => server.listen(socketPath, ready));
-	return { socketPath, close: () => { for (const socket of open) socket.destroy(); server.close(); } };
+	return { socketPath, close: () => { for (const socket of open) socket.destroy(); server.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
 test("a Host that never answers ends the call after the response wait", async () => {
