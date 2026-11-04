@@ -327,6 +327,7 @@ CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,sessio
 CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
 CREATE INDEX model_output_call_history ON model_output_item(session_ref,session_position) WHERE item_kind=3;
 CREATE INDEX model_output_hosted_history ON model_output_item(session_ref,session_position) WHERE item_kind=5;
+CREATE INDEX model_output_compaction_history ON model_output_item(session_ref,session_position) WHERE item_kind=4;
 CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4;
 CREATE INDEX turn_session_latest ON turn(session_ref,turn_id DESC);
 CREATE INDEX turn_unpositioned ON turn(session_ref) WHERE (outcome_code IS NULL)!=(outcome_position IS NULL);

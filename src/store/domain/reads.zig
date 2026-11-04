@@ -214,9 +214,10 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             "WHERE session_ref=?1 AND approval_position IS NOT NULL AND " ++ on(12) ++ " AND " ++ range("approval_position", "1") ++ order,
         // Each setting a revision changed, at the position it was accepted.
         "SELECT position,ordinal,13 AS kind,revision AS id FROM session_change WHERE session_ref=?1 AND " ++ on(13) ++ " AND " ++ range("position", "ordinal") ++
-            // Each compaction that succeeded, at its admission (D217).
-            " UNION ALL SELECT admission_position,0,14,operation_id FROM model_operation @index(model_operation_compaction_bases) " ++
-            "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND " ++ on(14) ++ " AND " ++ range("admission_position", "0") ++ order,
+            // Each compaction that succeeded, at its compaction item: a
+            // position its settlement took, so no earlier prefix gains it (D217).
+            " UNION ALL SELECT session_position,0,14,operation_id FROM model_output_item @index(model_output_compaction_history) " ++
+            "WHERE session_ref=?1 AND item_kind=4 AND " ++ on(14) ++ " AND " ++ range("session_position", "0") ++ order,
     };
 }
 
@@ -1324,10 +1325,11 @@ const session_change = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// Compaction Operation ?1 of Session ?2: what its floor dropped, and when
-/// it was settled.
+/// Compaction Operation ?1 of Session ?2, which succeeded: what its floor
+/// dropped, and when it was settled.
 const compaction_row = rsql.Read(.{
-    .sql = "SELECT coalesce(history_dropped,0) AS dropped,resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
+    .sql = "SELECT coalesce(history_dropped,0) AS dropped,resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND purpose=1 AND " ++
+        store_schema.resolutionIs("resolution_code", .compacted),
     .Args = struct { operation: u64, session: []const u8 },
     .Row = struct { dropped: u64, resolved_at: rsql.Positive },
     .cardinality = .one,

@@ -9691,7 +9691,20 @@ test "each compaction that succeeds is one compacted row, with the entries its f
             // An overflowed compaction has no row.
             try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
             const room = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // A poll while the compaction runs reads a frozen end past its
+            // admission; the row then takes a later position, so that
+            // prefix never gains it and a poll from its end finds it.
+            const frozen = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 0), frozen.count);
             try settleCompactionForTesting(&storage, &tmp, room, &.{.compaction});
+            var reread = request;
+            reread.end = frozen.end;
+            try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, reread)).count);
+            var follow = request;
+            follow.position = frozen.end;
+            const followed = try store_core.activityPageForTesting(&storage, follow);
+            try std.testing.expectEqual(@as(usize, 1), followed.count);
+            try std.testing.expectEqual(room.operation_id, followed.items[0].value.compacted.operation);
             // A later compaction without a floor drops nothing.
             try submitTestMessage(&storage, &tmp, "compacted-again", "compacted-again", session.slice(), "again");
             const again = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
