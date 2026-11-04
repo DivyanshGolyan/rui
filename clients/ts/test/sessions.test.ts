@@ -109,6 +109,7 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 		assert.equal(all[1]?.truncated, true);
 		assert.equal(all[1]?.text, undefined);
 		assert.equal(await session.readContent(all[1] as never), long);
+		assert.deepEqual(await session.readContentBytes(all[1] as never), Buffer.from(long));
 
 		const rest = [];
 		for await (const entry of session.listActivity({ kinds: ["admission"], after: all[0]?.cursor as string })) rest.push(entry);

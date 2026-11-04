@@ -109,10 +109,14 @@ function contentBody(store: string, session: string, entry: { position: string; 
 /** The Host stores up to a little under 1 GiB of text in one entry. */
 const MAX_CONTENT_BYTES = 1024 * 1024 * 1024;
 
-/** The whole text of an entry that has some, however long (D134). */
+/** The whole text of an entry that has some, as UTF-8 bytes, however long (D134). */
+export function readContentBytes(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<Buffer> {
+	return link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry), undefined, { max: MAX_CONTENT_BYTES });
+}
+
+/** The whole text of an entry as a string. A text past the JavaScript string limit (about 512 MiB) throws; use `readContentBytes`. */
 export async function readContent(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<string> {
-	const bytes = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry), undefined, { max: MAX_CONTENT_BYTES });
-	return bytes.toString("utf8");
+	return (await readContentBytes(link, session, entry)).toString("utf8");
 }
 
 /** Waits `ms`, or less when `signal` aborts. */
