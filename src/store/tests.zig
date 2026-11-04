@@ -1606,7 +1606,7 @@ test "a configure whose instructions and output schema are the same new bytes im
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            const rows = "SELECT count(*) FROM content";
+            const rows = store_testing.content_beside_tools;
 
             const create_bytes = "{\"title\":\"same-create\"}";
             var create = try completeConfiguration("same-create", "", workspace, "model-a");
@@ -2354,6 +2354,7 @@ test "Store entry points lock and fence only through canonical access" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("rsql.zig"),
         @embedFile("schema.zig"),
@@ -5302,7 +5303,7 @@ test "multiwindow content import and deduplication preserve all bytes" {
             try command.key.set("second");
             command.session = created_session_0;
             try std.testing.expect(storage.configure(&command, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
             const observation = try storage.inspectSessionForTesting(created_session_0.slice());
             try std.testing.expectEqual(@as(u64, 2), observation.revision);
             var reader: ContentReader = undefined;
@@ -5616,7 +5617,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try std.testing.expect(exhausted_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
 
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND (primary_content_id IS NOT NULL OR secondary_content_id IS NOT NULL)", .{}));
 
             try storage.close();
@@ -5636,7 +5637,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try changed_kind.session.set("absent");
             changed_kind.text = unknown_message.text;
             try std.testing.expect(storage.submitMessageWithModel(&changed_kind, null, .{}) == .conflict);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
         }
     }.run);
 }
@@ -8246,6 +8247,7 @@ const EntryPoint = enum {
     readHistoricalOutput,
     readHistoricalPart,
     readHistoricalToolResult,
+    readHistoricalTool,
     checkAttempt,
 };
 
@@ -8296,6 +8298,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readHistoricalOutput = 2,
     .readHistoricalPart = 1,
     .readHistoricalToolResult = 2,
+    .readHistoricalTool = 1,
     .checkAttempt = 1,
 });
 
@@ -8333,6 +8336,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("rsql.zig"),
         @embedFile("schema.zig"),
@@ -8579,6 +8583,10 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.start();
                 try view.settings(&settings);
                 meter.stop(.readHistoricalSettings);
+                var tool: historical_domain.HistoricalTool = .{};
+                meter.start();
+                try std.testing.expect(try view.nextTool(&tool));
+                meter.stop(.readHistoricalTool);
                 meter.start();
                 var entry = (try view.nextEntry(0)).?;
                 meter.stop(.readHistoricalEntry);
@@ -8726,10 +8734,10 @@ test "creating a Session takes the same work however many Sessions exist, in rou
             const few = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-few");
             const few_rounds = few.taken();
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tools_mask,permission_mode," ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
                 "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
                 "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
-                "SELECT 100000+value,'/','codex','openai-responses/1','model-a',1,0,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+                "SELECT 100000+value,'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
             const many = TwinRounds.start(&storage);
             _ = try configureTestSession(&storage, "creation-rounds-many");
             try std.testing.expectEqual(few_rounds, many.taken());

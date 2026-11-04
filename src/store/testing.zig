@@ -188,8 +188,15 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
 pub const baseline_sqlite_ddl: [:0]const u8 = @embedFile("migration_baseline.sqlite.sql");
 pub const baseline_mysql_ddl: [:0]const u8 = @embedFile("migration_baseline.mysql.sql");
 pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql");
+/// The rows a Store at the current schema holds once every migration ran
+/// on `baseline_rows`: the oracle each engine's migration test compares a
+/// migrated Store with. Written by hand from what each step should do, never
+/// read back from a migrated Store; each format change edits it, and its
+/// diff against `baseline_rows` shows every row the chain changes.
+pub const expected_rows: [:0]const u8 = @embedFile("migration_expected_rows.sql");
 comptime {
     if (fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
+    if (fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
 }
 
 fn isWordByte(byte: u8) bool {
@@ -554,3 +561,10 @@ pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, 
         .request_id = .{},
     }, .{});
 }
+
+/// Counts the content rows besides those only tool records name: every
+/// Session saves its tool set's texts once, beside what a test imports,
+/// and a Session's instructions may share one of them (the empty text).
+pub const content_beside_tools = "SELECT count(*) FROM content WHERE (content_id NOT IN (SELECT description_content_id FROM tool_record) " ++
+    "AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)) OR content_id IN (SELECT instructions_content_id FROM session_revision) " ++
+    "OR content_id IN (SELECT output_schema_content_id FROM session_revision WHERE output_schema_content_id IS NOT NULL)";

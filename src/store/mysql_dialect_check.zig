@@ -416,7 +416,7 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     try load(migrated_database, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| try load(migrated_database, schema.mysqlMigration(step.from), false);
     try load(fresh_database, schema.ddl(.mysql), false);
-    try load(fresh_database, store_testing.baseline_rows, true);
+    try load(fresh_database, store_testing.expected_rows, true);
     try expectSameResults(comptime &shapeQueries(migrated_database), comptime &shapeQueries(fresh_database));
     try expectSameResults(comptime &rowQueries(migrated_database), comptime &rowQueries(fresh_database));
     done.migrations += 1;

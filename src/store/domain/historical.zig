@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const configuration_domain = @import("configuration.zig");
+const tool_catalog = @import("../../tools.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
 const store_core = @import("../Store.zig");
@@ -69,7 +69,17 @@ pub const HistoricalSettings = struct {
     session_affinity: [16]u8,
     baseline_instructions: HistoricalContent,
     output_schema: ?HistoricalContent,
-    tools_mask: u8,
+    /// How many tools the frozen settings offer; `nextTool` reads them.
+    tool_count: u64,
+};
+
+/// One tool record the frozen settings offer, as saved: its texts are
+/// rendered from the Store, never from the Host's built-ins.
+pub const HistoricalTool = struct {
+    name: protocol.Bounded(tool_catalog.max_name_bytes) = .{},
+    owner: tool_catalog.Owner = undefined,
+    description: HistoricalContent = undefined,
+    input_schema: HistoricalContent = undefined,
 };
 
 pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results };
@@ -134,6 +144,11 @@ pub const HistoricalView = struct {
     group_scan: GroupScan = .{},
     next_tool_group_count: u64 = 0,
     active_tool_group_expected: u64 = 0,
+    /// The frozen tool set, which `settings` reads, and the ordinal of the
+    /// member `nextTool` reads next.
+    tool_set_id: u64 = 0,
+    tool_count: u64 = 0,
+    next_tool: u64 = 0,
     // Ordinary entries copied from one ranged read. Plain values, never a
     // statement: history below the admission boundary is immutable.
     entries: [entry_batch]HistoricalEntry = undefined,
@@ -210,6 +225,16 @@ pub const HistoricalView = struct {
     pub fn checkAttempt(self: *HistoricalView) !void {
         std.debug.assert(self.active);
         _ = try model_settlement_domain.checkAttempt(self.store, self.binding);
+    }
+
+    /// Fills `out` with the frozen settings' next tool, in set order, and
+    /// says whether there was one. `settings` must have run.
+    pub fn nextTool(self: *HistoricalView, out: *HistoricalTool) !bool {
+        std.debug.assert(self.active and self.tool_set_id != 0);
+        if (self.next_tool == self.tool_count) return false;
+        try readHistoricalTool(self.store, self, out);
+        self.next_tool += 1;
+        return true;
     }
 
     /// Fills `out`; on error its bytes mean nothing.
@@ -421,6 +446,53 @@ pub const HistoricalReader = struct {
 
 pub const OutputItemKind = output_format.OutputItemKind;
 
+/// A tool set's member at one ordinal, with its record and both texts'
+/// metadata.
+const historical_tool = rsql.Read(.{
+    .sql = "SELECT tool.name,tool.owner,tool.description_content_id AS description_id,description.byte_length AS description_length," ++
+        "description.digest AS description_digest,description.private AS description_private,tool.input_schema_content_id AS schema_id," ++
+        "input_schema.byte_length AS schema_length,input_schema.digest AS schema_digest,input_schema.private AS schema_private " ++
+        "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "JOIN content description ON description.content_id=tool.description_content_id " ++
+        "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 AND member.ordinal=?2",
+    .Args = struct { set: u64, ordinal: u64 },
+    .Row = struct {
+        name: *protocol.Bounded(tool_catalog.max_name_bytes),
+        owner: tool_catalog.Owner,
+        description_id: rsql.Positive,
+        description_length: u64,
+        description_digest: [32]u8,
+        description_private: bool,
+        schema_id: rsql.Positive,
+        schema_length: u64,
+        schema_digest: [32]u8,
+        schema_private: bool,
+    },
+    .cardinality = .optional,
+});
+
+fn readHistoricalTool(self: *Store, view: *HistoricalView, out: *HistoricalTool) !void {
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(Ordinary.none, toolOf(&access, view, out));
+}
+
+/// One round reads the member `view.next_tool`; a missing one, or private
+/// text, is `CorruptStore`.
+fn toolOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalTool) !void {
+    var row: historical_tool.Row = undefined;
+    row.name = &out.name;
+    var found: store_access.Found = undefined;
+    a.readInto(historical_tool, .{ .set = view.tool_set_id, .ordinal = view.next_tool }, &row, &found);
+    try store_access.runAs(a, error.CorruptStore);
+    if (!found.get() or row.description_private or row.schema_private) return error.CorruptStore;
+    out.owner = row.owner;
+    out.description = .{ .view = view, .content_id = @intCast(row.description_id.get()), .length = row.description_length, .digest = row.description_digest };
+    out.input_schema = .{ .view = view, .content_id = @intCast(row.schema_id.get()), .length = row.schema_length, .digest = row.schema_digest };
+}
+
 fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
@@ -432,16 +504,17 @@ fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalS
 /// The settings an Operation's request froze, with its Session's binding.
 /// The texts decode straight into the caller's settings.
 const historical_settings = rsql.Read(.{
-    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tool_set_id,tool_set.member_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
-        "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
+        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=r.tool_set_id JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
     .Row = struct {
         model: *protocol.Bounded(protocol.max_model_bytes),
         instructions_content_id: rsql.Positive,
         output_schema_content_id: ?rsql.Positive,
-        tools_mask: u8,
+        tool_set_id: rsql.Positive,
+        member_count: u64,
         provider: protocol.Provider,
         session_ref: *protocol.Bounded(protocol.max_session_bytes),
         workspace: *protocol.Bounded(protocol.max_workspace_bytes),
@@ -467,8 +540,11 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, &row, &found);
     try store_access.runAs(a, error.CorruptStore);
     if (!found.get()) return error.CorruptStore;
-    _ = try configuration_domain.toolSet(row.tools_mask);
-    out.tools_mask = row.tools_mask;
+    if (row.member_count > tool_catalog.max_tools) return error.CorruptStore;
+    view.tool_set_id = row.tool_set_id.get();
+    view.tool_count = row.member_count;
+    view.next_tool = 0;
+    out.tool_count = row.member_count;
     var instructions: content_metadata.Row = undefined;
     var output_schema: content_metadata.Row = undefined;
     a.read(content_metadata, .{ .content_id = row.instructions_content_id.get() }, &instructions);
