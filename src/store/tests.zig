@@ -2700,6 +2700,9 @@ test "production turn preserves skipped continuation preference through actual S
                 pub fn recoverExhaustedRetry(_: *@This()) error{Fence}!bool {
                     return false;
                 }
+                pub fn runCoreAction(_: *@This()) turn.Admission {
+                    return .no_work;
+                }
                 pub fn admitBash(self: *@This()) turn.Admission {
                     var admission = (self.storage.admitNextActionAttempt(1000, self.faults) catch |err| {
                         self.failure = err;

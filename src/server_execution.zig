@@ -716,6 +716,10 @@ const NativeTurn = struct {
         return null;
     }
 
+    pub fn runCoreAction(self: *NativeTurn) execution_turn.Admission {
+        return runNextCoreAction(self.host);
+    }
+
     pub fn admitBash(self: *NativeTurn) execution_turn.Admission {
         const slot = self.firstFreeSlot() orelse return .no_work;
         return switch (admitBashAttempt(self.host, slot, self.workspace)) {
@@ -1126,6 +1130,59 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
         else => {},
     };
     return made_progress;
+}
+
+/// Runs the next core tool call (D24) to its resolution: it reads the
+/// call's arguments, which settlement already checked, and one Store
+/// command does what they ask. Nothing is written before that command, so
+/// a call this stops short of is simply run again.
+fn runNextCoreAction(host: *Host) execution_turn.Admission {
+    const input = (host.store.nextCoreAction() catch |err| {
+        fenceDispatch(host, "core tool selection", err);
+        return .retry_later;
+    }) orelse return .no_work;
+    const location = host.store.openContent(input.arguments) catch |err| {
+        fenceDispatch(host, "core tool input", err);
+        return .retry_later;
+    };
+    var source: bash.ContentSource = .{ .length = input.arguments.length };
+    source.reader.open(location);
+    defer source.reader.close();
+    const Text = struct {
+        list: std.ArrayList(u8) = .empty,
+        allocator: std.mem.Allocator,
+
+        pub fn writeAll(self: *@This(), bytes: []const u8) !void {
+            try self.list.appendSlice(self.allocator, bytes);
+        }
+    };
+    var text: Text = .{ .allocator = host.allocator };
+    defer text.list.deinit(host.allocator);
+    const check = tools.core_tools.checkMessageAgent(&source, &text) catch |err| switch (err) {
+        // Memory comes back; the call is read again next time.
+        error.OutOfMemory => return .retry_later,
+        else => {
+            fenceDispatch(host, "core tool input", err);
+            return .retry_later;
+        },
+    };
+    const arguments = switch (check) {
+        .accepted => |accepted| accepted,
+        // Settlement accepted these exact bytes.
+        .rejected => {
+            fenceDispatch(host, "core tool input", error.CorruptStore);
+            return .retry_later;
+        },
+    };
+    _ = host.store.deliverAgentMessage(input.binding, arguments.id.slice(), text.list.items, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        // A stop resolved the call first.
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "core tool command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
 }
 
 fn admitBashAttempt(

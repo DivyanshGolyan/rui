@@ -8411,3 +8411,100 @@ test "a page of approval requests costs the same however many calls ran without 
     try std.testing.expect(thousand - few <= 1);
     try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
 }
+
+/// A Session that offers only `message_agent`, under an `ask` revision, so
+/// a core call that needed a person would wait.
+fn configureMessagingSession(storage: *Store, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try store_testing.completeConfiguration(key, "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools = try .of(&.{"message_agent"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    return reply.accepted.session;
+}
+
+test "a message_agent call runs as one core command: the Message is admitted from its Session and the call resolves" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const caller = try configureMessagingSession(&storage, "agent-caller");
+    const receiver = try configureTestSession(&storage, "agent-receiver");
+    try submitTestMessage(&storage, &tmp, "agent-task", "agent-task", caller.slice(), "ask the receiver");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var arguments_buffer: [96]u8 = undefined;
+    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"report back\"}}", .{receiver.slice()});
+    var encoded_buffer: [128]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"report back\\\"}}", .{receiver.slice()});
+    const calls = [_]TestingCall{
+        .{ .item_id = "agent-item", .name = "message_agent", .encoded_call_id = "agent-call", .decoded_call_id = "agent-call", .encoded_arguments = encoded, .decoded_arguments = arguments },
+        .{ .item_id = "agent-missing-item", .name = "message_agent", .encoded_call_id = "agent-missing", .decoded_call_id = "agent-missing", .encoded_arguments = "{\\\"id\\\":\\\"zzzzzz\\\",\\\"text\\\":\\\"hi\\\"}", .decoded_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hi\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, model, "agent-metadata", &calls);
+
+    // Both calls are decided at once under `ask`, described by the core,
+    // and never reach the Bash runner.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
+    var line_buffer: [32]u8 = undefined;
+    const line = try std.fmt.bufPrint(&line_buffer, "Message {s}", .{receiver.slice()});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line}));
+    try std.testing.expect(try storage.admitNextActionAttempt(300_000, .{}) == null);
+
+    const first = (try storage.nextCoreAction()).?;
+    try std.testing.expectEqualStrings(caller.slice(), first.session.slice());
+    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(first.binding, receiver.slice(), "report back", .{}));
+    const second = (try storage.nextCoreAction()).?;
+    try std.testing.expect(second.binding.action_id != first.binding.action_id);
+    try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(second.binding, "zzzzzz", "hi", .{}));
+    try std.testing.expect(try storage.nextCoreAction() == null);
+    // A resolved call is not run again.
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.deliverAgentMessage(first.binding, receiver.slice(), "report back", .{}));
+
+    // The receiver holds one Message from the caller, waiting for a Turn.
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2 AND turn_id IS NULL", .{ receiver.slice(), caller.slice() }));
+    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+    try expectContent(&storage, try testingContentReference(&storage, text_id), "report back");
+    // Each call resolved with what happened, and the caller's Turn can continue.
+    var delivered_buffer: [32]u8 = undefined;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "succeeded", try std.fmt.bufPrint(&delivered_buffer, "Delivered to {s}.", .{receiver.slice()}) },
+        .{ "failed", "No Session zzzzzz in this Store; nothing was sent." },
+    }) |case| {
+        const result_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code=?1", .{case[0]});
+        try expectContent(&storage, try testingContentReference(&storage, result_id), case[1]);
+    }
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code IS NULL AND continuation_operation_id=operation_id", .{caller.slice()}));
+    try expectDenseSessionPositions(&storage, caller.slice());
+    try expectDenseSessionPositions(&storage, receiver.slice());
+}
+
+test "a stop that selects a message_agent call's Turn cancels it before it runs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const caller = try configureMessagingSession(&storage, "stopped-caller");
+    try submitTestMessage(&storage, &tmp, "stopped-task", "stopped-task", caller.slice(), "message yourself");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var arguments_buffer: [96]u8 = undefined;
+    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"later\"}}", .{caller.slice()});
+    var encoded_buffer: [128]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"later\\\"}}", .{caller.slice()});
+    const calls = [_]TestingCall{.{ .item_id = "stopped-item", .name = "message_agent", .encoded_call_id = "stopped-call", .decoded_call_id = "stopped-call", .encoded_arguments = encoded, .decoded_arguments = arguments }};
+    try settleCallsForTesting(&storage, &tmp, model, "stopped-metadata", &calls);
+    const pending = (try storage.nextCoreAction()).?;
+    var stop = try completeSessionStop("stopped-stop", caller.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expect(try storage.nextCoreAction() == null);
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.deliverAgentMessage(pending.binding, caller.slice(), "later", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{caller.slice()}));
+}

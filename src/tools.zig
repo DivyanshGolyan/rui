@@ -77,11 +77,11 @@ pub const message_agent_record: Record = .{
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
 /// Who carries out an accepted call to a tool Rui owns, derived from its
-/// name (D46): Bash runs as an Action process; a core tool runs as a core
-/// command (D24). The Store keeps it as the call's action kind.
-pub const Runner = enum(u8) {
-    bash = 1,
-    core = 2,
+/// name and never stored (D46): Bash runs as an Action process; a core tool
+/// runs as a core command (D24).
+pub const Runner = enum {
+    bash,
+    core,
 
     pub fn of(tool: *const Record) Runner {
         return if (tool == &message_agent_record) .core else .bash;
