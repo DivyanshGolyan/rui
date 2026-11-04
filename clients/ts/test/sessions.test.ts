@@ -113,3 +113,20 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 		await rui.close();
 	}
 });
+
+test("inline text keeps its last character and kind filters may come in any order", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:tail" });
+		const texts = ["tail é", "tail €", "tail 😀"];
+		for (const [index, text] of texts.entries()) await session.send(text, { idempotencyKey: `msg:${index}` });
+		const seen = [];
+		for await (const entry of session.listActivity({ kinds: ["stop", "admission", "admission"] })) {
+			if (entry.kind === "admission") seen.push(entry.text);
+		}
+		assert.deepEqual(seen, texts);
+	} finally {
+		await rui.close();
+	}
+});

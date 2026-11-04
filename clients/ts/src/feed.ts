@@ -105,15 +105,6 @@ function contentBody(store: string, session: string, entry: { position: string; 
 	return `{"version":"8","kind":"activity_content","store":${JSON.stringify(store)},"session":${JSON.stringify(session)},"position":${JSON.stringify(entry.position)},"ordinal":${JSON.stringify(entry.ordinal)}}`;
 }
 
-/** Cuts a byte prefix back to a whole UTF-8 character. */
-function wholeCharacters(bytes: Buffer): string {
-	let end = bytes.length;
-	// A continuation byte (10xxxxxx) belongs to a character that starts earlier.
-	while (end > 0 && ((bytes[end - 1] as number) & 0xc0) === 0x80) end -= 1;
-	if (end > 0 && (bytes[end - 1] as number) >= 0xc0) end -= 1;
-	return bytes.subarray(0, end).toString("utf8");
-}
-
 /** The whole text of an entry that has some, however long (D134). */
 export async function readContent(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<string> {
 	const bytes = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry));
@@ -121,7 +112,8 @@ export async function readContent(link: Link, session: string, entry: { position
 }
 
 export async function* listActivity(link: Link, session: string, options: ListActivityOptions = {}): AsyncGenerator<FeedEntry, void, undefined> {
-	const kinds = options.kinds ?? FEED_KINDS;
+	// The Host wants kinds in its own order, each once.
+	const kinds = options.kinds === undefined ? FEED_KINDS : FEED_KINDS.filter((kind) => options.kinds?.includes(kind));
 	let position = "0";
 	let ordinal: string | null = null;
 	if (options.after !== undefined) {
@@ -142,7 +134,7 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 					entry.truncated = true;
 				} else {
 					const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, INLINE_TEXT_BYTES);
-					entry.text = wholeCharacters(prefix);
+					entry.text = prefix.toString("utf8");
 				}
 			}
 			yield entry;
