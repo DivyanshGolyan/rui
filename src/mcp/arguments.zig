@@ -48,16 +48,11 @@ fn description(value: []const u8) ?[]const u8 {
 }
 
 /// Whether `properties` has a member whose key decodes the same as `key`,
-/// written as the model wrote it.
+/// both as written; differently escaped spellings are one name.
 fn hasKey(properties: []const u8, key: []const u8) bool {
     var own = document.Members.init(properties);
     while (own.next()) |found| {
-        if (std.mem.eql(u8, found.key, key)) return true;
-        // Differently escaped spellings of one name are one name.
-        var buffer: [256]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buffer);
-        document.writeDecoded(&writer, key) catch continue;
-        if (document.keyIs(found.key, writer.buffered())) return true;
+        if (document.sameText(found.key, key)) return true;
     }
     return false;
 }
@@ -99,4 +94,15 @@ test "a schema with no properties lists no fields" {
     const out = try forServer(&buffer, "{\"type\":\"object\"}", "{\"q\":1,\"rui_call_description\":\"d\"}");
     try std.testing.expectEqualStrings("{}", out.text);
     try std.testing.expectEqualStrings("d", out.split.description.?);
+}
+
+test "escaped names longer than any fixed buffer still match" {
+    const a: [300]u8 = @splat('a');
+    const escaped = "\\u0061" ++ a[1..];
+    const saved = "{\"properties\":{\"" ++ a ++ "\":{}}}";
+    var buffer: [1024]u8 = undefined;
+    const out = try forServer(&buffer, saved, "{\"" ++ escaped ++ "\":1}");
+    try std.testing.expectEqualStrings("{\"" ++ escaped ++ "\":1}", out.text);
+    const other = "{\"properties\":{\"" ++ a[1..] ++ "b\":{}}}";
+    try std.testing.expectEqualStrings("{}", (try forServer(&buffer, other, "{\"" ++ escaped ++ "\":1}")).text);
 }
