@@ -1247,9 +1247,12 @@ fn control(self: *Store, comptime which: Control) !void {
 
 /// A typed statement's prepared form, cached like `controlStatement`'s.
 /// Only a type `rsql.Read` or `rsql.Write` made passes, so its text passed
-/// rsql's checks when that type was made (`rsql.isStatement`).
+/// rsql's checks when that type was made (`rsql.isStatement`). A test
+/// build also renders `S.mysql`, so it fails on a statement it reaches
+/// here that has no MySQL spelling; a release build renders none.
 pub fn cachedTyped(self: *Store, comptime S: type) !*c.sqlite3_stmt {
     comptime if (!rsql.isStatement(S)) @compileError("cachedTyped runs only a type rsql.Read or rsql.Write made: " ++ @typeName(S));
+    if (@import("builtin").is_test) _ = comptime S.mysql;
     return cachedStatic(self, S.sql);
 }
 

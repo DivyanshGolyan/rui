@@ -87,6 +87,7 @@ const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 test {
     _ = @import("rsql.zig");
+    _ = @import("schema.zig");
     _ = @import("access.zig");
 }
 
