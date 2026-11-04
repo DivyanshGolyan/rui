@@ -274,6 +274,8 @@ D188. D82's Prisma reason is removed (Drift uses `migrate deploy`). Drift's pool
 D189. Marlin's `GET /v1/models` is unprobed; Drift probes it before the port, and D80 is revisited only if it fails.
 D190. #840 measured: 249.3 MiB idle, 282.1 (1 agent), 285.7 (8), 298.0 (9), 312.8 three minutes after release.
 
+D191. (Divyansh 07:02Z idea, "proceed" 07:03Z) When the compaction request itself would not fit, Rui drops the oldest messages from what it sends to compaction until it fits, then compacts; the feed records how many were dropped. The Session, its ID and its attached children carry on. "Context full" remains only for one item larger than the window. Changes ARCHITECTURE.md:657/:685 ("never truncate"). The card on restart-in-place/adopt was withdrawn.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
