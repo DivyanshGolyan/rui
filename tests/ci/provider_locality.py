@@ -30,6 +30,8 @@ PROVIDER_OWNED = (
     # The test roots import every module, the sign-in ones included.
     "tests.zig",
     "logic_tests.zig",
+    # The Store's SQLite-only tests, split from store/tests.zig.
+    "store/sqlite_tests.zig",
     "testing/*",
 )
 
