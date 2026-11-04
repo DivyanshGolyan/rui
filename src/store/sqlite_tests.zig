@@ -8084,7 +8084,7 @@ test "a migration whose step fails leaves its backup and the original Store read
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{}, .digest = 0 }}));
+        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
     }
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "store.sqlite3.migration-3-to-4", .{}));
     _ = try tmp.dir.statFile(std.testing.io, "store.sqlite3.kept", .{});
@@ -8105,7 +8105,7 @@ test "a migration whose step fails leaves its backup and the original Store read
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{}, .digest = 0 }}));
+        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{} }}));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
     }
@@ -8153,7 +8153,7 @@ test "a migration that rebuilds a referenced table from the schema's text keeps 
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{}, .digest = 0 }});
+        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{} }});
     }
     var storage: Store = undefined;
     try storage.open(std.testing.io, store.path, store.root);
@@ -8180,7 +8180,7 @@ test "a migration that leaves other text than bootstrap's, or a broken reference
     const raw = try openRaw(store.path);
     defer _ = c.sqlite3_close(raw);
     for (cases) |case| {
-        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{}, .digest = 0 }}));
+        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{} }}));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));

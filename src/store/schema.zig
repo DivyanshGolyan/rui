@@ -55,7 +55,9 @@ pub const migration_baseline: u32 = 51;
 /// (`openExisting`). Rui runs no DDL on MySQL (D203): the DB team runs
 /// `mysql`, which `mysqlMigration` joins. A CHECK or predicate in either
 /// is spliced from `migrationExpression`, so it meets the rules schema
-/// text meets. `digest` pins the text (`migrationDigest`).
+/// text meets. A step's text is frozen once its `from + 1` is released:
+/// tests/ci/test_store_schema_version.py compares every step whose `from`
+/// is below the released schema_version with its text at the release.
 ///
 /// SQLite keeps each CREATE text as run, and a Store opens only when every
 /// object's text equals a fresh bootstrap's. ALTER TABLE ADD COLUMN splices
@@ -69,13 +71,11 @@ pub const Migration = struct {
     from: u32,
     sqlite: []const [:0]const u8,
     mysql: []const [:0]const u8,
-    digest: u64,
 };
 
 /// Every step from `migration_baseline` to `schema_version`, oldest first.
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
-/// chain grows. Only the last step, whose schema_version is unreleased
-/// (tests/ci/test_store_schema_version.py), may change, with its digest.
+/// chain grows. Only a step past the released schema_version may change.
 pub const migrations = [_]Migration{};
 comptime {
     if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
@@ -89,23 +89,11 @@ comptime {
             "migrations: the step from {d} moves past schema_version {d}: set schema_version to {d} and append its bootstrap_digests row, or drop the step",
             .{ step.from, schema_version, step.from + 1 },
         ));
-        if (step.digest != migrationDigest(step)) @compileError(if (step.from + 1 == schema_version) std.fmt.comptimePrint(
-            "migrations: the step from {d} changed: set its digest to 0x{x:0>16}",
-            .{ step.from, migrationDigest(step) },
-        ) else std.fmt.comptimePrint(
-            "migrations: the step from {d} shipped with digest 0x{x:0>16}, and its text now digests to 0x{x:0>16}: restore its text, and put the change in a new step",
-            .{ step.from, step.digest, migrationDigest(step) },
-        ));
     }
     if (migrations.len < schema_version - migration_baseline) @compileError(std.fmt.comptimePrint(
-        "migrations: schema_version is {d}, and no step moves a Store from {d}: append .{{ .from = {d}, .sqlite = ..., .mysql = ..., .digest = ... }}",
+        "migrations: schema_version is {d}, and no step moves a Store from {d}: append .{{ .from = {d}, .sqlite = ..., .mysql = ... }}",
         .{ schema_version, migration_baseline + migrations.len, migration_baseline + migrations.len },
     ));
-}
-
-/// FNV-1a over a step's SQLite statements, then its MySQL statements.
-pub fn migrationDigest(comptime step: Migration) u64 {
-    return statementsDigest(&.{ step.sqlite, step.mysql });
 }
 
 /// The statements of the step from `from`, as one text for the DB team to
@@ -1105,18 +1093,9 @@ fn joinLines(comptime lines: []const []const u8) []const u8 {
 /// SHA-256: it is a fixed algorithm, and SHA-256 costs seconds of every
 /// compile.
 pub fn digest() u64 {
-    return statementsDigest(&.{&bootstrap_sql});
-}
-
-/// FNV-1a over each statement of each group, NUL after each statement and
-/// 0x01 between groups.
-fn statementsDigest(comptime groups: []const []const [:0]const u8) u64 {
     return comptime blk: {
         var text: []const u8 = "";
-        for (groups, 0..) |group, position| {
-            if (position != 0) text = text ++ "\x01";
-            for (group) |statement| text = text ++ statement ++ "\x00";
-        }
+        for (bootstrap_sql) |statement| text = text ++ statement ++ "\x00";
         @setEvalBranchQuota(10 * text.len + 1000);
         break :blk std.hash.Fnv1a_64.hash(text);
     };
