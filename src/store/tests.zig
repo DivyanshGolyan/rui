@@ -14518,11 +14518,17 @@ test "a Full list takes a statement per 256 rows, and lists each row once in ord
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
         }
         _ = testingRuns(&storage, report_domain.full_stops);
+        _ = testingRuns(&storage, report_domain.full_interruptions);
+        _ = testingRuns(&storage, report_domain.full_results);
         const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
         defer std.testing.allocator.free(full);
         // 256 rows and the 257th row's absence fit one statement; a 257th
-        // row takes a second.
+        // row takes a second. The interruptions, read ahead of the stops'
+        // first chunk, are read again after it; the results, read ahead
+        // and found empty, are not.
         try std.testing.expectEqual(@as(i64, if (rows == 256) 1 else 2), testingRuns(&storage, report_domain.full_stops));
+        try std.testing.expectEqual(@as(i64, if (rows == 256) 1 else 2), testingRuns(&storage, report_domain.full_interruptions));
+        try std.testing.expectEqual(@as(i64, 1), testingRuns(&storage, report_domain.full_results));
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
         defer parsed.deinit();
         const stops = parsed.value.object.get("full").?.object.get("session_stops").?.array.items;
@@ -14810,12 +14816,11 @@ test "Full history takes a round per chunk" {
 test "Full revisions show each content whole where it first occurs" {
     // `mixed`: new, older and repeated content, an output schema that is
     // none, the instructions or other content. `same`: one older content
-    // throughout. `overflow`: `mixed` past `ContentOwners.capacity`
-    // values, so the later revisions take their owners from
-    // `full_revisions_owned`.
-    const Shape = enum { mixed, same, overflow };
-    const capacity = report_domain.ContentOwners.capacity;
-    for ([_]Shape{ .mixed, .same, .overflow }, [_]usize{ 70, 130, capacity * 2 }) |shape, revisions| {
+    // throughout. `grown`: `mixed` past half of
+    // `ContentOwners.initial_capacity` values, so the table doubles.
+    const Shape = enum { mixed, same, grown };
+    const capacity = report_domain.ContentOwners.initial_capacity;
+    for ([_]Shape{ .mixed, .same, .grown }, [_]usize{ 70, 130, capacity * 2 }) |shape, revisions| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -14848,23 +14853,14 @@ test "Full revisions show each content whole where it first occurs" {
         instructions[1] = 0;
         output_schema[1] = null;
         var fresh: usize = 11;
-        // The texts the Session holds so far, and whether `overflow` filled
-        // `ContentOwners` with a revision's instructions while its output
-        // schema is new: a value that first occurs in the revision that
-        // filled the map.
+        // The texts the Session holds.
         const held = try std.testing.allocator.alloc(bool, 4 * capacity);
         defer std.testing.allocator.free(held);
         @memset(held, false);
         held[0] = true;
         var distinct: usize = 1;
-        var filled_between = false;
         for (2..revisions + 1) |revision| {
-            const fill = shape == .overflow and distinct == capacity - 1;
-            instructions[revision] = if (shape == .same) 1 else if (fill) blk: {
-                lengths[fresh] = (try std.fmt.bufPrint(&texts[fresh], "{{\"title\":\"fresh {d}\"}}", .{revision})).len;
-                fresh += 1;
-                break :blk fresh - 1;
-            } else switch (revision % 5) {
+            instructions[revision] = if (shape == .same) 1 else switch (revision % 5) {
                 // Older content, out of id order.
                 0 => 1 + (revision * 7) % 10,
                 // An earlier revision's instructions.
@@ -14875,12 +14871,7 @@ test "Full revisions show each content whole where it first occurs" {
                     break :blk fresh - 1;
                 },
             };
-            output_schema[revision] = if (shape == .same) null else if (fill) blk: {
-                lengths[fresh] = (try std.fmt.bufPrint(&texts[fresh], "{{\"title\":\"schema {d}\"}}", .{revision})).len;
-                fresh += 1;
-                filled_between = true;
-                break :blk fresh - 1;
-            } else switch (revision % 3) {
+            output_schema[revision] = if (shape == .same) null else switch (revision % 3) {
                 0 => null,
                 1 => instructions[revision],
                 else => 1 + (revision * 3) % 10,
@@ -14900,13 +14891,9 @@ test "Full revisions show each content whole where it first occurs" {
             } else reconfigure.configuration.output_schema.state = .explicit_null;
             try std.testing.expect(storage.configure(&reconfigure, .{}) == .accepted);
         }
-        try std.testing.expectEqual(shape == .overflow, filled_between and distinct > capacity);
-        _ = testingRuns(&storage, report_domain.full_revisions_owned);
+        try std.testing.expectEqual(shape == .grown, 2 * distinct > capacity);
         const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .full);
         defer std.testing.allocator.free(full);
-        // Owners come from the read with owner columns only once the map
-        // is full.
-        try std.testing.expectEqual(shape == .overflow, testingRuns(&storage, report_domain.full_revisions_owned) > 0);
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
         defer parsed.deinit();
         const listed = parsed.value.object.get("full").?.object.get("session_revisions").?.array.items;

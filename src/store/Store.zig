@@ -341,13 +341,6 @@ pub const Store = struct {
         return @ptrCast(self.scratch(.configuration));
     }
 
-    /// The Full report's revision content owners, in the Store's scratch
-    /// beside its change ring (`OutOfLine`), so no Host stack frame holds
-    /// its 16 KiB. Only `report.renderRevisions` uses it.
-    pub fn reportOwners(self: *Store) *report_domain.ContentOwners {
-        return @ptrCast(self.scratch(.report));
-    }
-
     /// The scratch for `use`. Safe builds check that the caller holds the
     /// mutex, and that no other use took the scratch in this entry point:
     /// the two share its bytes. `Entry.release` frees it.
@@ -886,16 +879,15 @@ const OutOfLine = struct {
     scratch: Scratch align(scratch_align),
 };
 
-const ScratchUse = enum(u8) { none, configuration, settlement, report };
+const ScratchUse = enum(u8) { none, configuration, settlement };
 
-/// One entry point's large state: a configure's reads, a settlement's
-/// batch or a Full report's content owners (within the batch's 14480
-/// bytes), which no entry point holds at once (`Store.scratch` checks
-/// that in safe builds). Bytes, not a union, so it is no bigger than the larger
+/// One entry point's large state: a configure's reads or a settlement's
+/// batch, which no entry point holds at once (`Store.scratch` checks that
+/// in safe builds). Bytes, not a union, so it is no bigger than the larger
 /// use and needs no tag of its own: `Store.scratch_use` is its tag.
 const Scratch = [scratch_bytes]u8;
-const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch), @sizeOf(report_domain.ContentOwners));
-const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch), @alignOf(report_domain.ContentOwners));
+const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
+const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
 /// The resident bytes the owner accepted for a settlement batch of 64
 /// items, beyond the configure reads' 4888.
