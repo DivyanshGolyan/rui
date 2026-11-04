@@ -4704,7 +4704,7 @@ test "historical tool-result EOF revalidates complete canonical coverage" {
     defer view.close();
     var position: u64 = 0;
     while (true) {
-        const entry = (try view.nextEntry(position)) orelse return error.MissingToolResultGroup;
+        const entry = (try nextTestingItem(&view, position)) orelse return error.MissingToolResultGroup;
         position = entry.position;
         if (entry.kind == .tool_results) break;
     }
@@ -10246,7 +10246,8 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
     try std.testing.expectEqual(@as(u8, 0), later_settings.tools_mask);
     var position: u64 = 0;
-    for ([_]HistoricalEntryKind{ .user, .user, .instruction, .user }) |kind| {
+    // The failed first Operation keeps its boundary between the inputs.
+    for ([_]HistoricalEntryKind{ .user, .user, .instruction, .operation, .user }) |kind| {
         const entry = (try later_view.nextEntry(position)).?;
         try std.testing.expectEqual(kind, entry.kind);
         position = entry.position;
@@ -12177,9 +12178,9 @@ test "completed tool labels trust admission while model replay authenticates pay
     defer view.close();
     // Discovery trusts the labels; the first call's name fences when it is
     // read for replay.
-    const first = (try view.nextEntry(0)).?;
+    const first = (try nextTestingItem(&view, 0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, first.kind);
-    const call = (try view.nextEntry(first.position)).?;
+    const call = (try nextTestingItem(&view, first.position)).?;
     try std.testing.expectEqual(try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3"), call.position);
     const name = (try view.openOutput(call.position)).call.?[0];
     var reader: HistoricalReader = undefined;
@@ -12655,9 +12656,9 @@ test "compaction overflow admits a new Operation without losing applied input" {
     defer view.close();
     try std.testing.expectEqual(ModelOperationKind.compaction, (try testSettings(&view)).operation);
     try std.testing.expect((try view.coverage()).anchor == null);
-    const input = (try view.nextEntry(0)).?;
+    const input = (try nextTestingItem(&view, 0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
-    try std.testing.expect((try view.nextEntry(input.position)) == null);
+    try std.testing.expect((try nextTestingItem(&view, input.position)) == null);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
     const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024, .full);
     defer std.testing.allocator.free(bytes);
@@ -12684,9 +12685,14 @@ fn readTestingContent(view: *HistoricalView, content: HistoricalContent, out: *s
 }
 
 /// Renders a historical entry as the Store holds it: a user entry's text,
-/// or an output item's kind, bag, call fields and parts (`array.kind=text{bag}`).
+/// an earlier Operation's effort (`operation.high`), or an output item's
+/// kind, bag, call fields and parts (`array.kind=text{bag}`).
 fn renderTestingEntry(view: *HistoricalView, entry: HistoricalEntry, buffer: []u8) ![]const u8 {
     var out = std.Io.Writer.fixed(buffer);
+    if (entry.kind == .operation) {
+        try out.print("operation.{s}", .{if (entry.effort) |effort| @tagName(effort) else "default"});
+        return out.buffered();
+    }
     if (entry.kind != .provider_output) {
         try readTestingContent(view, entry.content.?, &out);
         return out.buffered();
@@ -12717,11 +12723,23 @@ const TestingHistoryCursor = struct {
     position: u64 = 0,
 
     fn next(self: *@This(), view: *HistoricalView) !?HistoricalEntry {
-        const entry = try view.nextEntry(self.position);
+        const entry = try nextTestingItem(view, self.position);
         if (entry) |item| self.position = item.position;
         return entry;
     }
 };
+
+/// The next history entry after `after` that is no earlier Operation's
+/// effort boundary: the history these tests check, without the boundaries
+/// the codec places between it (tested on their own).
+fn nextTestingItem(view: *HistoricalView, after: u64) !?HistoricalEntry {
+    var position = after;
+    while (try view.nextEntry(position)) |entry| {
+        if (entry.kind != .operation) return entry;
+        position = entry.position;
+    }
+    return null;
+}
 
 test "compaction success retains host inputs and ordered anchor suffix across reopen" {
     var tmp = std.testing.tmpDir(.{});
@@ -13061,9 +13079,9 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     try std.testing.expectEqual(@as(u64, 1), frozen.compaction_trigger);
     try std.testing.expectEqual(@as(u64, 1), frozen.output_reservation);
     try std.testing.expect((try view.coverage()).anchor == null);
-    const input = (try view.nextEntry(0)).?;
+    const input = (try nextTestingItem(&view, 0)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
-    try std.testing.expect((try view.nextEntry(input.position)) == null);
+    try std.testing.expect((try nextTestingItem(&view, input.position)) == null);
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
     try patch.key.set("updated-heuristics");
     try patch.configuration.compaction_trigger.value.set("999");
@@ -13313,7 +13331,7 @@ test "compaction selected newest base corruption fences rather than using an old
             try std.testing.expectError(error.CorruptStore, view.coverage());
         } else {
             const anchor = (try view.coverage()).anchor.?;
-            const selected = (try view.nextEntry(anchor - 1)).?;
+            const selected = (try nextTestingItem(&view, anchor - 1)).?;
             try std.testing.expectEqual(anchor, selected.position);
             var reader: HistoricalReader = undefined;
             try view.openContent((try view.openOutput(selected.position)).bag.?, &reader);
