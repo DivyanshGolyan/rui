@@ -703,7 +703,7 @@ const RetryChoice = struct {
 /// The read Access `candidate` pages through due retries in id order,
 /// outside any transaction, until it finds one `active` does not hold,
 /// after at most one more than it can exclude; each page is a round. The
-/// Store worker runs no other entry point meanwhile, so the write Access `a`
+/// Store runs no other entry point meanwhile, so the write Access `a`
 /// starts the replacement Attempt from what the scan read, in one round.
 pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active: ActiveOperationFilter, faults: Faults) !?AttemptAdmission {
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(io)) orelse return error.IntegerOutOfRange;

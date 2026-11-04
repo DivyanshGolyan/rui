@@ -1,5 +1,5 @@
 //! The Store type and its public entry points, then what the domain files share
-//! and nothing outside src/store/ reaches: the worker hop and fencing, statement execution,
+//! and nothing outside src/store/ reaches: the Store's queue and fencing, statement execution,
 //! identities and traces. The facade re-exports only the Store type and its value types.
 
 const std = @import("std");
@@ -57,7 +57,7 @@ const StatementCache = sqlite.StatementCache;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
-const Worker = @import("worker.zig").Worker;
+const Queue = @import("queue.zig").Queue;
 
 pub const Store = struct {
     io: std.Io,
@@ -73,7 +73,7 @@ pub const Store = struct {
     /// the generation the commit advances to.
     touched: change_ring.Touched = .{},
     /// Which Sessions changed at recent generations: Session listing's
-    /// `since` hint, the worker's alone. Owned: `openWithOptions` maps it
+    /// `since` hint, touched only by the Store's holder. Owned: `openWithOptions` maps it
     /// and `close` unmaps it.
     changes: *change_ring.Ring,
     /// This opening's identity: a `since` token from any other opening
@@ -115,10 +115,10 @@ pub const Store = struct {
     /// today's immutable Session configuration admission. Requires a newer
     /// current revision, leaving that revision and its frozen inputs intact.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
-        return self.worker().call(prefixSealForTestingOnWorker, .{ self, binding });
+        return self.queue().run(prefixSealForTestingHeld, .{ self, binding });
     }
 
-    fn prefixSealForTestingOnWorker(self: *Store, binding: AttemptBinding) !?PrefixSeal {
+    fn prefixSealForTestingHeld(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
         const entry = try enter(self, .none);
         defer entry.release();
@@ -260,7 +260,7 @@ pub const Store = struct {
         errdefer destroyRing(changes);
         self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = .{ .next = undefined } };
         self.served = options.served;
-        self.worker().* = .init(io);
+        self.queue().* = .init(io);
         // The Store is in final storage, so the function may keep its address.
         if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
             return error.StoreOpenFailed;
@@ -272,14 +272,14 @@ pub const Store = struct {
         // Error paths then roll back without preparing or allocating.
         _ = try controlStatement(self, .rollback);
         try loadIdentities(self, .full);
-        try self.worker().start();
+        self.queue().opened();
     }
 
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
-        return self.worker().call(sqliteDiagnosticOnWorker, .{self});
+        return self.queue().run(sqliteDiagnosticHeld, .{self});
     }
 
-    fn sqliteDiagnosticOnWorker(self: *Store) SqliteDiagnostic {
+    fn sqliteDiagnosticHeld(self: *Store) SqliteDiagnostic {
         var result: SqliteDiagnostic = .{};
         var current: c.sqlite3_int64 = 0;
         var highwater: c.sqlite3_int64 = 0;
@@ -327,7 +327,7 @@ pub const Store = struct {
 
     pub fn close(self: *Store) !void {
         // Every caller has its answer, so the queue is empty.
-        self.worker().stop();
+        self.queue().closing();
         self.statements.deinit();
         const close_result = c.sqlite3_close(self.database);
         // Freed even when SQLite keeps the handle: nothing retries a close.
@@ -353,16 +353,16 @@ pub const Store = struct {
 
     /// The one thread that touches `database`, the scratch and `ids`,
     /// beside the change ring (`OutOfLine`).
-    pub fn worker(self: *Store) *Worker {
+    pub fn queue(self: *Store) *Queue {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-        return &owned.worker;
+        return &owned.queue;
     }
 
     /// The scratch for `use`. Safe builds check that the caller owns the
-    /// connection (`Worker.owner`), and that no other use took the scratch in this entry point:
+    /// connection (`Queue.owner`), and that no other use took the scratch in this entry point:
     /// the two share its bytes. `Entry.release` frees it.
     fn scratch(self: *Store, use: ScratchUse) *align(scratch_align) [scratch_bytes]u8 {
-        std.debug.assert(self.worker().owned());
+        std.debug.assert(self.queue().owned());
         std.debug.assert(self.scratch_use == .none or self.scratch_use == use);
         self.scratch_use = use;
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
@@ -380,10 +380,10 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        return self.worker().call(configureOnWorker, .{ self, command, faults });
+        return self.queue().write(configureHeld, .{ self, command, faults });
     }
 
-    fn configureOnWorker(
+    fn configureHeld(
         self: *Store,
         command: *const protocol.ConfigureCommand,
         faults: Faults,
@@ -405,8 +405,8 @@ pub const Store = struct {
         from_peer: bool,
     };
 
-    /// Called on the Store worker once a fresh Message admission commits,
-    /// before the worker takes another request, so whatever reads the Store next also sees its effect.
+    /// Called, on whichever thread holds the Store, once a fresh Message
+    /// admission commits and before the Store runs another request, so whatever reads the Store next also sees its effect.
     /// A replayed or rejected Message calls nothing. It cannot fail.
     pub const MessageCommitted = struct {
         context: *anyopaque,
@@ -421,10 +421,10 @@ pub const Store = struct {
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
-        return self.worker().call(submitMessageWithModelOnWorker, .{ self, command, committed, faults });
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, faults });
     }
 
-    fn submitMessageWithModelOnWorker(
+    fn submitMessageWithModelHeld(
         self: *Store,
         command: *const protocol.MessageCommand,
         committed: ?MessageCommitted,
@@ -443,10 +443,10 @@ pub const Store = struct {
         faults: Faults,
     ) SessionStopReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
-        return self.worker().call(stopSessionOnWorker, .{ self, command, faults });
+        return self.queue().write(stopSessionHeld, .{ self, command, faults });
     }
 
-    fn stopSessionOnWorker(
+    fn stopSessionHeld(
         self: *Store,
         command: *const protocol.SessionStopCommand,
         faults: Faults,
@@ -464,10 +464,10 @@ pub const Store = struct {
         faults: Faults,
     ) ModelInterruptionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
-        return self.worker().call(interruptModelOnWorker, .{ self, command, faults });
+        return self.queue().write(interruptModelHeld, .{ self, command, faults });
     }
 
-    fn interruptModelOnWorker(
+    fn interruptModelHeld(
         self: *Store,
         command: *const protocol.ModelInterruptionCommand,
         faults: Faults,
@@ -485,10 +485,10 @@ pub const Store = struct {
         faults: Faults,
     ) PermissionDecisionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
-        return self.worker().call(decidePermissionOnWorker, .{ self, command, faults });
+        return self.queue().write(decidePermissionHeld, .{ self, command, faults });
     }
 
-    fn decidePermissionOnWorker(
+    fn decidePermissionHeld(
         self: *Store,
         command: *const protocol.PermissionDecisionCommand,
         faults: Faults,
@@ -501,10 +501,10 @@ pub const Store = struct {
     }
 
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
-        return self.worker().call(observeCommandOnWorker, .{ self, key });
+        return self.queue().run(observeCommandHeld, .{ self, key });
     }
 
-    fn observeCommandOnWorker(self: *Store, key: []const u8) !CommandObservation {
+    fn observeCommandHeld(self: *Store, key: []const u8) !CommandObservation {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -513,10 +513,10 @@ pub const Store = struct {
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
-        return self.worker().call(commandResultOnWorker, .{ self, key });
+        return self.queue().run(commandResultHeld, .{ self, key });
     }
 
-    fn commandResultOnWorker(self: *Store, key: []const u8) !ContentReference {
+    fn commandResultHeld(self: *Store, key: []const u8) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -525,10 +525,10 @@ pub const Store = struct {
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
-        return self.worker().call(inspectSessionOnWorker, .{ self, session_ref, out });
+        return self.queue().run(inspectSessionHeld, .{ self, session_ref, out });
     }
 
-    fn inspectSessionOnWorker(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
+    fn inspectSessionHeld(self: *Store, session_ref: []const u8, out: *SessionObservation) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -541,10 +541,10 @@ pub const Store = struct {
     // The fixed end is the last committed position at the first read, not a
     // count of visible rows; a private-only append cannot become public later.
     pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
-        return self.worker().call(publicConversationPageOnWorker, .{ self, request, out });
+        return self.queue().run(publicConversationPageHeld, .{ self, request, out });
     }
 
-    fn publicConversationPageOnWorker(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+    fn publicConversationPageHeld(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -555,10 +555,10 @@ pub const Store = struct {
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
     pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
-        return self.worker().call(openPublicConversationContentOnWorker, .{ self, request });
+        return self.queue().run(openPublicConversationContentHeld, .{ self, request });
     }
 
-    fn openPublicConversationContentOnWorker(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+    fn openPublicConversationContentHeld(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -567,10 +567,10 @@ pub const Store = struct {
     }
 
     pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
-        return self.worker().call(activityPageOnWorker, .{ self, request, out });
+        return self.queue().run(activityPageHeld, .{ self, request, out });
     }
 
-    fn activityPageOnWorker(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+    fn activityPageHeld(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -580,10 +580,10 @@ pub const Store = struct {
     }
 
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
-        return self.worker().call(openActivityContentOnWorker, .{ self, request });
+        return self.queue().run(openActivityContentHeld, .{ self, request });
     }
 
-    fn openActivityContentOnWorker(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+    fn openActivityContentHeld(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
@@ -596,7 +596,7 @@ pub const Store = struct {
     /// diagnostics. Diagnostic faults never fence canonical state.
     pub fn captureFailedResponse(self: *Store, request: *const protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
         const selection = request.failed_response.?;
-        const binding = try self.worker().call(captureFailedResponseOnWorker, .{ self, request.session.slice(), selection });
+        const binding = try self.queue().run(captureFailedResponseHeld, .{ self, request.session.slice(), selection });
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
@@ -604,7 +604,7 @@ pub const Store = struct {
         return capture.seal();
     }
 
-    fn captureFailedResponseOnWorker(self: *Store, session_ref: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
+    fn captureFailedResponseHeld(self: *Store, session_ref: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -620,11 +620,11 @@ pub const Store = struct {
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
-        try self.worker().call(captureSessionReportOnWorker, .{ self, session_ref, options, &capture });
+        try self.queue().run(captureSessionReportHeld, .{ self, session_ref, options, &capture });
         return capture.seal();
     }
 
-    fn captureSessionReportOnWorker(self: *Store, session_ref: []const u8, options: SessionReportOptions, capture: *SessionReportCapture) !void {
+    fn captureSessionReportHeld(self: *Store, session_ref: []const u8, options: SessionReportOptions, capture: *SessionReportCapture) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -639,11 +639,11 @@ pub const Store = struct {
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
-        try self.worker().call(captureSessionListOnWorker, .{ self, request, &capture });
+        try self.queue().run(captureSessionListHeld, .{ self, request, &capture });
         return capture.seal();
     }
 
-    fn captureSessionListOnWorker(self: *Store, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
+    fn captureSessionListHeld(self: *Store, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -660,10 +660,10 @@ pub const Store = struct {
     }
 
     fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
-        return self.worker().call(actionContentOnWorker, .{ self, session_ref, action_id, field });
+        return self.queue().run(actionContentHeld, .{ self, session_ref, action_id, field });
     }
 
-    fn actionContentOnWorker(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
+    fn actionContentHeld(self: *Store, session_ref: []const u8, action_id: u64, field: protocol.ProposalField) !ContentReference {
         const entry = try enter(self, .none);
         defer entry.release();
         if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
@@ -681,10 +681,10 @@ pub const Store = struct {
     /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
     /// stay off the frame of a caller that goes on to dispatch the Attempt.
     pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        return self.worker().call(admitModelAttemptOnWorker, .{ self, kind, faults });
+        return self.queue().write(admitModelAttemptHeld, .{ self, kind, faults });
     }
 
-    noinline fn admitModelAttemptOnWorker(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    noinline fn admitModelAttemptHeld(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         var reader: ReadAccess = .open(&entry);
@@ -699,10 +699,10 @@ pub const Store = struct {
         bash_timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        return self.worker().call(admitNextActionAttemptOnWorker, .{ self, bash_timeout_ms, faults });
+        return self.queue().write(admitNextActionAttemptHeld, .{ self, bash_timeout_ms, faults });
     }
 
-    fn admitNextActionAttemptOnWorker(
+    fn admitNextActionAttemptHeld(
         self: *Store,
         bash_timeout_ms: u64,
         faults: Faults,
@@ -719,10 +719,10 @@ pub const Store = struct {
 
     /// `out` is valid only when this returns without error.
     pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-        return self.worker().call(readBashExecutionInputOnWorker, .{ self, binding, out });
+        return self.queue().run(readBashExecutionInputHeld, .{ self, binding, out });
     }
 
-    fn readBashExecutionInputOnWorker(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
+    fn readBashExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -731,10 +731,10 @@ pub const Store = struct {
     }
 
     pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
-        return self.worker().call(revokeActionSenderOnWorker, .{ self, binding });
+        return self.queue().write(revokeActionSenderHeld, .{ self, binding });
     }
 
-    fn revokeActionSenderOnWorker(self: *Store, binding: ActionAttemptBinding) !void {
+    fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.single, error{}) = .open(&entry);
@@ -743,10 +743,10 @@ pub const Store = struct {
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
-        return self.worker().call(actionSupersededByStopOnWorker, .{ self, binding });
+        return self.queue().run(actionSupersededByStopHeld, .{ self, binding });
     }
 
-    fn actionSupersededByStopOnWorker(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
+    fn actionSupersededByStopHeld(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -760,16 +760,16 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        try self.worker().callHeld(withActionDispatchHandoffOnWorker, .{ self, binding });
-        defer self.worker().resumeWorker();
+        try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
+        defer self.queue().release();
         // Launch failures are effect outcomes, not canonical faults; the
         // caller settles or fences them. The handoff runs on the caller's
-        // thread while the worker waits, so no request runs between the
+        // thread while it still holds the Store, so no request runs between the
         // check and the launch.
         try handoff(context);
     }
 
-    fn withActionDispatchHandoffOnWorker(self: *Store, binding: ActionAttemptBinding) !void {
+    fn withActionDispatchHandoffHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -784,10 +784,10 @@ pub const Store = struct {
         result: []const u8,
         faults: Faults,
     ) !ActionSettlement {
-        return self.worker().call(settleActionAttemptOnWorker, .{ self, binding, code, result, faults });
+        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, faults });
     }
 
-    fn settleActionAttemptOnWorker(
+    fn settleActionAttemptHeld(
         self: *Store,
         binding: ActionAttemptBinding,
         code: ActionResolutionCode,
@@ -803,10 +803,10 @@ pub const Store = struct {
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
-        return self.worker().call(recoverOneUncertainActionOnWorker, .{ self, active });
+        return self.queue().write(recoverOneUncertainActionHeld, .{ self, active });
     }
 
-    fn recoverOneUncertainActionOnWorker(self: *Store, active: ActiveOperationFilter) !bool {
+    fn recoverOneUncertainActionHeld(self: *Store, active: ActiveOperationFilter) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var candidate: ReadAccess = .open(&entry);
@@ -821,10 +821,10 @@ pub const Store = struct {
         active: ActiveOperationFilter,
         faults: Faults,
     ) !?AttemptAdmission {
-        return self.worker().call(tryAdmitNextModelRetryOnWorker, .{ self, active, faults });
+        return self.queue().write(tryAdmitNextModelRetryHeld, .{ self, active, faults });
     }
 
-    fn tryAdmitNextModelRetryOnWorker(
+    fn tryAdmitNextModelRetryHeld(
         self: *Store,
         active: ActiveOperationFilter,
         faults: Faults,
@@ -859,10 +859,10 @@ pub const Store = struct {
     }
 
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-        return self.worker().call(operationSupersededByControlOnWorker, .{ self, binding });
+        return self.queue().run(operationSupersededByControlHeld, .{ self, binding });
     }
 
-    fn operationSupersededByControlOnWorker(self: *Store, binding: AttemptBinding) !?SupersedingControl {
+    fn operationSupersededByControlHeld(self: *Store, binding: AttemptBinding) !?SupersedingControl {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -876,13 +876,13 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        try self.worker().callHeld(withDispatchHandoffOnWorker, .{ self, binding });
-        defer self.worker().resumeWorker();
+        try self.queue().callHeld(withDispatchHandoffHeld, .{ self, binding });
+        defer self.queue().release();
         // As for Actions, dispatch failures belong to the caller.
         try handoff(context);
     }
 
-    fn withDispatchHandoffOnWorker(self: *Store, binding: AttemptBinding) !void {
+    fn withDispatchHandoffHeld(self: *Store, binding: AttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.readAttemptKind(&entry, binding));
@@ -894,10 +894,10 @@ pub const Store = struct {
     /// prevents a second refresh. Returns false when the Operation already
     /// claimed, or when no replacement allowance would remain.
     pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
-        return self.worker().call(claimModelAuthRefreshOnWorker, .{ self, binding });
+        return self.queue().write(claimModelAuthRefreshHeld, .{ self, binding });
     }
 
-    fn claimModelAuthRefreshOnWorker(self: *Store, binding: AttemptBinding) !bool {
+    fn claimModelAuthRefreshHeld(self: *Store, binding: AttemptBinding) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.attempt_binding || error{AuthRefreshUnclaimed}) = .open(&entry);
@@ -912,10 +912,10 @@ pub const Store = struct {
         disposition: ModelFailureClass,
         faults: Faults,
     ) !void {
-        return self.worker().call(settleModelAttemptFailureOnWorker, .{ self, binding, failure, disposition, faults });
+        return self.queue().write(settleModelAttemptFailureHeld, .{ self, binding, failure, disposition, faults });
     }
 
-    fn settleModelAttemptFailureOnWorker(
+    fn settleModelAttemptFailureHeld(
         self: *Store,
         binding: AttemptBinding,
         failure: ModelFailure,
@@ -942,10 +942,10 @@ pub const Store = struct {
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
-        return self.worker().call(recoverOneExhaustedModelAttemptOnWorker, .{ self, active });
+        return self.queue().write(recoverOneExhaustedModelAttemptHeld, .{ self, active });
     }
 
-    fn recoverOneExhaustedModelAttemptOnWorker(
+    fn recoverOneExhaustedModelAttemptHeld(
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
@@ -965,10 +965,10 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         EntryTrace.fromSettlement(faults.settlement_trace).mark(.requested);
-        return self.worker().call(settleModelSuccessOnWorker, .{ self, binding, output, faults });
+        return self.queue().write(settleModelSuccessHeld, .{ self, binding, output, faults });
     }
 
-    fn settleModelSuccessOnWorker(
+    fn settleModelSuccessHeld(
         self: *Store,
         binding: AttemptBinding,
         output: *const ValidatedOutput,
@@ -1079,7 +1079,7 @@ comptime {
 /// The Store's state too large for the frame that holds it.
 const OutOfLine = struct {
     ring: change_ring.Ring,
-    worker: Worker,
+    queue: Queue,
     scratch: Scratch align(scratch_align),
 };
 
@@ -1201,14 +1201,14 @@ const EntryTrace = union(enum) {
 /// Exclusive canonical access for one entry point, from `enter` through
 /// `release`. Errors leave through `finish` or `finishTransaction`, which
 /// return the entry point's declared ordinary errors and fence the rest.
-/// Runs on the Store worker, which takes no other request meanwhile.
+/// Runs while its thread holds the Store, which runs no other request meanwhile.
 pub const Entry = struct {
     const max_result_bytes = 1024;
 
     store: *Store,
     trace: EntryTrace,
     changes: i64,
-    /// A test thread's Entry, opened while it borrows the worker.
+    /// A test's own Entry, which holds the Store until `release`.
     borrowed: if (@import("builtin").is_test) bool else void,
 
     pub fn finish(self: Entry, comptime Expected: type, result: anytype) @TypeOf(result) {
@@ -1255,7 +1255,7 @@ pub const Entry = struct {
             store.changes.record(generation, &store.touched);
         }
         self.trace.mark(.complete);
-        if (@import("builtin").is_test) if (self.borrowed) store.worker().giveBack();
+        if (@import("builtin").is_test) if (self.borrowed) store.queue().giveBack();
     }
 
     /// Rejects an entry point result over `max_result_bytes`. A Host
@@ -1280,16 +1280,16 @@ pub const Entry = struct {
     }
 };
 
-/// On the Store worker: the public entry point marked `.requested` before
-/// handing its body over. A test may open an Entry on its own thread, which
-/// borrows the worker until `release`.
+/// While its thread holds the Store: the public entry point marked
+/// `.requested` before it queued. A test may open an Entry without an entry
+/// point, which holds the Store until `release`.
 pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
     if (self.isFenced()) return error.StoreFenced;
     const borrowed = if (@import("builtin").is_test) borrowed: {
-        const off = !self.worker().onWorker();
-        if (off) self.worker().borrow();
+        const off = !self.queue().owned();
+        if (off) self.queue().borrow();
         break :borrowed off;
-    } else std.debug.assert(self.worker().onWorker());
+    } else std.debug.assert(self.queue().owned());
     self.touched = .{};
     // Rows a test changed outside any entry point belong to none.
     if (@import("builtin").is_test) clearTouchOracleForTesting(self);
@@ -1426,7 +1426,7 @@ const Control = enum {
 };
 
 /// `which`'s prepared form, cached for the Store's lifetime; the caller
-/// resets it before the Store worker takes the next request.
+/// resets it before the Store runs the next request.
 fn controlStatement(self: *Store, comptime which: Control) !*c.sqlite3_stmt {
     return cachedStatic(self, comptime which.sql());
 }

@@ -89,7 +89,7 @@ test {
     _ = @import("rsql.zig");
     _ = @import("schema.zig");
     _ = @import("access.zig");
-    _ = @import("worker.zig");
+    _ = @import("queue.zig");
 }
 
 /// Tests read a view's settings by value; the Host fills them in place.
@@ -2341,7 +2341,7 @@ test "the Store prepares only typed statements, its transaction control and test
 
 test "Store entry points queue and fence only through canonical access" {
     // Every entry point classifies its errors through `Entry`; a new path
-    // cannot take a lock beside the worker's queue, read or set the fence
+    // cannot take a lock beside the Store's queue, read or set the fence
     // beside it, or enter without returning through a classifier.
     const sources = .{
         @embedFile("Store.zig"),
@@ -2360,7 +2360,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("schema.zig"),
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
-        @embedFile("worker.zig"),
+        @embedFile("queue.zig"),
     };
     var locks: usize = 0;
     var fence_stores: usize = 0;
@@ -2378,8 +2378,8 @@ test "Store entry points queue and fence only through canonical access" {
             try std.testing.expect(std.mem.indexOf(u8, body, "entry.finish") != null);
         }
     }
-    // The worker's queue: `wait`, `serve` and `stop`.
-    try std.testing.expectEqual(@as(usize, 3), locks);
+    // The Store's queue: `release`, `closing`, `take`, and its tests' `waitQueued`.
+    try std.testing.expectEqual(@as(usize, 4), locks);
     try std.testing.expectEqual(@as(usize, 1), fence_stores);
     try std.testing.expectEqual(@as(usize, 1), fence_loads);
     try std.testing.expect(entered > 0);
@@ -8205,8 +8205,8 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 }
 
 /// The functions that enter the Store (`enter(self, ...)`), each a
-/// separate transition on the Store worker, by the name the source gives
-/// it (less the `OnWorker` of a body the worker runs).
+/// separate transition while the Store is held, by the name the source
+/// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
     configure,
     submitMessageWithModel,
@@ -8342,7 +8342,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("schema.zig"),
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
-        @embedFile("worker.zig"),
+        @embedFile("queue.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
     var fixtures: [entering_fixtures.len]bool = @splat(false);
@@ -8360,8 +8360,8 @@ test "every function that enters the Store has a round budget" {
             const fn_at = @max(std.mem.lastIndexOf(u8, before, " fn ") orelse 0, std.mem.lastIndexOf(u8, before, "\nfn ") orelse 0) + " fn ".len;
             var end = fn_at;
             while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
-            // The body a public entry point hands to the Store worker.
-            const name = if (std.mem.endsWith(u8, source[fn_at..end], "OnWorker")) source[fn_at .. end - "OnWorker".len] else source[fn_at..end];
+            // The body a public entry point queues.
+            const name = if (std.mem.endsWith(u8, source[fn_at..end], "Held")) source[fn_at .. end - "Held".len] else source[fn_at..end];
             if (std.mem.endsWith(u8, name, "ForTesting")) {
                 const listed = for (entering_fixtures, 0..) |fixture, position| {
                     if (std.mem.eql(u8, fixture, name)) break position;

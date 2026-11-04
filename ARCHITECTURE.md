@@ -1486,9 +1486,10 @@ Uncertainty alone requires neither User intervention nor Turn termination; SQLit
 
 ### Store durability
 
-One Store worker thread owns the connection, the Store's scratch and its id allocator.
-Each Store entry point hands its body to that thread and waits for the answer, so entry points run one at a time, in arrival order, and no other thread touches SQLite.
-A dispatch check holds the worker after it answers until its caller has launched the Attempt or Action, so no stop commits between the check and the launch; the launch itself runs on the caller's thread.
+One thread at a time holds the Store: its connection, its scratch and its id allocator.
+A caller that finds the Store free holds it and runs its entry point on its own thread; a caller that finds it busy queues its request and sleeps, and the holder runs queued requests in arrival order before it lets go, so each waiter wakes once, with its answer.
+A holder runs at most 64 requests for others, then hands the Store to the next waiter.
+A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
 
 The Host opens the Store database with `locking_mode=EXCLUSIVE`, `journal_mode=WAL`, `synchronous=FULL` (with `fullfsync` on macOS) and a 4-MiB `journal_size_limit`.
 Each commit appends to `rui.sqlite3-wal` and syncs it before the transaction returns, so an acknowledged commit survives a process crash and, under SQLite's WAL `FULL` contract, an OS crash or power loss on storage that honors sync.
