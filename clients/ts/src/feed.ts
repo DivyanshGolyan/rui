@@ -11,8 +11,27 @@ type Schemas = components["schemas"];
 type Row = Schemas["ActivityItem"];
 
 /** The row kinds the Host sends today. */
-export const FEED_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "sent", "send_failed", "received"] as const;
+type WireKind = Schemas["ActivityPageRequest"]["kinds"][number];
+/** Every kind the Host's feed has, in its own order. */
+export const FEED_KINDS = [
+	"admission",
+	"user",
+	"assistant",
+	"call",
+	"tool_result",
+	"hosted_call",
+	"turn_ended",
+	"stop",
+	"sent",
+	"send_failed",
+	"received",
+	"approval_requested",
+	"session_changed",
+] as const satisfies readonly WireKind[];
 export type FeedKind = (typeof FEED_KINDS)[number];
+// A kind the wire gains fails to compile here until the list has it.
+const complete: [Exclude<WireKind, FeedKind>] extends [never] ? true : never = true;
+void complete;
 
 /** Entry text is inline up to this many bytes (D168). */
 export const INLINE_TEXT_BYTES = 16 * 1024;
