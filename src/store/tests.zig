@@ -15030,9 +15030,10 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const attempt = try TestingAttempt.admit(&storage, &tmp);
-    // Main's statements and VM steps at 72db6de9, each on its warm second
-    // call: opening a view, its Attempt check, recording a seal, the
-    // Operation's kind, a dispatch handoff and a content lookup.
+    // Main's statements and VM steps at 72db6de9 and again at 2e8e8353,
+    // each on its warm second call: opening a view, its Attempt check,
+    // recording a seal, the Operation's kind, a dispatch handoff and a
+    // content lookup.
     const main_work = [_][2]i64{ .{ 2, 24 }, .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
     for (0..2) |call| {
         var work: [main_work.len][2]i64 = undefined;
