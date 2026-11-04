@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0xecd596d78939345e },
+    .{ .schema_version = 51, .digest = 0x307c91c969f3c53c },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -582,7 +582,8 @@ pub const tables = [_]Table{
                 "(resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)",
             "(@same(resolution_code,'interrupted') AND interrupted_by_command_key IS NOT NULL) OR " ++
                 "(coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)",
-            "(history_floor IS NULL AND history_level IS NULL) OR (history_floor IS NOT NULL AND history_level IS NOT NULL AND purpose=1)",
+            // A level is the room a compaction made; one that made none keeps its base's floor.
+            "(history_floor IS NULL AND history_level IS NULL) OR (history_floor IS NOT NULL AND purpose=1)",
         },
     },
     .{
