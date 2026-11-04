@@ -3163,7 +3163,11 @@ After delivery retires and local borrowers finish, intake closes the accepted so
 Retained cleanup keeps its file handles, charge and exchange owner until reclamation succeeds.
 Incomplete uploads publish nothing.
 Every valid short control and its complete semantic response fit a field-derived bound, including framing and worst-case escaping, without content scratch.
-Reject oversized discovery before body parsing and route/kind disagreement before content capture.
+Reject oversized discovery before body parsing, and route/kind disagreement as soon as `kind` is read, which is before any content capture when `kind` precedes the content.
+A request's object members may come in any order, as JSON allows, so clients generated from `openapi.json` in any language can build bodies (D212).
+Each member appears at most once, required members must all be present, and unknown members fail.
+The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content strings as they arrive (a Message's `text` value, a configure command's `instructions` and `output_schema` values), and the second fills the command, so each content value takes the capture its string arrived in.
+Once `kind` is known, content the kind cannot carry fails before capture; before that, at most two strings are captured, and a third fails.
 Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes.
 Progress cannot renew it.
 Mutation-response waiting and transfer inactivity follow [the client transport contract](#client-transport-and-observations).
@@ -3229,7 +3233,7 @@ Host information is a read-only, bounded `/v1/host-info` exchange for the canoni
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
-A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device` or `key_file`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
+A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device` or `key_file`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.
@@ -3347,6 +3351,11 @@ Acknowledgement means a fence was requested, not that effects retired, connectio
 A missing/disconnected listener or timeout leaves completion unconfirmed.
 After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
 Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
+
+Holding new Turns is a different control, answered from Host memory like `host_info`: `POST /v1/control/host-pause` takes `kind:"host_pause"`, `store` and `paused`, sets whether this Host holds every new Turn, and replies `host_pause_reply` with the state now in force; repeating it changes nothing (D193).
+While held, Messages are still admitted and queue, running Turns go on through their tool continuations, retries and Messages that join them at an input boundary, and no waiting Message starts a Turn: model admission selects only a Session whose open Turn takes input at its next model call.
+Clearing it lets them start in the usual order at the next admission pass, which reads the flag beside the commit generation, so a resume needs no commit.
+The flag is not saved: a Host starts with it clear, and a later launch option can start one held.
 
 Peer collaboration has no Rui-owned group lifecycle.
 Operators compose ordinary Session stops over known addresses or stop the entire selected Host, including unrelated work there.

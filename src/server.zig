@@ -337,6 +337,7 @@ const Intake = struct {
                     const limit: u64 = switch (self.route.?) {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
+                        .host_pause => protocol.max_host_pause_request_bytes,
                         .session_stop => protocol.max_session_stop_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
@@ -570,7 +571,7 @@ const Intake = struct {
                     continue;
                 }
                 if (exchange.state != .ready) continue;
-                if (exchange.route == .host_info or exchange.route == .host_stop) continue;
+                if (exchange.route) |route| if (route.atomicOnly()) continue;
                 if (next == null) next = exchange;
             }
             if (next) |exchange| {
@@ -662,7 +663,7 @@ const Intake = struct {
                             wake_at = @min(wake_at, exchange.deadline);
                         }
                     },
-                    .ready => if (exchange.route == .host_info or exchange.route == .host_stop) {
+                    .ready => if (exchange.route.?.atomicOnly()) {
                         exchange.state = .reply;
                         exchange.prepare() catch |err| exchange.fail(err);
                         wake_at = now;
@@ -1246,6 +1247,7 @@ const ControlTiming = struct {
 const Route = enum {
     host_info,
     host_stop,
+    host_pause,
     configure,
     message,
     session_stop,
@@ -1265,7 +1267,13 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .host_pause or self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+    }
+
+    /// Answered on the listener from atomics and fixed values alone,
+    /// never by a worker or SQLite.
+    fn atomicOnly(self: Route) bool {
+        return self == .host_info or self == .host_stop or self == .host_pause;
     }
 
     fn kind(self: Route) protocol.Kind {
@@ -1336,7 +1344,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.providers.routes() });
+            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes() });
+        },
+        .host_pause => |pause| {
+            if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+            // Execution reads the flag at its next admission pass.
+            host.turns_paused.store(pause.paused, .release);
+            try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), renderHostPause, .{pause.paused});
         },
         .host_stop => {
             if (host.advance(.stopping) != .stopping) wakeListener(host);
@@ -1648,6 +1662,8 @@ const HeaderReader = struct {
             .host_info
         else if (std.mem.eql(u8, path, "/v1/control/host-stop"))
             .host_stop
+        else if (std.mem.eql(u8, path, "/v1/control/host-pause"))
+            .host_pause
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
@@ -2051,11 +2067,16 @@ fn renderHostInfo(
     descriptor_soft_limit: ?u64,
     started_at: u64,
     custody_occupied: u64,
+    paused: bool,
     routes: protocol.Routes,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, routes.codex, routes.openai });
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
+}
+
+fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
+    try response.appendShape(protocol.host_pause_reply, .{paused});
 }
 
 /// Nothing changed since the token: it comes back, with no rows.
@@ -3045,7 +3066,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, protocol.routesAll(.chatgpt_device) });
+    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device) });
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
@@ -3211,6 +3232,7 @@ test "retired reserved exchanges cannot block their successors while workers are
             const path = switch (route) {
                 .host_info => "host-info",
                 .host_stop => "control/host-stop",
+                .host_pause => "control/host-pause",
                 .session_stop => "control/session-stop",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
