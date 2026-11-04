@@ -295,6 +295,8 @@ D201. (Drift 08:12Z withdrew the prefix ask; card closed as "own database only")
 D202. Rui needs only SELECT, INSERT and UPDATE on its MySQL database while running, plus `GET_LOCK` (no grant). Checked on main and the 6b branch: no runtime statement deletes rows, and the only DELETE is a test-build oracle. rsql refuses DELETE in runtime statements, so this stays true as a compile error, not a promise.
 D203. Replaces D155's "all privileges". On MySQL, Rui never creates or changes tables. `rui store schema --engine mysql` prints the DDL for that build as one SQL file, which the DB team applies once to the empty database. At open, Rui checks the schema version and digest and refuses with `RuiStartError store_schema_missing` or `store_schema_behind`. SQLite keeps creating its own file.
 
+D204. (Divyansh 08:23Z) Replaces D94's "no backward compatibility" for the Store format, on every engine. Each Store format change ships a forward migration (one from-to file per engine, SQLite and MySQL), and CI applies it to a Store at the old format and checks the result matches the new schema digest and the fixtures still read. It starts with the PR that adds the migration runner; Stores older than that still reset once. On MySQL the DB team applies the file (D203); on SQLite, Rui applies it at open.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
