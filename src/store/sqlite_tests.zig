@@ -8539,10 +8539,10 @@ test "a compaction's floor read costs the same however long its Session's histor
     try std.testing.expectEqual(thousand, try Walk.steps(&storage, compaction.operation_id));
 }
 
-test "a catalog past a Session's tool limit saves and opens again" {
+test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const count = tool_catalog.max_tools + 72;
+    const count = tool_catalog.max_catalog_records - 2;
     var names: [count][8]u8 = undefined;
     var records: [count + 2]tool_catalog.Record = undefined;
     var digests: [count + 2][32]u8 = undefined;

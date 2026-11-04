@@ -109,8 +109,9 @@ pub const Catalog = struct {
     }
 };
 
-/// The most records a Host's catalog holds.
-pub const max_catalog_records = 1024;
+/// The most records a Host's catalog holds: the Store saves it as a tool
+/// set, which holds at most `max_tools`.
+pub const max_catalog_records = max_tools;
 
 pub const bash_record: Record = .{
     .name = "bash",

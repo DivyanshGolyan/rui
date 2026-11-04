@@ -39,7 +39,7 @@ CREATE TABLE tool_set(
  UNIQUE(digest),
  CHECK(tool_set_id>0),
  CHECK(length(digest)=32),
- CHECK(member_count BETWEEN 0 AND 1024)
+ CHECK(member_count BETWEEN 0 AND 128)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 CREATE TABLE tool_set_member(
  tool_set_id BIGINT NOT NULL,
