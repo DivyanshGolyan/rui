@@ -185,7 +185,12 @@ def run():
         assert ACCESS not in public_report
         assert len(endpoint.requests) == 2
         continuation = json.loads(endpoint.requests[1])
-        assert continuation["reasoning"] == {"effort": "high"}, continuation
+        # openai-responses/2 keeps the starting effort on top, so the prefix
+        # stays cached, and writes the change into the input once.
+        assert continuation["reasoning"] == {"effort": "medium"}, continuation
+        assert [item for item in continuation["input"] if item.get("type") == "configuration_update"] == [
+            {"type": "configuration_update", "reasoning": {"effort": "high"}}
+        ], continuation["input"]
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" and "tool-witness" in item["output"] for item in continuation["input"])
         assert any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in continuation["input"])
         assert all(item.get("role") != "system" for item in continuation["input"])

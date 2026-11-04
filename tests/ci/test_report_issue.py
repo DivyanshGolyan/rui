@@ -84,6 +84,15 @@ GATE = logged(
     "renderer mutation gate failed: mark-collision: expected exactly one anchor, found 0",
     "Evidence: /home/runner/work/_temp/mutations/report.json (logs beside it).",
 )
+# The plan job's `git diff --check` over a commit that swept in node_modules (#894).
+WHITESPACE = logged(
+    "clients/ts/node_modules/yaml-ast-parser/src/loader.ts:208: trailing whitespace.",
+    "+    ",
+    "clients/ts/node_modules/yaml-ast-parser/workspace.json:31: new blank line at EOF.",
+    "clients/ts/node_modules/yargs-parser/CHANGELOG.md:235: trailing whitespace.",
+    "+* \\_\\_proto\\_\\_ will now be replaced",
+    "##[error]Process completed with exit code 2.",
+)
 
 
 class CauseTest(unittest.TestCase):
@@ -146,6 +155,20 @@ class CauseTest(unittest.TestCase):
         [gate] = report_issue.failure_causes(GATE, self.cases)
         self.assertEqual(gate.signature,
                          'renderer mutation gate failed: mark-collision: expected exactly one anchor, found 0')
+
+    def test_a_whitespace_check_names_its_files(self):
+        [cause] = report_issue.failure_causes(WHITESPACE, self.cases)
+        self.assertEqual(cause.signature, "whitespace check (git diff --check) failed")
+        self.assertEqual(cause.paths, ["clients/ts/node_modules/yaml-ast-parser/src/loader.ts",
+                                       "clients/ts/node_modules/yaml-ast-parser/workspace.json",
+                                       "clients/ts/node_modules/yargs-parser/CHANGELOG.md"])
+        self.assertEqual(cause.detail.splitlines()[:2],
+                         ["3 problems in 3 files, first:",
+                          "clients/ts/node_modules/yaml-ast-parser/src/loader.ts: trailing whitespace"])
+        # Thousands of swept files keep a bounded issue.
+        many = logged(*(f"vendor/{index}.js:1: trailing whitespace." for index in range(50)))
+        [bounded] = report_issue.failure_causes(many, self.cases)
+        self.assertEqual(len(bounded.paths), report_issue.WHITESPACE_PATHS)
 
     def test_a_python_unit_test_is_named_by_its_id_and_raising_line(self):
         [cause] = report_issue.failure_causes(UNITTEST, self.cases)

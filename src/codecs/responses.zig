@@ -1,5 +1,8 @@
-//! The OpenAI Responses codec (`openai-responses/1`), serving the `codex`
-//! provider.
+//! The OpenAI Responses codec, in two versions. `openai-responses/1` sends
+//! each Operation's effort at the top of its request, so changing effort
+//! costs the prompt cache. `openai-responses/2` keeps the Session's
+//! starting effort at the top and changes it inside the history with a
+//! `configuration_update` item at the Operation that changed it (D75-D77).
 const std = @import("std");
 const codec_abi = @import("../codec_abi.zig");
 const json = @import("json.zig");
@@ -16,12 +19,25 @@ pub const manifest: codec_abi.Manifest = .{
 const ItemHeader = codec_abi.ItemHeader;
 const Pieces = codec_abi.Pieces;
 
-/// The encoder's state between history elements: whether one was written,
-/// since the next input item then takes a comma.
-pub const Carry = struct { input_comma: bool };
+pub const Version = enum { one, two };
 
-/// The carry before the first history element.
-pub const initial: Carry = .{ .input_comma = false };
+/// The encoder's state between history elements: whether one was written,
+/// since the next input item then takes a comma, and under version two the
+/// effort in force, which an Operation boundary changes.
+pub const Carry = struct {
+    input_comma: bool = false,
+    version: Version,
+    effort: ?codec_abi.Effort = null,
+};
+
+/// The carry before the first history element: version two starts at the
+/// effort its requests send at the top.
+pub fn initial(version: Version, starting_effort: ?codec_abi.Effort) Carry {
+    return switch (version) {
+        .one => .{ .version = .one },
+        .two => .{ .version = .two, .effort = starting_effort },
+    };
+}
 
 /// The request encoder. Beyond its carry, its state lives only within one
 /// output item or the tools array. A function call's open and a tool take
@@ -40,7 +56,11 @@ pub const Encoder = struct {
                 out.literal("{\"model\":\"");
                 out.content(0, .json_string_v1);
                 out.literal(envelope);
-                if (settings.effort) |effort| out.literal(switch (effort) {
+                const top = switch (self.carry.version) {
+                    .one => settings.effort,
+                    .two => settings.starting_effort,
+                };
+                if (top) |effort| out.literal(switch (effort) {
                     inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
                 });
             },
@@ -135,6 +155,17 @@ pub const Encoder = struct {
                 out.literal("\",\"output\":\"");
                 out.content(1, .json_string_v1);
                 out.literal("\"}");
+            },
+            // Version two changes effort where an Operation changed it; an
+            // unchanged effort writes nothing. Effort is null for a whole
+            // Session or for none of it, so a boundary never returns to it.
+            .operation => |effort| if (self.carry.version == .two and !std.meta.eql(effort, self.carry.effort)) {
+                const changed = effort orelse return error.Declined;
+                self.separateInput(out);
+                out.literal(switch (changed) {
+                    inline else => |value| "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}}",
+                });
+                self.carry.effort = changed;
             },
             .history_end => {},
             .compaction_trigger => {
@@ -1847,7 +1878,7 @@ fn terminalOf(data: []const u8, start: u64, offset: *u64) Failure!codec_abi.Memb
 test "an encoder resumed from a carry separates its next input item only after an earlier one" {
     const header: ItemHeader = .{ .item = .tool_result, .handles = 0b11 };
     var pieces: Pieces = .{ .len = 0 };
-    var first: Encoder = .{ .carry = initial };
+    var first: Encoder = .{ .carry = initial(.one, null) };
     try first.encodeItem(&header, &pieces);
     try std.testing.expect(!std.mem.eql(u8, pieces.items[0].literal, ","));
     // A fresh encoder given only the carry that element ended in.
@@ -1860,10 +1891,14 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     // Every item the Host can give, with each handle set it can give that
     // item, from every state the encoder can be in before it.
     const Case = struct { item: codec_abi.Item, handles: []const u8 };
-    var cases: [64]Case = undefined;
+    var cases: [80]Case = undefined;
     var count: usize = 0;
     for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
         cases[count] = .{ .item = .{ .settings = .{ .effort = effort, .session_affinity = @splat(0xff), .model_length = 0 } }, .handles = &.{0b1} };
+        count += 1;
+    }
+    for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
+        cases[count] = .{ .item = .{ .operation = effort }, .handles = &.{0} };
         count += 1;
     }
     for (std.enums.values(codec_abi.Author)) |author| {
@@ -1894,10 +1929,16 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     }
     var longest: u8 = 0;
     for (cases[0..count]) |case| for (case.handles) |handles| {
-        for ([_]bool{ false, true }) |comma| for ([_]bool{ false, true }) |omit| for (std.enums.values(codec_abi.PartArray)) |array| {
-            var encoder: Encoder = .{ .carry = .{ .input_comma = comma }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
+        for ([_]bool{ false, true }) |comma| for ([_]bool{ false, true }) |omit| for (std.enums.values(codec_abi.PartArray)) |array| for (std.enums.values(Version)) |version| {
+            var encoder: Encoder = .{ .carry = .{ .input_comma = comma, .version = version, .effort = .low }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
             const header: ItemHeader = .{ .item = case.item, .handles = handles };
             var pieces: Pieces = .{ .len = 0 };
+            // A boundary back to no effort is the one item version two
+            // declines.
+            if (case.item == .operation and case.item.operation == null and version == .two) {
+                try std.testing.expectError(error.Declined, encoder.encodeItem(&header, &pieces));
+                continue;
+            }
             try encoder.encodeItem(&header, &pieces);
             longest = @max(longest, pieces.len);
             for (pieces.slice()) |piece| switch (piece) {
@@ -1907,6 +1948,31 @@ test "every item at its longest fits max_pieces and names only handles it has" {
         };
     };
     try std.testing.expectEqual(codec_abi.max_pieces, longest);
+}
+
+test "version two keeps the starting effort at the top and changes it at the Operation that changed it" {
+    var pieces: Pieces = .{ .len = 0 };
+    const settings: codec_abi.Settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 0 };
+    const header: ItemHeader = .{ .item = .{ .settings = settings }, .handles = 0b1 };
+    var two: Encoder = .{ .carry = initial(.two, .low) };
+    try two.encodeItem(&header, &pieces);
+    try std.testing.expectEqualStrings(",\"reasoning\":{\"effort\":\"low\"}", pieces.items[pieces.len - 1].literal);
+    var one: Encoder = .{ .carry = initial(.one, .low) };
+    try one.encodeItem(&header, &pieces);
+    try std.testing.expectEqualStrings(",\"reasoning\":{\"effort\":\"high\"}", pieces.items[pieces.len - 1].literal);
+
+    // The same effort writes nothing; a new one writes the update once.
+    try two.encodeItem(&.{ .item = .{ .operation = .low }, .handles = 0 }, &pieces);
+    try std.testing.expectEqual(@as(u8, 0), pieces.len);
+    try two.encodeItem(&.{ .item = .{ .operation = .high }, .handles = 0 }, &pieces);
+    try std.testing.expectEqual(@as(u8, 1), pieces.len);
+    try std.testing.expectEqualStrings("{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"high\"}}", pieces.items[0].literal);
+    try std.testing.expectEqual(@as(?codec_abi.Effort, .high), two.carry.effort);
+    try two.encodeItem(&.{ .item = .{ .operation = .high }, .handles = 0 }, &pieces);
+    try std.testing.expectEqual(@as(u8, 0), pieces.len);
+    // Version one never writes a boundary.
+    try one.encodeItem(&.{ .item = .{ .operation = .high }, .handles = 0 }, &pieces);
+    try std.testing.expectEqual(@as(u8, 0), pieces.len);
 }
 
 test "the request headers ask for the stream, the Session's id and Rui as originator" {

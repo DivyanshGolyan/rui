@@ -1154,7 +1154,7 @@ def persistent_cases(state, library, home, store, host, session):
                     return b""  # Caller is already reaped; no delivery to its closed socket.
                 proxy = canonical.ReplyProxy(host, "/v1/message", hold)
                 os.write(master, b"held real Admission\n")
-                assert received.wait(10)
+                fixture.wait_for(human.draining(master, received.is_set), "Admission route reached", timeout=10)
                 caller.send_signal(signal.SIGINT)
             elif case.startswith("backpressure"):
                 # After opening, the next screen write stops and fills stdout's
@@ -1673,7 +1673,9 @@ def command_interruption_cases(state, library, only=None):
                 if route is None:
                     fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "Configure pre-send sync")
                 elif route:
-                    assert received.wait(10), (case, "command route not reached")
+                    # Read the screen while waiting: Darwin's PTY holds 1 KiB, and
+                    # an unread screen blocks the command before it is sent.
+                    fixture.wait_for(human.draining(master, received.is_set), f"{case} command route reached", timeout=10)
                 else:
                     fixture.wait_for(lambda: log.exists() and "command-return-signal" in log.read_text(), "decoded command return signal")
                 if route != "":  # The probe signals at a "" command's return; nothing holds it.
@@ -1975,7 +1977,7 @@ def decision_reporting_cases(state):
                     human.pick_deny(master, read_ready)
                 os.write(master, human.ALLOW)
                 if lost:
-                    assert received.wait(10)
+                    fixture.wait_for(human.draining(master, received.is_set), "permission decision route reached", timeout=10)
                     caller.send_signal(signal.SIGINT)
                 else:
                     human.read_terminal(master, f"SETTLED-{name}", composer=True)
@@ -2889,8 +2891,12 @@ def host_diagnostic_cases(state, library):
                     contention_complete = True
                 if index == 0 and credit in ("diagnostic-enable", "diagnostic-enable-unmutated"):
                     arm.unlink()
-            assert_file_flags(fcntl.fcntl(write_fd, fcntl.F_GETFL),
-                flags | os.O_NONBLOCK if credit.startswith("diagnostic-restore") else flags)
+            # A trace reaches the observation channel before its borrowed
+            # stderr write restores the flags, so wait for the restoration.
+            expected_flags = flags | os.O_NONBLOCK if credit.startswith("diagnostic-restore") else flags
+            restored = fixture.wait_for(lambda: fcntl.fcntl(write_fd, fcntl.F_GETFL), "stderr flags restored after the last trace",
+                ready=lambda actual: os_semantics.user_file_flags(actual) == os_semantics.user_file_flags(expected_flags))
+            assert_file_flags(restored, expected_flags)
             if credit in ("diagnostic-enable", "diagnostic-enable-unmutated", "diagnostic-restore", "diagnostic-restore-startup"):
                 effects = log.read_text()
                 assert ("diagnostic-mutated\n" in effects) == (credit != "diagnostic-enable-unmutated"), effects

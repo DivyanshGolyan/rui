@@ -34,8 +34,8 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/1", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .table },
-            .openai => .{ .codec = .@"openai-responses/1", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .model_list = .live },
+            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .table },
+            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .model_list = .live },
         };
     }
 
@@ -80,7 +80,9 @@ pub const Facts = struct {
 
 /// A provider grammar and its version, as a Session pins it. A version's
 /// requests never change shape, so a pinned Session's prompt cache holds.
-pub const Codec = enum { @"openai-responses/1" };
+/// New Sessions pin the provider's current codec; a Session pinned to an
+/// older one keeps it.
+pub const Codec = enum { @"openai-responses/1", @"openai-responses/2" };
 
 test "each credential kind names its one provider" {
     try std.testing.expectEqual(Provider.codex, comptime Provider.onlyWith(.sign_in));
