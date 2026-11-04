@@ -3430,6 +3430,72 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     try std.testing.expect(try expectMemoRebuildEqual(&setup, successor_binding, &memos, .{}) > 0);
 }
 
+test "a compaction that overflows makes room a level at a time, then the Turn ends context_full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("room-config");
+    // model-a is unlisted: a 128k window and no reservation, so the levels
+    // aim at 512,000, 128,000 and 32,000 bytes. Newest first, the Messages
+    // reach 40,000, 140,000 and 540,000 bytes at m4, m3 and m2.
+    const sizes = [_]usize{ 1, 400_000, 100_000, 30_000, 10_000 };
+    var texts: [sizes.len][]u8 = undefined;
+    for (&texts, sizes, 0..) |*text, size, index| {
+        text.* = try std.testing.allocator.alloc(u8, size);
+        @memset(text.*, @intCast('a' + index));
+    }
+    defer for (texts) |text| std.testing.allocator.free(text);
+    for (texts, 0..) |text, index| {
+        var name: [16]u8 = undefined;
+        const key = try std.fmt.bufPrint(&name, "room-m{d}", .{index + 1});
+        try setup.submit(key, key, session.slice(), text);
+    }
+    var call = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const call_binding = try call.permit.consume();
+    try setup.storage.settleModelAttemptFailure(call_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    // The full compaction, then levels 1 to 3, each dropping one more
+    // Message; the first Message always stays.
+    const expected = [_][]const []const u8{
+        &.{ texts[0], texts[1], texts[2], texts[3], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[2], texts[3], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[3], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[4], "compaction_trigger" },
+    };
+    for (expected) |inputs| {
+        var compact = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedCompaction;
+        const binding = try compact.permit.consume();
+        try std.testing.expectEqual(call_binding.turn_id, binding.turn_id);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        try setup.storage.openHistoricalView(binding, &prep.view);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        const request = try drainPreparation(&prep, 64 * 1024, 64, 4096);
+        defer std.testing.allocator.free(request.bytes);
+        try expectInputTexts(request.bytes, inputs);
+        try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    }
+    try std.testing.expect(try setup.storage.admitNextModelAttempt(.{}) == null);
+    try std.testing.expect(try store.turnEndedForTesting(&setup.storage, call_binding.turn_id, "ResourceExceeded"));
+}
+
+test "a compaction that overflows with nothing left to drop ends its Turn context_full" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("no-room-config");
+    try setup.submit("no-room-first", "no-room-first", session.slice(), "first");
+    try setup.submit("no-room-second", "no-room-second", session.slice(), "second");
+    var call = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const call_binding = try call.permit.consume();
+    try setup.storage.settleModelAttemptFailure(call_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
+    try setup.storage.settleModelAttemptFailure(try compact.permit.consume(), .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    try std.testing.expect(try setup.storage.admitNextModelAttempt(.{}) == null);
+    try std.testing.expect(try store.turnEndedForTesting(&setup.storage, call_binding.turn_id, "ResourceExceeded"));
+}
+
 test "compaction public preparation rejects incompatible selected base and suffix bindings" {
     for ([_]bool{ false, true }) |incompatible_suffix| {
         var setup: PreparationTestSetup = undefined;

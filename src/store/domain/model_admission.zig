@@ -16,6 +16,7 @@ const store_access = @import("../access.zig");
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const historical_domain = @import("historical.zig");
+const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
@@ -525,8 +526,8 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,1,0,@now)",
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
+        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,1,0,@now)",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -538,6 +539,8 @@ const insert_operation = rsql.Write(.{
         compaction_trigger: ?u64,
         output_reservation: u64,
         reasoning_effort: ?protocol.ReasoningEffort,
+        history_floor: ?u64,
+        history_level: ?u8,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -607,6 +610,13 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         try takeContext(&compaction, &context);
     }
     const purpose = turn_policy.nextPurpose(compaction);
+    // A compaction after one that overflowed makes room: settlement let
+    // the Turn go on only because a deeper floor exists (D217).
+    const room: ?history_floor_domain.Choice = if (compaction.previous) |previous| room: {
+        if (purpose != .compaction or previous.purpose != .compaction or !previous.context_overflow or !previous.turn_active) break :room null;
+        const latest = facts.latest_operation orelse return error.CorruptStore;
+        break :room try history_floor_domain.deeperFloor(writer, latest.get()) orelse return error.CorruptStore;
+    } else null;
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
     const instructions: u64 = if (purpose == .compaction) 0 else facts.instructions;
 
@@ -647,6 +657,8 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .compaction_trigger = policy.compaction_trigger,
         .output_reservation = policy.output_reservation,
         .reasoning_effort = configuration_domain.effectiveReasoningEffort(&facts),
+        .history_floor = if (room) |choice| choice.floor else null,
+        .history_level = if (room) |choice| choice.level else null,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
