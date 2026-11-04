@@ -147,6 +147,8 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 			(await link.exchange("/v1/activity-page", (store) => activityBody(store, session, { end: pinnedEnd, position, ordinal, kinds }))).toString("utf8"),
 		) as Schemas["ActivityPageReply"];
 		for (const row of page.items) {
+			// Cancellation is honoured before each entry, and again after any read that took time.
+			if (signal?.aborted) return;
 			const { entry, reference } = entryOf(row);
 			if (reference) {
 				if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
@@ -156,6 +158,7 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 					entry.text = prefix.toString("utf8");
 				}
 			}
+			if (signal?.aborted) return;
 			yield entry;
 			position = row.position;
 			ordinal = row.ordinal;
