@@ -30,7 +30,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x65f259f9c7614afb },
-    .{ .schema_version = 52, .digest = 0x6afac8d0711b8490 },
+    .{ .schema_version = 52, .digest = 0x161b494630068daa },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -292,9 +292,6 @@ pub const tables = [_]Table{
             .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
             .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_tools}) },
-            // The members' names, in order, one space apart: what a reader
-            // shows of the set without reading each member.
-            .{ .name = "names", .type = .{ .text = .{ .max = tool_catalog.max_names_bytes } }, .check = "@charset(names,'A-Za-z0-9_ -')" },
         },
         .primary_key = &.{"tool_set_id"},
         .uniques = &.{&.{"digest"}},

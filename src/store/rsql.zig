@@ -2172,13 +2172,12 @@ fn argumentRanges(comptime tokens: []const Token, comptime open: usize, comptime
 }
 
 /// The characters of a set literal such as 'a-z0-9_-': ranges and single
-/// characters (letters, digits, '_', '-' and the space) only, so every
-/// engine's bracket expression reads it alike.
+/// characters only, so every engine's bracket expression reads it alike.
 fn characterSet(comptime literal: []const u8, comptime text: []const u8) []const u8 {
     if (literal.len < 3 or literal[0] != '\'' or literal[literal.len - 1] != '\'') @compileError("rsql: a character set is one quoted literal: " ++ text);
     const set = literal[1 .. literal.len - 1];
     for (set) |byte| {
-        if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_' and byte != ' ') @compileError("rsql: a character set holds letters, digits, '_', the space and ranges: " ++ text);
+        if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') @compileError("rsql: a character set holds letters, digits, '_' and ranges: " ++ text);
     }
     return set;
 }

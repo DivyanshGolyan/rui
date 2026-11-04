@@ -21,8 +21,7 @@ pub const sqlite = [_][:0]const u8{
     \\CREATE TABLE tool_set(
     \\ tool_set_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_set_id>0),
     \\ digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),
-    \\ member_count INTEGER NOT NULL CHECK(member_count BETWEEN 0 AND 128),
-    \\ names TEXT NOT NULL CHECK(length(CAST(names AS BLOB))<=4223 AND (names NOT GLOB '*[^A-Za-z0-9_ -]*' AND length(names)=length(CAST(names AS BLOB))))
+    \\ member_count INTEGER NOT NULL CHECK(member_count BETWEEN 0 AND 128)
     \\) STRICT
     ,
     \\CREATE TABLE tool_set_member(
@@ -37,7 +36,7 @@ pub const sqlite = [_][:0]const u8{
     "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528',0,0,X'' WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0)",
     "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 1,'bash','rui',(SELECT content_id FROM content WHERE digest=X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845' AND byte_length=633 AND private=0),(SELECT content_id FROM content WHERE digest=X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9' AND byte_length=1147 AND private=0) WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3)))",
     "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 2,'web_search','provider',(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0),(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0) WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3)))",
-    "INSERT INTO tool_set(tool_set_id,digest,member_count,names) SELECT used.tools_mask+1,CASE used.tools_mask WHEN 0 THEN X'fe748044351540765e2284e8b22eee2921470a1314d382303cdc7075a2ae4848' WHEN 1 THEN X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2' WHEN 2 THEN X'd9cfc45bb675c92d875c57d0206db60df3cdf46d271687b6a6d34ceecde1e968' WHEN 3 THEN X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da' END,CASE used.tools_mask WHEN 0 THEN 0 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 2 END,CASE used.tools_mask WHEN 0 THEN '' WHEN 1 THEN 'bash' WHEN 2 THEN 'web_search' WHEN 3 THEN 'bash web_search' END FROM (SELECT tools_mask FROM session UNION SELECT tools_mask FROM session_revision) used",
+    "INSERT INTO tool_set(tool_set_id,digest,member_count) SELECT used.tools_mask+1,CASE used.tools_mask WHEN 0 THEN X'fe748044351540765e2284e8b22eee2921470a1314d382303cdc7075a2ae4848' WHEN 1 THEN X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2' WHEN 2 THEN X'd9cfc45bb675c92d875c57d0206db60df3cdf46d271687b6a6d34ceecde1e968' WHEN 3 THEN X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da' END,CASE used.tools_mask WHEN 0 THEN 0 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 2 END FROM (SELECT tools_mask FROM session UNION SELECT tools_mask FROM session_revision) used",
     "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,0,CASE WHEN tool_set_id=3 THEN 2 ELSE 1 END FROM tool_set WHERE tool_set_id>1",
     "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,1,2 FROM tool_set WHERE tool_set_id=4",
     "ALTER TABLE session RENAME TO session_old",
@@ -114,13 +113,11 @@ pub const mysql = [_][:0]const u8{
     \\ tool_set_id BIGINT NOT NULL,
     \\ digest VARBINARY(32) NOT NULL,
     \\ member_count BIGINT NOT NULL,
-    \\ names TEXT NOT NULL,
     \\ PRIMARY KEY(tool_set_id),
     \\ UNIQUE(digest),
     \\ CHECK(tool_set_id>0),
     \\ CHECK(length(digest)=32),
-    \\ CHECK(member_count BETWEEN 0 AND 128),
-    \\ CHECK(OCTET_LENGTH(names)<=4223 AND (NOT REGEXP_LIKE(names,'[^A-Za-z0-9_ -]','c')))
+    \\ CHECK(member_count BETWEEN 0 AND 128)
     \\) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin
     ,
     \\CREATE TABLE tool_set_member(
@@ -138,7 +135,7 @@ pub const mysql = [_][:0]const u8{
     "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528',0,0,X'' FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0)",
     "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 1,'bash','rui',(SELECT content_id FROM content WHERE digest=X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845' AND byte_length=633 AND private=0),(SELECT content_id FROM content WHERE digest=X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9' AND byte_length=1147 AND private=0) FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3)))",
     "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 2,'web_search','provider',(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0),(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0) FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3)))",
-    "INSERT INTO tool_set(tool_set_id,digest,member_count,names) SELECT used.tools_mask+1,CASE used.tools_mask WHEN 0 THEN X'fe748044351540765e2284e8b22eee2921470a1314d382303cdc7075a2ae4848' WHEN 1 THEN X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2' WHEN 2 THEN X'd9cfc45bb675c92d875c57d0206db60df3cdf46d271687b6a6d34ceecde1e968' WHEN 3 THEN X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da' END,CASE used.tools_mask WHEN 0 THEN 0 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 2 END,CASE used.tools_mask WHEN 0 THEN '' WHEN 1 THEN 'bash' WHEN 2 THEN 'web_search' WHEN 3 THEN 'bash web_search' END FROM (SELECT tools_mask FROM session UNION SELECT tools_mask FROM session_revision) used",
+    "INSERT INTO tool_set(tool_set_id,digest,member_count) SELECT used.tools_mask+1,CASE used.tools_mask WHEN 0 THEN X'fe748044351540765e2284e8b22eee2921470a1314d382303cdc7075a2ae4848' WHEN 1 THEN X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2' WHEN 2 THEN X'd9cfc45bb675c92d875c57d0206db60df3cdf46d271687b6a6d34ceecde1e968' WHEN 3 THEN X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da' END,CASE used.tools_mask WHEN 0 THEN 0 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 2 END FROM (SELECT tools_mask FROM session UNION SELECT tools_mask FROM session_revision) used",
     "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,0,CASE WHEN tool_set_id=3 THEN 2 ELSE 1 END FROM tool_set WHERE tool_set_id>1",
     "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,1,2 FROM tool_set WHERE tool_set_id=4",
     "ALTER TABLE session ADD COLUMN tool_set_id BIGINT AFTER instructions_content_id",

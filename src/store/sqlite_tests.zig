@@ -1316,9 +1316,6 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
     try std.testing.expectEqual([3]u64{ 3, 2, 3 }, try Tools.counts(&storage));
-    // Each set keeps its members' names, in order, one space apart.
-    try std.testing.expectEqual(@as(u64, 3), try queryU64(storage.database, "SELECT count(*) FROM tool_set WHERE " ++
-        "(member_count=0 AND names='') OR (member_count=1 AND names='bash') OR (member_count=2 AND names='bash web_search')"));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')"));
