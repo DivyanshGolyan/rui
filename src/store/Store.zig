@@ -420,7 +420,8 @@ pub const Store = struct {
     };
 
     /// Called, on whichever thread holds the Store, once a fresh Message
-    /// admission commits and before the Store runs another request, so whatever reads the Store next also sees its effect.
+    /// admission's write succeeds and before the Store runs another request, so whatever reads the Store next also sees its effect.
+    /// In a batch it runs before the batch's COMMIT; a COMMIT that fails fences the Store, so no Turn reads the admission.
     /// A replayed or rejected Message calls nothing. It cannot fail.
     pub const MessageCommitted = struct {
         context: *anyopaque,
