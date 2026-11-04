@@ -440,7 +440,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
         assert compaction["text"] == {"verbosity": "low"}, compaction
-        assert compaction["parallel_tool_calls"] is False, compaction
+        assert compaction["parallel_tool_calls"] is True, compaction
         assert user_texts(compaction) == ["covered user input"], compaction
         # Admission fixes coverage. Later settings and messages cannot enter it.
         patch(store, session, f"{route}-policy", "--compaction-trigger", "1", "--output-reservation", "0")
@@ -3549,7 +3549,7 @@ def main(mode="all", correlation_case="all"):
             "model": "gpt-6-sol",
             "store": False,
             "stream": True,
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"effort": "medium"},
             "instructions": model_instructions(ROOT, "A", store=store, session=main_session),

@@ -13,18 +13,6 @@ pub const manifest: codec_abi.Manifest = .{
     },
 };
 
-/// Models that get `parallel_tool_calls: true`; every other model, known or
-/// not, gets `false`. Codex 970111f6cb62cc02fe36a82ea7d71b37a2889c97
-/// client.rs disables it for Responses-lite models although its catalog
-/// advertises it for all; this is not a claim that Rui uses the lite route.
-/// The body this table shapes is pinned with the codec version.
-const parallel_tool_call_models = [_][]const u8{"gpt-5.5"};
-
-pub fn parallelToolCalls(model: []const u8) bool {
-    for (parallel_tool_call_models) |id| if (std.mem.eql(u8, id, model)) return true;
-    return false;
-}
-
 const ItemHeader = codec_abi.ItemHeader;
 const Pieces = codec_abi.Pieces;
 
@@ -51,7 +39,7 @@ pub const Encoder = struct {
             .settings => |*settings| {
                 out.literal("{\"model\":\"");
                 out.content(0, .json_string_v1);
-                out.literal(if (parallelToolCalls(settings.modelName())) envelope(true) else envelope(false));
+                out.literal(envelope);
                 if (settings.effort) |effort| out.literal(switch (effort) {
                     inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
                 });
@@ -397,10 +385,8 @@ pub const ClassifyScratch = struct {
     }
 };
 
-fn envelope(comptime parallel_tool_calls: bool) []const u8 {
-    return "\",\"parallel_tool_calls\":" ++ (if (parallel_tool_calls) "true" else "false") ++
-        ",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
-}
+/// Every model may ask for several tools in one turn.
+const envelope = "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
 
 // ------------------------------------------------------------- interpret
 
@@ -1854,12 +1840,6 @@ fn terminalOf(data: []const u8, start: u64, offset: *u64) Failure!codec_abi.Memb
     }
     const named = try identity(found.getPtrConst(.type), found.getPtrConst(.id));
     return .{ .terminal = .{ .kind = named.kind, .whole = .{ .start = start, .length = offset.* - start }, .id = named.id } };
-}
-
-test "only the pinned table's models send parallel tool calls" {
-    try std.testing.expect(parallelToolCalls("gpt-5.5"));
-    for ([_][]const u8{ "gpt-6.1-sol", "gpt-6-luna", "GPT-5.5", "gpt-5.5-mini", "gpt-5", "" }) |model|
-        try std.testing.expect(!parallelToolCalls(model));
 }
 
 test "an encoder resumed from a carry separates its next input item only after an earlier one" {

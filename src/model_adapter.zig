@@ -2046,7 +2046,7 @@ const composed_replayed_call_a = "{\"type\":\"function_call\",\"name\":\"bash\",
 const composed_replayed_call_b = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-b\",\"status\":\"completed\"}";
 
 const composed_expected =
-    "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
+    "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
     "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
     composed_replayed ++ "," ++
     composed_replayed_call_a ++ "," ++
@@ -2162,7 +2162,7 @@ test "request preparation minimal golden is exact across schedules" {
     defer workspace_dir.close(std.testing.io);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = workspace_buffer[0..try workspace_dir.realPath(std.testing.io, &workspace_buffer)];
-    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
     const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
     var first_bytes: ?[]u8 = null;
     defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
@@ -2235,7 +2235,7 @@ test "request preparation retains the allocated ID across reopen and replacement
     try setup.submit("prep-replacement-input", "prep-replacement-message", session.slice(), "same input");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const original = try admitted.permit.consume();
-    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}],\"tools\":[" ++ default_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
+    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}],\"tools\":[" ++ default_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
     defer std.testing.allocator.free(expected);
     var binding = original;
     for (0..2) |index| {
@@ -2479,7 +2479,7 @@ test "request preparation emits catalog or explicit effort through sealed custod
             } else try std.testing.expect(!request.contains("reasoning"));
             try std.testing.expectEqualStrings(case.model, request.get("model").?.string);
             try std.testing.expectEqualStrings("low", request.get("text").?.object.get("verbosity").?.string);
-            try std.testing.expectEqual(std.mem.eql(u8, case.model, "gpt-5.5"), request.get("parallel_tool_calls").?.bool);
+            try std.testing.expectEqual(true, request.get("parallel_tool_calls").?.bool);
             try std.testing.expectEqualStrings("keep this exact input", request.get("input").?.array.items[0].object.get("content").?.array.items[0].object.get("text").?.string);
             try std.testing.expectEqual(@as(usize, purpose), std.mem.count(u8, bytes, "compaction_trigger"));
             sealed.deinit(std.testing.io, preparation.writer.budget);
@@ -2526,7 +2526,7 @@ test "request preparation freezes settings at admission" {
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
-    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
         bash_tool_json ++ "],\"text\":{\"verbosity\":\"low\"}}";
     const full_expected = try requestGolden(setup.workspace, session.slice(), expected);
     defer std.testing.allocator.free(full_expected);
@@ -3193,7 +3193,7 @@ test "request preparation replays reasoning continuation without its private rea
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
         const body = try std.mem.concat(std.testing.allocator, u8, &.{
-            "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
+            "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"original\"}]},",
             case.replayed,
             ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ default_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
