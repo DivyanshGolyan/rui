@@ -15,7 +15,8 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import CACHE_POLICY, RENDERER_HARNESSES, execution_batches, matches, select, setup_requirements
+from select_tests import (CACHE_POLICY, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES, RENDERER_HARNESSES,
+                          execution_batches, matches, select, setup_requirements)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -27,9 +28,44 @@ AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read
 
 class SelectionTest(unittest.TestCase):
     def test_development_does_not_claim_native_acceptance(self):
+        # The Store keeps `test` for the live MySQL check (LIVE_RULES); nothing else widens.
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
-        self.assertEqual(result["targets"], ["test-logic"])
+        self.assertEqual(result["targets"], ["test", "test-logic"])
         self.assertFalse(result["native_required"])
+        self.assertEqual(select(["src/bash_platform.c"], "development", AVAILABLE)["targets"], ["test-logic"])
+
+    def test_a_store_change_starts_mysql_for_the_live_dialect_check_in_every_phase(self):
+        for phase in ("development", "review"):
+            with self.subTest(phase=phase):
+                result = select(["src/store/rsql.zig"], phase, AVAILABLE)
+                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS, result["targets"])
+
+    def test_every_live_rule_selects_a_target_that_starts_its_server(self):
+        for patterns, _, _, reason, served_by in LIVE_RULES:
+            path = next(pattern.replace("*", "x") for pattern in patterns if not pattern.startswith("!"))
+            for phase in ("development", "review"):
+                with self.subTest(reason=reason, phase=phase):
+                    self.assertIn(reason, select([path], phase, AVAILABLE)["reasons"])
+                    self.assertTrue(set(select([path], phase, AVAILABLE)["targets"]) & served_by)
+
+    def test_prepush_leaves_server_targets_to_ci(self):
+        import prepush
+        for path in ("src/store/rsql.zig", "src/store/wire/mysql_driver.zig", "src/store/wire/pg.zig"):
+            with self.subTest(path=path):
+                builds = [command for name, command in prepush.checks([path], AVAILABLE) if name == "development selection"]
+                self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
+
+    def test_live_server_targets_match_the_workflow_conditions_that_start_the_servers(self):
+        workflow = Path(".github/workflows/check.yml").read_text()
+
+        def named(line):
+            return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
+
+        live_mysql = next(line for line in workflow.splitlines() if line.strip().startswith("LIVE_MYSQL:"))
+        self.assertEqual(named(live_mysql), LIVE_MYSQL_TARGETS)
+        postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
+        self.assertTrue(postgres.strip().startswith("if:"), postgres)
+        self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
