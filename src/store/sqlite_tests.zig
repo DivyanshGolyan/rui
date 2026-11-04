@@ -8,6 +8,7 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
+const protocol_reply = @import("../protocol_reply.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const tool_catalog = @import("../tools.zig");
@@ -24,6 +25,7 @@ const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const content_domain = @import("domain/content.zig");
 const historical_domain = @import("domain/historical.zig");
+const history_floor_domain = @import("domain/history_floor.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
@@ -8413,6 +8415,104 @@ test "a page of approval requests costs the same however many calls ran without 
     try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
 }
 
+test "a compaction's floor counts the output bytes a request sends, and none its base covers" {
+    // A 200,000-byte answer with no usage passes level 2's 128,000 bytes,
+    // unless a compaction base covers it and the request sends none of it.
+    const answer = try std.testing.allocator.alloc(u8, 200_000);
+    defer std.testing.allocator.free(answer);
+    @memset(answer, 'a');
+    const item = try std.fmt.allocPrint(std.testing.allocator, "{{\"type\":\"message\",\"id\":\"a1\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{s}\"}}]}}", .{answer});
+    defer std.testing.allocator.free(item);
+    for ([_]bool{ false, true }) |covered| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try tests.configureTestSessionAsk(&storage, "floor-bytes-config");
+        try submitTestMessage(&storage, &tmp, "floor-bytes-first", "floor-bytes-first", session.slice(), "first");
+        const answered = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleItemsForTesting(&storage, &tmp, answered, &.{item}, answer);
+        if (covered) {
+            try submitTestMessage(&storage, &tmp, "floor-bytes-covered", "floor-bytes-covered", session.slice(), "c");
+            const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+        }
+        try submitTestMessage(&storage, &tmp, "floor-bytes-small", "floor-bytes-small", session.slice(), "small");
+        const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+        const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: historical_domain.ReadAccess = .open(&entry);
+        defer a.deinit();
+        const room = try history_floor_domain.deeperFloor(&a, compaction.operation_id);
+        if (covered) {
+            try std.testing.expect(room == null);
+        } else {
+            // The floor drops the answer and keeps "small" above it.
+            const position = try store_testing.sqliteQueryU64(storage.database, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{answered.operation_id});
+            try std.testing.expectEqual(@as(u8, 2), room.?.choice.level);
+            try std.testing.expect(room.?.choice.floor >= position);
+        }
+    }
+}
+
+test "a compaction's floor read costs the same however long its Session's history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionAsk(&storage, "floor-steps-config");
+    // 200 KB Messages: level 1's 512,000 bytes are past at the fourth.
+    const text = try std.testing.allocator.alloc(u8, 200_000);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    try submitTestMessage(&storage, &tmp, "floor-steps-first", "floor-steps-first", session.slice(), "first");
+    try submitTestMessage(&storage, &tmp, "floor-steps-big", "floor-steps-big", session.slice(), text);
+    const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const Walk = struct {
+        fn steps(store: *Store, operation: u64) !u64 {
+            // The first read prepares the walk's statements.
+            _ = try deeper(store, operation);
+            var counter: TestingSteps = .{};
+            counter.begin(store.database);
+            defer counter.end(store.database);
+            try std.testing.expect(try deeper(store, operation) != null);
+            return counter.steps;
+        }
+        fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
+            const entry = try store_core.enter(store, .none);
+            defer entry.release();
+            var a: historical_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            return history_floor_domain.deeperFloor(&a, operation);
+        }
+        /// 1,000 more copies of the big Message, older than the rest: the
+        /// first Message moves past them, as the walk keeps it either way.
+        fn addOlder(store: *Store, ref: []const u8, comptime first: u64) !void {
+            const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
+            try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) " ++
+                "SELECT session_ref,entry_ordinal+value*10,session_position-value-1,entry_kind,turn_id,source_admission_id+value*10,NULL,NULL,content_id,recorded_at " ++
+                "FROM conversation_entry CROSS JOIN sequence WHERE session_ref=?1 AND entry_ordinal=2", .{ref});
+        }
+    };
+    try store_testing.sqlite_only.withoutForeignKeys(&storage, "UPDATE conversation_entry SET session_position=session_position+3000 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.withoutForeignKeys(&storage, "UPDATE model_operation SET admission_position=admission_position+3000 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.withoutForeignKeys(&storage, "UPDATE session SET next_position=next_position+3000 WHERE session_ref=?1", .{session.slice()});
+    try Walk.addOlder(&storage, session.slice(), 1);
+    const thousand = try Walk.steps(&storage, compaction.operation_id);
+    try Walk.addOlder(&storage, session.slice(), 1001);
+    try std.testing.expectEqual(@as(u64, 2002), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM conversation_entry", .{}));
+    try std.testing.expectEqual(thousand, try Walk.steps(&storage, compaction.operation_id));
+}
+
 /// A Session that offers only `message_agent`, under an `ask` revision, so
 /// a core call that needed a person would wait.
 fn configureMessagingSession(storage: *Store, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
@@ -8508,4 +8608,32 @@ test "a stop that selects a message_agent call's Turn cancels it before it runs"
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.deliverAgentMessage(pending.binding, caller.slice(), "later", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{caller.slice()}));
+}
+
+test "a Session with message_agent keeps it through its list row and report, as the client reads them" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, io);
+    defer storage.close() catch unreachable;
+    const session = try configureMessagingSession(&storage, "listed-messaging");
+    const file = try tmp.dir.createFile(io, "client-reply", .{ .read = true });
+    defer file.close(io);
+
+    var used = std.atomic.Value(u64).init(0);
+    const listed = try testingSessionList(&storage, &tmp, .{}, &used, 1);
+    defer std.testing.allocator.free(listed);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "\"tools\":[\"message_agent\"]") != null);
+    try file.writePositionalAll(io, listed, 0);
+    const list = try protocol_reply.SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = listed.len } });
+    try std.testing.expectEqual(@as(usize, 1), list.page.count);
+    try std.testing.expect(list.page.rows[0].tools.eql(.initOne(.message_agent)));
+
+    const reported = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+    defer std.testing.allocator.free(reported);
+    try file.setLength(io, 0);
+    try file.writePositionalAll(io, reported, 0);
+    const current = try protocol_reply.CurrentReply.decode(io, file, session.slice(), .{ .report = .{ .bytes = reported.len } });
+    try std.testing.expect(current.current.settings.tools.set.eql(.initOne(.message_agent)));
 }
