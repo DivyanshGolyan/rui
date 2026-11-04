@@ -15289,10 +15289,9 @@ test "Full history takes a round per chunk" {
 test "Full revisions show each content whole where it first occurs" {
     // `mixed`: new, older and repeated content, an output schema that is
     // none, the instructions or other content. `same`: one older content
-    // throughout. `grown`: `mixed` past half of
-    // `ContentOwners.initial_capacity` values, so the table doubles.
+    // throughout. `grown`: `mixed` with more than 512 distinct values.
     const Shape = enum { mixed, same, grown };
-    const capacity = report_domain.ContentOwners.initial_capacity;
+    const capacity = 1024;
     for ([_]Shape{ .mixed, .same, .grown }, [_]usize{ 70, 130, capacity * 2 }) |shape, revisions| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -15397,9 +15396,8 @@ test "Full revisions show each content whole where it first occurs" {
                 }
             }
         }
-        // The next report starts its owners afresh: the other Session's
-        // revisions each own their instructions, which this one's map
-        // placed elsewhere.
+        // Owners are the Session's own: the other Session's revisions each
+        // own their instructions, which this one's revisions also hold.
         const again = try testingSessionReportWithProfile(&storage, &tmp, other.slice(), 64 * 1024 * 1024, .full);
         defer std.testing.allocator.free(again);
         var reparsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, again, .{});

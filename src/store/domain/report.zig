@@ -13,7 +13,6 @@ const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
-const pages = @import("../../os/pages.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
@@ -1991,66 +1990,14 @@ pub const ContentOwner = struct {
     revision: u64,
     field: RevisionContentField,
 
-    /// One integer that orders owners as they occur.
+    /// One integer that orders owners as they occur: `full_revisions`
+    /// reads each content's least.
     fn slot(owner: ContentOwner) u64 {
         return owner.revision * 2 + @as(u64, @intCast(@backingInt(owner.field)));
     }
 
     fn ofSlot(value: u64) ContentOwner {
         return .{ .revision = value / 2, .field = if (value % 2 == 0) .instructions else .output_schema };
-    }
-};
-
-/// The owner of each content value the revisions listed so far hold, by
-/// content id: an open-addressing table in pages of its own
-/// (`pages.mapZeroed`), so no frame holds it, mapped for one report and
-/// doubled whenever it is half full. It holds every value the Session's
-/// revisions hold, as main's ownership statement sorted them, so each
-/// lookup and insertion is one probe sequence however many revisions
-/// there are. Revisions list in order, so a value not found here occurs
-/// first in the row that holds it.
-pub const ContentOwners = struct {
-    pub const initial_capacity = 1024;
-
-    /// `id` 0 is an empty entry: content ids are positive.
-    const Entry = struct { id: u64, slot: u64 };
-
-    entries: []Entry,
-    count: usize = 0,
-
-    fn map() error{SessionReadFailed}!ContentOwners {
-        return .{ .entries = pages.mapZeroed(Entry, initial_capacity) catch return error.SessionReadFailed };
-    }
-
-    fn unmap(owners: *ContentOwners) void {
-        pages.unmapZeroed(owners.entries);
-    }
-
-    /// The entry holding `id`, or the empty one where it would go.
-    fn probe(entries: []Entry, id: u64) *Entry {
-        var at: usize = @intCast((id *% 0x9E3779B97F4A7C15) >> 32 & (entries.len - 1));
-        while (entries[at].id != 0 and entries[at].id != id) at = (at + 1) & (entries.len - 1);
-        return &entries[at];
-    }
-
-    fn find(owners: *const ContentOwners, id: u64) ?ContentOwner {
-        const entry = probe(owners.entries, id);
-        return if (entry.id == id) .ofSlot(entry.slot) else null;
-    }
-
-    /// Adds `id`, which it does not hold, doubling the table first when
-    /// the addition would fill it past half.
-    fn add(owners: *ContentOwners, id: u64, owner: ContentOwner) error{SessionReadFailed}!void {
-        if (2 * (owners.count + 1) > owners.entries.len) {
-            const grown = pages.mapZeroed(Entry, 2 * owners.entries.len) catch return error.SessionReadFailed;
-            for (owners.entries) |entry| if (entry.id != 0) {
-                probe(grown, entry.id).* = entry;
-            };
-            pages.unmapZeroed(owners.entries);
-            owners.entries = grown;
-        }
-        probe(owners.entries, id).* = .{ .id = id, .slot = owner.slot() };
-        owners.count += 1;
     }
 };
 
@@ -2076,10 +2023,16 @@ const RevisionRow = struct {
     output_schema_id: ?rsql.Positive,
     output_schema_length: ?u64,
     output_schema_digest: ?[32]u8,
+    instructions_owner: u64,
+    output_schema_owner: ?u64,
 };
 
-/// The Session's revisions, by `revision`, with each content's metadata;
-/// `ContentOwners` names the owners. On SQLite:
+/// The Session's revisions, by `revision`, with each content's metadata
+/// and owner: the least `ContentOwner.slot` among the Session's revisions
+/// that hold it, one seek each in `session_revision_instructions` and
+/// `session_revision_output_schema`, whose keys end in `revision`. A row
+/// holds its own instructions, so that owner is never NULL, and two-argument
+/// min is NULL when either is, hence the coalesce. On SQLite:
 ///   ... FROM session_revision r LEFT JOIN content instructions ON ...
 ///   WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY revision LIMIT 257
 pub const full_revisions = rsql.Page(.{
@@ -2089,13 +2042,25 @@ pub const full_revisions = rsql.Page(.{
         .columns = "(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
             "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.tools_mask,r.permission_mode," ++
             "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
-            "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest",
+            "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
+            owner_column("instructions") ++ " AS instructions_owner," ++ owner_column("output_schema") ++ " AS output_schema_owner",
         .joins = "LEFT JOIN content instructions ON instructions.content_id=r.instructions_content_id " ++
             "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id",
     }},
     .Row = RevisionRow,
     .take = chunk_rows,
 });
+
+/// The owner of revision `r`'s `field` content: the least slot of its
+/// first holder as instructions (2*revision) and as an output schema
+/// (2*revision+1). NULL where `r` holds no such content.
+fn owner_column(comptime field: []const u8) []const u8 {
+    const as_instructions = "(SELECT min(revision)*2 FROM session_revision WHERE session_ref=?1 AND instructions_content_id=r." ++ field ++ "_content_id)";
+    const as_output_schema = "(SELECT min(revision)*2+1 FROM session_revision WHERE session_ref=?1 AND output_schema_content_id=r." ++ field ++ "_content_id)";
+    const own = if (std.mem.eql(u8, field, "instructions")) as_instructions else as_output_schema;
+    const other = if (std.mem.eql(u8, field, "instructions")) as_output_schema else as_instructions;
+    return "min(" ++ own ++ ",coalesce(" ++ other ++ "," ++ own ++ "))";
+}
 
 /// A revision's content, as its row shows it: whole where the revision
 /// owns it, else a reference to its owner.
@@ -2150,7 +2115,6 @@ const RevisionTail = struct {
 const RevisionChunk = struct {
     a: *ReadAccess,
     capture: *SessionReportCapture,
-    owners: *ContentOwners,
     first: bool,
     after: full_revisions.Args,
     rows: u16 = 0,
@@ -2159,7 +2123,7 @@ const RevisionChunk = struct {
     failure: ?Failure = null,
     decoded: RevisionRow = undefined,
 
-    const Failure = SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore, SessionReadFailed } ||
+    const Failure = SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore } ||
         @typeInfo(@typeInfo(@TypeOf(RevisionTail.render)).@"fn".return_type.?).error_union.error_set;
 
     pub fn visit(chunk: *RevisionChunk, row: *const RevisionRow) bool {
@@ -2196,18 +2160,20 @@ const RevisionChunk = struct {
         const output_schema_here: ContentOwner = .{ .revision = revision, .field = .output_schema };
         const instructions: InlineValue = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
         const output_schema = try optionalValue(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
-        const instructions_owner = try chunk.ownerOf(instructions.id, instructions_here);
-        const output_schema_content: ?RevisionContent = if (output_schema) |value| .of(value, try chunk.ownerOf(value.id, output_schema_here), output_schema_here) else null;
+        const instructions_owner = try ownerOf(row.instructions_owner, instructions_here);
+        const output_schema_content: ?RevisionContent = if (output_schema) |value|
+            .of(value, try ownerOf(row.output_schema_owner orelse return error.CorruptStore, output_schema_here), output_schema_here)
+        else
+            null;
         try chunk.renderSettings(row);
         return .{ .instructions = .of(instructions, instructions_owner, instructions_here), .output_schema = output_schema_content };
     }
 
-    /// The owner of content `id` at `here`: from `ContentOwners`, else
-    /// `here`, which it then adds.
-    fn ownerOf(chunk: *RevisionChunk, id: u64, here: ContentOwner) error{SessionReadFailed}!ContentOwner {
-        if (chunk.owners.find(id)) |owner| return owner;
-        try chunk.owners.add(id, here);
-        return here;
+    /// The owner `slot` names: `here` or a revision before it, since the
+    /// Session's revisions hold `here`'s content at `here`.
+    fn ownerOf(slot: u64, here: ContentOwner) error{CorruptStore}!ContentOwner {
+        if (slot > here.slot()) return error.CorruptStore;
+        return .ofSlot(slot);
     }
 
     fn renderSettings(chunk: *RevisionChunk, row: *const RevisionRow) (SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore })!void {
@@ -2241,15 +2207,13 @@ const RevisionChunk = struct {
 };
 
 /// The revisions list (`RevisionChunk`), whose step failure is main's
-/// `SessionReadFailed`, as is a failed map of `ContentOwners`' pages.
+/// `SessionReadFailed`.
 /// Not inlined: its chunk holds a decoded row.
 noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    var owners: ContentOwners = try .map();
-    defer owners.unmap();
     var first = true;
     var after: full_revisions.Args = .{ .session = session_ref };
     while (true) {
-        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .owners = &owners, .first = first, .after = after };
+        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .first = first, .after = after };
         a.readEach(full_revisions, after, full_revisions.limit, &chunk);
         const ran = store_access.runAs(a, error.SessionReadFailed);
         if (chunk.failure) |err| return err;

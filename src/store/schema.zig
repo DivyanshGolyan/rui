@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0xf1573f753ac0bf89 },
+    .{ .schema_version = 51, .digest = 0x43be5ca893d88299 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -629,6 +629,10 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
+    // A content's owner in a Full report (`report.full_revisions`): its
+    // first revision, since each key ends in the primary key's revision.
+    .{ .name = "session_revision_instructions", .table = "session_revision", .columns = &.{ "session_ref", "instructions_content_id" } },
+    .{ .name = "session_revision_output_schema", .table = "session_revision", .columns = &.{ "session_ref", "output_schema_content_id" } },
     .{ .name = "session_stop_exclusion", .table = "session_stop", .columns = &.{ "session_ref", "admission_cutoff", "position" } },
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
