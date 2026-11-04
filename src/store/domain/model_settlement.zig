@@ -1071,7 +1071,7 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                 if (inspectOutputCall(io, output.source, name_record, record)) |facts| {
                     if (tool_catalog.classifyCall(facts.name, facts.bash_arguments != null, frozen_tools)) |code| {
                         var buffer: [192]u8 = undefined;
-                        if (rejectionText(io, output, code, name_record, &buffer)) |text| {
+                        if (rejectionText(io, output, code, facts.bash_problem, name_record, &buffer)) |text| {
                             const fits = batch.add(.ofBytes(text, false));
                             std.debug.assert(fits);
                         } else |_| {}
@@ -1092,9 +1092,9 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 }
 
 /// A rejected call's result text, from its name in the source.
-fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: protocol.ProposalRejection, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
+fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: protocol.ProposalRejection, problem: ?tool_catalog.BashProblem, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
     var rejected_name: output_format.NameReader = .{ .io = io, .file = output.source, .position = name.start, .end = try name.end() };
-    return tool_catalog.rejectionResult(code, &rejected_name, name.decoded_length, name.content_digest, buffer);
+    return tool_catalog.rejectionResult(code, problem, &rejected_name, name.decoded_length, name.content_digest, buffer);
 }
 
 /// Main's checks on the candidate output, before any import: compaction
@@ -1550,7 +1550,7 @@ fn Settlement(comptime A: type) type {
             const rejection_code = tool_catalog.classifyCall(call_facts.name, call_facts.bash_arguments != null, s.tools);
             const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
                 var buffer: [192]u8 = undefined;
-                const text = try rejectionText(s.io, s.output, code, name, &buffer);
+                const text = try rejectionText(s.io, s.output, code, call_facts.bash_problem, name, &buffer);
                 if (s.faults.output_import) return error.InjectedContentImportFailure;
                 const value: content_domain.Import = .ofBytes(text, false);
                 const row = try s.content(batch, value);

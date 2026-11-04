@@ -3965,7 +3965,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
     const expected_outputs = [_][]const u8{
         "Permission denied.",
         "Unknown tool: unknown.",
-        "Invalid arguments for tool 'bash'.",
+        "Invalid arguments for tool 'bash': the arguments are not one well-formed JSON object.",
         "Permission denied.",
     };
     for (expected_call_ids, expected_outputs, 0..) |expected_call_id, expected_output, ordinal| {

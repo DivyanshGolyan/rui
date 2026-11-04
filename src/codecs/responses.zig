@@ -149,7 +149,7 @@ pub const Encoder = struct {
                 out.content(0, .json_string_v1);
                 out.literal("\",\"description\":\"");
                 out.content(1, .json_string_v1);
-                out.literal("\",\"strict\":true,\"parameters\":");
+                out.literal("\",\"parameters\":");
                 out.content(2, .verbatim);
                 out.literal("}");
             },

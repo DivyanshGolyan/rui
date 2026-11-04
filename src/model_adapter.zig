@@ -1791,7 +1791,7 @@ const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
 // Share the tool's prose and schema, not the request's tool envelope.
 const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_definition.description ++
-    "\",\"strict\":true,\"parameters\":" ++ tools.bash_definition.parameters_json ++ "}";
+    "\",\"parameters\":" ++ tools.bash_definition.parameters_json ++ "}";
 // A Session created with the product's default tools.
 const default_tools_json = bash_tool_json ++ ",{\"type\":\"web_search\",\"external_web_access\":true}";
 

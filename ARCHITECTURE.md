@@ -1117,10 +1117,12 @@ Keeping rejected calls outside Action preserves the invariant that every Action 
 No Step/group entity is required.
 Actions run and settle independently, including within one Workspace.
 
-Bash arguments require `description` alongside `cmd` and `timeout_ms`.
+Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
+Function tools are offered without the provider's strict mode: the provider does not check a call against its schema, Rui does.
+A call whose arguments fail that check is settled as an `invalid_arguments` rejection whose result tells the model what was wrong (for example "Invalid arguments for tool 'bash': cmd is required."), so the model corrects the call within the Turn; the Turn does not fail.
 The description is nonblank, single-line, valid UTF-8, and at most 100 decoded UTF-8 bytes.
 Validation counts decoded bytes, not JSON spelling, characters, or display columns.
-Missing or invalid descriptions receive the ordinary invalid-arguments rejection; Rui does not repair, fabricate, or accept a compatibility form.
+Missing or invalid descriptions receive the ordinary invalid-arguments rejection, naming the description; Rui does not repair, fabricate, or accept a compatibility form.
 The original argument string remains canonical and unchanged.
 
 The tool schema guides descriptions toward a base verb, concrete target, and useful scope, in sentence case without trailing punctuation.
@@ -1574,7 +1576,7 @@ Invalid UTF-8 and non-string/non-null values reject without coercion.
 The Host never inserts input into `cmd`, argv or an environment value.
 The tool description says: "Put text payloads in stdin, never inside cmd."
 This composes with `rui session send --to ID`, `rui session start`, `git commit -F -` and `cat >file`.
-The provider's strict schema lists nullable `stdin` in `required`, as required by that API; Rui also accepts omission as part of the tool contract.
+The schema leaves `stdin` out of `required`; Rui also accepts an explicit null.
 
 Decoded stdin is bounded to 122,880 bytes, reusing the existing command preparation ceiling rather than adding an unbounded per-execution payload.
 Oversize input settles as `spawn_failed` with the byte limit before launch.
@@ -1594,7 +1596,7 @@ Null-input executions retain the previous resource path.
 The Bash definition tells the model that each call starts in the Session Workspace, relative paths resolve there, and absolute paths can access outside it.
 It recommends scoped filesystem inspection before broader searches.
 It also says Bash has no terminal, so a prompt that flags or stdin cannot answer goes to the user to run in their own terminal, never retried in Bash.
-`timeout_ms:null` selects the Host default; a positive representable override replaces it.
+An omitted or null `timeout_ms` selects the Host default; a positive representable override replaces it.
 The description recommends the default unless the work needs a different total elapsed budget, explains that output does not reset the deadline, and distinguishes expiry from a background handle.
 A saved `timed_out` result reports the execution's effective millisecond budget, preserves its output excerpt, and directs the model to inspect partial effects before retrying, then narrow or lengthen safe repeatable work.
 An interrupted search cannot establish absence.
