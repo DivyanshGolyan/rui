@@ -517,7 +517,7 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(result["native_targets"], ["codex-h2-integration", "transport-h2-integration"])
 
     def test_public_read_fixture_and_client_select_owner_once(self):
-        for owner in ("proposal", "activity"):
+        for owner in ("activity",):
             for suffix in ("_integration.py", "_client.zig"):
                 path = f"tests/integration/{owner}{suffix}"
                 result = select([path], "review", AVAILABLE)
@@ -776,7 +776,7 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
                 terminal_restoration_integration.py.release canonical_failure_integration.py.release
                 preference_policy_integration.py.preferences
                 session_list_integration.py.release conversation_page_integration.py.release
-                proposal_integration.py.release activity_integration.py.release
+                activity_integration.py.release
                 host_status_integration.py.release host_stop_integration.py.release"
             if [ "$TEST_PART" = parallel ]; then
                 peers="$peers native. admission_integration.sh.release dispatch_integration.py.release
@@ -818,9 +818,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
                     "    time.monotonic_ns = fail_clock\n")
                 env["PYTHONPATH"] = str(root)
-            arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences", "notice"]
+            arguments = (["parallel", str(root / "native"), "status", "sessions", "activity", "preferences", "notice"]
                          if part == "parallel" else
-                         ["status", "sessions", "proposal", "activity", "preferences", part, "notice"])
+                         ["status", "sessions", "activity", "preferences", part, "notice"])
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]
@@ -1162,7 +1162,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
             "session_list_integration.py release", "conversation_page_integration.py release",
-            "proposal_integration.py release", "activity_integration.py release",
+            "activity_integration.py release",
             "descriptor_capacity_integration.py release", "host_status_integration.py release",
             "host_launch_integration.py release", "host_stop_integration.py release",
             "admission_integration.sh debug", "host_process_test.py ",
@@ -1216,7 +1216,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             complete[part] = set(lines)
         for fixture in ("human_cli_integration.py", "preference_policy_integration.py",
                         "session_list_integration.py", "conversation_page_integration.py",
-                        "proposal_integration.py", "activity_integration.py",
+                        "activity_integration.py",
                         "host_status_integration.py", "host_stop_integration.py",
                         "host_launch_integration.py", "host_process_test.py",
                         "host_allocator_test.py", "admission_integration.sh"):

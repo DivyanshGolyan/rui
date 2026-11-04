@@ -341,8 +341,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// `readEach` with Args its caller keeps, for Args too large to
-        /// copy into a frame: they are bound when queued, so the caller
-        /// may reuse them once this returns.
+        /// copy into a frame. The Args struct itself may be reused once
+        /// this returns: its fixed-size values are copied when queued. The
+        /// bytes its `[]const u8` and `rsql.Bytes` fields point to are read
+        /// in place at the pass, so they must outlive it unchanged, which
+        /// debug and test builds check with a checksum (`Borrowed`).
         pub fn readEachFrom(a: *Self, comptime S: type, args: *const S.Args, limit: u64, visitor: anytype) void {
             comptime std.debug.assert(S.kind == .read and S.cardinality == .each);
             if (comptime eachVisitorError(S.Row, @TypeOf(visitor.*))) |message| @compileError(message ++ ": " ++ S.sql);
@@ -395,9 +398,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Queues a write, touching each Session its @session markers
-        /// name, unless it is an UPDATE that assigns only columns no list
-        /// row shows (`rsql.Write.touches` false). A failed guard fails the
-        /// round that runs it.
+        /// name. A failed guard fails the round that runs it.
         pub fn write(a: *Self, comptime S: type, args: S.Args) void {
             if (S.expect == .counted) @compileError("rsql: a .counted write states its rows through writeCount: " ++ S.sql);
             a.queueWrite(S, &args, .{ .none = {} });
@@ -414,7 +415,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         fn queueWrite(a: *Self, comptime S: type, args: *const S.Args, target: @FieldType(Queued, "target")) void {
             comptime std.debug.assert(S.kind == .write and mode != .read and S.session_fields.len <= max_sessions);
-            if (S.touches) inline for (S.session_fields) |field| a.touch(@field(args, field));
+            inline for (S.session_fields) |field| a.touch(@field(args, field));
             _ = a.queueStatement(S, args, runWrite(S), target);
         }
 

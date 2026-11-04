@@ -165,14 +165,6 @@ pub const touch_oracle_tables = .{
     "conversation_entry", "model_output_item", "model_tool_call",
 };
 
-/// The columns, as `table.column`, whose update the oracle does not
-/// watch. It is written here by hand, not read from
-/// `schema.Column.listed`, which `rsql.Write.touches` reads: a column
-/// marked unlisted by mistake is still watched, so a write of it that
-/// skips its touch fails the test that drives it. A Store test holds this
-/// list equal to the schema's unlisted columns.
-pub const touch_oracle_unwatched = [_][]const u8{"session.read_through"};
-
 /// Test builds: a temporary trigger on each table that carries a Session
 /// notes every Session whose rows change, for `untouchedForTesting`.
 /// It precedes every cached statement, so none re-prepares.
@@ -184,28 +176,20 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
         const sessions = comptime store_schema.sessionColumns(table);
         inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {
             const columns = comptime if (std.mem.eql(u8, event, "UPDATE")) sessions[0..1] else sessions;
-            const watched = comptime if (std.mem.eql(u8, event, "UPDATE")) " OF " ++ watchedColumns(table, store_schema.columnsOf(table)) else "";
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s}{s} ON main.{s} BEGIN {s} END", .{ table, event, event, watched, table, comptime oracleBody(event, columns) }));
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ table, event, event, table, comptime oracleBody(event, columns) }));
         }
         const both = comptime store_schema.readByBoth(table);
         if (both.len != 0) {
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, comptime watchedColumns(table, both), table, comptime oracleBody("UPDATE", sessions[1..]) }));
+            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, comptime joined(both), table, comptime oracleBody("UPDATE", sessions[1..]) }));
         }
     }
 }
 
-/// `columns` of `table` without `touch_oracle_unwatched`, joined by
-/// commas: an `UPDATE OF` list, which must name at least one column.
-fn watchedColumns(comptime table: []const u8, comptime columns: []const []const u8) []const u8 {
+/// `columns` joined by commas: an `UPDATE OF` list.
+fn joined(comptime columns: []const []const u8) []const u8 {
     comptime {
         var text: []const u8 = "";
-        for (columns) |column| {
-            const unwatched = for (touch_oracle_unwatched) |name| {
-                if (std.mem.eql(u8, name, table ++ "." ++ column)) break true;
-            } else false;
-            if (!unwatched) text = text ++ (if (text.len == 0) "" else ",") ++ column;
-        }
-        if (text.len == 0) @compileError("touch oracle: an update of " ++ table ++ " would watch no column");
+        for (columns) |column| text = text ++ (if (text.len == 0) "" else ",") ++ column;
         return text;
     }
 }
@@ -380,7 +364,7 @@ var transient: extern union { bits: usize, destructor: c.sqlite3_destructor_type
 
 /// Binds a typed statement's `Args` as ?1..?N, then `now` as ?(N+1) when
 /// the text uses @now. Integers, `[n]u8` arrays, `protocol.Bounded` texts
-/// and a SessionHead's or SessionRef's reference are copied into the
+/// and a SessionHead's reference are copied into the
 /// statement when it is bound: SQLite holds the copy, in its own heap,
 /// until the statement is rebound or reset, so a caller may reuse their
 /// memory at once. Only a `[]const u8` text and an `rsql.Bytes` blob are
@@ -429,7 +413,6 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, comptime T: type, value: 
     if (T == rsql.Positive) return bindU64(statement, index, value.get());
     if (T == rsql.Bytes) return bindBlob(statement, index, value.bytes);
     if (T == rsql.SessionHead) return bindCopied(statement, index, &value.ref, true);
-    if (T == rsql.SessionRef) return bindCopied(statement, index, &value.ref, true);
     if (comptime isBounded(T)) {
         comptime std.debug.assert(@typeInfo(@FieldType(T, "bytes")).array.len <= max_copied_bytes);
         return bindCopied(statement, index, if (value.len == 0) "" else value.slice(), true);

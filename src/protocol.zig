@@ -5,7 +5,7 @@ const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "6";
+pub const wire_version = "8";
 /// Versions a newer and an older Host speak, for tests that refuse them.
 pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
@@ -177,12 +177,8 @@ pub const Kind = enum {
     list_sessions,
     conversation_page,
     conversation_content,
-    proposal_page,
-    proposal_field,
     activity_page,
     activity_content,
-    mark_read,
-    person_message,
     model_list,
 };
 
@@ -522,7 +518,6 @@ pub const ProposalField = enum { name, call_id, arguments };
 /// One certified call field: its decoded length and content digest.
 pub const ProposalFieldReference = struct { length: u64, digest: [32]u8 };
 pub const ProposalRejection = enum { unknown_tool, invalid_arguments };
-pub const proposal_page_items = 16;
 pub const ProposalMetadata = struct {
     position: u64,
     operation: u64,
@@ -531,25 +526,6 @@ pub const ProposalMetadata = struct {
     action: ?u64,
     rejection: ?ProposalRejection,
     fields: [3]ProposalFieldReference, // ProposalField order.
-};
-pub const ProposalPage = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    end: ?u64 = null, // Null captures; zero freezes an empty traversal.
-    after: u64 = 0,
-
-    pub fn validate(self: ProposalPage) !void {
-        if (self.after > std.math.maxInt(i64)) return error.InvalidCursor;
-        if (self.end) |end| {
-            if (end > std.math.maxInt(i64) or self.after > end) return error.InvalidCursor;
-        } else if (self.after != 0) return error.InvalidCursor;
-    }
-};
-pub const ReadProposalField = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    position: u64 = 0,
-    field: ProposalField = .name,
 };
 
 pub const ActivityPage = struct {
@@ -560,11 +536,19 @@ pub const ActivityPage = struct {
     // Null is a sequence boundary; a value identifies an actual public row.
     ordinal: ?u64 = null,
     direction: enum { forward, backward } = .forward,
+    /// The row kinds the page lists; the cursor may name a row of any kind.
+    kinds: Kinds = .full,
+    /// At most this many rows, from 1 to `items`.
+    limit: u8 = items,
+
+    pub const Kinds = std.EnumSet(ActivityItem.Kind);
+    pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
 
     pub fn validate(self: ActivityPage) !void {
         if (self.position > std.math.maxInt(i64) or (self.ordinal != null and
             (self.position == 0 or self.ordinal.? > std.math.maxInt(i64)))) return error.InvalidCursor;
         if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
+        if (self.kinds.count() == 0 or self.limit == 0 or self.limit > items) return error.InvalidCursor;
     }
 };
 pub const ToolPresentation = struct {
@@ -635,7 +619,10 @@ pub const ActivityItem = struct {
     /// The Host Unix second the row's owning fact committed.
     at: u64,
     value: Value,
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed };
+    /// `admission` is a Message a person or script sent; `received` one
+    /// another Session sent, which always names it as `sender`.
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message };
+    pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
         digest: [32]u8,
@@ -666,6 +653,7 @@ pub const ActivityItem = struct {
         const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
         pub const admission = message;
         pub const user = message;
+        pub const received = message;
         /// Hole: content.
         pub const assistant = .{Hole{ .json = Content }};
         /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
@@ -695,7 +683,7 @@ pub const ActivityItem = struct {
             inline else => |_, kind| try writeShape(out, head(kind), .{ self.position, self.ordinal, self.at }),
         }
         switch (self.value) {
-            inline .admission, .user => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
+            inline .admission, .user, .received => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
                 message.admission,   message.key.slice(), message.turn,    message.state,
                 message.admitted_at, message.sender,      message.content,
             }),
@@ -717,43 +705,6 @@ pub const ActivityItem = struct {
     }
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
-/// A person has seen the Session's conversation through `position`.
-pub const MarkRead = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0 };
-
-/// The Message with no Session sender nearest `position` at `end`: before
-/// it backward, after it forward. Position zero starts either traversal.
-pub const ReadPersonMessage = struct {
-    store: Bounded(max_store_bytes) = .{},
-    session: Bounded(max_session_bytes) = .{},
-    end: ?u64 = null,
-    position: u64 = 0,
-    direction: @FieldType(ActivityPage, "direction") = .backward,
-
-    pub fn validate(self: ReadPersonMessage) !void {
-        try (ActivityPage{ .end = self.end, .position = self.position, .direction = self.direction }).validate();
-    }
-};
-pub const PersonMessage = struct {
-    end: u64,
-    message: ?Found = null,
-
-    /// The Message's Activity position and its content.
-    pub const Found = struct {
-        position: u64,
-        content: ActivityItem.Content,
-        pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ActivityItem.Content }, "}" };
-        pub const max_json_bytes = shapeBytes(json_shape);
-        pub fn writeJson(self: Found, out: *std.Io.Writer) !void {
-            try writeShape(out, json_shape, .{ self.position, self.content });
-        }
-    };
-    /// Holes: end, the Message or null.
-    pub const reply_shape = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"person_message\",\"end\":\"", Hole.decimal, "\",\"message\":", Hole{ .optional_json = Found }, "}" };
-    pub const max_json_bytes = shapeBytes(reply_shape);
-    pub fn writeJson(self: *const PersonMessage, out: *std.Io.Writer) !void {
-        try writeShape(out, reply_shape, .{ self.end, self.message });
-    }
-};
 
 pub const CallActivity = struct {
     pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
@@ -1043,17 +994,11 @@ pub const ActivityFacts = struct {
     /// At the same boundary as `call_activity`.
     queued: Queued = .{},
     work: PageWork = .{},
-    /// The position a person has read the Session's conversation through,
-    /// as of this page's read; null until someone has.
-    read_through: ?u64 = null,
-    /// The first row past this page, in its direction, follows the
-    /// read-through position: false when there is none.
-    beyond_unseen: bool = false,
 
     /// Holes: end, direction; then the items, then `tail`.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
-    /// Holes: more, call activity, queued, work, read-through position, beyond unseen.
-    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, ",\"read_through\":", Hole.optional_id, ",\"beyond_unseen\":", Hole.boolean, "}" };
+    /// Holes: more, call activity, queued, work.
+    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, "}" };
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
@@ -1062,7 +1007,7 @@ pub const ActivityFacts = struct {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work, self.read_through, self.beyond_unseen });
+        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work });
     }
 };
 
@@ -1082,19 +1027,15 @@ pub const Request = union(Kind) {
     list_sessions: ListSessions,
     conversation_page: ConversationPage,
     conversation_content: ConversationContent,
-    proposal_page: ProposalPage,
-    proposal_field: ReadProposalField,
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
-    mark_read: MarkRead,
-    person_message: ReadPersonMessage,
     model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .mark_read, .person_message, .model_list => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
         }
     }
 
@@ -1421,18 +1362,10 @@ const Parser = struct {
             .conversation_page
         else if (kind_text.eql("conversation_content"))
             .conversation_content
-        else if (kind_text.eql("proposal_page"))
-            .proposal_page
-        else if (kind_text.eql("proposal_field"))
-            .proposal_field
         else if (kind_text.eql("activity_page"))
             .activity_page
         else if (kind_text.eql("activity_content"))
             .activity_content
-        else if (kind_text.eql("mark_read"))
-            .mark_read
-        else if (kind_text.eql("person_message"))
-            .person_message
         else if (kind_text.eql("model_list"))
             .model_list
         else
@@ -1504,14 +1437,6 @@ const Parser = struct {
                 out.* = .{ .conversation_content = .{ .store = store } };
                 try self.parseConversationContent(&out.conversation_content);
             },
-            .proposal_page => {
-                out.* = .{ .proposal_page = .{ .store = store } };
-                try self.parseProposalPage(&out.proposal_page);
-            },
-            .proposal_field => {
-                out.* = .{ .proposal_field = .{ .store = store } };
-                try self.parseProposalField(&out.proposal_field);
-            },
             .activity_page => {
                 out.* = .{ .activity_page = .{ .store = store } };
                 try self.parseActivityPage(&out.activity_page);
@@ -1519,14 +1444,6 @@ const Parser = struct {
             .activity_content => {
                 out.* = .{ .activity_content = .{ .store = store } };
                 try self.parseActivityContent(&out.activity_content);
-            },
-            .mark_read => {
-                out.* = .{ .mark_read = .{ .store = store } };
-                try self.parseMarkRead(&out.mark_read);
-            },
-            .person_message => {
-                out.* = .{ .person_message = .{ .store = store } };
-                try self.parsePersonMessage(&out.person_message);
             },
         }
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
@@ -1841,21 +1758,6 @@ const Parser = struct {
             out.ordinal > std.math.maxInt(i64) or (out.stream and out.start != 0)) return error.InvalidCursor;
     }
 
-    fn parseProposalPage(self: *Parser, out: *ProposalPage) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("end");
-        if (try self.consumeIf('n')) {
-            for ("ull") |byte| try self.expectByte(byte);
-        } else out.end = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("after");
-        out.after = try self.readCanonicalU64();
-        try out.validate();
-    }
-
     fn parseActivityPage(self: *Parser, out: *ActivityPage) !void {
         try self.expectByte(',');
         try self.expectKey("session");
@@ -1878,36 +1780,25 @@ const Parser = struct {
         var direction: Bounded(8) = .{};
         try self.readSmallString(&direction);
         out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
-        try out.validate();
-    }
-
-    fn parseMarkRead(self: *Parser, out: *MarkRead) !void {
         try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
+        try self.expectKey("kinds");
+        try self.expectByte('[');
+        // Each kind at most once, in tag order, so one set has one spelling.
+        out.kinds = .empty;
+        var last: ?ActivityItem.Kind = null;
+        if (!try self.consumeIf(']')) while (true) {
+            var name: Bounded(16) = .{};
+            try self.readSmallString(&name);
+            const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
+            if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
+            out.kinds.insert(kind);
+            last = kind;
+            if (try self.consumeIf(']')) break;
+            try self.expectByte(',');
+        };
         try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        if (out.position == 0 or out.position > std.math.maxInt(i64)) return error.InvalidCursor;
-    }
-
-    fn parsePersonMessage(self: *Parser, out: *ReadPersonMessage) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("end");
-        if (try self.consumeIf('n')) {
-            for ("ull") |byte| try self.expectByte(byte);
-        } else out.end = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        try self.expectByte(',');
-        try self.expectKey("direction");
-        var direction: Bounded(8) = .{};
-        try self.readSmallString(&direction);
-        out.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
+        try self.expectKey("limit");
+        out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor;
         try out.validate();
     }
 
@@ -1922,21 +1813,6 @@ const Parser = struct {
         try self.expectKey("ordinal");
         out.ordinal = try self.readCanonicalU64();
         if (out.position == 0 or out.position > std.math.maxInt(i64) or out.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
-    }
-
-    fn parseProposalField(self: *Parser, out: *ReadProposalField) !void {
-        try self.expectByte(',');
-        try self.expectKey("session");
-        try self.readSmallString(&out.session);
-        try self.expectByte(',');
-        try self.expectKey("position");
-        out.position = try self.readCanonicalU64();
-        if (out.position == 0 or out.position > std.math.maxInt(i64)) return error.InvalidCursor;
-        try self.expectByte(',');
-        try self.expectKey("field");
-        var field: Bounded(16) = .{};
-        try self.readSmallString(&field);
-        out.field = std.meta.stringToEnum(ProposalField, field.slice()) orelse return error.InvalidField;
     }
 
     fn parseReadResult(self: *Parser, out: *ReadResult) !void {
@@ -2347,6 +2223,8 @@ pub const Hole = union(enum) {
     tag: type,
     /// A `?E` for this enum `E`, as a JSON string of its tag name or `null`.
     optional_tag: type,
+    /// A `std.EnumSet(E)`, as a JSON array of its tag names in tag order.
+    tag_set: type,
     /// At most this many bytes, as a JSON string.
     string: usize,
     /// A `?[]const u8` of at most this many bytes, as a JSON string or `null`.
@@ -2367,6 +2245,11 @@ pub const Hole = union(enum) {
             .optional_id => @max("null".len, 2 + (comptime Hole.maxBytes(.decimal))),
             .tag => |T| maxTagBytes(T),
             .optional_tag => |T| @max("null".len, 2 + maxTagBytes(T)),
+            .tag_set => |T| blk: {
+                var bytes = "[]".len + std.meta.tags(T).len - 1;
+                for (std.meta.tags(T)) |tag| bytes += 2 + @tagName(tag).len;
+                break :blk bytes;
+            },
             .string => |bytes| maximumJsonStringBytes(bytes),
             .optional_string => |bytes| @max("null".len, maximumJsonStringBytes(bytes)),
             .text => |bytes| bytes,
@@ -2415,6 +2298,16 @@ pub fn writeShape(out: *std.Io.Writer, comptime shape: anytype, args: anytype) !
                 .optional_id => if (@as(?u64, argument)) |id| try out.print("\"{d}\"", .{id}) else try out.writeAll("null"),
                 .tag => |T| try out.writeAll(@tagName(@as(T, argument))),
                 .optional_tag => |T| if (@as(?T, argument)) |tag| try out.print("\"{s}\"", .{@tagName(tag)}) else try out.writeAll("null"),
+                .tag_set => |T| {
+                    try out.writeByte('[');
+                    var first = true;
+                    for (std.meta.tags(T)) |tag| if (@as(std.EnumSet(T), argument).contains(tag)) {
+                        if (!first) try out.writeByte(',');
+                        first = false;
+                        try out.print("\"{s}\"", .{@tagName(tag)});
+                    };
+                    try out.writeByte(']');
+                },
                 .string => |bytes| {
                     const value: []const u8 = argument;
                     std.debug.assert(value.len <= bytes);
@@ -2493,18 +2386,10 @@ pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ 
 pub const conversation_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\",\"stream\":true}" };
 /// Holes: Store, Session, end, before position, before ordinal.
 pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, end, after.
-pub const proposal_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"proposal_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"after\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, position, field.
-pub const proposal_field_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"proposal_field\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = ProposalField }, "\"}" };
-/// Holes: Store, Session, end, position, ordinal, direction.
-pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
+/// Holes: Store, Session, end, position, ordinal, direction, kinds, limit.
+pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, position.
-pub const mark_read_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"mark_read\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\"}" };
-/// Holes: Store, Session, end, position, direction.
-pub const person_message_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"person_message\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
 /// metadata has a shape. The variable parts are written between these.
 pub const configure_request = struct {
@@ -2542,21 +2427,15 @@ pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_argum
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request);
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
-pub const max_proposal_page_request_bytes = shapeBytes(proposal_page_request);
-pub const max_proposal_field_request_bytes = shapeBytes(proposal_field_request);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
-pub const max_mark_read_request_bytes = shapeBytes(mark_read_request);
-pub const max_person_message_request_bytes = shapeBytes(person_message_request);
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request,     host_info_request,             host_stop_request,
     read_result_request,         list_sessions_changed_request, read_action_arguments_request,
     read_action_call_id_request, conversation_content_request,  conversation_page_request,
-    proposal_page_request,       proposal_field_request,        activity_page_request,
-    activity_content_request,    mark_read_request,             person_message_request,
-    model_list_request,
+    activity_page_request,       activity_content_request,      model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -2567,30 +2446,7 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 /// A Message or answer's content reference in an observation. Holes: length, digest.
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
-pub const proposal_page_reply = struct {
-    /// Hole: the page end.
-    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"proposal_page\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
-    /// Holes: position, operation, turn, call ordinal, Action and rejection.
-    pub const item_head = .{ "{\"position\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":{" };
-    /// One field's reference, in `ProposalField` order. Holes: length, digest.
-    pub fn field(comptime name: ProposalField) struct { []const u8, Hole, []const u8, Hole, []const u8 } {
-        const separator = if (name == std.meta.tags(ProposalField)[0]) "" else ",";
-        return .{ separator ++ "\"" ++ @tagName(name) ++ "\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\"}" };
-    }
-    pub const item_end = .{"}}"};
-    /// Hole: whether more items follow.
-    pub const tail = .{ "],\"more\":", Hole.boolean, "}" };
-};
-
-pub const max_proposal_page_response_bytes = blk: {
-    const page = proposal_page_reply;
-    var item = shapeBytes(page.item_head) + shapeBytes(page.item_end);
-    for (std.meta.tags(ProposalField)) |name| item += shapeBytes(page.field(name));
-    break :blk shapeBytes(page.head) + jsonListBytes(proposal_page_items, item) + shapeBytes(page.tail);
-};
-
 pub const max_activity_page_response_bytes = ActivityFacts.max_json_bytes;
-pub const max_person_message_response_bytes = PersonMessage.max_json_bytes;
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":";
@@ -2714,7 +2570,7 @@ pub const command_observation_reply = struct {
 
 /// Holes: error type and code.
 /// The `type` of an error reply: what kind of failure its code names.
-pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, proposal_unavailable, failed_response_unavailable, mark_read_refused };
+pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable };
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
@@ -2733,7 +2589,6 @@ comptime {
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
 pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
-pub const mark_read_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"mark_read_reply\",\"status\":\"recorded\"}";
 
 /// Each served provider's models: `model_list.writeProviders` follows the
 /// head, then the tail.
@@ -2745,7 +2600,7 @@ pub const model_list_reply = struct {
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, mark_read_ack.len));
+pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
 
 pub const conversation_page_reply = struct {
     /// Hole: the page end.
@@ -3206,17 +3061,21 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     }
 }
 
-test "a read-through position is a canonical positive Session position" {
-    const cases = [_]struct { position: []const u8, expected: ?u64 = null, failure: ?anyerror = null }{
-        .{ .position = "1", .expected = 1 },
-        .{ .position = "9223372036854775807", .expected = std.math.maxInt(i64) },
-        .{ .position = "0", .failure = error.InvalidCursor },
-        .{ .position = "9223372036854775808", .failure = error.InvalidCursor },
-        .{ .position = "07", .failure = error.InvalidIdentity },
+test "an activity page names its kinds once each, in order, and a limit from 1 to 16" {
+    const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
+        .{ .body = "[\"admission\"],\"limit\":\"1\"" },
+        .{ .body = "[\"admission\",\"received\"],\"limit\":\"16\"" },
+        .{ .body = "[\"received\",\"admission\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
+        .{ .body = "[\"user\",\"user\"],\"limit\":\"1\"", .failure = error.InvalidJsonShape },
+        .{ .body = "[\"unknown\"],\"limit\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "[],\"limit\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"17\"", .failure = error.InvalidCursor },
+        .{ .body = "[\"user\"],\"limit\":\"256\"", .failure = error.InvalidCursor },
     };
     for (cases) |case| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"mark_read\",\"store\":\"s\",\"session\":\"x\",\"position\":\"{s}\"}}", .{case.position});
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":\"s\",\"session\":\"x\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":{s}}}", .{case.body});
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
@@ -3224,8 +3083,7 @@ test "a read-through position is a canonical positive Session position" {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
             const request = try parseForTest(&parser);
-            try std.testing.expectEqual(case.expected.?, request.mark_read.position);
-            try std.testing.expectEqualStrings("x", request.mark_read.session.slice());
+            try std.testing.expect(request == .activity_page);
         }
     }
 }

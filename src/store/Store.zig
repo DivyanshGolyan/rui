@@ -33,6 +33,7 @@ const BashExecutionInput = action_domain.BashExecutionInput;
 const CommandObservation = command_domain.CommandObservation;
 const ConfigureReply = configuration_domain.ConfigureReply;
 const ContentBlob = @import("access.zig").ContentBlob;
+const Found = @import("access.zig").Found;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
@@ -45,7 +46,6 @@ const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const PrefixSeal = historical_domain.PrefixSeal;
-const ProposalPage = reads_domain.ProposalPage;
 const PublicConversationPage = reads_domain.PublicConversationPage;
 const SessionListOptions = report_domain.SessionListOptions;
 const SessionObservation = reads_domain.SessionObservation;
@@ -497,28 +497,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
     }
 
-    /// Records that a person has seen the Session's conversation through
-    /// `request.position`. It only advances, so a client that saw less, or a
-    /// repeated write, changes nothing. No Session list row shows it, so
-    /// it touches nothing in the change ring: a list watching the Session
-    /// does not read it again.
-    pub fn markRead(self: *Store, request: *const protocol.MarkRead) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        return entry.finish(Ordinary.read_through, reads_domain.markRead(&entry, request));
-    }
-
-    /// The Message with no Session sender next to `position` at `end`: one
-    /// seek in the index of those Messages, then its content's metadata.
-    pub fn personMessage(self: *Store, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
-        try request.validate();
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.personMessage(&access, request));
-    }
-
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
@@ -526,24 +504,6 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
-    }
-
-    pub fn proposalPage(self: *Store, request: *const protocol.ProposalPage, out: *ProposalPage) !void {
-        try request.validate();
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.proposalPage(&access, request, out));
-    }
-
-    pub fn openProposalField(self: *Store, request: *const protocol.ReadProposalField) !ContentLocation {
-        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.content, reads_domain.openProposalField(&access, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -927,18 +887,24 @@ const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
+/// The resident bytes the owner accepted for a settlement batch of 64
+/// items, beyond the configure reads' 4888.
+const accepted_settlement_growth = 10240;
+
 comptime {
-    // A settlement batch of 64 items, 16528 bytes, is the larger use; the
-    // owner accepted about 10 KiB more than the configure reads' 4888.
-    if (scratch_bytes > 17 * 1024) @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes; keep it within 17 KiB", .{scratch_bytes}));
+    // The settlement batch is the larger use: 14480 bytes, 9592 beyond the
+    // configure reads. Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 4888 or scratch_bytes != 14480)
+        @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
+    if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
 
 /// The change ring, and the scratch beside it, in pages of their own,
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most about 16 KiB, a settlement
-/// batch's size, of which a configure writes about 5 KiB.
+/// resident for the Store's life: at most 14480 bytes, a settlement
+/// batch's size, of which a configure writes 4888.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -966,7 +932,6 @@ fn destroyRing(ring: *change_ring.Ring) void {
 pub const Ordinary = struct {
     pub const none = error{};
     const page = error{ SessionNotFound, InvalidCursor };
-    const read_through = error{ SessionNotFound, PositionNotReached };
     const content = error{ContentNotFound};
     const public_content = error{ ContentNotFound, RangeOutOfBounds };
     pub const action = error{ActionNotFound};
@@ -1198,15 +1163,15 @@ pub fn fence(self: *Store, err: anytype) @TypeOf(err) {
     return err;
 }
 
-/// The saved Session, as `configuration.readSaved` reads it, in an Entry
-/// of its own.
+/// The saved Session, as `configuration.readSaved` reads it, in a read
+/// Access of its own, then checked by `configuration.checkSaved`.
 pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
     const entry = try enter(self, .none);
     defer entry.release();
     var a: ReadAccess = .open(&entry);
     defer a.deinit();
     var current: CurrentConfiguration = .{};
-    var found: @import("access.zig").Found = undefined;
+    var found: Found = undefined;
     configuration_domain.readSaved(&a, session_ref, &current, &found);
     try entry.finish(Ordinary.none, a.run());
     if (!found.get()) return null;
@@ -1223,12 +1188,6 @@ pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !pro
 pub fn publicConversationPageForTesting(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
     try self.publicConversationPage(&request, &page);
-    return page;
-}
-
-pub fn proposalPageForTesting(self: *Store, request: protocol.ProposalPage) !ProposalPage {
-    var page: ProposalPage = undefined;
-    try self.proposalPage(&request, &page);
     return page;
 }
 

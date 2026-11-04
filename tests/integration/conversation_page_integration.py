@@ -52,6 +52,9 @@ def dispose_page(process, endpoint, thread, timeout):
     )
 
 
+ACTIVITY_KINDS = ["admission", "user", "assistant", "call", "tool_result", "hosted_call", "outcome", "stop", "sent", "send_failed", "received"]
+
+
 def request(socket_path, store, route, kind, session, **fields):
     body = json.dumps(
         {"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store), "session": session, **fields},
@@ -449,7 +452,7 @@ def missing_assistant_entries():
                     paths = {
                         "page": ("conversation-page", "conversation_page", dict(end="0", before_position="0", before_ordinal="0")),
                         "exact": ("conversation-content", "conversation_content", dict(position=str(target[0]), ordinal="0", start="0")),
-                        "activity": ("activity-page", "activity_page", dict(end=None, position="0", ordinal=None, direction="forward")),
+                        "activity": ("activity-page", "activity_page", dict(end=None, position="0", ordinal=None, direction="forward", kinds=ACTIVITY_KINDS, limit="16")),
                         "full": ("inspect-session", "inspect_session", dict(profile="full")),
                     }
                     path, kind, fields = paths[route]

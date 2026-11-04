@@ -112,12 +112,11 @@ pub fn visitRow(visitor: anytype, row: anytype) bool {
 /// many rows' reads answers as main did for the one that failed; any
 /// other is `CorruptStore`. A Proposal's keeps `StatementFailed`, as
 /// main's `proposal` let it through.
-const read_failures = .{
+pub const read_failures = .{
     .{ missing_assistant_entry, error.ConversationReadFailed },
     .{ public_page, error.ConversationReadFailed },
     .{ activity_forward, error.ActivityReadFailed },
     .{ activity_backward, error.ActivityReadFailed },
-    .{ proposal_positions, error.ProposalReadFailed },
     .{ public_entry, error.ConversationReadFailed },
     .{ public_tool_result, error.PublicContentReadFailed },
     .{ hosted_call, error.ActivityReadFailed },
@@ -159,33 +158,77 @@ fn toolGroupCompletesAtLast(comptime operation: []const u8) []const u8 {
 }
 
 /// Each Activity source, as (position, ordinal, kind, id) rows matching
-/// `filter`, which names a source's position and ordinal through `range`.
-/// Every source seeks an index on (Session, position), so a filter on
-/// position reads only the rows it keeps. The sources come in three groups,
+/// `filter`, which names a source's position and ordinal through `range`,
+/// and whose kind is in `kinds`, an SQL integer with bit `k` set for each
+/// kind `k` it lists (`activityKinds`). Every source seeks an index on
+/// (Session, position), so a filter on position reads only the rows it
+/// keeps, and a source whose kinds are off reads nothing. A person's
+/// Messages (kind 1) come from their own index while the page lists no
+/// received ones (kind 11), and otherwise share one source with them, as
+/// every unfiltered page reads Messages. The sources come in three groups,
 /// each within the Store's four-term compound limit.
-fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime order: []const u8) [3][]const u8 {
+fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) [3][]const u8 {
+    const Kinds = struct {
+        fn on(comptime kind: u5) []const u8 {
+            return std.fmt.comptimePrint("({s}/{d})%2=1", .{ kinds, @as(u64, 1) << kind });
+        }
+        fn off(comptime kind: u5) []const u8 {
+            return std.fmt.comptimePrint("({s}/{d})%2=0", .{ kinds, @as(u64, 1) << kind });
+        }
+    };
+    const on = Kinds.on;
     return .{
-        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_position) " ++
-            "WHERE session_ref=?1 AND " ++ range("admission_position", "0") ++
+        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_person) " ++
+            "WHERE session_ref=?1 AND sender_session_ref IS NULL AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
+            " UNION ALL SELECT admission_position,0,CASE WHEN sender_session_ref IS NULL THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
+            "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (sender_session_ref IS NOT NULL OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++
             " UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry " ++
-            "WHERE session_ref=?1 AND entry_kind IN (1,3) AND " ++ range("session_position", "0") ++
+            "WHERE session_ref=?1 AND (entry_kind=1 AND " ++ on(2) ++ " OR entry_kind=3 AND " ++ on(3) ++ ") AND " ++ range("session_position", "0") ++
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
-            "WHERE session_ref=?1 AND item_kind=3 AND " ++ range("session_position", "0") ++
-            " UNION ALL SELECT sender_position,0,8,admission_id FROM message_admission WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++ order,
+            "WHERE session_ref=?1 AND item_kind=3 AND " ++ on(4) ++ " AND " ++ range("session_position", "0") ++ order,
         // A tool group's results sit at its last acceptance, one per call,
         // ordered by call.
         "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last " ++
-            "JOIN model_tool_call tool_call ON tool_call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++
+            "JOIN model_tool_call tool_call ON tool_call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id") ++
             " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last " ++
-            "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++
+            "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
-            " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn @index(turn_outcome_position) WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ range("outcome_position", "0") ++
-            " UNION ALL SELECT position,0,7,NULL FROM session_stop @index(session_stop_position) WHERE session_ref=?1 AND " ++ range("position", "0") ++ order,
-        "SELECT sender_position AS position,0 AS ordinal,9 AS kind,NULL AS id FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ range("sender_position", "0") ++
+            " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn @index(turn_outcome_position) WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ on(6) ++ " AND " ++ range("outcome_position", "0") ++
+            " UNION ALL SELECT position,0,7,NULL FROM session_stop @index(session_stop_position) WHERE session_ref=?1 AND " ++ on(7) ++ " AND " ++ range("position", "0") ++ order,
+        "SELECT sender_position AS position,0 AS ordinal,8 AS kind,admission_id AS id FROM message_admission WHERE sender_session_ref=?1 AND " ++ on(8) ++ " AND " ++ range("sender_position", "0") ++
+            " UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1 AND " ++ on(9) ++ " AND " ++ range("sender_position", "0") ++
             " UNION ALL SELECT session_position,0,10,NULL FROM model_output_item @index(model_output_hosted_history) " ++
-            "WHERE session_ref=?1 AND item_kind=5 AND " ++ range("session_position", "0") ++ order,
+            "WHERE session_ref=?1 AND item_kind=5 AND " ++ on(10) ++ " AND " ++ range("session_position", "0") ++ order,
     };
+}
+
+/// Every kind, for a read of one known row.
+const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 12) - 2});
+
+/// The kind codes the sources number, for each Activity kind.
+fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
+    return switch (kind) {
+        .admission => 1,
+        .user => 2,
+        .assistant => 3,
+        .call => 4,
+        .tool_result => 5,
+        .outcome => 6,
+        .stop => 7,
+        .sent => 8,
+        .send_failed => 9,
+        .hosted_call => 10,
+        .received => 11,
+    };
+}
+
+/// `kinds` as the sources' integer: bit `k` for each kind code `k`.
+fn activityKinds(kinds: protocol.ActivityPage.Kinds) u64 {
+    var bits: u64 = 0;
+    var iterator = kinds.iterator();
+    while (iterator.next()) |kind| bits |= @as(u64, 1) << activityKindCode(kind);
+    return bits;
 }
 
 fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const u8) []const u8 {
@@ -196,10 +239,10 @@ fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const 
 /// The Activity row at position ?3 and ordinal ?4 through end ?2: each
 /// source seeks that one position. A second row is `CorruptStore`.
 const activity_item = blk: {
-    const sources = activitySources(anyActivityPosition, "");
+    const sources = activitySources(anyActivityPosition, all_activity_kinds, "");
     break :blk rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), " ++
-            "activity AS (SELECT position,ordinal,kind,id FROM entries UNION ALL SELECT position,ordinal,kind,id FROM completions UNION ALL {s}) " ++
+        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}), " ++
+            "activity AS (SELECT position,ordinal,kind,id FROM entries UNION ALL SELECT position,ordinal,kind,id FROM completions UNION ALL SELECT position,ordinal,kind,id FROM others) " ++
             "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ sources[0], sources[1], sources[2] }),
         .Args = struct { session: []const u8, end: u64, position: u64, ordinal: u64 },
         .Row = struct { kind: u8, id: ?rsql.Positive },
@@ -208,9 +251,10 @@ const activity_item = blk: {
     });
 };
 
-/// One Activity page, at most 17 rows: forward, after cursor (?3, ?4)
-/// through end ?2; backward, before cursor (?2, ?3), which is at or before
-/// the end. Each source group keeps its own first 17 rows, read
+/// One Activity page, at most 17 rows of the kinds ?5 (forward) or ?4
+/// (backward) lists: forward, after cursor (?3, ?4) through end ?2;
+/// backward, before cursor (?2, ?3), which is at or before the end. A
+/// smaller page steps fewer of them. Each source group keeps its own first 17 rows, read
 /// in order from its indexes, and the page takes the first 17 of those:
 /// the cost follows the page, not the Session's history.
 fn ActivityPage(comptime forward: bool) type {
@@ -223,11 +267,11 @@ fn ActivityPage(comptime forward: bool) type {
         }
     };
     const order = if (forward) " ORDER BY 1,2 LIMIT 17" else " ORDER BY 1 DESC,2 DESC LIMIT 17";
-    const sources = activitySources(if (forward) Range.after else Range.before, order);
+    const sources = activitySources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order);
     return rsql.Read(.{
         .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}) SELECT position,ordinal FROM entries " ++
             "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others{s}", .{ sources[0], sources[1], sources[2], order }),
-        .Args = if (forward) struct { session: []const u8, end: u64, position: u64, ordinal: u64 } else struct { session: []const u8, position: u64, ordinal: u64 },
+        .Args = if (forward) struct { session: []const u8, end: u64, position: u64, ordinal: u64, kinds: u64 } else struct { session: []const u8, position: u64, ordinal: u64, kinds: u64 },
         .Row = ActivityPageRow,
         .cardinality = .each,
         .compound = true,
@@ -275,13 +319,6 @@ pub const PublicConversationPage = struct {
     pub const capacity = protocol.public_conversation_page_items;
     end: u64,
     items: [capacity]PublicConversationItem = undefined,
-    count: usize = 0,
-    more: bool = false,
-};
-
-pub const ProposalPage = struct {
-    end: u64,
-    items: [protocol.proposal_page_items]protocol.ProposalMetadata = undefined,
     count: usize = 0,
     more: bool = false,
 };
@@ -372,7 +409,9 @@ fn readPublicMetadata(a: *ReadAccess, content_id: u64) !ContentMetadata {
 
 /// Round 1 reads the saved Session; round 2 its instructions' and output
 /// schema's metadata with the counts' first round (`report.SessionCounts`);
-/// round 3 the pending count after the latest stop's cutoff.
+/// round 3 the counts' second round: the pending count after the latest
+/// stop's cutoff, the tool outcome rule, and the Action and rejected-call
+/// counts.
 pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *SessionObservation) !void {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
@@ -615,33 +654,36 @@ pub const missing_assistant_entry = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Whether a Conversation entry `e` is public: its content is, and its
-/// message or assistant provenance agrees with it, over `public_entry_joins`.
-pub const public_entry_consistent = "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
-    "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
-    "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
-    "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
-    "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
-    "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ ")))";
-
-/// The rows `public_entry_consistent` reads for an entry `e`. LEFT JOIN
-/// retains damage instead of hiding dependencies.
-pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
-    "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
-    "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
-    "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
-    "LEFT JOIN content c ON c.content_id=e.content_id";
+/// A read of Conversation entries `e`: `SELECT columns`, then a
+/// `consistent` column, `FROM conversation_entry e` with the rows that
+/// make an entry public, then `rest` (its WHERE and order). An entry is
+/// consistent when `also` holds (an SQL condition and `OR`, or empty), or
+/// when it is public: its content is, and its message or assistant
+/// provenance agrees with it. Its joins are LEFT JOINs, which keep damage
+/// instead of hiding a missing row, under the aliases t, m, o, item and c,
+/// which `columns` and `rest` may also read.
+pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, comptime rest: []const u8) []const u8 {
+    return "SELECT " ++ columns ++ ",CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+        "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
+        "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
+        "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
+        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent " ++
+        "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+        "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+        "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+        "LEFT JOIN content c ON c.content_id=e.content_id " ++ rest;
+}
 
 /// An ordinary entry at a position, with the provenance that makes it
 /// public. One indexed ordinary identity owns provenance for pages,
 /// cursors and bytes.
 const public_entry = rsql.Read(.{
-    .sql = "SELECT e.content_id,CASE WHEN " ++ public_entry_consistent ++ " THEN 1 ELSE 0 END AS consistent," ++
-        "CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at " ++
-        "FROM conversation_entry e " ++ public_entry_joins ++ " " ++
-        "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)",
+    .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { content_id: rsql.Positive, consistent: bool, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive },
+    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
 
@@ -692,7 +734,7 @@ pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_oper
 /// Public content's reads, in rounds it may share with other rows. `queue`
 /// the entry with its assistant check, or the Tool Result; after that
 /// round, `found`, then `queueMetadata`, which also queues a Tool Result's
-/// group outcome check (`ToolOutcomeCheck`, every outcome terminal);
+/// group outcome check (`ToolOutcomeCheck`);
 /// after that round, `takeMetadata`, which judges that check first, as
 /// main checked the group before it read the metadata.
 const PublicContentRead = struct {
@@ -703,7 +745,7 @@ const PublicContentRead = struct {
     content: PublicContent = undefined,
     missing: missing_assistant_entry.Result = null,
     metadata: content_metadata.Row = undefined,
-    outcome: ToolOutcomeCheck = .{ .terminal = true },
+    outcome: ToolOutcomeCheck = .{},
     count: RowCount = .{},
 
     fn queue(read: *PublicContentRead, a: *ReadAccess, session: []const u8) void {
@@ -913,9 +955,9 @@ const HostedRead = struct {
 
 /// The Session columns an Activity page reads, its workspace into the
 /// page itself. They are the columns main's Session facts read, so a
-/// damaged one still fails the page, and how far a person read.
+/// damaged one still fails the page.
 const page_session = rsql.Read(.{
-    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace,read_through " ++
+    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -929,7 +971,6 @@ const page_session = rsql.Read(.{
         created_at: rsql.Positive,
         provider: protocol.Provider,
         workspace: *protocol.Bounded(protocol.max_workspace_bytes),
-        read_through: ?rsql.Positive,
     },
     .cardinality = .optional,
 });
@@ -964,17 +1005,18 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     if (end >= next or request.position > end) return error.InvalidCursor;
     if (guard != null) return error.CorruptStore;
     page.end = end;
-    page.read_through = if (session.read_through) |position| position.get() else null;
     // The cursor as a bound on (position, ordinal): a whole position is
     // passed or kept by the largest ordinal, and a backward page with
     // no cursor starts after the end's last row.
     const forward = request.direction == .forward;
     const whole: u64 = std.math.maxInt(i64);
+    const kinds = activityKinds(request.kinds);
+    const limit: usize = request.limit;
     var rows: Collected(ActivityPageRow, page.items.len + 1) = .{};
     if (forward)
-        a.readEach(activity_forward, .{ .session = session_ref, .end = end, .position = request.position, .ordinal = request.ordinal orelse whole }, rows.items.len, &rows)
+        a.readEach(activity_forward, .{ .session = session_ref, .end = end, .position = request.position, .ordinal = request.ordinal orelse whole, .kinds = kinds }, limit + 1, &rows)
     else
-        a.readEach(activity_backward, .{ .session = session_ref, .position = if (request.position != 0) request.position else end, .ordinal = if (request.position == 0) whole else request.ordinal orelse 0 }, rows.items.len, &rows);
+        a.readEach(activity_backward, .{ .session = session_ref, .position = if (request.position != 0) request.position else end, .ordinal = if (request.position == 0) whole else request.ordinal orelse 0, .kinds = kinds }, limit + 1, &rows);
     _ = work.queue(a);
     if (request.ordinal) |ordinal| {
         // The cursor's item, read into the first slot, which the page's
@@ -985,13 +1027,8 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
         };
     } else try runRows(a);
     try work.advance();
-    page.count = @min(rows.len, page.items.len);
-    if (rows.len > page.items.len) {
-        page.more = true;
-        // The row after a backward page's oldest says whether the
-        // unseen rows reach past it.
-        page.beyond_unseen = !forward and if (page.read_through) |read| rows.items[page.items.len].position.get() > read else true;
-    }
+    page.count = @min(rows.len, limit);
+    page.more = rows.len > limit;
     var at: [page.items.len]ItemAt = undefined;
     for (rows.slice()[0..page.count], at[0..page.count]) |row, *item| item.* = .{ .position = row.position.get(), .ordinal = row.ordinal };
     const boundary: ?ItemAt = if (page.more) at[page.count - 1] else null;
@@ -1002,11 +1039,18 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     var missing: missing_assistant_entry.Result = null;
     var calls: CallRows = .{ .activity = &page.call_activity, .args = .{ .session = session_ref, .position = call_position, .ordinal = if (last) |item| item.ordinal else null } };
     var waiting: QueuedMessages = .{};
-    if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
+    // Only a page that lists assistant rows could lose one to a damaged
+    // entry; another may span much more history than it lists.
+    if (lower <= upper and request.kinds.contains(.assistant)) a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
     // Both count what they read (`CallActivity.total`, `Queued.count`), so
     // neither has a smaller bound than every row its statement returns.
-    a.readEach(call_activity, calls.args, std.math.maxInt(u64), &calls);
-    a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
+    // Only a page of every kind carries them: a filtered one, such as
+    // Ctrl-P's one-row page of Messages, would scan later tool history and
+    // the whole queue for footers it has no use for.
+    if (request.kinds.eql(.full)) {
+        a.readEach(call_activity, calls.args, std.math.maxInt(u64), &calls);
+        a.readEach(queued, .{ .session = session_ref, .position = call_position }, std.math.maxInt(u64), &waiting);
+    }
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
     page.queued = waiting.queued;
@@ -1021,86 +1065,6 @@ const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };
 
 /// An Activity item's place: its position and ordinal.
 const ItemAt = struct { position: u64, ordinal: u64 };
-
-/// Main's one guarded UPDATE: how far a person read moves only forward,
-/// and stays below the Session's next position. No Session list row shows
-/// `read_through` (`schema` marks it unlisted), so the write touches no
-/// Session and names it by its reference alone.
-const advance_read_through = rsql.Write(.{
-    .sql = "UPDATE session SET read_through=?2 WHERE session_ref=@session(?1) AND ?2<next_position AND (read_through IS NULL OR read_through<?2)",
-    .Args = struct { session: rsql.SessionRef, position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ReadThroughKept } },
-});
-
-/// Round 1 is the guarded write, which commits itself. Only when it
-/// changes no row does a read round ask why, as main did: an unknown
-/// Session, a position not reached, or one already read, which is no
-/// error. A failed read is `SessionReadFailed`, main's name for it.
-pub fn markRead(entry: *const store_core.Entry, request: *const protocol.MarkRead) !void {
-    // Main's bind refused a position past maxInt(i64), which fences.
-    if (request.position > std.math.maxInt(i64)) return error.IntegerOutOfRange;
-    const session = request.session.slice();
-    const Ref = @FieldType(rsql.SessionRef, "ref");
-    // The schema's check holds every session_ref to this length, so a
-    // text of any other names no Session.
-    if (session.len != @sizeOf(Ref)) return error.SessionNotFound;
-    kept: {
-        var a: store_access.Access(.single, error{ReadThroughKept}) = .open(entry);
-        defer a.deinit();
-        a.write(advance_read_through, .{ .session = .{ .ref = session[0..@sizeOf(Ref)].* }, .position = request.position });
-        a.commit() catch |err| switch (err) {
-            error.ReadThroughKept => break :kept,
-            else => |failed| return failed,
-        };
-        return;
-    }
-    var a: ReadAccess = .open(entry);
-    defer a.deinit();
-    const next = try readNextPosition(&a, session) orelse return error.SessionNotFound;
-    if (request.position >= next) return error.PositionNotReached;
-}
-
-const PersonMessageArgs = struct { session: []const u8, after: u64, before: u64 };
-const PersonMessageRow = struct { admission_position: rsql.Positive, content_id: rsql.Positive };
-
-/// The Message with no Session sender nearest a bound, in `backward` or
-/// forward order: one seek in the index of those Messages.
-fn PersonMessage(comptime backward: bool) type {
-    return rsql.Read(.{
-        .sql = "SELECT admission_position,content_id FROM message_admission @index(message_admission_person) " ++
-            "WHERE session_ref=?1 AND sender_session_ref IS NULL AND admission_position>?2 AND admission_position<?3 ORDER BY admission_position" ++
-            (if (backward) " DESC LIMIT 1" else " LIMIT 1"),
-        .Args = PersonMessageArgs,
-        .Row = PersonMessageRow,
-        .cardinality = .optional,
-    });
-}
-const person_backward = PersonMessage(true);
-const person_forward = PersonMessage(false);
-
-/// Round 1 reads the Session's next position, round 2 the Message, round
-/// 3 its content's metadata. A failed step of the Message's read is
-/// `ActivityReadFailed`, main's name.
-pub fn personMessage(a: *ReadAccess, request: *const protocol.ReadPersonMessage) !protocol.PersonMessage {
-    const session = request.session.slice();
-    const next = try readNextPosition(a, session) orelse return error.SessionNotFound;
-    const end = request.end orelse next - 1;
-    if (end >= next or request.position > end) return error.InvalidCursor;
-    const backward = request.direction == .backward;
-    const bound: PersonMessageArgs = .{
-        .session = session,
-        .after = if (backward) 0 else request.position,
-        .before = if (backward and request.position != 0) request.position else end + 1,
-    };
-    var found: ?PersonMessageRow = undefined;
-    if (backward) a.read(person_backward, bound, &found) else a.read(person_forward, bound, &found);
-    try store_access.runAs(a, error.ActivityReadFailed);
-    var reply: protocol.PersonMessage = .{ .end = end };
-    const row = found orelse return reply;
-    const metadata = try readPublicMetadata(a, row.content_id.get());
-    reply.message = .{ .position = row.admission_position.get(), .content = .{ .length = metadata.length, .digest = metadata.digest } };
-    return reply;
-}
 
 // This projection shares the page's canonical capture, not Current's active
 // Turn lifetime. It is staged until the frontend acknowledges that page.
@@ -1150,13 +1114,18 @@ const call_outcomes = ToolOutcome(call_candidates_sql ++ ", ", "SELECT DISTINCT 
 /// Operations by the tool outcome rule before any presentation is taken:
 /// each by itself (`operation_outcome`) while they are at most
 /// `max_operations`, which `operations` holds, and else all of them in
-/// one read (`call_outcomes`), whose search for them costs more than one
-/// Operation's own read. The rule implies main's equality: a valid call
-/// is terminal exactly when it has an acceptance, and its rejection's or
-/// result's content then, so an Operation the rule passes is a group, at
-/// its largest acceptance, exactly when every call is terminal, and its
-/// publication is then that acceptance. It keeps no row, so its read
-/// steps every row the statement returns: a count has no smaller bound.
+/// one read (`call_outcomes`). One read repeats the candidates' search,
+/// so it steps more than the reads one per Operation at every count
+/// measured, and more than main (3 Operations: 14135 steps against
+/// 13477 and main's 13722; 33: 30629 against 26131 and 27606); only the
+/// frame bounds `max_operations`. Main's equality holds by the schema's
+/// CHECKs, not the rule: a call has an acceptance exactly when it is
+/// rejected (`model_tool_call`'s) or its Action resolved
+/// (`action_operation`'s), and then has its rejection's or result's
+/// content, so an Operation the rule passes is a group, at its largest
+/// acceptance, exactly when every call has one, and its publication is
+/// then that acceptance. It keeps no row, so its read steps every row the
+/// statement returns: a count has no smaller bound.
 const CallRows = struct {
     activity: *protocol.CallActivity,
     args: CallArgs,
@@ -1167,7 +1136,7 @@ const CallRows = struct {
     check: ToolOutcomeCheck = .{},
     presentations: [@typeInfo(@FieldType(protocol.CallActivity, "entries")).array.len]PresentationRead = undefined,
 
-    const max_operations = 4;
+    const max_operations = 32;
 
     pub fn visit(rows: *CallRows, row: *const CallRow) bool {
         const operation = row.operation_id.get();
@@ -1543,7 +1512,7 @@ const ItemRead = struct {
             return;
         }
         switch (read.kind) {
-            1, 2 => |kind| {
+            1, 2, 11 => |kind| {
                 const message = &read.state.message;
                 if (read.round == 1) {
                     message.read.queue(a, session, end);
@@ -1606,10 +1575,13 @@ const ItemRead = struct {
         const item = read.item;
         if (read.round == 0) return read.takeRow();
         switch (read.kind) {
-            1, 2 => |kind| {
+            1, 2, 11 => |kind| {
                 const message = &read.state.message;
                 if (read.round == 1) {
                     if (!try message.read.count.found()) return error.CorruptStore;
+                    // A source names a person's Message or a received one
+                    // by its sender; the row read must agree.
+                    if (kind != 2 and (kind == 11) != (message.read.message.sender != null)) return error.CorruptStore;
                     if (kind == 2) try message.entry.found();
                     return;
                 }
@@ -1708,10 +1680,17 @@ const ItemRead = struct {
         item.* = .{ .position = read.position, .ordinal = read.ordinal, .at = undefined, .value = undefined };
         read.kind = row.kind;
         switch (row.kind) {
-            1, 2 => {
+            1, 2, 11 => {
                 const admission = (row.id orelse return error.CorruptStore).get();
-                item.value = if (row.kind == 1) .{ .admission = undefined } else .{ .user = undefined };
-                const message = if (row.kind == 1) &item.value.admission else &item.value.user;
+                item.value = switch (row.kind) {
+                    1 => .{ .admission = undefined },
+                    11 => .{ .received = undefined },
+                    else => .{ .user = undefined },
+                };
+                const message = switch (item.value) {
+                    .admission, .received, .user => |*message| message,
+                    else => unreachable,
+                };
                 message.admission = admission;
                 read.state = .{ .message = .{ .read = .{ .message = message }, .entry = .{ .position = read.position, .ordinal = read.ordinal } } };
             },
@@ -1818,51 +1797,6 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
 }
 
-/// The positions of a Session's proposed calls after ?2 through ?3: the
-/// immutable accepted item owns discovery, including rejected calls. Do
-/// not filter on live Actions, permissions or Turn state.
-const proposal_positions = rsql.Read(.{
-    .sql = "SELECT session_position FROM model_output_item " ++
-        "WHERE session_ref=?1 AND session_position>?2 AND session_position<=?3 AND item_kind=3 " ++
-        "ORDER BY session_position LIMIT 17",
-    .Args = struct { session: []const u8, after: u64, end: u64 },
-    .Row = struct { session_position: rsql.Positive },
-    .cardinality = .each,
-});
-
-/// Round 1 reads the Session's next position; round 2 the page's positions
-/// into this frame, with the cursor's Proposal; round 3 every row's
-/// Proposal. A failed step of the positions read is `ProposalReadFailed`,
-/// main's name.
-pub fn proposalPage(a: *ReadAccess, request: *const protocol.ProposalPage, page: *ProposalPage) !void {
-    const session = request.session.slice();
-    const next = try readNextPosition(a, session) orelse return error.SessionNotFound;
-    const end = request.end orelse next - 1;
-    if (end >= next) return error.InvalidCursor;
-    page.* = .{ .end = end };
-    var rows: Collected(proposal_positions.Row, protocol.proposal_page_items + 1) = .{};
-    var cursor: ProposalRead = .{ .position = request.after };
-    if (request.after != 0) readProposal(a, session, &cursor);
-    a.readEach(proposal_positions, .{ .session = session, .after = request.after, .end = end }, rows.items.len, &rows);
-    try runRows(a);
-    if (request.after != 0) cursor.found() catch |err| switch (err) {
-        error.ContentNotFound => return error.InvalidCursor,
-        else => return err,
-    };
-    page.more = rows.len > page.items.len;
-    page.count = @min(rows.len, page.items.len);
-    if (page.count == 0) return;
-    var reads: [protocol.proposal_page_items]ProposalRead = undefined;
-    for (rows.slice()[0..page.count], page.items[0..page.count], reads[0..page.count]) |row, *item, *read| {
-        read.* = .{ .position = row.session_position.get(), .metadata = item };
-        readProposal(a, session, read);
-    }
-    try runRows(a);
-    for (reads[0..page.count]) |*read| try read.found();
-}
-
-pub const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [3]i64 };
-
 /// The content columns of a Proposal's three fields, in ProposalField order.
 const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", "arguments_content_id" };
 
@@ -1893,7 +1827,7 @@ const proposal_joins = "LEFT JOIN model_operation op ON op.operation_id=item.ope
     "LEFT JOIN content field1 ON field1.content_id=tool_call." ++ proposal_fields[1] ++ " " ++
     "LEFT JOIN content field2 ON field2.content_id=tool_call." ++ proposal_fields[2] ++ " ";
 
-// The page, continuation cursor and byte route share one provenance check.
+// Every caller (Activity pages, Action reads, call outcomes, the report) shares one provenance check.
 /// The Proposal at a Session position, with each field's content row.
 pub const proposal_row = rsql.Read(.{
     .sql = "SELECT " ++ proposal_columns ++ " FROM model_output_item item " ++ proposal_joins ++
@@ -1925,14 +1859,12 @@ pub const proposal_row = rsql.Read(.{
 });
 
 /// The Proposal at `position`, read in a round it may share with other
-/// rows (`readProposal`), into `metadata` and `content_ids` when the
-/// caller keeps them. Each field's content must be public and match the
+/// rows (`readProposal`), into `metadata` when the caller keeps it. Each field's content must be public and match the
 /// metadata admission certified, so reference substitution is detectable
 /// without reopening payloads.
 pub const ProposalRead = struct {
     position: u64,
     metadata: ?*protocol.ProposalMetadata = null,
-    content_ids: ?*[3]i64 = null,
     count: RowCount = .{},
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
@@ -1941,9 +1873,6 @@ pub const ProposalRead = struct {
 
     fn keep(read: *ProposalRead, row: *const proposal_row.Row) error{CorruptStore}!void {
         const fields = try certifiedFields(row);
-        if (read.content_ids) |ids| inline for (proposal_fields, 0..) |column, index| {
-            ids[index] = @intCast(@field(row, column).get());
-        };
         if (read.metadata) |metadata| metadata.* = .{
             .position = read.position,
             .operation = row.operation_id.get(),
@@ -2069,11 +1998,12 @@ pub const ToolOutcomeRow = struct {
 /// a call; every call has its item, its three fields' contents, and is
 /// either rejected with its rejection's content and acceptance and no
 /// Action, or has an Action that is unresolved, with no result and no
-/// acceptance, or resolved, with its result's content and acceptance;
-/// with `terminal`, every call is rejected or resolved. Main also
-/// required a terminal Operation's publication, its largest acceptance;
-/// every rejected or resolved call has an acceptance, so a terminal
-/// Operation with a call has one, and no count is kept for it. For each
+/// acceptance, or resolved, with its result's content and acceptance.
+/// Main also required a public Tool Result's group to be terminal, every
+/// call rejected or resolved; `public_tool_result` only returns a group
+/// whose every call has an acceptance and content, so in the same
+/// snapshot no call the rule passes is unresolved, and no count is kept
+/// for it. For each
 /// call, as main's per-call Proposal read: its Proposal is consistent and
 /// its fields certified (`certifiedFields`). Every failure is
 /// `CorruptStore`, main's answer for each, so which one it meets first
@@ -2086,8 +2016,6 @@ pub const ToolOutcomeCheck = struct {
     expected: u32 = 0,
     calls: u32 = 0,
     valid: u32 = 0,
-    terminals: u32 = 0,
-    terminal: bool = false,
     failed: bool = false,
 
     /// One check may judge several reads' rows, each after the other's,
@@ -2107,7 +2035,7 @@ pub const ToolOutcomeCheck = struct {
         const operation = row.scope_operation.get();
         if (operation != check.operation) {
             try check.close();
-            check.* = .{ .terminal = check.terminal, .operation = operation, .expected = std.math.cast(u32, row.expected) orelse return error.CorruptStore };
+            check.* = .{ .operation = operation, .expected = std.math.cast(u32, row.expected) orelse return error.CorruptStore };
         }
         if (row.ordinal == null) return;
         if (check.calls == check.expected) return error.CorruptStore;
@@ -2118,14 +2046,12 @@ pub const ToolOutcomeCheck = struct {
         const unresolved = row.rejection_code == null and row.action_id != null and !row.action_resolved and !row.action_content and row.action_acceptance == null;
         const fields = row.length0 != null and row.length1 != null and row.length2 != null;
         if (row.item_kind == 3 and fields and (rejected or resolved or unresolved)) check.valid += 1;
-        if (rejected or resolved) check.terminals += 1;
     }
 
     /// Judges the Operation whose rows ended.
     fn close(check: *ToolOutcomeCheck) error{CorruptStore}!void {
         if (check.operation == 0) return;
-        if (check.expected == 0 or check.calls != check.expected or check.valid != check.expected or
-            (check.terminal and check.terminals != check.expected)) return error.CorruptStore;
+        if (check.expected == 0 or check.calls != check.expected or check.valid != check.expected) return error.CorruptStore;
         check.operation = 0;
     }
 
@@ -2140,8 +2066,8 @@ fn optionalPositive(value: ?rsql.Positive) ?u64 {
     return if (value) |positive| positive.get() else null;
 }
 
-/// One Operation: a public Tool Result's, every outcome terminal, or an
-/// Activity page's candidates'.
+/// One Operation: a public Tool Result's, or an Activity page's
+/// candidates'.
 const operation_outcome = ToolOutcome("", "SELECT DISTINCT ?1 AS operation_id," ++ expectedCallsSql("?1"), struct { operation: u64 }, false);
 
 /// Queues reading the Proposal at `read.position`; `read.found` follows
@@ -2151,21 +2077,11 @@ pub fn readProposal(a: anytype, session: []const u8, read: *ProposalRead) void {
 }
 
 /// `readProposal` in a round of its own.
-pub fn proposal(a: anytype, session: []const u8, position: u64) !ProposalIdentity {
-    var identity: ProposalIdentity = undefined;
-    var read: ProposalRead = .{ .position = position, .metadata = &identity.metadata, .content_ids = &identity.content_ids };
+pub fn proposal(a: anytype, session: []const u8, position: u64) !protocol.ProposalMetadata {
+    var metadata: protocol.ProposalMetadata = undefined;
+    var read: ProposalRead = .{ .position = position, .metadata = &metadata };
     readProposal(a, session, &read);
     try a.run();
     try read.found();
-    return identity;
-}
-
-pub fn openProposalField(a: *ReadAccess, request: *const protocol.ReadProposalField) !ContentLocation {
-    const identity = proposal(a, request.session.slice(), request.position) catch |err| switch (err) {
-        error.ContentNotFound => return err,
-        else => return store_core.fence(a.store, err),
-    };
-    const index = @backingInt(request.field);
-    const field = identity.metadata.fields[index];
-    return .{ .store = a.store, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest } };
+    return metadata;
 }
