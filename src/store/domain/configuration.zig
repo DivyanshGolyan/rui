@@ -54,7 +54,7 @@ pub fn toolSet(mask: c_int) !tool_catalog.ToolSet {
 
 /// The tools a creation or a `tools` change saves: the requested ones, or
 /// the defaults when a creation names none.
-fn requestedTools(requested: *const protocol.Configuration) tool_catalog.ToolSet {
+pub fn requestedTools(requested: *const protocol.Configuration) tool_catalog.ToolSet {
     if (requested.tools.state != .value) return toolSet(default_tools_mask) catch unreachable;
     var set: tool_catalog.ToolSet = .empty;
     // The parser admits only tools the Host offers: the built-ins.
@@ -425,6 +425,8 @@ pub const ConfigurationReads = struct {
     pair: ?content_domain.Pair = null,
     /// The tool set a creation or a `tools` change saves, when it does.
     tools: ?tool_set.Ensure = null,
+    /// The Session a creation starts as the child of, when it has one.
+    parent: ?[protocol.session_id_bytes]u8 = null,
 
     /// The value the instructions import through: the requested content,
     /// or the empty default a creation imports.
@@ -458,8 +460,8 @@ const creation_facts = rsql.Read(.{
 /// the `created_seq` of its first Session.
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -477,15 +479,21 @@ const insert_session = rsql.Write(.{
         digest: [32]u8,
         created_seq: u64,
         workspace_key: u64,
+        parent: ?protocol.Bounded(protocol.max_session_bytes),
     },
     // Its round read the reference free, under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Queues inserting the created Session `head` with the settings `next`.
-/// `configure` calls it, and a test drives it with references the schema
-/// refuses.
-pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64) void {
+/// Queues inserting the created Session `head` with the settings `next`,
+/// as the child of `parent` when one is named. `configure` calls it, and a
+/// test drives it with references the schema refuses.
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [protocol.session_id_bytes]u8) void {
+    var parent_ref: ?protocol.Bounded(protocol.max_session_bytes) = null;
+    if (parent) |reference| {
+        parent_ref = .{};
+        parent_ref.?.set(reference) catch unreachable;
+    }
     a.write(insert_session, .{
         .session = head,
         .workspace = next.workspace.slice(),
@@ -503,6 +511,7 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .digest = workspace_digest.*,
         .created_seq = created_seq,
         .workspace_key = head.workspace_key.get(),
+        .parent = parent_ref,
     });
 }
 
@@ -705,7 +714,7 @@ pub fn applyConfiguration(
             .workspace_key = if (reads.creation.workspace_key) |key| key else .of(created_seq),
             .next_position = .of(1),
         };
-        insertSession(a, head, next, &reads.workspace_digest, created_seq);
+        insertSession(a, head, next, &reads.workspace_digest, created_seq, if (reads.parent) |*parent| parent else null);
         try target.set(&reads.reference);
     } else {
         head = .{ .ref = session[0..protocol.session_id_bytes].*, .workspace_key = .of(next.workspace_key), .next_position = .of(next.next_position) };

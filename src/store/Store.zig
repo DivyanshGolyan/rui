@@ -26,6 +26,7 @@ const c = sqlite.c;
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
 const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const AgentDelivery = command_domain.AgentDelivery;
+const AgentStart = command_domain.AgentStart;
 const CoreActionInput = action_domain.CoreActionInput;
 const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
@@ -834,6 +835,35 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, faults)));
     }
 
+    /// Runs the `start_agent` call `binding` names with its checked
+    /// arguments, in one transaction; `configuration` is the agent's spec,
+    /// which this completes. `committed` runs once the task is admitted.
+    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
+        return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, faults });
+    }
+
+    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.agent_start) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, faults)));
+    }
+
+    /// Fails the core tool call `binding` names with `result`, in one
+    /// transaction; false when a stop selected its Turn first.
+    pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+        return self.queue().write(failCoreCallHeld, .{ self, binding, result, faults });
+    }
+
+    fn failCoreCallHeld(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.failCoreCall(&access, binding, result, faults)));
+    }
+
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
         return self.queue().write(recoverOneUncertainActionHeld, .{ self, active });
     }
@@ -1132,9 +1162,9 @@ const accepted_settlement_growth = 10240;
 
 comptime {
     // The settlement batch is the larger use: 14480 bytes, 9120 beyond the
-    // configure reads, 5760 with the tool set a configure may save. Exact,
+    // configure reads, 5768 with the tool set and parent a configure may save. Exact,
     // so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 5760 or scratch_bytes != 14480)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 5768 or scratch_bytes != 14480)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1181,6 +1211,8 @@ pub const Ordinary = struct {
     const model_success = attempt_binding || error{InvalidProviderEnvelope};
     const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
+    /// A creation updates no Session, but shares configure's error set.
+    const agent_start = action_attempt || error{SessionUpdateFailed};
 
     /// Rejects a declared ordinary name the body cannot return, so a
     /// stale or misspelled name fails to compile instead of fencing.

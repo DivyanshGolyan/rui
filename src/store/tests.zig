@@ -287,7 +287,7 @@ fn insertSessionForTesting(storage: *Store, current: *const configuration_domain
     defer a.deinit();
     const head: rsql.SessionHead = .{ .ref = ref.*, .workspace_key = .of(current.workspace_key), .next_position = .of(1) };
     const digest = store_core.workspaceDigest(current.workspace.slice());
-    configuration_domain.insertSession(&a, head, current, &digest, 1_000_000);
+    configuration_domain.insertSession(&a, head, current, &digest, 1_000_000, null);
     const ran = a.run();
     try a.abandon(.{});
     return ran;
@@ -8307,6 +8307,8 @@ const EntryPoint = enum {
     revokeActionSender,
     nextCoreAction,
     deliverAgentMessage,
+    startAgent,
+    failCoreCall,
     actionSupersededByStop,
     withActionDispatchHandoff,
     settleActionAttempt,
@@ -8360,6 +8362,8 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .revokeActionSender = 2,
     .nextCoreAction = 3,
     .deliverAgentMessage = 3,
+    .startAgent = 5,
+    .failCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
     .settleActionAttempt = 3,
@@ -8498,6 +8502,23 @@ const RoundMeter = struct {
     }
 };
 
+/// A `start_agent` spec as the Host's check leaves it: gpt-6.1-sol at low
+/// effort, `tools`, `permission_mode` and no label.
+pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) !protocol.Configuration {
+    var spec: protocol.Configuration = .{};
+    spec.model.state = .value;
+    try spec.model.value.set("gpt-6.1-sol");
+    spec.reasoning_effort.state = .value;
+    try spec.reasoning_effort.value.set("low");
+    spec.compaction_trigger.state = .value;
+    try spec.compaction_trigger.value.set("100000");
+    spec.tools.state = .value;
+    spec.tools = try .of(tools);
+    spec.permission_mode.state = .value;
+    try spec.permission_mode.value.set(permission_mode);
+    return spec;
+}
+
 test "each Store entry point takes its round budget on its common path" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -8612,15 +8633,14 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.stopSession);
         }
 
-        /// Two Bash calls under ask: one allowed, run and settled, one
-        /// denied; then the continuation's history, its failure, and the
-        /// Session's reads.
+        /// Three core calls: a Message delivered, an agent started, and a
+        /// start whose arguments the Host refused.
         fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var command = try completeConfiguration("budget-core", "", workspace, "model-a");
             command.configuration.tools.state = .value;
-            command.configuration.tools = try .of(&.{"message_agent"});
+            command.configuration.tools = try .of(&.{ "message_agent", "start_agent" });
             const session = storage.configure(&command, .{}).accepted.session;
             try submitTestMessage(storage, tmp, "budget-core-input", "budget-core-key", session.slice(), "message yourself");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -8628,7 +8648,11 @@ test "each Store entry point takes its round budget on its common path" {
             const decoded = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
             var encoded_buffer: [96]u8 = undefined;
             const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
-            const calls = [_]TestingCall{.{ .item_id = "core-item", .name = "message_agent", .encoded_call_id = "core-call", .decoded_call_id = "core-call", .encoded_arguments = encoded, .decoded_arguments = decoded }};
+            const calls = [_]TestingCall{
+                .{ .item_id = "core-item", .name = "message_agent", .encoded_call_id = "core-call", .decoded_call_id = "core-call", .encoded_arguments = encoded, .decoded_arguments = decoded },
+                .{ .item_id = "start-item", .name = "start_agent", .encoded_call_id = "start-call", .decoded_call_id = "start-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "refused-item", .name = "start_agent", .encoded_call_id = "refused-call", .decoded_call_id = "refused-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            };
             try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
             meter.start();
             const core = (try storage.nextCoreAction()).?;
@@ -8636,8 +8660,21 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
             meter.stop(.deliverAgentMessage);
+            const start = (try storage.nextCoreAction()).?;
+            try std.testing.expect(start.tool == .start_agent);
+            var spec = try testingAgentSpec(&.{"message_agent"}, "ask");
+            meter.start();
+            try std.testing.expect(try storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{}) == .started);
+            meter.stop(.startAgent);
+            const refused = (try storage.nextCoreAction()).?;
+            meter.start();
+            try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
+            meter.stop(.failCoreCall);
         }
 
+        /// Two Bash calls under ask: one allowed, run and settled, one
+        /// denied; then the continuation's history, its failure, and the
+        /// Session's reads.
         fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSessionAsk(storage, "budget-tools");
             try submitTestMessage(storage, tmp, "budget-tools-input", "budget-tools-key", session.slice(), "run");

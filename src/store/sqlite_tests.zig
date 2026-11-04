@@ -8637,3 +8637,62 @@ test "a Session with message_agent keeps it through its list row and report, as 
     const current = try protocol_reply.CurrentReply.decode(io, file, session.slice(), .{ .report = .{ .bytes = reported.len } });
     try std.testing.expect(current.current.settings.tools.set.eql(.initOne(.message_agent)));
 }
+
+test "a start_agent call creates its agent where its caller works, with the task from the caller, and may only narrow" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try store_testing.completeConfiguration("starting-caller", "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools = try .of(&.{ "message_agent", "start_agent" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const caller = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "start-task", "start-task", caller.slice(), "split the work");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "attached-item", .name = "start_agent", .encoded_call_id = "attached", .decoded_call_id = "attached", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "standalone-item", .name = "start_agent", .encoded_call_id = "standalone", .decoded_call_id = "standalone", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "wider-item", .name = "start_agent", .encoded_call_id = "wider", .decoded_call_id = "wider", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "bypass-item", .name = "start_agent", .encoded_call_id = "bypass", .decoded_call_id = "bypass", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, model, "start-metadata", &calls);
+    // Decided at once under `ask`, and never a Bash Attempt.
+    try std.testing.expectEqual(@as(u64, 4), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
+    try std.testing.expect(try storage.admitNextActionAttempt(300_000, .{}) == null);
+
+    const attached = (try storage.nextCoreAction()).?;
+    try std.testing.expect(attached.tool == .start_agent);
+    var spec = try tests.testingAgentSpec(&.{"message_agent"}, "ask");
+    try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(attached.binding, caller.slice(), "read the tests", true, &spec, null, .{}));
+    const standalone = (try storage.nextCoreAction()).?;
+    spec = try tests.testingAgentSpec(&.{}, "ask");
+    try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(standalone.binding, caller.slice(), "read the docs", false, &spec, null, .{}));
+    const wider = (try storage.nextCoreAction()).?;
+    spec = try tests.testingAgentSpec(&.{"bash"}, "ask");
+    try std.testing.expectEqual(command_domain.AgentStart.failed, try storage.startAgent(wider.binding, caller.slice(), "run things", true, &spec, null, .{}));
+    const bypass = (try storage.nextCoreAction()).?;
+    spec = try tests.testingAgentSpec(&.{"message_agent"}, "bypass");
+    try std.testing.expectEqual(command_domain.AgentStart.failed, try storage.startAgent(bypass.binding, caller.slice(), "run freely", true, &spec, null, .{}));
+    try std.testing.expect(try storage.nextCoreAction() == null);
+
+    // Two agents, both in the caller's Workspace with its provider; only
+    // the attached one is its child.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
+    // Each task is its agent's first Message, from the caller, under the
+    // call's own command key.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND admission_position=1 AND command_key LIKE 'rui.core/start_agent/%'", .{caller.slice()}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN session s ON s.session_ref=m.session_ref JOIN content c ON c.content_id=m.content_id WHERE s.parent_ref=?1 AND c.byte_length=14", .{caller.slice()}));
+    // The refusals name the field and start nothing.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='failed'", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'Started %'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.tools: bash is not one of your tools.%'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.permissionMode:%'", .{}));
+}

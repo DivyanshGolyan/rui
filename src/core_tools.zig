@@ -98,9 +98,11 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8) error{OutOfM
         },
         else => return refused("spec.compactAt must be a positive number of tokens"),
     }
-    configuration.tools = toolsField(arena, spec.get("tools") orelse return refused("spec.tools is required")) catch |err| switch (err) {
+    var unknown: []const u8 = "";
+    configuration.tools = toolsField(arena, spec.get("tools") orelse return refused("spec.tools is required"), &unknown) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Refused => return refused("spec.tools must be a list of distinct tool names"),
+        error.UnknownTool => return refusedField(arena, unknown, "is not a Rui tool (spec.tools)"),
     };
     configuration.permission_mode = stringField(spec, "permissionMode", @TypeOf(configuration.permission_mode)) orelse
         return refused("spec.permissionMode must be ask or bypass");
@@ -148,16 +150,24 @@ fn stringField(object: std.json.ObjectMap, comptime name: []const u8, comptime T
     return field;
 }
 
-fn toolsField(arena: std.mem.Allocator, value: std.json.Value) error{ OutOfMemory, Refused }!protocol.ToolsField {
+/// The tool list `value` names, sorted; `unknown` is set to a name no
+/// built-in tool has.
+fn toolsField(arena: std.mem.Allocator, value: std.json.Value, unknown: *[]const u8) error{ OutOfMemory, Refused, UnknownTool }!protocol.ToolsField {
     const items = switch (value) {
         .array => |array| array.items,
         else => return error.Refused,
     };
     const names = try arena.alloc([]const u8, items.len);
-    for (items, names) |item, *name| name.* = switch (item) {
-        .string => |text| text,
-        else => return error.Refused,
-    };
+    for (items, names) |item, *name| {
+        name.* = switch (item) {
+            .string => |text| text,
+            else => return error.Refused,
+        };
+        if (protocol.builtInTool(name.*) == null) {
+            unknown.* = name.*;
+            return error.UnknownTool;
+        }
+    }
     std.mem.sort([]const u8, names, {}, struct {
         fn less(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.order(u8, a, b) == .lt;
@@ -409,5 +419,43 @@ test "a message_agent text over its bound is rejected, across chunk boundaries" 
             try std.testing.expectEqual(@as(u64, length), check.accepted.text_bytes)
         else
             try std.testing.expectEqual(MessageAgentCheck{ .rejected = .text_invalid }, check);
+    }
+}
+
+test "a start_agent call's arguments carry a task and a whole spec, never a Workspace or provider" {
+    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}";
+    const Case = struct { arguments: []const u8, refusal: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true," ++ spec ++ "}" },
+        .{ .arguments = "{\"task\":\"\",\"attached\":true," ++ spec ++ "}", .refusal = "task must be nonempty UTF-8 text, at most 65536 bytes" },
+        .{ .arguments = "{\"attached\":true," ++ spec ++ "}", .refusal = "task is required" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":1," ++ spec ++ "}", .refusal = "attached must be true or false" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true}", .refusal = "spec is required" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"workspace\":\"/\"}}", .refusal = "spec.workspace: an agent always works in your Workspace" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"provider\":\"codex\"}}", .refusal = "spec.provider: an agent always uses your provider" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"edit\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "edit is not a Rui tool (spec.tools)" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"bash\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":0,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.compactAt must be a positive number of tokens" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"never\",\"label\":null}}", .refusal = "spec.permissionMode must be ask or bypass" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"note\":1," ++ spec ++ "}", .refusal = "note is not a start_agent field" },
+        .{ .arguments = "{\"task\":\"read\",\"task\":\"again\",\"attached\":true," ++ spec ++ "}", .refusal = "a field appears more than once" },
+        .{ .arguments = "[]", .refusal = "the arguments are not one JSON object" },
+        .{ .arguments = "{", .refusal = "the arguments are not one well-formed JSON object" },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const check = try checkStartAgent(arena.allocator(), case.arguments);
+        if (case.refusal) |expected| {
+            try std.testing.expectEqualStrings(expected, check.rejected);
+        } else {
+            const start = check.accepted;
+            try std.testing.expectEqualStrings("read", start.task);
+            try std.testing.expect(start.attached);
+            try std.testing.expectEqualStrings("gpt-6.1-sol", start.configuration.model.value.slice());
+            try std.testing.expectEqualStrings("100000", start.configuration.compaction_trigger.value.slice());
+            // Sorted, as the Store's tool list requires.
+            try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
+            try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
+        }
     }
 }
