@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the mechanical pre-push checks of CODING_STANDARDS.md#evidence in one step.
 
-Formatting, the CI policy tests, undefined fixture names, the development
+Whitespace, formatting, the CI policy tests, undefined fixture names, the development
 selection and the macOS type check whenever CI's review selection would
 run it. The selection covers committed changes since the merge base with
 --base; formatting and the tests read the working tree. Focused
@@ -20,10 +20,12 @@ from select_tests import changed_paths, select
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def checks(paths, available):
+def checks(paths, available, base):
     targets = select(paths, "development", available)["targets"]
     # check.yml's macos_typecheck runs whenever the review selection is non-empty.
     typecheck = bool(select(paths, "review", available)["targets"])
+    # The plan job runs this first; a failure there turns every check red.
+    yield "whitespace", ["git", "diff", "--check", base, "HEAD"]
     yield "zig fmt", ["zig", "fmt", "--check", "--ast-check", "build.zig", "src"]
     yield "tests/ci", [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci"]
     yield "undefined fixture names", [sys.executable, "-m", "ruff", "check", "--select", "F821", "tests"]
@@ -41,7 +43,7 @@ def main():
     base = subprocess.check_output(["git", "merge-base", "HEAD", args.base], cwd=ROOT, text=True).strip()
     paths, _ = changed_paths(base, "HEAD")
     failed = []
-    for name, command in checks(paths, available):
+    for name, command in checks(paths, available, base):
         print(f"== {name}: {' '.join(command)}", flush=True)
         if subprocess.run(command, cwd=ROOT).returncode:
             failed.append(name)
