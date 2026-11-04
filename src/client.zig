@@ -1975,12 +1975,16 @@ test "Host processing wait starts inactivity only after the first response byte"
     const writer = try std.Thread.spawn(.{}, struct {
         fn respond(fd: std.posix.fd_t) void {
             defer closeTestDescriptor(fd);
-            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(400), .awake) catch return;
             writeAll(fd, empty_test_response) catch {};
         }
     }.respond, .{sockets[1]});
     defer writer.join();
-    const head = try readResponseHeadWithInactivity(sockets[0], 10);
+    // The head is read a byte at a time, and each byte gets a fresh window.
+    // A loaded runner can pause the reader between bytes for over 10 ms
+    // (#859), so the window must outlast scheduling, while the silence before
+    // the first byte stays four windows long.
+    const head = try readResponseHeadWithInactivity(sockets[0], 100);
     try std.testing.expectEqual(@as(u16, 200), head.status);
 }
 
