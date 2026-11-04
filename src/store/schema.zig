@@ -47,6 +47,88 @@ comptime {
     ));
 }
 
+/// The oldest format a Store moves forward from (D204). An older Store, or
+/// a newer one, is refused with WrongStoreVersion, as before migrations.
+pub const migration_baseline: u32 = 51;
+
+/// One forward step of the Store format, from `from` to `from + 1`, as
+/// statements per engine. SQLite runs `sqlite` when a Store opens
+/// (`openExisting`). Rui runs no DDL on MySQL (D203): the DB team runs
+/// `mysql`, which `mysqlMigration` joins. A CHECK or predicate in either
+/// is spliced from `migrationExpression`, so it meets the rules schema
+/// text meets. `digest` pins the text (`migrationDigest`).
+///
+/// SQLite keeps each CREATE text as run, and a Store opens only when every
+/// object's text equals a fresh bootstrap's. ALTER TABLE ADD COLUMN splices
+/// the new column into the stored text, and RENAME quotes the new name, so
+/// a step that changes a table rebuilds it: it renames the table aside,
+/// creates it with the new text, copies its rows, drops the old table and
+/// creates its indexes again. `migrate` runs the steps with foreign keys
+/// off and legacy_alter_table on, so other tables' references keep the
+/// table's name, and checks every foreign key before it commits.
+pub const Migration = struct {
+    from: u32,
+    sqlite: []const [:0]const u8,
+    mysql: []const [:0]const u8,
+    digest: u64,
+};
+
+/// Every step from `migration_baseline` to `schema_version`, oldest first.
+/// The baseline snapshots (migration_baseline.*.sql) never change; the
+/// chain grows. Only the last step, whose schema_version is unreleased
+/// (tests/ci/test_store_schema_version.py), may change, with its digest.
+pub const migrations = [_]Migration{};
+comptime {
+    if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
+    for (migrations, 0..) |step, position| {
+        const expected = migration_baseline + position;
+        if (step.from != expected) @compileError(std.fmt.comptimePrint(
+            "migrations: step {d} moves from {d}; the step after {d} must move from {d}",
+            .{ position, step.from, expected -| 1, expected },
+        ));
+        if (step.from >= schema_version) @compileError(std.fmt.comptimePrint(
+            "migrations: the step from {d} moves past schema_version {d}: set schema_version to {d} and append its bootstrap_digests row, or drop the step",
+            .{ step.from, schema_version, step.from + 1 },
+        ));
+        if (step.digest != migrationDigest(step)) @compileError(if (step.from + 1 == schema_version) std.fmt.comptimePrint(
+            "migrations: the step from {d} changed: set its digest to 0x{x:0>16}",
+            .{ step.from, migrationDigest(step) },
+        ) else std.fmt.comptimePrint(
+            "migrations: the step from {d} shipped with digest 0x{x:0>16}, and its text now digests to 0x{x:0>16}: restore its text, and put the change in a new step",
+            .{ step.from, step.digest, migrationDigest(step) },
+        ));
+    }
+    if (migrations.len < schema_version - migration_baseline) @compileError(std.fmt.comptimePrint(
+        "migrations: schema_version is {d}, and no step moves a Store from {d}: append .{{ .from = {d}, .sqlite = ..., .mysql = ..., .digest = ... }}",
+        .{ schema_version, migration_baseline + migrations.len, migration_baseline + migrations.len },
+    ));
+}
+
+/// FNV-1a over a step's SQLite statements, then its MySQL statements.
+pub fn migrationDigest(comptime step: Migration) u64 {
+    return statementsDigest(&.{ step.sqlite, step.mysql });
+}
+
+/// The statements of the step from `from`, as one text for the DB team to
+/// run on a MySQL Store at `from`; `ddl(.mysql)` is a new MySQL Store's.
+/// PR 8's `rui store schema --engine mysql [--from N]` prints them.
+pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
+    return comptime blk: {
+        if (from < migration_baseline or from - migration_baseline >= migrations.len)
+            @compileError(std.fmt.comptimePrint("migrations: no step moves a Store from {d}", .{from}));
+        var text: []const u8 = "";
+        for (migrations[from - migration_baseline].mysql) |statement| text = text ++ statement ++ ";\n";
+        const terminated = text ++ "\x00";
+        break :blk terminated[0..text.len :0];
+    };
+}
+
+/// `text`, a CHECK or index predicate on `table`, in `dialect`'s spelling,
+/// once it meets the rules schema text meets (`expression`).
+pub fn migrationExpression(comptime dialect: rsql.Dialect, comptime table: []const u8, comptime text: []const u8) []const u8 {
+    return comptime expression(dialect, tables[tablePosition(&tables, table)], text);
+}
+
 /// SQL membership of `column` in a closed set of enum tags or text literals:
 /// IN up to two values, else an OR of equalities, because SQLite builds a
 /// temporary b-tree for an IN list of more than two each time the statement
@@ -1074,9 +1156,18 @@ fn joinLines(comptime lines: []const []const u8) []const u8 {
 /// SHA-256: it is a fixed algorithm, and SHA-256 costs seconds of every
 /// compile.
 pub fn digest() u64 {
+    return statementsDigest(&.{&bootstrap_sql});
+}
+
+/// FNV-1a over each statement of each group, NUL after each statement and
+/// 0x01 between groups.
+fn statementsDigest(comptime groups: []const []const [:0]const u8) u64 {
     return comptime blk: {
         var text: []const u8 = "";
-        for (bootstrap_sql) |statement| text = text ++ statement ++ "\x00";
+        for (groups, 0..) |group, position| {
+            if (position != 0) text = text ++ "\x01";
+            for (group) |statement| text = text ++ statement ++ "\x00";
+        }
         @setEvalBranchQuota(10 * text.len + 1000);
         break :blk std.hash.Fnv1a_64.hash(text);
     };
@@ -1195,15 +1286,55 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "COMMIT");
 }
 
+/// Opens a Store of this application at schema_version, or moves one at a
+/// format from migration_baseline on to it first (`migrate`).
+pub fn openExisting(database: *c.sqlite3, selector: []const u8) !void {
+    if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
+    const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
+    if (found == schema_version) return validateCurrent(database, selector);
+    if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
+    return migrate(database, selector, found, migrations[found - migration_baseline ..]);
+}
+
+/// In one transaction: runs `steps`' SQLite statements on a Store at
+/// format `from`, sets its format to schema_version, and commits only if
+/// the Store then validates as a fresh bootstrap's would
+/// (`validateCurrent`) and every foreign key holds. A Store whose
+/// store_meta format is not `from` is a WrongStoreVersion, and any failure
+/// leaves the Store as it was.
+pub fn migrate(database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+    // Both outside the transaction, where PRAGMA foreign_keys takes effect.
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    defer sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch {};
+    try sqlite.exec(database, "BEGIN EXCLUSIVE");
+    errdefer sqlite.rollback(database);
+    var from_text: [10]u8 = undefined;
+    if (!try metaEquals(database, "format", std.fmt.bufPrint(&from_text, "{d}", .{from}) catch unreachable)) return error.WrongStoreVersion;
+    for (steps) |step| for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    {
+        const violations = try sqlite.prepare(database, "PRAGMA foreign_key_check");
+        defer _ = c.sqlite3_finalize(violations);
+        switch (c.sqlite3_step(violations)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => return error.MigrationBrokeForeignKey,
+            else => return error.StatementFailed,
+        }
+    }
+    try sqlite.exec(database, version_sql);
+    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
+    try validateCurrent(database, selector);
+    try sqlite.exec(database, "COMMIT");
+}
+
 /// Refuses a Store unless its tables and indexes are exactly the ones
 /// bootstrap creates, each with the same CREATE text. SQLite keeps that text
-/// as run and bootstrap is its only writer, so a dropped CHECK, a changed
-/// column or a missing or extra index or trigger is a WrongStoreSchema. A
+/// as run, and only bootstrap and `migrate` write it, so a dropped CHECK, a
+/// changed column, a migration that leaves other text than bootstrap's, or a
+/// missing or extra index or trigger is a WrongStoreSchema. A
 /// network engine keeps no such text: PR 8/9 compare its catalog's tables,
 /// columns and indexes by name and type instead, which cannot see a CHECK.
-pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
-    if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
-    if (try sqlite.pragmaInt(database, "PRAGMA user_version") != schema_version) return error.WrongStoreVersion;
+/// Its caller has read user_version as schema_version, or set it.
+fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
     {
         const expected = comptime objects(.sqlite);
         const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");

@@ -18,6 +18,7 @@ import subprocess
 import sys
 
 import host_process
+import live_engines
 
 IMAGE = "mysql:8.4.13@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7"
 READY_SECONDS = 180
@@ -77,7 +78,6 @@ def main(argv, root_password):
 
 
 if __name__ == "__main__":
-    # Read before `enter`, which keeps only the fixture environment.
-    password = os.environ.get("RUI_TEST_MYSQL_ROOT_PASSWORD", "")
+    password = os.environ.get(live_engines.MYSQL_ROOT_PASSWORD, "")
     host_process.enter()
     sys.exit(main(sys.argv[1:], password))
