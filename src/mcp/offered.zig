@@ -54,7 +54,7 @@ fn before(_: void, a: Item, b: Item) bool {
 /// The built-ins plus each source's tools, sorted by name. A listed source
 /// contributes what it listed; an unlisted one, its records in `saved`.
 /// Everything the result points to is `listed`'s, `saved`'s or `arena`'s.
-pub fn merge(arena: std.mem.Allocator, saved: ?*const tools.Catalog, sources: []const Source, collision: *Collision) Error!tools.Catalog {
+pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.Catalog, sources: []const Source, collision: *Collision) Error!tools.Catalog {
     var items: std.ArrayList(Item) = .empty;
     for (tools.built_in.records) |record| try items.append(arena, .{ .record = record, .source = built_in_source });
     for (sources) |source| {
@@ -74,7 +74,13 @@ pub fn merge(arena: std.mem.Allocator, saved: ?*const tools.Catalog, sources: []
         }
     }
     if (items.items.len > tools.max_catalog_records) return error.TooManyTools;
-    std.mem.sort(Item, items.items, {}, before);
+    // Insertion sort: stable (so a collision names its sources in order), and
+    // std's block sort puts a 45 KiB frame on the Host's main thread.
+    for (1..items.items.len) |at| {
+        var low = at;
+        while (low > 0 and before({}, items.items[low], items.items[low - 1])) : (low -= 1)
+            std.mem.swap(Item, &items.items[low], &items.items[low - 1]);
+    }
     for (items.items[1..], 0..) |item, at| {
         const earlier = items.items[at];
         if (!std.mem.eql(u8, earlier.record.name, item.record.name)) continue;
@@ -100,7 +106,7 @@ pub const Fetched = union(enum) {
 
 /// Lists one server's tools within `list_timeout_ms`, copying them into
 /// `arena`. Anything but a complete listing leaves the server unreachable.
-pub fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: launch_frame.Frame.McpServer) Error!Fetched {
+pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: launch_frame.Frame.McpServer) Error!Fetched {
     const target = http1.parseTarget(server.url.slice()) catch return .unreachable_;
     const entries = try scratch.alloc(Listing.Entry, entries_per_server);
     defer scratch.free(entries);
@@ -147,7 +153,7 @@ pub fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, s
 
 /// Lists every server and merges the result with `saved`. On a collision
 /// the error is `ToolNameCollision` and `collision` says between which.
-pub fn collect(
+pub noinline fn collect(
     io: std.Io,
     arena: std.mem.Allocator,
     scratch: std.mem.Allocator,

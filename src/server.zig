@@ -864,7 +864,7 @@ pub const launch_shutdown_seconds = 10;
 /// Lists each MCP server and saves the Host's catalog: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
 /// (D147). A name two sources share refuses the start (D142).
-fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer) !void {
+noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer) !void {
     var saved = try storage.readCatalog(arena);
     const kept: ?tools.Catalog = if (saved) |*found| found.catalog() else null;
     var collision: mcp_offered.Collision = .{};
