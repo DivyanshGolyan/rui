@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 51;
+pub const schema_version: u32 = 52;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -30,6 +30,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x8382406a3bf20730 },
+    .{ .schema_version = 52, .digest = 0x8b2df5ab01885a41 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -78,7 +79,22 @@ pub const Migration = struct {
 /// Every step from `migration_baseline` to `schema_version`, oldest first.
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
 /// chain grows. Only a step past the released schema_version may change.
-pub const migrations = [_]Migration{};
+pub const migrations = [_]Migration{
+    // Schema 52: a Session's parent (D27).
+    .{
+        .from = 51,
+        .sqlite = &.{
+            "ALTER TABLE session RENAME TO session_before_52",
+            "CREATE TABLE session(\n session_ref TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(session_ref AS BLOB))=6 AND (session_ref NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*' AND length(session_ref)=length(CAST(session_ref AS BLOB)))),\n workspace TEXT NOT NULL CHECK(length(CAST(workspace AS BLOB)) BETWEEN 1 AND 4096),\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),\n codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),\n prefix_seal BLOB CHECK(prefix_seal IS NULL OR length(prefix_seal)=56),\n model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n revision INTEGER NOT NULL CHECK(revision>0),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n created_at INTEGER NOT NULL CHECK(created_at>0),\n next_position INTEGER NOT NULL CHECK(next_position>0),\n created_seq INTEGER NOT NULL UNIQUE CHECK(created_seq>0),\n workspace_digest BLOB NOT NULL CHECK(length(workspace_digest)=32),\n workspace_key INTEGER NOT NULL,\n parent_ref TEXT REFERENCES session(session_ref),\n CHECK(workspace_key>0 AND workspace_key<=created_seq),\n CHECK(parent_ref IS NULL OR parent_ref<>session_ref)\n) STRICT",
+            "INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key) SELECT session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key FROM session_before_52",
+            "DROP TABLE session_before_52",
+            "CREATE INDEX session_workspace_list ON session(workspace_digest,created_seq)",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
+        },
+    },
+};
 
 comptime {
     if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
@@ -334,14 +350,17 @@ pub const tables = [_]Table{
             .{ .name = "workspace_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             // The change ring's key: created_seq of the Workspace's first Session.
             .{ .name = "workspace_key", .type = .int },
+            // The Session that started this one as its attached child (D27).
+            .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
-        .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
+        .checks = &.{ "workspace_key>0 AND workspace_key<=created_seq", "parent_ref IS NULL OR parent_ref<>session_ref" },
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
+            references("parent_ref", "session", session_reference),
         },
     },
     .{

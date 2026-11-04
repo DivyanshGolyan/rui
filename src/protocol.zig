@@ -185,9 +185,10 @@ pub const ToolsField = struct {
 pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
 
 /// The tools the Host offers, in their names' byte order: `bash` runs locally as
-/// Actions; `message_agent` is the core's own, run as a core command (D24);
+/// Actions; `message_agent` and `start_agent` are the core's own, run as core
+/// commands (D24);
 /// `web_search` is hosted, run by the provider inside a response.
-pub const BuiltInTool = enum { bash, message_agent, web_search };
+pub const BuiltInTool = enum { bash, message_agent, start_agent, web_search };
 
 /// The built-in tool `name` names, or null.
 pub fn builtInTool(name: []const u8) ?BuiltInTool {

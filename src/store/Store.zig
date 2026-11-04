@@ -1132,9 +1132,9 @@ const accepted_settlement_growth = 10240;
 
 comptime {
     // The settlement batch is the larger use: 14480 bytes, 9120 beyond the
-    // configure reads, 5560 with the tool set a configure may save. Exact,
+    // configure reads, 5760 with the tool set a configure may save. Exact,
     // so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 5560 or scratch_bytes != 14480)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 5760 or scratch_bytes != 14480)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
