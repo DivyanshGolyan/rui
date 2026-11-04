@@ -553,6 +553,11 @@ fn contractValue(comptime T: type, value: anytype) T {
     };
 }
 
+/// The contract's copy of a frozen effort.
+fn effortOf(effort: ?protocol.ReasoningEffort) ?codec_abi.Effort {
+    return if (effort) |value| contractValue(codec_abi.Effort, value) else null;
+}
+
 comptime {
     std.debug.assert(codec_abi.max_model_bytes == protocol.max_model_bytes);
 }
@@ -677,6 +682,8 @@ pub const Preparation = struct {
         output_parts,
         tool_results,
         covered_tool_results,
+        /// The boundary of the Operation being prepared, after the span.
+        current_operation,
         compaction_trigger,
         tools,
         tool,
@@ -827,8 +834,8 @@ pub const Preparation = struct {
                 try self.view.settings(&self.settings);
                 if (self.settings.output_schema != null and !providers.acceptsOutputSchema(protocol.routeOf(self.state.routes, self.settings.provider)))
                     return error.UnsupportedOutputSchemaRoute;
-                const codec = self.settings.provider.codec();
-                self.carry = codecs.initialCarry(codec);
+                const codec = self.settings.codec;
+                self.carry = codecs.initialCarry(codec, effortOf(self.settings.starting_effort));
                 self.encoder = codecs.resumeFrom(self.carry);
                 codecs.requestHeaders(codec, self.loadSettingsItem(), &self.request.headers);
                 self.state.stage = .history_validation;
@@ -859,7 +866,7 @@ pub const Preparation = struct {
                     .pending => return .pending,
                     .ready => |entry| entry orelse {
                         try self.endSpan();
-                        self.state.stage = .compaction_trigger;
+                        self.state.stage = .current_operation;
                         return self.loadItemHeader(.history_end, 0);
                     },
                 };
@@ -885,6 +892,9 @@ pub const Preparation = struct {
                         return self.loadItemHeader(.{ .message = if (entry.kind == .user) .user else .instruction }, handles);
                     },
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
+                    // A compaction base covers the boundaries before its
+                    // anchor with the output, so effort there is the top's.
+                    .operation => if (!covered) return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0),
                     .provider_output => {
                         if (covered) return .pending;
                         validateRequestedBinding(entry.requested_model.?.slice(), self.settings.model.slice()) catch {
@@ -943,6 +953,12 @@ pub const Preparation = struct {
             },
             .covered_tool_results => {
                 if (try self.view.nextToolResult() == null) self.state.stage = .history;
+            },
+            // Where a later request's span places this Operation's
+            // boundary: after everything admitted before it.
+            .current_operation => {
+                self.state.stage = .compaction_trigger;
+                return self.loadItemHeader(.{ .operation = effortOf(self.settings.reasoning_effort) }, 0);
             },
             .compaction_trigger => {
                 self.state.stage = .tools;
@@ -1003,7 +1019,8 @@ pub const Preparation = struct {
         const header = &self.item;
         header.handles = 0b1;
         header.item = .{ .settings = .{
-            .effort = if (self.settings.reasoning_effort) |effort| contractValue(codec_abi.Effort, effort) else null,
+            .effort = effortOf(self.settings.reasoning_effort),
+            .starting_effort = effortOf(self.settings.starting_effort),
             .session_affinity = self.settings.session_affinity,
             .model_length = @intCast(model.len),
         } };
@@ -1349,7 +1366,7 @@ pub const Preparation = struct {
         self.request.charged = self.writer.charged;
         self.request.structured_output = self.settings.output_schema != null;
         self.request.provider = self.settings.provider;
-        self.request.codec = self.settings.provider.codec();
+        self.request.codec = self.settings.codec;
         return .{ .prepared = &self.request };
     }
 
@@ -2413,7 +2430,7 @@ test "request preparation frozen selection excludes later messages" {
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-test "request preparation emits catalog or explicit effort through sealed custody and compaction" {
+test "request preparation keeps the starting effort at the top and changes it at its Operation" {
     for ([_]struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8 }{
         .{ .model = "gpt-6-luna", .expected = "medium" },
         .{ .model = "gpt-6-astra", .expected = "low" },
@@ -2471,7 +2488,12 @@ test "request preparation emits catalog or explicit effort through sealed custod
             const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
             defer parsed.deinit();
             const request = parsed.value.object;
-            const expected = if (case.override != null and purpose != 0) "low" else case.expected;
+            // The top keeps the Session's starting effort; a later change
+            // is an update item at its Operation, after the span.
+            const expected = case.expected;
+            const changed = case.override != null and purpose != 0;
+            try std.testing.expectEqual(@as(usize, @intFromBool(changed)), std.mem.count(u8, bytes, "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"low\"}},{\"type\":\"compaction_trigger\"}"));
+            try std.testing.expectEqual(@as(usize, @intFromBool(changed)), std.mem.count(u8, bytes, "configuration_update"));
             if (expected) |effort| {
                 try std.testing.expectEqual(true, request.contains("reasoning"));
                 const reasoning = request.get("reasoning").?.object;
@@ -3502,6 +3524,10 @@ fn advanceMemoHistoryForTesting(setup: *PreparationTestSetup, session: protocol.
 }
 
 fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounded(protocol.max_session_bytes) {
+    return configureMemoSessionModelForTesting(setup, "model-a");
+}
+
+fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
     var command: protocol.ConfigureCommand = .{};
     try command.key.set("memo-config");
     command.configuration.workspace.state = .value;
@@ -3509,7 +3535,7 @@ fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounde
     command.configuration.provider.state = .value;
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
-    try command.configuration.model.value.set("model-a");
+    try command.configuration.model.value.set(model);
     command.configuration.tools.state = .value;
     command.configuration.tools.count = 1;
     command.configuration.tools.values[0] = .bash;
@@ -3625,6 +3651,58 @@ test "request N+1 begins with request N's history span" {
             previous = null;
         }
         previous = try std.testing.allocator.dupe(u8, span);
+    }
+}
+
+test "an effort change keeps each request's input a prefix of the next" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionModelForTesting(&setup, "gpt-5.5");
+    try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    // The effort set before each round's successor is admitted; null
+    // leaves it, and a repeat changes nothing the model sees.
+    const efforts = [_]?[]const u8{ null, "high", null, "xhigh", "xhigh", "medium" };
+    var previous: ?[]u8 = null;
+    defer if (previous) |bytes| std.testing.allocator.free(bytes);
+    for (efforts, 0..) |effort, round| {
+        if (round != 0) {
+            if (effort) |value| {
+                var update: protocol.ConfigureCommand = .{};
+                var key: [32]u8 = undefined;
+                try update.key.set(try std.fmt.bufPrint(&key, "effort-round-{d}", .{round}));
+                update.session = session;
+                update.configuration.reasoning_effort.state = .value;
+                try update.configuration.reasoning_effort.value.set(value);
+                try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+            }
+            binding = try advanceMemoHistoryForTesting(&setup, session, binding, round);
+        }
+        // A memo copy writes what a rebuild does.
+        _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+        const request = try prepareMemoForTesting(&setup, binding, null, .{});
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+        defer parsed.deinit();
+        // The top keeps gpt-5.5's starting effort for the Session's life.
+        try std.testing.expectEqualStrings("medium", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+        // Everything up to the end of the input is the next request's start.
+        const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
+        if (previous) |earlier| {
+            try std.testing.expectStringStartsWith(request.bytes, earlier);
+            std.testing.allocator.free(earlier);
+        }
+        previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
+        if (round == efforts.len - 1) {
+            // high, xhigh, medium: three changes, each written once.
+            try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, request.bytes, "configuration_update"));
+            try std.testing.expectStringEndsWith(request.bytes[0..input_end], "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"medium\"}}");
+        }
+        std.testing.allocator.free(request.bytes);
     }
 }
 
