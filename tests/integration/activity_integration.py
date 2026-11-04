@@ -173,15 +173,18 @@ def main():
             assert history(store, complete_end, direction="backward")[1] == list(reversed(complete))
             assert history(store, position=queued_end)[1] == [r for r in complete if int(r["position"]) > int(queued_end)], "catch-up replayed old group ties"
             for row in complete:
-                if kind(row) in ("assistant", "outcome"):
+                if kind(row) in ("assistant", "turn_ended"):
                     assert caller(store, "content", row["position"], row["ordinal"]) == TEXT.encode()
+            # Each done Turn marks one answer final.
+            done = [r for r in complete if kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "done"]
+            assert done and len(done) == len([r for r in complete if kind(r) == "assistant" and r["value"]["assistant"]["final"]]), complete
             message(state, store, "third", SESSION, "stopped work")
             third = wait_for(lambda: (h := history(store)) and (h if len([r for r in h[1] if kind(r) == "call"]) == 36 else None), "later proposals")
             message(state, store, "excluded", SESSION, "equal queued input")
             stop_session(state, store, "stop", SESSION)
-            stopped_end, stopped = wait_for(lambda: (h := history(store)) and (h if any(kind(r) == "outcome" and r["value"]["outcome"]["code"] == "cancelled" for r in h[1]) else None), "stopped outcome")
+            stopped_end, stopped = wait_for(lambda: (h := history(store)) and (h if any(kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "stopped" for r in h[1]) else None), "stopped outcome")
             assert history(store, third[0])[1] == third[1]
-            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "tool_result", "outcome", "stop"}
+            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "tool_result", "turn_ended", "stop"}
             excluded = next(r["value"]["admission"] for r in stopped if kind(r) == "admission" and r["value"]["admission"]["key"] == "excluded")
             assert excluded["state"] == "excluded" and excluded["turn"] is None
             assert all(r["value"]["stop"]["completion"] == "completed" for r in stopped if kind(r) == "stop")

@@ -361,6 +361,24 @@ pub const CommandKind = enum {
 };
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
 pub const SessionStopCompletion = enum { pending, completed };
+
+/// How a Turn ended, as its `turn_ended` Activity row names it.
+pub const TurnEnding = enum {
+    /// The Turn's answer is its `final` assistant row.
+    done,
+    /// The conversation no longer fits the model's context, even after compaction.
+    context_full,
+    /// The provider answered with a refusal that resending will meet again.
+    provider_refused,
+    /// The provider could not be reached, or retries ran out.
+    provider_unavailable,
+    /// A Session stop ended it.
+    stopped,
+    /// A Model Interruption ended it.
+    interrupted,
+    /// Any other failure, which the row's `code` names.
+    failed,
+};
 pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
 pub const ModelInterruptionRejection = enum {
     invalid_session_reference,
@@ -621,7 +639,7 @@ pub const ActivityItem = struct {
     value: Value,
     /// `admission` is a Message a person or script sent; `received` one
     /// another Session sent, which always names it as `sender`.
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message };
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
@@ -636,7 +654,12 @@ pub const ActivityItem = struct {
     // A null `sender` means a human or script sent the Message.
     pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?NamedPeer = null };
     pub const Call = ProposalMetadata;
-    pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(max_code_bytes), content: ?Content };
+    /// `final` marks the Turn's answer: the assistant row a `done` Turn
+    /// ended with, once its `turn_ended` row is within the page's end.
+    pub const Assistant = struct { content: Content, final: bool = false };
+    /// `code` is the saved code the ending was judged from; `content` a
+    /// done Turn's answer or a failed one's report.
+    pub const TurnEnded = struct { turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
@@ -654,16 +677,16 @@ pub const ActivityItem = struct {
         pub const admission = message;
         pub const user = message;
         pub const received = message;
-        /// Hole: content.
-        pub const assistant = .{Hole{ .json = Content }};
+        /// Holes: content, final.
+        pub const assistant = .{ "{\"content\":", Hole{ .json = Content }, ",\"final\":", Hole.boolean, "}" };
         /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
         pub const call = .{ "{\"operation\":\"", Hole.decimal, "\",\"turn\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\",\"action\":", Hole.optional_id, ",\"rejection\":", Hole{ .optional_tag = ProposalRejection }, ",\"fields\":[", Hole{ .json = Content }, ",", Hole{ .json = Content }, ",", Hole{ .json = Content }, "]}" };
         /// Holes: content, presentation.
         pub const tool_result = .{ "{\"content\":", Hole{ .json = Content }, ",\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
         /// A call the provider ran, shown by its line alone. Hole: presentation.
         pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
-        /// Holes: turn, operation, code, content.
-        pub const outcome = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
+        /// Holes: turn, operation, ending, code, content.
+        pub const turn_ended = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
         /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
         /// Holes: admission, admitted at, target, content.
@@ -689,7 +712,7 @@ pub const ActivityItem = struct {
             }),
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
-            .assistant => |content| try writeShape(out, value_shapes.assistant, .{content}),
+            .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{presentation}),
             .call => |call| {
@@ -698,7 +721,7 @@ pub const ActivityItem = struct {
                 for (call.fields, &fields) |field, *content| content.* = .{ .length = field.length, .digest = field.digest };
                 try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2] });
             },
-            .outcome => |outcome| try writeShape(out, value_shapes.outcome, .{ outcome.turn, outcome.operation, outcome.code.slice(), outcome.content }),
+            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
         try writeShape(out, tail, .{});

@@ -12,7 +12,7 @@ It never reruns a command whose outcome it cannot confirm.
 
 Rui is in development.
 It supports Codex sign-in, interactive conversations, scripts, optional Bash approval and saved-result recovery.
-JavaScript workflows, a file-editing tool and structured answers are not available yet.
+A file-editing tool and structured answers are not available yet.
 
 Rui supports Apple Silicon macOS and x86-64 Linux.
 Builds for ARM64 Linux and Intel macOS are experimental.

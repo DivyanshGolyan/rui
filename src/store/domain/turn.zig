@@ -11,6 +11,7 @@ const model_admission_domain = @import("model_admission.zig");
 const sqlite = @import("../sqlite.zig");
 const c = sqlite.c;
 const continues_without_input_sql = model_admission_domain.continues_without_input_sql;
+const failure_class = @import("../../failure_class.zig");
 
 /// How a Turn ended. `turn.outcome_code` saves `code()` and
 /// `turn.outcome_content_id` saves `content()`: a completed Turn's answer,
@@ -29,10 +30,12 @@ pub const TurnOutcome = union(enum) {
     const Failed = struct { code: []const u8, report: ?i64 };
     pub const Tag = std.meta.Tag(TurnOutcome);
 
+    pub const completed_code = "completed";
+
     /// The saved code of every outcome but a failure, which saves its own.
     fn fixedCode(tag: Tag) ?[]const u8 {
         return switch (tag) {
-            .completed => "completed",
+            .completed => completed_code,
             .cancelled => "cancelled",
             .retry_exhausted => "retry_exhausted",
             .resource_exceeded => "ResourceExceeded",
@@ -50,6 +53,24 @@ pub const TurnOutcome = union(enum) {
             .retry_exhausted, .resource_exceeded => |report| report,
             .failed => |failed| failed.report,
             .cancelled => null,
+        };
+    }
+
+    /// The ending the feed names. A cancelled Turn was `stopped` when a
+    /// Session stop selected it, and otherwise interrupted by a Model
+    /// Interruption.
+    pub fn ending(outcome: TurnOutcome, stopped: bool) protocol.TurnEnding {
+        return switch (outcome) {
+            .completed => .done,
+            .cancelled => if (stopped) .stopped else .interrupted,
+            .retry_exhausted => .provider_unavailable,
+            .resource_exceeded => .context_full,
+            .failed => |failed| switch (failure_class.of(failed.code)) {
+                .policy, .quota, .plan, .model, .sign_in, .api_key, .refused => .provider_refused,
+                .unreachable_provider, .retries_exhausted => .provider_unavailable,
+                .overflow => .context_full,
+                .interrupted, .other => .failed,
+            },
         };
     }
 

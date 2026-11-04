@@ -1159,7 +1159,20 @@
                 "type": "object",
                 "properties": {
                   "assistant": {
-                    "$ref": "#/components/schemas/ActivityItemContent"
+                    "type": "object",
+                    "properties": {
+                      "content": {
+                        "$ref": "#/components/schemas/ActivityItemContent"
+                      },
+                      "final": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "content",
+                      "final"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -1365,7 +1378,7 @@
               "value": {
                 "type": "object",
                 "properties": {
-                  "outcome": {
+                  "turn_ended": {
                     "type": "object",
                     "properties": {
                       "turn": {
@@ -1373,6 +1386,18 @@
                       },
                       "operation": {
                         "$ref": "#/components/schemas/Decimal"
+                      },
+                      "ending": {
+                        "type": "string",
+                        "enum": [
+                          "done",
+                          "context_full",
+                          "provider_refused",
+                          "provider_unavailable",
+                          "stopped",
+                          "interrupted",
+                          "failed"
+                        ]
                       },
                       "code": {
                         "type": "string",
@@ -1393,6 +1418,7 @@
                     "required": [
                       "turn",
                       "operation",
+                      "ending",
                       "code",
                       "content"
                     ],
@@ -1400,7 +1426,7 @@
                   }
                 },
                 "required": [
-                  "outcome"
+                  "turn_ended"
                 ],
                 "additionalProperties": false
               }
@@ -1805,7 +1831,7 @@
                 "call",
                 "tool_result",
                 "hosted_call",
-                "outcome",
+                "turn_ended",
                 "stop",
                 "sent",
                 "send_failed",
