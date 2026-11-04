@@ -64,7 +64,7 @@ export function post(call: Post): Promise<Buffer> {
 }
 
 function refusal(status: number | undefined, reply: Buffer): Error {
-	let parsed: components["schemas"]["ErrorReply"] | undefined;
+	let parsed: (components["schemas"]["ErrorReply"] & { answer?: { status?: unknown; code?: unknown } }) | undefined;
 	try {
 		parsed = JSON.parse(reply.toString("utf8"));
 	} catch {
@@ -72,6 +72,10 @@ function refusal(status: number | undefined, reply: Buffer): Error {
 	}
 	if (parsed && typeof parsed.code === "string" && typeof parsed.type === "string") {
 		return new RuiRequestError(parsed.type, parsed.code);
+	}
+	// A reused key with different input answers 409 with the command's own envelope.
+	if (parsed?.answer && typeof parsed.answer.code === "string" && typeof parsed.answer.status === "string") {
+		return new RuiRequestError(parsed.answer.status, parsed.answer.code);
 	}
 	return new RuiRequestError("invocation_error", `http_${status ?? "unknown"}`);
 }

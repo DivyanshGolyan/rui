@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
+import { models, Session, Sessions, setPaused, type ModelSummary } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -101,6 +102,8 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	#restart: NodeJS.Timeout | undefined;
 	#closing: Promise<void> | undefined;
 	#dead: Error | undefined;
+	/** Create and list Sessions. */
+	readonly sessions: Sessions = new Sessions(this);
 
 	private constructor(launch: Launch, runtimeDir: string, host: Host) {
 		super();
@@ -129,6 +132,25 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 			await rm(runtimeDir, { recursive: true, force: true });
 			throw error;
 		}
+	}
+
+	/** A handle on an existing Session. Does no I/O: an unknown id fails on the first call (D16). */
+	getSession(id: string): Session {
+		return new Session(this, id);
+	}
+
+	/** The models each provider offers. */
+	models(): Promise<ModelSummary[]> {
+		return models(this);
+	}
+
+	/** Holds every new Turn until `resume`. Running work continues. */
+	pause(): Promise<void> {
+		return setPaused(this, true);
+	}
+
+	resume(): Promise<void> {
+		return setPaused(this, false);
 	}
 
 	/**
@@ -180,6 +202,16 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 				retried = true;
 			}
 		}
+	}
+
+	/**
+	 * Sends one request built for the Host's Store. `build` receives the
+	 * canonical Store name the Host reported at readiness. Internal: the
+	 * package's calls are built on it.
+	 */
+	async exchange(path: string, build: (store: string) => string, environment?: Buffer): Promise<Buffer> {
+		const host = await this.#ready();
+		return this.call(path, build(host.info.store), environment);
 	}
 
 	/** The running child's process id. Internal. */
