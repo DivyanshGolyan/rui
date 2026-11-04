@@ -32,6 +32,8 @@ pub const Frame = struct {
     key: api_key.Key = .{},
     runtime_dir: protocol.Bounded(max_runtime_dir_bytes) = .{},
     active_capacity: ?usize = null,
+    /// The Host opens with Turns paused, as if `host_pause` had just run (D196).
+    paused: bool = false,
 
     pub const max_base_url_bytes = 2048;
 
@@ -126,8 +128,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
         if (capacity < 1) return refuse(refusal, "activeCapacity must be at least 1");
         frame.active_capacity = std.math.cast(usize, capacity) orelse return refuse(refusal, "activeCapacity is too large");
     }
-    // D196: opening paused needs Host pause (D193), which is not built yet.
-    if (wire.paused) return refuse(refusal, "paused is not supported by this build");
+    frame.paused = wire.paused;
 }
 
 /// The one stdout line a refused launch writes before exiting.
@@ -167,6 +168,18 @@ test "a launch frame carries the Store, provider key and runtime directory" {
     try std.testing.expectEqualStrings("/tmp/r/rui.sock", frame.socketPath(&buffer));
 }
 
+test "a launch frame can open the Host paused" {
+    var frame: Frame = .{};
+    defer frame.wipe();
+    var refusal: Refusal = undefined;
+    try parse(std.testing.allocator, valid_json, &frame, &refusal);
+    try std.testing.expect(!frame.paused);
+    try parse(std.testing.allocator,
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","paused":true}
+    , &frame, &refusal);
+    try std.testing.expect(frame.paused);
+}
+
 test "a launch frame is refused with launch_frame_invalid when it is wrong" {
     const cases = [_][]const u8{
         "not json",
@@ -185,8 +198,6 @@ test "a launch frame is refused with launch_frame_invalid when it is wrong" {
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/"}
         ,
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","activeCapacity":0}
-        ,
-        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","paused":true}
         ,
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","presets":{}}
         ,

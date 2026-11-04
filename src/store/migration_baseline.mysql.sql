@@ -17,6 +17,39 @@ CREATE TABLE content(
  CHECK(private IN (0,1)),
  CHECK(length(payload)=byte_length)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE tool_record(
+ tool_record_id BIGINT NOT NULL,
+ name VARCHAR(64) NOT NULL,
+ owner VARCHAR(8) NOT NULL,
+ description_content_id BIGINT NOT NULL,
+ input_schema_content_id BIGINT NOT NULL,
+ PRIMARY KEY(tool_record_id),
+ UNIQUE(name,owner,description_content_id,input_schema_content_id),
+ FOREIGN KEY(description_content_id) REFERENCES content(content_id),
+ FOREIGN KEY(input_schema_content_id) REFERENCES content(content_id),
+ CHECK(tool_record_id>0),
+ CHECK(OCTET_LENGTH(name) BETWEEN 1 AND 64 AND (NOT REGEXP_LIKE(name,'[^A-Za-z0-9_-]','c'))),
+ CHECK(owner IN ('rui','provider'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE tool_set(
+ tool_set_id BIGINT NOT NULL,
+ digest VARBINARY(32) NOT NULL,
+ member_count BIGINT NOT NULL,
+ PRIMARY KEY(tool_set_id),
+ UNIQUE(digest),
+ CHECK(tool_set_id>0),
+ CHECK(length(digest)=32),
+ CHECK(member_count BETWEEN 0 AND 128)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE tool_set_member(
+ tool_set_id BIGINT NOT NULL,
+ ordinal BIGINT NOT NULL,
+ tool_record_id BIGINT NOT NULL,
+ PRIMARY KEY(tool_set_id,ordinal),
+ FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),
+ FOREIGN KEY(tool_record_id) REFERENCES tool_record(tool_record_id),
+ CHECK(ordinal>=0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 CREATE TABLE session(
  session_ref VARCHAR(6) NOT NULL,
  workspace TEXT NOT NULL,
@@ -26,7 +59,7 @@ CREATE TABLE session(
  prefix_seal BLOB,
  model TEXT NOT NULL,
  instructions_content_id BIGINT NOT NULL,
- tools_mask BIGINT NOT NULL,
+ tool_set_id BIGINT NOT NULL,
  permission_mode BIGINT NOT NULL,
  output_schema_content_id BIGINT,
  revision BIGINT NOT NULL,
@@ -42,6 +75,7 @@ CREATE TABLE session(
  PRIMARY KEY(session_ref),
  UNIQUE(created_seq),
  FOREIGN KEY(instructions_content_id) REFERENCES content(content_id),
+ FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),
  FOREIGN KEY(output_schema_content_id) REFERENCES content(content_id),
  CHECK(OCTET_LENGTH(session_ref)=6 AND (NOT REGEXP_LIKE(session_ref,'[^0123456789abcdefghjkmnpqrstvwxyz]','c'))),
  CHECK(OCTET_LENGTH(workspace) BETWEEN 1 AND 4096),
@@ -50,7 +84,7 @@ CREATE TABLE session(
  CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),
  CHECK(prefix_seal IS NULL OR length(prefix_seal)=56),
  CHECK(OCTET_LENGTH(model) BETWEEN 1 AND 256),
- CHECK(tools_mask BETWEEN 0 AND 3),
+ CHECK(tool_set_id>0),
  CHECK(permission_mode BETWEEN 0 AND 1),
  CHECK(revision>0),
  CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
@@ -98,7 +132,7 @@ CREATE TABLE session_revision(
  model LONGTEXT NOT NULL,
  instructions_content_id BIGINT NOT NULL,
  instructions_updated TINYINT NOT NULL,
- tools_mask BIGINT NOT NULL,
+ tool_set_id BIGINT NOT NULL,
  permission_mode BIGINT NOT NULL,
  output_schema_content_id BIGINT,
  compaction_trigger BIGINT,
@@ -110,16 +144,34 @@ CREATE TABLE session_revision(
  FOREIGN KEY(session_ref) REFERENCES session(session_ref),
  FOREIGN KEY(command_key) REFERENCES core_command(command_key),
  FOREIGN KEY(instructions_content_id) REFERENCES content(content_id),
+ FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),
  FOREIGN KEY(output_schema_content_id) REFERENCES content(content_id),
  CHECK(revision>0),
  CHECK(OCTET_LENGTH(provider) BETWEEN 1 AND 16 AND REGEXP_LIKE(provider,'^[a-z]','c') AND (NOT REGEXP_LIKE(provider,'[^a-z0-9_-]','c'))),
  CHECK(instructions_updated IN (0,1)),
- CHECK(tools_mask BETWEEN 0 AND 3),
+ CHECK(tool_set_id>0),
  CHECK(permission_mode BETWEEN 0 AND 1),
  CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
  CHECK(output_reservation IS NULL OR output_reservation>=0),
  CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),
  CHECK(label IS NULL OR OCTET_LENGTH(label) BETWEEN 1 AND 100)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE session_change(
+ session_ref VARCHAR(6) NOT NULL,
+ position BIGINT NOT NULL,
+ ordinal BIGINT NOT NULL,
+ revision BIGINT NOT NULL,
+ field VARCHAR(18) NOT NULL,
+ changed_at BIGINT NOT NULL,
+ PRIMARY KEY(session_ref,position,ordinal),
+ UNIQUE(session_ref,revision,field),
+ FOREIGN KEY(session_ref) REFERENCES session(session_ref),
+ FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),
+ CHECK(position>0),
+ CHECK(ordinal>=0),
+ CHECK(revision>1),
+ CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label')),
+ CHECK(changed_at>0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 CREATE TABLE message_admission(
  admission_id BIGINT NOT NULL,
@@ -401,6 +453,7 @@ CREATE TABLE action_operation(
  attempt_at BIGINT,
  decided_at BIGINT,
  resolved_at BIGINT,
+ approval_position BIGINT,
  PRIMARY KEY(action_id),
  UNIQUE(parent_operation_id,call_ordinal),
  FOREIGN KEY(parent_operation_id) REFERENCES model_operation(operation_id),
@@ -423,6 +476,7 @@ CREATE TABLE action_operation(
  CHECK(attempt_at IS NULL OR attempt_at>0),
  CHECK(decided_at IS NULL OR decided_at>0),
  CHECK(resolved_at IS NULL OR resolved_at>0),
+ CHECK(approval_position IS NULL OR approval_position>0),
  CHECK((NOT (resolution_code <=> 'denied')) OR (authorized=0 AND attempt_ordinal=0)),
  CHECK((attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),
  CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)),
@@ -460,6 +514,7 @@ CREATE INDEX action_operation_session_order ON action_operation(session_ref,acti
 CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle);
 CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
 CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position);
+CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position);
 CREATE INDEX action_operation_executable ON action_operation(action_id);
 CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id);
 CREATE INDEX model_tool_call_session_order ON model_tool_call(session_ref,operation_id,call_ordinal);
@@ -469,6 +524,7 @@ CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operat
 CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id);
 CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
 CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
+CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position);
 CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position);
 CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position);
 CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
