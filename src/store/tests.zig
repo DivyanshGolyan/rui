@@ -14499,13 +14499,13 @@ fn testingSteps(storage: *Store, comptime S: type) i64 {
     return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
 }
 
-test "Full interruptions grow linearly past their first chunk, within 30% of main's steps" {
+test "Full interruptions seek their Session's commands, within 75% of main's steps" {
     // Main's interruption statement stepped 6612, 22540 and 90124 times on
-    // these Sessions (origin/main 2e8e8353, the same rejected commands).
-    // Its first chunk is main's plan plus the keyset column; the later
-    // chunks walk the command log from where the chunk before stopped. A
-    // chunk that sorted the Session's interruptions again took 8 times
-    // main's steps at 4096.
+    // these Sessions (origin/main 2e8e8353, the same rejected commands),
+    // scanning every interruption and sorting the Session's. Each chunk
+    // here seeks `core_command_target_order` from where the one before
+    // stopped; a chunk that scanned and sorted again took 8 times main's
+    // steps at 4096.
     const main_steps = [_]i64{ 6612, 22540, 90124 };
     for ([_]usize{ 300, 1024, 4096 }, main_steps) |count, main| {
         var tmp = std.testing.tmpDir(.{});
@@ -14523,16 +14523,14 @@ test "Full interruptions grow linearly past their first chunk, within 30% of mai
         }
         std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .full));
         _ = testingSteps(&storage, report_domain.full_interruptions);
-        _ = testingSteps(&storage, report_domain.full_interruptions_later);
         _ = testingRuns(&storage, report_domain.full_interruptions);
-        _ = testingRuns(&storage, report_domain.full_interruptions_later);
         const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .full);
         defer std.testing.allocator.free(full);
-        const steps = testingSteps(&storage, report_domain.full_interruptions) + testingSteps(&storage, report_domain.full_interruptions_later);
-        try std.testing.expect(steps * 10 <= main * 13);
-        // One statement per 256 rows, the first by main's plan.
-        try std.testing.expectEqual(@as(i64, 1), testingRuns(&storage, report_domain.full_interruptions));
-        try std.testing.expectEqual(@as(i64, @intCast((count - 1) / 256)), testingRuns(&storage, report_domain.full_interruptions_later));
+        const steps = testingSteps(&storage, report_domain.full_interruptions);
+        // 4546, 15464 and 61892 steps when this was written.
+        try std.testing.expect(steps * 4 <= main * 3);
+        // One statement per 256 rows.
+        try std.testing.expectEqual(@as(i64, @intCast((count - 1) / 256 + 1)), testingRuns(&storage, report_domain.full_interruptions));
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
         defer parsed.deinit();
         const listed = parsed.value.object.get("full").?.object.get("model_interruptions").?.array.items;
@@ -14622,7 +14620,6 @@ const FailingList = struct {
         .Row = struct { turn_id: rsql.Positive },
         .cardinality = .each,
     });
-    pub const Next = S;
     pub const failed = error.TurnReadFailed;
     pub const header = "],\"failing\":[";
     pub const State = report_domain.NoState;
@@ -14669,65 +14666,6 @@ test "Full history answers a list's first check before a later list's failed ste
             report_domain.renderRun(&a, .{ report_domain.Conversation, FailingList }, session.slice(), &capture),
         );
     }
-}
-
-/// A list whose first chunk reads 257 rows and whose later chunks fail
-/// at their first row's step.
-const FailingLaterList = struct {
-    pub const S = rsql.Read(.{
-        .sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<300) SELECT i AS turn_id FROM n WHERE ?1<>'' AND i>?2 ORDER BY i LIMIT 257",
-        .Args = struct { session: []const u8, after: u64 = 0 },
-        .Row = struct { turn_id: rsql.Positive },
-        .cardinality = .each,
-        .compound = true,
-    });
-    pub const Next = rsql.Read(.{
-        .sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<300) SELECT i AS turn_id FROM n WHERE ?1<>'' AND i>?2 AND abs(-9223372036854775808+0*i)>=0 ORDER BY i LIMIT 257",
-        .Args = S.Args,
-        .Row = S.Row,
-        .cardinality = .each,
-        .compound = true,
-    });
-    pub const failed = error.TurnReadFailed;
-    pub const header = "],\"failing\":[";
-    pub const State = report_domain.NoState;
-    pub const check = report_domain.noCheck;
-    pub const First = report_domain.NoFirst;
-    pub const queueFirst = report_domain.noQueueFirst;
-    pub const checkFirst = report_domain.noCheckFirst;
-    pub const streams = report_domain.streamsNever;
-    pub const kept_rows = 0;
-
-    pub fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.turn_id.get() };
-    }
-
-    pub fn render(_: *reads_domain.ReadAccess, _: *report_domain.SessionReportCapture, _: *const S.Row) error{}!void {}
-};
-
-test "Full history names a list whose later chunk's statement fails" {
-    // The first chunk reads by `S`; the chunk after it by `Next`, whose
-    // failed step is the list's own, as `S`'s is.
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSessionAsk(&storage, "later-failure-config");
-    var root: [protocol.max_store_bytes]u8 = undefined;
-    const length = try tmp.dir.realPath(std.testing.io, &root);
-    var used = std.atomic.Value(u64).init(0);
-    var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
-    try capture.create(root[0..length], 1, false);
-    defer capture.deinit();
-    const entry = try store_core.enter(&storage, .none);
-    defer entry.release();
-    var a: reads_domain.ReadAccess = .open(&entry);
-    defer a.deinit();
-    try std.testing.expectError(
-        error.TurnReadFailed,
-        report_domain.renderRun(&a, .{ report_domain.Conversation, FailingLaterList }, session.slice(), &capture),
-    );
 }
 
 test "a Full list keeps the rows whose content it shows whole for after their chunk, in order" {

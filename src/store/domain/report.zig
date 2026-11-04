@@ -1660,9 +1660,6 @@ const Headers = struct {
 /// required:
 /// - `S`, its statement, whose Args are the Session and the key after
 ///   which a chunk starts, 0 before the first;
-/// - `Next`, the statement of the chunks after one that rendered a row:
-///   `S` where one plan serves every chunk, else another with `S`'s Row
-///   and Args;
 /// - `after(session, row)`, the Args of the chunk after `row`;
 /// - `failed`, the name main gave its statement's failed step;
 /// - `header`, the text that opens the list;
@@ -1676,7 +1673,6 @@ const Headers = struct {
 /// `NoState`, `noCheck`, `NoFirst`, `noQueueFirst`, `noCheckFirst` and
 /// `streamsNever` are the hooks of a list that has none.
 fn Chunk(comptime L: type) type {
-    comptime std.debug.assert(L.Next.Row == L.S.Row and L.Next.Args == L.S.Args);
     return struct {
         const Row = L.S.Row;
         const Failure = @typeInfo(@typeInfo(@TypeOf(L.render)).@"fn".return_type.?).error_union.error_set ||
@@ -1812,9 +1808,7 @@ pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []c
                 list.first_queued = true;
             }
             list.chunk = .{ .a = a, .capture = capture, .headers = &headers, .list = i, .first = &list.first, .state = &list.state, .status = &list.status, .after = list.after };
-            if (list.first) {
-                a.readEach(L.S, list.after, chunk_rows + 1, &list.chunk);
-            } else a.readEach(L.Next, list.after, chunk_rows + 1, &list.chunk);
+            a.readEach(L.S, list.after, chunk_rows + 1, &list.chunk);
         };
         a.run() catch |err| return runFailure(a, Ls, &lists, current, err);
         var blocked = false;
@@ -1855,7 +1849,7 @@ fn runFailure(a: *const ReadAccess, comptime Ls: anytype, lists: *RunState(Ls), 
     if (err != error.StatementFailed) return err;
     var failed: ?usize = null;
     inline for (Ls, 0..) |L, i| if (failed == null and i >= current) {
-        if (a.failedOn(L.S) or a.failedOn(L.Next) or failedOnFirst(a, L)) failed = i;
+        if (a.failedOn(L.S) or failedOnFirst(a, L)) failed = i;
     };
     const index = failed orelse return err;
     inline for (Ls, 0..) |L, i| if (i >= current and i <= index) {
@@ -2218,7 +2212,6 @@ const unpositioned_message = rsql.Read(.{
 
 pub const Messages = struct {
     const S = full_messages;
-    const Next = S;
     const failed = error.MessageReadFailed;
     const header = "],\"messages\":[";
     pub const kept_rows = 4;
@@ -2327,7 +2320,6 @@ const full_conversation = rsql.Read(.{
 
 pub const Conversation = struct {
     const S = full_conversation;
-    const Next = S;
     const failed = error.ConversationReadFailed;
     const header = "],\"conversation\":[";
     const State = NoState;
@@ -2401,7 +2393,6 @@ const full_turns = rsql.Read(.{
 
 const Turns = struct {
     const S = full_turns;
-    const Next = S;
     const failed = error.TurnReadFailed;
     const header = "],\"turns\":[";
     const State = NoState;
@@ -2461,7 +2452,6 @@ const full_operations = rsql.Read(.{
 
 const Operations = struct {
     const S = full_operations;
-    const Next = S;
     const failed = error.OperationReadFailed;
     const header = "],\"model_operations\":[";
     const State = NoState;
@@ -2549,7 +2539,6 @@ const full_calls = rsql.Read(.{
 
 const Calls = struct {
     const S = full_calls;
-    const Next = S;
     const failed = error.CallReadFailed;
     const header = "],\"tool_calls\":[";
     const State = NoState;
@@ -2609,7 +2598,6 @@ const full_actions = rsql.Read(.{
 
 const Actions = struct {
     const S = full_actions;
-    const Next = S;
     const failed = error.ActionReadFailed;
     const header = "],\"actions\":[";
     const State = NoState;
@@ -2664,7 +2652,6 @@ const full_decisions = rsql.Read(.{
 
 const Decisions = struct {
     const S = full_decisions;
-    const Next = S;
     const failed = error.PermissionReadFailed;
     const header = "],\"permission_decisions\":[";
     const State = NoState;
@@ -2713,7 +2700,6 @@ pub const full_stops = rsql.Read(.{
 
 const Stops = struct {
     const S = full_stops;
-    const Next = S;
     const failed = error.SessionStopReadFailed;
     const header = "],\"session_stops\":[";
     const State = NoState;
@@ -2741,48 +2727,28 @@ const Stops = struct {
     }
 };
 
-const InterruptionRow = struct {
-    command_seq: rsql.Positive,
-    command_key: protocol.Bounded(128),
-    accepted: bool,
-    code: protocol.Bounded(96),
-    turn_id: protocol.Bounded(20),
-    operation_id: protocol.Bounded(20),
-};
-
-const InterruptionArgs = struct { session: []const u8, after: u64 = 0 };
-
-/// The Session's interruption commands, by command order: the first
-/// chunk (?2 is 0), by main's plan. CROSS JOIN keeps the interruption
-/// table outer: it scans the Store's interruptions, as main did, and
-/// sorts the Session's by `command_seq`, so a Session with at most
-/// `chunk_rows` never walks the command log.
+/// The Session's interruption commands, by command order: a seek on
+/// `core_command_target_order` from ?2, each joined by key. The command's
+/// target is the Session its interruption row names: both are written from
+/// the one command, in its transaction.
 pub const full_interruptions = rsql.Read(.{
     .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id " ++
-        "FROM model_interruption_command interruption CROSS JOIN core_command command ON command.command_key=interruption.command_key " ++
-        "WHERE interruption.session_ref=?1 AND ?2=0 ORDER BY command.command_seq" ++ chunk_limit,
-    .Args = InterruptionArgs,
-    .Row = InterruptionRow,
-    .cardinality = .each,
-});
-
-/// The chunks after the first: the command log by `command_seq` from ?2,
-/// so no chunk sorts or reads again what an earlier one listed. No index
-/// finds a Session's interruptions, so a chunk walks every command of
-/// the Store after ?2 until its `LIMIT`, and the last one to the log's
-/// end; only a Session with more than `chunk_rows` interruptions reads it.
-pub const full_interruptions_later = rsql.Read(.{
-    .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id " ++
         "FROM core_command command CROSS JOIN model_interruption_command interruption ON interruption.command_key=command.command_key " ++
-        "WHERE command.command_seq>?2 AND command.kind=4 AND interruption.session_ref=?1 ORDER BY command.command_seq" ++ chunk_limit,
-    .Args = InterruptionArgs,
-    .Row = InterruptionRow,
+        "WHERE command.target=?1 AND command.kind=4 AND command.command_seq>?2 AND interruption.session_ref=?1 ORDER BY command.command_seq" ++ chunk_limit,
+    .Args = struct { session: []const u8, after: u64 = 0 },
+    .Row = struct {
+        command_seq: rsql.Positive,
+        command_key: protocol.Bounded(128),
+        accepted: bool,
+        code: protocol.Bounded(96),
+        turn_id: protocol.Bounded(20),
+        operation_id: protocol.Bounded(20),
+    },
     .cardinality = .each,
 });
 
 const Interruptions = struct {
     const S = full_interruptions;
-    const Next = full_interruptions_later;
     const failed = error.InterruptionReadFailed;
     const header = "],\"model_interruptions\":[";
     const State = NoState;
@@ -2842,7 +2808,6 @@ pub const full_results = rsql.Read(.{
 
 const Results = struct {
     const S = full_results;
-    const Next = S;
     const failed = error.CallReadFailed;
     const header = "],\"tool_results\":[";
     const State = NoState;

@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 50;
+pub const schema_version: u32 = 51;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -29,6 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
+    .{ .schema_version = 51, .digest = 0xd8d1996fcdbe12b3 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -236,11 +237,12 @@ pub const tables = [_]Table{
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
-            // Command order, allocated by the Host in the recording transaction.
+            // Command order, allocated by the Host in the recording
+            // transaction: the rowid, so command order costs no index.
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
         },
-        .primary_key = &.{"command_key"},
-        .uniques = &.{&.{"command_seq"}},
+        .primary_key = &.{"command_seq"},
+        .uniques = &.{&.{"command_key"}},
         .foreign_keys = &.{
             references("primary_content_id", "content", content_reference),
             references("secondary_content_id", "content", content_reference),
@@ -626,6 +628,7 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
+    .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
     .{ .name = "session_stop_exclusion", .table = "session_stop", .columns = &.{ "session_ref", "admission_cutoff", "position" } },
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
