@@ -6,11 +6,12 @@
 import { randomUUID } from "node:crypto";
 
 import { RuiRequestError } from "./errors.ts";
+import { listActivity, readContent, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import type { components } from "./wire.ts";
 
 /** What a Session handle needs from the client. */
 export interface Link {
-	exchange(path: string, build: (store: string) => string, environment?: Buffer): Promise<Buffer>;
+	exchange(path: string, build: (store: string) => string, environment?: Buffer, prefixBytes?: number): Promise<Buffer>;
 }
 
 type Schemas = components["schemas"];
@@ -133,6 +134,19 @@ export class Session {
 	constructor(link: Link, id: string) {
 		this.#link = link;
 		this.id = id;
+	}
+
+	/**
+	 * The Session's feed, in order, as an async iterator (D9). Without `follow`
+	 * it ends at the current end of the feed; with it, it never ends.
+	 */
+	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
+		return listActivity(this.#link, this.id, options);
+	}
+
+	/** The whole text of an entry, however long (D134). */
+	readContent(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<string> {
+		return readContent(this.#link, this.id, entry);
 	}
 
 	/** Sends a Message. The receipt is its admission number; the answer arrives in the feed (D8). */

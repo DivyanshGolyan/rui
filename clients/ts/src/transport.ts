@@ -21,6 +21,8 @@ export interface Post {
 	instance?: string;
 	/** Client environment bytes sent ahead of the JSON (`/v1/message`). */
 	environment?: Buffer;
+	/** Resolve with the first this-many bytes of a successful reply and drop the rest. */
+	prefixBytes?: number;
 }
 
 /** A failure to reach the Host at all, as opposed to a refusal from it. */
@@ -45,6 +47,15 @@ export function post(call: Post): Promise<Buffer> {
 			const chunks: Buffer[] = [];
 			let length = 0;
 			incoming.on("data", (chunk: Buffer) => {
+				if (call.prefixBytes !== undefined && incoming.statusCode === 200) {
+					chunks.push(chunk);
+					length += chunk.length;
+					if (length >= call.prefixBytes) {
+						incoming.destroy();
+						resolve(Buffer.concat(chunks).subarray(0, call.prefixBytes));
+					}
+					return;
+				}
 				length += chunk.length;
 				if (length > MAX_REPLY_BYTES) {
 					incoming.destroy(new Error(`the reply exceeds ${MAX_REPLY_BYTES} bytes`));

@@ -183,7 +183,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	 * waits for the restarted Host and is sent once more. Internal: the
 	 * package's calls are built on it.
 	 */
-	async call(path: string, body: string, environment?: Buffer): Promise<Buffer> {
+	async call(path: string, body: string, environment?: Buffer, prefixBytes?: number): Promise<Buffer> {
 		let retried = false;
 		for (;;) {
 			const host = await this.#ready();
@@ -194,6 +194,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 					body,
 					instance: host.instance,
 					...(environment ? { environment } : {}),
+					...(prefixBytes !== undefined ? { prefixBytes } : {}),
 				});
 			} catch (error) {
 				if (!(error instanceof ConnectionError)) throw error;
@@ -209,9 +210,9 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	 * canonical Store name the Host reported at readiness. Internal: the
 	 * package's calls are built on it.
 	 */
-	async exchange(path: string, build: (store: string) => string, environment?: Buffer): Promise<Buffer> {
+	async exchange(path: string, build: (store: string) => string, environment?: Buffer, prefixBytes?: number): Promise<Buffer> {
 		const host = await this.#ready();
-		return this.call(path, build(host.info.store), environment);
+		return this.call(path, build(host.info.store), environment, prefixBytes);
 	}
 
 	/** The running child's process id. Internal. */
