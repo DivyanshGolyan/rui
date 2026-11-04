@@ -91,7 +91,7 @@ class SelectionTest(unittest.TestCase):
         import prepush
         for path in ("src/store/rsql.zig", "src/store/wire/mysql_driver.zig", "src/store/wire/pg.zig"):
             with self.subTest(path=path):
-                builds = [command for name, command in prepush.checks([path], AVAILABLE) if name == "development selection"]
+                builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
                 self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
 
     def test_live_server_targets_match_the_workflow_conditions_that_start_the_servers(self):
