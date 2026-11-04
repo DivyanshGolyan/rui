@@ -740,8 +740,13 @@ const NativeTurn = struct {
         };
     }
 
+    /// While new Turns are held, waiting input only joins open Turns.
     pub fn admitNewModel(self: *NativeTurn) execution_turn.Admission {
-        return self.admitModel(.message);
+        return self.admitModel(if (self.turnsPaused()) .open_turn_message else .message);
+    }
+
+    pub fn turnsPaused(self: *const NativeTurn) bool {
+        return self.host.turns_paused.load(.acquire);
     }
 
     pub fn admitToolContinuation(self: *NativeTurn) execution_turn.Admission {

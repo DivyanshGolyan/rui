@@ -472,7 +472,7 @@ def main():
             noncanonical = json.dumps({
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
                 "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
-                "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}},
+                "paused": False, "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}},
             }).encode()
             valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
             ambiguous_bodies = (
@@ -487,6 +487,7 @@ def main():
                 valid_body.replace(b'"custody_occupied": "1"', b'"custody_occupied": "2"'),
                 valid_body.replace(b'"started_at": "1792918800", ', b''),
                 valid_body.replace(b'"custody_occupied": "1", ', b''),
+                valid_body.replace(b'"paused": false, ', b''),
             )
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n\r\n{}",
@@ -612,7 +613,7 @@ def main():
                 "version": host_process.WIRE_VERSION, "type": "host_status", "status": "ready", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
                 "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
-                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
+                "paused": False, "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
                 "diagnostics": f"{store.resolve()}/diagnostics",
             }, selected
             assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
@@ -630,10 +631,17 @@ def main():
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
-                "started_at": started_at, "custody_occupied": "0",
+                "started_at": started_at, "custody_occupied": "0", "paused": False,
                 "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
+            # Holding new Turns is Host memory: the reply and Host status say it.
+            for paused in (True, False):
+                head, body = exchange("host_pause", lambda: raw_info(stale, store.resolve(), kind="host_pause", route="control/host-pause", extra={"paused": paused}), 5).split(b"\r\n\r\n", 1)
+                assert head.startswith(b"HTTP/1.1 200 OK\r\n"), head
+                assert json.loads(body) == {"version": host_process.WIRE_VERSION, "type": "host_pause_reply", "paused": paused}, body
+                info = exchange("host_info", lambda: raw_info(stale, store.resolve()), 5).split(b"\r\n\r\n", 1)[1]
+                assert json.loads(info)["paused"] is paused, info
             changed = exchange("host_info", lambda: raw_info(stale, store.resolve(), "0" * 32), 5)
             assert b"host_instance_changed" in changed and changed.startswith(b"HTTP/1.1 409")
             guarded = exchange("session_stop", lambda: raw_info(stale, store.resolve(), "0" * 32, kind="session_stop", route="control/session-stop", extra={"key": "guarded-stop", "session": "none"}), 5)

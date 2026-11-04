@@ -4277,6 +4277,9 @@ test "production turn preserves skipped continuation preference through actual S
             self.model = admission.permit.consume() catch unreachable;
             return .admitted;
         }
+        pub fn turnsPaused(_: *@This()) bool {
+            return false;
+        }
         pub fn admitNewModel(self: *@This()) turn.Admission {
             return self.admit(.message);
         }
@@ -5499,6 +5502,31 @@ test "each saved outcome names one feed ending" {
         .{ turn_domain.TurnOutcome{ .failed = .{ .code = "malformed_provider_output", .report = null } }, true, protocol.TurnEnding.failed },
     };
     inline for (cases) |case| try std.testing.expectEqual(case[2], case[0].ending(case[1]));
+}
+
+test "while new Turns are held, waiting input joins only an open Turn" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const open = try configureTestSession(&storage, "held-open-config");
+    try submitTestMessage(&storage, &tmp, "held-first", "held-first-key", open.slice(), "first");
+    const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    // A Message that arrives while the answer is being made keeps its Turn open.
+    try submitTestMessage(&storage, &tmp, "held-second", "held-second-key", open.slice(), "second");
+    try settleMessagesForTesting(&storage, &tmp, first, 1, false, null);
+    const idle = try configureTestSession(&storage, "held-idle-config");
+    try submitTestMessage(&storage, &tmp, "held-new", "held-new-key", idle.slice(), "new");
+    // Held: the open Turn takes its input; the idle Session starts nothing.
+    const joined = (try storage.admitModelAttempt(.open_turn_message, .{})).?.permit.binding;
+    try std.testing.expectEqual(first.turn_id, joined.turn_id);
+    try settleMessagesForTesting(&storage, &tmp, joined, 1, false, null);
+    try std.testing.expect((try storage.admitModelAttempt(.open_turn_message, .{})) == null);
+    // Resumed: the held Message starts its Turn.
+    const started = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try std.testing.expect(started.turn_id != first.turn_id);
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "a done Turn marks its answer final once its ending is within the page" {

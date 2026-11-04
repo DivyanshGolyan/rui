@@ -23,8 +23,9 @@ pub const Outcome = union(enum) {
 
 /// The Bash, message and tool-continuation scans read Store rows, which move
 /// the commit generation, and execution slots (free count, open shared
-/// preparations), which move the slot change count.
-const AdmissionKey = struct { generation: u64, slot_changes: u64 };
+/// preparations), which move the slot change count; the message scan also
+/// reads whether new Turns are held, which a resume moves.
+const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool };
 
 pub const State = struct {
     preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
@@ -96,6 +97,7 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
     const admission_key: AdmissionKey = .{
         .generation = context.commitGeneration(),
         .slot_changes = context.slotChanges(),
+        .paused = context.turnsPaused(),
     };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     var found_nothing = true;
@@ -190,6 +192,7 @@ const Recording = struct {
     bash_prep_open: bool = true,
     model_prep_open: bool = true,
     slot_changes: u64 = 0,
+    paused: bool = false,
     observed_slots: ?SlotFacts = null,
     transport: bool = false,
     bash: bool = false,
@@ -338,6 +341,10 @@ const Recording = struct {
     fn admitRetry(self: *Recording) Admission {
         self.record(.admit_retry);
         return self.retry_admission;
+    }
+
+    fn turnsPaused(self: *const Recording) bool {
+        return self.paused;
     }
 
     fn admitNewModel(self: *Recording) Admission {
@@ -738,6 +745,23 @@ test "admission rescans after any slot change or commit and skips while both sta
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_bash));
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_continuation));
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+}
+
+test "a pause or resume reruns the message scan with no commit" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    // A resume commits nothing, yet held Messages may now start Turns.
+    context.paused = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.paused = false;
+    _ = run(&state, &context);
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
 }
