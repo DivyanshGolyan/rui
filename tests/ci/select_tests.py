@@ -105,6 +105,8 @@ RULES = (
      ("test-logic", "mysql-wire-integration"), ("test-logic",),
      "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)"),
     (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
+    (("src/http1/*",), ("test-logic", "test"), ("test-logic", "test"),
+     "The loopback HTTP/1.1 client: its value cores and its socket exchange"),
     (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
      "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
     (("src/history_memo.zig",), ("test-logic",), ("test-logic",), "History memo decisions and table"),
