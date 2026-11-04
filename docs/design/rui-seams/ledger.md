@@ -317,6 +317,8 @@ D216. (lane K P2 premise, accepted) Word search (F3): SQL only narrows candidate
 
 D217. (lane K K6 premise, accepted) D191's drop is a history floor: a nullable `model_operation.history_floor` that later requests carry forward, so dropped messages never return. The unit dropped is one host message, or one Operation's outputs together with its tool results; instructions and the first User Message are never dropped. It runs only when the provider rejects the compaction request itself for overflow. The first level targets the catalog window minus reservation at 4 bytes per token, and each further level quarters it (1.05M, 262k, 65k for a 1.05M window), so a ChatGPT-sized real window recovers by level 3. After level 3, or when nothing is left to drop, the Turn ends `context_full`, so at most 4 requests. Every compaction adds a `compacted {dropped}` feed entry, including when nothing was dropped. Premise: /mnt/project-files/rui-seams/spec/k6-compaction-room-premise.md.
 
+D218. (lane K calls, accepted) A revision takes its feed position at acceptance: `session_revision.position` and `revised_at` are written by `configure` and by core-made revisions (D174). `session_changed {revision, field}` rows are derived at read time by comparing revision N with N-1, one per changed field, with the field code as ordinal. Creation emits none. Revisions saved before format 52 have a NULL position and no rows.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
