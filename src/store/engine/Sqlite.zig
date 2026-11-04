@@ -224,25 +224,25 @@ pub fn diagnostic(self: *Sqlite) store_core.SqliteDiagnostic {
     return result;
 }
 
-fn handleOf(statement: ?Statement) *c.sqlite3_stmt {
+inline fn handleOf(statement: ?Statement) *c.sqlite3_stmt {
     return @ptrCast(statement.?);
 }
 
-pub fn statementFor(self: *Sqlite, comptime S: type) error{ StatementPrepareFailed, OutOfMemory }!Statement {
+pub inline fn statementFor(self: *Sqlite, comptime S: type) error{ StatementPrepareFailed, OutOfMemory }!Statement {
     return @ptrCast(try self.cachedTyped(S));
 }
 
-pub fn bind(statement: ?Statement, comptime S: type, args: *const S.Args, now: i64) Failure!void {
+pub inline fn bind(statement: ?Statement, comptime S: type, args: *const S.Args, now: i64) Failure!void {
     return sqlite.bindArgs(handleOf(statement), S, args, now);
 }
 
 /// Resets a statement bound but never stepped (`sqlite.resetUnstepped`).
-pub fn discard(statement: ?Statement) void {
+pub inline fn discard(statement: ?Statement) void {
     if (statement) |bound| sqlite.resetUnstepped(@ptrCast(bound));
 }
 
 /// Steps `statement`: true at a row, false at its end.
-pub fn nextRow(statement: ?Statement) Failure!bool {
+pub inline fn nextRow(statement: ?Statement) Failure!bool {
     return switch (c.sqlite3_step(handleOf(statement))) {
         c.SQLITE_ROW => true,
         c.SQLITE_DONE => false,
@@ -250,12 +250,12 @@ pub fn nextRow(statement: ?Statement) Failure!bool {
     };
 }
 
-pub fn decodeRow(comptime Row: type, statement: ?Statement, row: *Row) error{CorruptStore}!void {
+pub inline fn decodeRow(comptime Row: type, statement: ?Statement, row: *Row) error{CorruptStore}!void {
     return sqlite.decodeRow(Row, handleOf(statement), row);
 }
 
 /// Steps a write to its end, and returns the rows it changed.
-pub fn stepWrite(self: *const Sqlite, statement: ?Statement) Failure!u64 {
+pub inline fn stepWrite(self: *const Sqlite, statement: ?Statement) Failure!u64 {
     switch (c.sqlite3_step(handleOf(statement))) {
         c.SQLITE_DONE => {},
         c.SQLITE_FULL => return error.CanonicalStorageFull,
@@ -265,7 +265,7 @@ pub fn stepWrite(self: *const Sqlite, statement: ?Statement) Failure!u64 {
 }
 
 /// Resets a statement its pass stepped, and checks it (`sqlite.resetCached`).
-pub fn endStatement(statement: ?Statement) void {
+pub inline fn endStatement(statement: ?Statement) void {
     if (statement) |stepped| sqlite.resetCached(@ptrCast(stepped));
 }
 
@@ -308,7 +308,7 @@ pub fn control(self: *Sqlite, comptime which: Control) engine.ControlError!void 
     if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.SqliteExecFailed;
 }
 
-pub fn inTransaction(self: *const Sqlite) bool {
+pub inline fn inTransaction(self: *const Sqlite) bool {
     return c.sqlite3_get_autocommit(self.database) == 0;
 }
 
@@ -317,7 +317,7 @@ pub fn inWriteTransaction(self: *const Sqlite) bool {
 }
 
 /// Rows changed since the connection opened, rolled-back changes included.
-pub fn totalChanges(self: *const Sqlite) i64 {
+pub inline fn totalChanges(self: *const Sqlite) i64 {
     return c.sqlite3_total_changes64(self.database);
 }
 

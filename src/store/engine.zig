@@ -43,106 +43,109 @@ pub const Failure = error{
 pub const Engine = union(Kind) {
     sqlite: Sqlite,
 
+    // Each method only picks the variant, so it is inline: one variant
+    // costs no call.
+
     /// `S`'s handle, for `bind` and the pass that steps it.
-    pub fn statementFor(e: *Engine, comptime S: type) error{ StatementPrepareFailed, OutOfMemory }!?Statement {
+    pub inline fn statementFor(e: *Engine, comptime S: type) error{ StatementPrepareFailed, OutOfMemory }!?Statement {
         return switch (e.*) {
             .sqlite => |*s| try s.statementFor(S),
         };
     }
 
-    pub fn bind(e: *Engine, statement: ?Statement, comptime S: type, args: *const S.Args, now: i64) Failure!void {
+    pub inline fn bind(e: *Engine, statement: ?Statement, comptime S: type, args: *const S.Args, now: i64) Failure!void {
         return switch (e.*) {
             .sqlite => Sqlite.bind(statement, S, args, now),
         };
     }
 
     /// Drops a statement bound but never stepped.
-    pub fn discard(e: *Engine, statement: ?Statement) void {
+    pub inline fn discard(e: *Engine, statement: ?Statement) void {
         switch (e.*) {
             .sqlite => Sqlite.discard(statement),
         }
     }
 
     /// True at a row of `statement`, false at its end.
-    pub fn nextRow(e: *Engine, statement: ?Statement) Failure!bool {
+    pub inline fn nextRow(e: *Engine, statement: ?Statement) Failure!bool {
         return switch (e.*) {
             .sqlite => Sqlite.nextRow(statement),
         };
     }
 
     /// Decodes the row `nextRow` reached.
-    pub fn decodeRow(e: *Engine, comptime Row: type, statement: ?Statement, row: *Row) error{CorruptStore}!void {
+    pub inline fn decodeRow(e: *Engine, comptime Row: type, statement: ?Statement, row: *Row) error{CorruptStore}!void {
         return switch (e.*) {
             .sqlite => Sqlite.decodeRow(Row, statement, row),
         };
     }
 
     /// Runs a write, and returns the rows it changed.
-    pub fn stepWrite(e: *Engine, statement: ?Statement) Failure!u64 {
+    pub inline fn stepWrite(e: *Engine, statement: ?Statement) Failure!u64 {
         return switch (e.*) {
             .sqlite => |*s| s.stepWrite(statement),
         };
     }
 
     /// Ends a statement its pass ran; null, a content payload, has none.
-    pub fn endStatement(e: *Engine, statement: ?Statement) void {
+    pub inline fn endStatement(e: *Engine, statement: ?Statement) void {
         switch (e.*) {
             .sqlite => Sqlite.endStatement(statement),
         }
     }
 
-    pub fn writePayload(e: *Engine, content_id: u64, bytes: []const u8) Failure!void {
+    pub inline fn writePayload(e: *Engine, content_id: u64, bytes: []const u8) Failure!void {
         return switch (e.*) {
             .sqlite => |*s| s.writePayload(content_id, bytes),
         };
     }
 
-    pub fn readRaw(e: *Engine, content_id: u64, offset: u64, destination: []u8) Failure!void {
+    pub inline fn readRaw(e: *Engine, content_id: u64, offset: u64, destination: []u8) Failure!void {
         return switch (e.*) {
             .sqlite => |*s| s.readRaw(content_id, offset, destination),
         };
     }
 
     /// A sink on the payload of `content_id`, whose row holds `length` bytes.
-    pub fn openSink(e: *Engine, content_id: u64, length: u64) Failure!ContentSink {
+    pub inline fn openSink(e: *Engine, content_id: u64, length: u64) Failure!ContentSink {
         return switch (e.*) {
             .sqlite => |*s| .{ .sqlite = try s.openSink(content_id, length) },
         };
     }
 
-    pub fn control(e: *Engine, comptime which: Control) ControlError!void {
+    pub inline fn control(e: *Engine, comptime which: Control) ControlError!void {
         return switch (e.*) {
             .sqlite => |*s| s.control(which),
         };
     }
 
-    pub fn inTransaction(e: *const Engine) bool {
+    pub inline fn inTransaction(e: *const Engine) bool {
         return switch (e.*) {
             .sqlite => |*s| s.inTransaction(),
         };
     }
 
-    pub fn inWriteTransaction(e: *const Engine) bool {
+    pub inline fn inWriteTransaction(e: *const Engine) bool {
         return switch (e.*) {
             .sqlite => |*s| s.inWriteTransaction(),
         };
     }
 
     /// Advances with every changed row, rolled-back changes included.
-    pub fn totalChanges(e: *const Engine) i64 {
+    pub inline fn totalChanges(e: *const Engine) i64 {
         return switch (e.*) {
             .sqlite => |*s| s.totalChanges(),
         };
     }
 
     /// What an Entry holds until it ends.
-    pub fn releaseEntry(e: *Engine) void {
+    pub inline fn releaseEntry(e: *Engine) void {
         switch (e.*) {
             .sqlite => |*s| s.releaseEntry(),
         }
     }
 
-    pub fn close(e: *Engine) error{StoreCloseFailed}!void {
+    pub inline fn close(e: *Engine) error{StoreCloseFailed}!void {
         return switch (e.*) {
             .sqlite => |*s| s.close(),
         };
@@ -153,13 +156,13 @@ pub const Engine = union(Kind) {
 pub const ContentSink = union(Kind) {
     sqlite: Sqlite.ContentSink,
 
-    pub fn write(sink: ContentSink, bytes: []const u8, offset: u64) error{ ContentWriteFailed, ContentTooLarge }!void {
+    pub inline fn write(sink: ContentSink, bytes: []const u8, offset: u64) error{ ContentWriteFailed, ContentTooLarge }!void {
         return switch (sink) {
             .sqlite => |s| s.write(bytes, offset),
         };
     }
 
-    pub fn close(sink: ContentSink) void {
+    pub inline fn close(sink: ContentSink) void {
         switch (sink) {
             .sqlite => |s| s.close(),
         }
