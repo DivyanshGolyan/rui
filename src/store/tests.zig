@@ -1201,7 +1201,7 @@ test "an Access commits its writes, positions and identities together, or none o
             try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
             const after = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
             try std.testing.expectEqual(position + 2, try store_testing.queryU64(&storage, next_sql, .{}));
-            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND CAST(payload AS TEXT)='round committed'", .{}));
+            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND payload=X'" ++ comptime &std.fmt.bytesToHex("round committed", .upper) ++ "'", .{}));
             const dated: i64 = @intCast(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}));
             try std.testing.expect(before <= dated and dated <= after);
         }
@@ -1401,7 +1401,8 @@ test "a list row carries its Session's Label, times, first Message, work and pee
             }
             _ = (try storage.admitNextModelAttempt(.{})).?;
             try submitTestMessage(&storage, &tmp, "row-second", "row-second", session.slice(), "and then");
-            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=2000 WHERE admission_id=(SELECT max(admission_id) FROM message_admission)", .{});
+            const newest_admission = try store_testing.queryU64(&storage, "SELECT max(admission_id) FROM message_admission", .{});
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=2000 WHERE admission_id=?1", .{newest_admission});
             {
                 // The first Message is now its Turn's; the latest person's Message is
                 // the queued second one.
@@ -4785,9 +4786,12 @@ test "message observation validates accepted admission references independently"
                 switch (corruption) {
                     .session => try store_testing.exec(&storage, "UPDATE message_admission SET session_ref=?1 " ++
                         "WHERE command_key='reference-primary-message'", .{other_session.slice()}),
-                    .content => try store_testing.exec(&storage, "UPDATE message_admission SET content_id=(" ++
-                        "SELECT content_id FROM message_admission WHERE command_key='reference-other-message') " ++
-                        "WHERE command_key='reference-primary-message'", .{}),
+                    .content => try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?1 " ++
+                        "WHERE command_key='reference-primary-message'", .{try store_testing.queryU64(
+                        &storage,
+                        "SELECT content_id FROM message_admission WHERE command_key='reference-other-message'",
+                        .{},
+                    )}),
                 }
                 try std.testing.expectError(
                     error.CorruptStore,
@@ -5956,8 +5960,9 @@ test "a Tool Result is dated by its group's last acceptance, even when the clock
             // The clock stepped back between the two acceptances: the later one,
             // at the greater position, carries the earlier time.
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT acceptance_position) FROM action_operation", .{}));
+            const latest_acceptance = try store_testing.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try store_testing.exec(&storage, "UPDATE action_operation SET resolved_at=" ++
-                "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 100 ELSE 200 END", .{});
+                "CASE WHEN acceptance_position=?1 THEN 100 ELSE 200 END", .{latest_acceptance});
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
             const page = try store_core.activityPageForTesting(&storage, request);
@@ -6852,9 +6857,10 @@ test "compaction selected newest base corruption fences rather than using an old
                 const newest = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleCompactionForTesting(&storage, &tmp, newest, &.{ .compaction, .message });
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const newest_operation = try store_testing.queryU64(&storage, "SELECT max(operation_id) FROM model_output_item", .{});
                 switch (corruption) {
-                    .anchor => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4", .{}),
-                    .tail => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=2", .{}),
+                    .anchor => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=?1 AND item_kind=4", .{newest_operation}),
+                    .tail => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=?1 AND item_kind=2", .{newest_operation}),
                     .payload => try store_testing.exec(&storage, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT extras_content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4)", .{}),
                 }
                 var view: HistoricalView = undefined;

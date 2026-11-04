@@ -3,6 +3,8 @@
 import os
 import sys
 
+import live_engines
+
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
     "(effective user ID 0), and root bypasses the file and socket permission denials "
@@ -27,6 +29,9 @@ INHERITED = (
     # The runner's Zig caches and packages: install.sh builds the previous
     # release with them, and the sequence model builds its overlay against them.
     "ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR", "ZIG_LOCAL_PKG_DIR",
+    # The live engine servers CI starts for the unit binary, which check.sh
+    # launches through this boundary (live_engines.py owns the names).
+    *live_engines.VARIABLES,
 )
 # Withheld from every fixture; only the opt-in live journey hands them to its Host.
 NETWORK = ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR")

@@ -283,11 +283,8 @@ jobs:
           password=$(openssl rand -hex 16)
           RUI_TEST_MYSQL_ROOT_PASSWORD="$password" nohup python3 -B tests/integration/mysql_server.py \
             start rui-mysql "$socket_dir" "$RUNNER_TEMP/mysql-started" > "$RUNNER_TEMP/mysql-start.log" 2>&1 &
-          {
-            echo "RUI_TEST_REQUIRE_ENGINES=${RUI_TEST_REQUIRE_ENGINES:+$RUI_TEST_REQUIRE_ENGINES,}mysql"
-            echo "RUI_TEST_MYSQL_SOCKET=$socket_dir/mysqld.sock"
-            echo "RUI_TEST_MYSQL_ROOT_PASSWORD=$password"
-          } >> "$GITHUB_ENV"
+          python3 -B tests/ci/live_engine_step.py export mysql \
+            "$socket_dir/mysqld.sock" "$password" "$RUNNER_TEMP/mysql-dialect-check-record"
       - name: Use the verified producer artifact or compile locally
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
@@ -314,12 +311,7 @@ jobs:
             sleep 1
           done
           docker exec rui-pg pg_isready -h 127.0.0.1 -U postgres
-          {
-            echo "RUI_TEST_REQUIRE_ENGINES=${RUI_TEST_REQUIRE_ENGINES:+$RUI_TEST_REQUIRE_ENGINES,}postgres"
-            echo "RUI_TEST_PG_PORT=5432"
-            echo "RUI_TEST_PG_PASSWORD=$password"
-            echo "RUI_TEST_PG_CA_FILE=$certs/server.crt"
-          } >> "$GITHUB_ENV"
+          python3 -B tests/ci/live_engine_step.py export postgres 5432 "$password" "$certs/server.crt"
       - name: Give tests macOS's temporary directory shape
         # macOS's TMPDIR is /var/folders/XX/<30>/T/ through a symlink to
         # /private/var. Linux's short real /tmp hid that class three times
@@ -350,6 +342,14 @@ jobs:
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
+      - name: Require that the live MySQL dialect check ran
+        # Fails when the unit binary left no record or PREPAREd nothing, so
+        # any path that keeps the check from running (selection, launcher
+        # environment, caching) turns this shard red.
+        if: ${{ !cancelled() && env.LIVE_MYSQL == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/live_engine_step.py verify mysql | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -430,22 +430,22 @@ const admission_facts = rsql.Read(.{
 /// (`uncoveredBytesSql`). Otherwise the usage is NULL and the bytes 0.
 /// Admission and the Current report (`CompactionRead`) read it only when
 /// `turn_policy.forcedPurpose` leaves the purpose open. `since`
-/// and `usage` are each named once, so SQLite need not materialize them.
+/// and `latest_usage` are each named once, so SQLite need not materialize them.
 /// `base` is `context_changed`'s and named twice: a one-row `base` named
 /// once measured 5 steps cheaper here and 11 dearer in `context_changed`.
 /// The newest usage at or after the base is the newest
 /// usage, when that one is at or after the base, and none otherwise; so
-/// `usage` reads the newest, and the join holds it to the base. `provider`
+/// `latest_usage` reads the newest, and the join holds it to the base. `provider`
 /// and `model` are the Session's settings, as `admission_facts` read them.
 const admission_context = rsql.Read(.{
     .sql = "WITH " ++ compaction_base_sql ++ "," ++
         "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,coalesce((SELECT admission_position FROM base),0) AS frontier)," ++
-        "usage AS (" ++ latestUsageSql("0", "?3", "?4") ++ ")," ++
-        "measured AS (SELECT since.changed,since.frontier,usage.uncached,usage.cache_read,usage.cache_write,usage.output," ++
-        "usage.usage_position,usage.result_admission," ++
-        "CASE WHEN usage.uncached IS NULL THEN 0 ELSE usage.usage_position END AS covered," ++
-        "CASE WHEN usage.uncached IS NULL THEN since.frontier ELSE usage.result_admission END AS results " ++
-        "FROM since LEFT JOIN usage ON since.changed AND usage.result_admission>=since.frontier) " ++
+        "latest_usage AS (" ++ latestUsageSql("0", "?3", "?4") ++ ")," ++
+        "measured AS (SELECT since.changed,since.frontier,latest_usage.uncached,latest_usage.cache_read,latest_usage.cache_write,latest_usage.output," ++
+        "latest_usage.usage_position,latest_usage.result_admission," ++
+        "CASE WHEN latest_usage.uncached IS NULL THEN 0 ELSE latest_usage.usage_position END AS covered," ++
+        "CASE WHEN latest_usage.uncached IS NULL THEN since.frontier ELSE latest_usage.result_admission END AS results " ++
+        "FROM since LEFT JOIN latest_usage ON since.changed AND latest_usage.result_admission>=since.frontier) " ++
         "SELECT measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
         "CASE WHEN measured.changed THEN " ++ uncoveredBytesSql("measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
         "FROM measured",

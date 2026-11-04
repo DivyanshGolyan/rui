@@ -49,7 +49,7 @@ SQLITE_TESTS = "src/store/sqlite_tests.zig"
 SQLITE_CODE = re.compile(
     r"\bsqlite\.|\bc\.(?:sqlite3|SQLITE)|\.database\b|\bStatementCache\b|\bsqlite_heap_bytes\b|"
     r"\.passes\b|\.statements\b|\btesting_work\.(?:read|blob|closes)\b|\.read_blob\b|"
-    r"\.open\(\s*(?:std\.testing\.)?io\s*,|\bopenWithOptions\b")
+    r"\.open\(\s*(?:std\.testing\.)?io\s*,|\bopenWithOptions\b|\bsqlite_only\b")
 # Fixture text that names a SQLite mechanism stays raw SQL.
 SQLITE_TEXT = re.compile(
     r"\b(?:PRAGMA|sqlite_\w*|temp|CREATE|ALTER|DROP|TRIGGER|VIEW|ATTACH|SAVEPOINT|BEGIN|COMMIT|ROLLBACK|VACUUM)\b",
