@@ -13,3 +13,6 @@ consults/
 # Generated Python bytecode
 __pycache__/
 *.py[cod]
+
+# Installed by npm; never committed
+node_modules/
