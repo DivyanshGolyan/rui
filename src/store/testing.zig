@@ -12,6 +12,7 @@ const output_decode = @import("../output_decode.zig");
 const store_core = @import("Store.zig");
 const rsql = @import("rsql.zig");
 const sqlite = @import("sqlite.zig");
+const required_engines = @import("wire/required_engines.zig");
 const Store = store_core.Store;
 const historical_domain = @import("domain/historical.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
@@ -29,20 +30,8 @@ pub const Case = struct {
     engine: Engine,
 };
 
-/// The names `RUI_TEST_REQUIRE_ENGINES` may list. `mysql` and `postgres`
-/// have no `Engine` here; pg_tests.zig reads the variable itself.
-pub const EngineName = enum { sqlite, mysql, postgres };
-
-/// `list`, comma-separated, as a set of names. Each token must equal one
-/// name of `EngineName` exactly, so "mysqlx", " mysql" and an empty token
-/// are `UnknownRequiredEngine`. An empty `list` names none.
-pub fn parseRequiredEngines(list: []const u8) error{UnknownRequiredEngine}!std.EnumSet(EngineName) {
-    var names: std.EnumSet(EngineName) = .empty;
-    if (list.len == 0) return names;
-    var tokens = std.mem.splitScalar(u8, list, ',');
-    while (tokens.next()) |token| names.insert(std.meta.stringToEnum(EngineName, token) orelse return error.UnknownRequiredEngine);
-    return names;
-}
+pub const EngineName = required_engines.EngineName;
+pub const parseRequiredEngines = required_engines.parse;
 
 /// The names `RUI_TEST_REQUIRE_ENGINES` lists, parsed once per process;
 /// none when it is unset.
@@ -53,17 +42,32 @@ pub fn requiredEngines() !std.EnumSet(EngineName) {
     if (Parsed.names) |names| return names;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
-    const names = try parseRequiredEngines(environ.get("RUI_TEST_REQUIRE_ENGINES") orelse "");
+    const names = try required_engines.fromEnviron(&environ);
     Parsed.names = names;
     return names;
 }
 
+/// The first of `names` that conformance tests must reach but this build
+/// has no `Engine` for, or null. Postgres is not a Store engine yet; the
+/// wire tests in pg_tests.zig answer for it.
+pub fn unbuiltEngine(names: std.EnumSet(EngineName)) ?EngineName {
+    var listed = names.iterator();
+    while (listed.next()) |name| {
+        if (name == .postgres) continue;
+        if (std.meta.stringToEnum(Engine, @tagName(name)) == null) return name;
+    }
+    return null;
+}
+
 /// Runs `run(case)` once for each `Engine`, in order, and on a failure
 /// prints the engine's name and returns the error. It first checks
-/// `requiredEngines`, so an unknown name fails every conformance test.
-/// SQLite, the only engine here, always runs.
+/// `requiredEngines`: an unknown name, or a listed engine with no
+/// `Engine` (`unbuiltEngine`), fails every conformance test.
 pub fn forEachEngine(comptime run: anytype) !void {
-    _ = try requiredEngines();
+    if (unbuiltEngine(try requiredEngines())) |name| {
+        std.debug.print("RUI_TEST_REQUIRE_ENGINES lists {s}, an engine not built into these tests\n", .{@tagName(name)});
+        return error.RequiredEngineNotBuilt;
+    }
     inline for (comptime std.enums.values(Engine)) |engine| {
         var case: Case = .{ .engine = engine };
         run(&case) catch |err| {
@@ -77,6 +81,20 @@ pub fn forEachEngine(comptime run: anytype) !void {
 /// the same `tmp` again reopens the same Store. On SQLite the database is
 /// the file store.sqlite3 in `tmp`.
 pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
+    return testingStoreWith(case, storage, tmp, io, .{});
+}
+
+/// How `testingStoreWith` opens a Store beyond `testingStore`'s defaults.
+pub const TestingStoreOptions = struct {
+    /// The canonical identity the Store is opened under, when not `tmp`'s
+    /// real path.
+    identity: ?[]const u8 = null,
+    /// The providers whose Sessions get model Attempts.
+    served: protocol.Routes = protocol.routesAll(.endpoint),
+};
+
+/// `testingStore` with `options`.
+pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {
     switch (case.engine) {
         .sqlite => {
             var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -84,7 +102,7 @@ pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir
             const root = root_buffer[0..root_length];
             var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
             const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-            return storage.open(io, database, root) catch |err| {
+            return storage.openWithOptions(io, database, options.identity orelse root, .{ .served = options.served }) catch |err| {
                 std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
                 return err;
             };
@@ -92,42 +110,131 @@ pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir
     }
 }
 
+/// Words a fixture's SQL may not hold outside string literals, matched
+/// whole and ignoring case: each names a SQLite setting, schema change,
+/// transaction or connection mechanism. A test that needs one belongs in
+/// sqlite_tests.zig. tests/ci/store_conformance.py reads this list.
+pub const fixture_sqlite_words = [_][]const u8{
+    "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
+    "ATTACH", "SAVEPOINT", "BEGIN",  "COMMIT", "ROLLBACK", "VACUUM",
+};
+
+/// Word prefixes a fixture's SQL may not hold outside string literals,
+/// ignoring case: SQLite's own tables (`sqlite_schema`) and its PRAGMA
+/// table functions (`pragma_table_info()`). tests/ci/store_conformance.py
+/// reads this list.
+pub const fixture_sqlite_prefixes = [_][]const u8{ "sqlite_", "pragma_" };
+
 /// Why `text` cannot be a fixture's SQL, or null: it fails
-/// `rsql.portabilityError`, or it contains the word PRAGMA, a SQLite
-/// setting. It does not check that `text` parses.
+/// `rsql.portabilityError`; or, outside its string literals, it holds a
+/// word of `fixture_sqlite_words`, a word starting with one of
+/// `fixture_sqlite_prefixes`, or `AS TEXT` (MySQL casts only to CHAR).
+/// It does not check that `text` parses.
 pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
     comptime {
-        @setEvalBranchQuota(10 * text.len + 1000);
+        @setEvalBranchQuota(1000 * text.len + 10000);
         if (rsql.portabilityError(text, rsql.reserved_names_checked)) |message| return message;
-        var words = std.mem.tokenizeAny(u8, text, " \t\n;(),=");
-        while (words.next()) |word| {
-            if (std.ascii.eqlIgnoreCase(word, "PRAGMA")) return "fixture: PRAGMA is a SQLite setting; write the test in sqlite_tests.zig";
+        var index: usize = 0;
+        var previous: []const u8 = "";
+        while (index < text.len) {
+            if (text[index] == '\'') {
+                // A literal ends at a quote not doubled.
+                index += 1;
+                while (index < text.len) : (index += 1) {
+                    if (text[index] != '\'') continue;
+                    if (index + 1 < text.len and text[index + 1] == '\'') {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                index += 1;
+                previous = "";
+                continue;
+            }
+            if (!isWordByte(text[index])) {
+                if (!std.ascii.isWhitespace(text[index])) previous = "";
+                index += 1;
+                continue;
+            }
+            var end = index;
+            while (end < text.len and isWordByte(text[end])) end += 1;
+            const word = text[index..end];
+            index = end;
+            for (fixture_sqlite_words) |sqlite_word| {
+                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test in sqlite_tests.zig";
+            }
+            for (fixture_sqlite_prefixes) |prefix| {
+                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test in sqlite_tests.zig";
+            }
+            if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
+                return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
+            previous = word;
         }
         return null;
     }
 }
+
+fn isWordByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+
+/// Texts `fixtureTextError` refuses or takes, one of each rule and of
+/// each way past it. A test checks each verdict, and
+/// tests/ci/store_conformance.py reads these to check its own verdicts
+/// agree.
+pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
+    .{ .text = "SELECT count(*) FROM turn", .refused = false },
+    .{ .text = "PRAGMA foreign_keys=OFF", .refused = true },
+    .{ .text = "UPDATE turn SET note='PRAGMA temp VIEW sqlite_x AS TEXT'", .refused = false },
+    .{ .text = "UPDATE turn SET note='it''s' WHERE pragma_count=1", .refused = true },
+    .{ .text = "SELECT name FROM pragma_table_info('turn')", .refused = true },
+    .{ .text = "SELECT count(*) FROM sqlite_schema", .refused = true },
+    .{ .text = "DROP TABLE turn", .refused = true },
+    .{ .text = "SELECT count(*) FROM content WHERE CAST(payload AS TEXT)='x'", .refused = true },
+    .{ .text = "SELECT count(*) FROM content WHERE CAST(payload as text)='x'", .refused = true },
+    .{ .text = "SELECT text AS label FROM turn", .refused = false },
+    .{ .text = "SELECT temperature FROM turn", .refused = false },
+    .{ .text = "SELECT a||b FROM turn", .refused = true },
+    .{ .text = "SELECT a FROM turn -- note", .refused = true },
+    .{ .text = "INSERT OR IGNORE INTO turn VALUES (1)", .refused = true },
+    .{ .text = "SELECT unixepoch() FROM turn", .refused = true },
+};
 
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
     if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
     return text;
 }
 
-/// Runs `sql` on `storage`'s engine outside any entry point, so no entry
+/// Runs `sql` on `storage`'s SQLite database outside any entry point, so no entry
 /// point touches what it changes. With empty `args`, `sql` may hold several
 /// statements; otherwise it is one statement whose `?1`, `?2`... take
-/// `args` in order: integers, and byte slices as text.
+/// `args` in order: integers, `Blob`s as blobs, and byte slices as text.
+/// The fixtures run on SQLite, the only engine today.
 pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
-    if (args.len == 0) return sqlite.exec(storage.database, fixtureText(sql));
-    const statement = try sqlite.prepare(storage.database, fixtureText(sql));
-    defer _ = sqlite.c.sqlite3_finalize(statement);
-    try bindFixtureArgs(statement, args);
-    try sqlite.expectDone(statement);
+    return sqliteExec(storage.database, fixtureText(sql), args);
 }
 
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
 /// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
-    const statement = try sqlite.prepare(storage.database, fixtureText(sql));
+    return sqliteQueryU64(storage.database, fixtureText(sql), args);
+}
+
+/// `exec` on a SQLite connection, for any SQLite text: sqlite_tests.zig's
+/// raw SQL.
+pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !void {
+    if (args.len == 0) return sqlite.exec(database, sql);
+    const statement = try sqlite.prepare(database, sql);
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    try bindFixtureArgs(statement, args);
+    try sqlite.expectDone(statement);
+}
+
+/// `queryU64` on a SQLite connection, for any SQLite text:
+/// sqlite_tests.zig's raw SQL.
+pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !u64 {
+    const statement = try sqlite.prepare(database, sql);
     defer _ = sqlite.c.sqlite3_finalize(statement);
     try bindFixtureArgs(statement, args);
     if (sqlite.c.sqlite3_step(statement) != sqlite.c.SQLITE_ROW) return error.QueryFailed;
@@ -136,8 +243,9 @@ pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64
     return @intCast(value);
 }
 
-/// `exec` with foreign keys unchecked for `sql` alone. On SQLite,
-/// PRAGMA foreign_keys is OFF around it and ON after it, also when it fails.
+/// `exec` with foreign keys unchecked for `sql` alone: on SQLite, the only
+/// engine today, PRAGMA foreign_keys is OFF around it and ON after it, also
+/// when it fails.
 pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
     try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
     defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
@@ -146,19 +254,26 @@ pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: any
 
 /// Leaves `table` preparing normally but failing at the first step of a
 /// statement that reads it, the shape of an I/O or corruption fault after
-/// a statement compiled. On SQLite, `table` is renamed and a view whose
-/// filter overflows `abs` takes its name.
+/// a statement compiled. On SQLite, the only engine today, `table` is
+/// renamed and a view whose filter overflows `abs` takes its name.
 pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
     try sqlite.exec(storage.database, "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");
     try sqlite.exec(storage.database, "CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable " ++
         "WHERE abs(-9223372036854775808) IS NOT NULL");
 }
 
+/// Bytes a fixture binds as a blob, not as text.
+pub const Blob = struct { bytes: []const u8 };
+
 fn bindFixtureArgs(statement: *sqlite.c.sqlite3_stmt, args: anytype) !void {
-    inline for (args, 1..) |value, index| switch (@typeInfo(@TypeOf(value))) {
-        .int, .comptime_int => try sqlite.bindI64(statement, index, value),
-        else => try sqlite.bindText(statement, index, value),
-    };
+    inline for (args, 1..) |value, index| {
+        if (@TypeOf(value) == Blob) {
+            try sqlite.bindBlob(statement, index, value.bytes);
+        } else switch (@typeInfo(@TypeOf(value))) {
+            .int, .comptime_int => try sqlite.bindI64(statement, index, value),
+            else => try sqlite.bindText(statement, index, value),
+        }
+    }
 }
 
 pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !protocol.ConfigureCommand {

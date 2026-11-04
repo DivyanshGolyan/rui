@@ -1,7 +1,9 @@
 from pathlib import Path
 import unittest
 
-from store_conformance import ROOT, TESTS, check, rewrite
+import re
+
+from store_conformance import ROOT, TESTS, check, fixture_verdict, not_portable, rewrite, table
 
 PRE_SPLIT = '''//! The Store's tests.
 
@@ -52,6 +54,34 @@ test "no Store" {
 
 
 class StoreConformanceTest(unittest.TestCase):
+    def test_fixture_verdicts_agree_with_the_zig_check(self):
+        # testing.zig's test checks fixtureTextError on these same cases.
+        source = (ROOT / "src/store/testing.zig").read_text()
+        cases = source[source.index("pub const fixture_text_cases"):]
+        cases = re.findall(r'\.text = "((?:\\.|[^"\\])*)", \.refused = (true|false)', cases[:cases.index("};")])
+        self.assertGreater(len(cases), 10)
+        for text, refused in cases:
+            with self.subTest(text=text):
+                self.assertEqual(fixture_verdict(text.replace('\\"', '"')), refused == "true")
+
+    def test_a_refused_fixture_text_stays_raw(self):
+        self.assertTrue(not_portable('"SELECT name FROM " ++ "pragma_table_info(\'turn\')"'))
+        self.assertFalse(not_portable('"UPDATE turn SET note=\'PRAGMA\'"'))
+        source = PRE_SPLIT.replace('"SELECT count(*) FROM turn"', '"SELECT count(*) FROM sqlite_schema"')
+        _, moved, stats = rewrite(source)
+        self.assertEqual(stats["moved_tests"], 2)
+        self.assertIn('queryU64(storage.database, "SELECT count(*) FROM sqlite_schema")', moved)
+
+    def test_table_names_each_test_and_its_reason(self):
+        self.assertEqual(table(PRE_SPLIT), [
+            ("a portable test", "tests.zig", "every engine"),
+            ("a SQLite test", "sqlite_tests.zig", "a SQLite mechanism"),
+            ("no Store", "tests.zig", "opens no Store"),
+        ])
+        counted = PRE_SPLIT.replace('test "no Store" {\n    try std.testing.expect(true);',
+                                    'test "no Store" {\n    try std.testing.expect(storage.testing_content_work.read.load(.monotonic) == 0);')
+        self.assertEqual(table(counted)[2], ("no Store", "sqlite_tests.zig", "a SQLite mechanism"))
+
     def test_repository_tests_zig_names_no_sqlite_mechanism(self):
         self.assertIsNone(check((ROOT / TESTS).read_text()))
 
