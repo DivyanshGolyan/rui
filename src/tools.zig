@@ -1062,3 +1062,13 @@ test "Bash descriptions are required and bounded by decoded UTF-8 bytes" {
     var duplicate = TestSource{ .bytes = "{\"description\":\"Run tests\",\"cmd\":\"true\",\"description\":\"Read files\",\"timeout_ms\":null}" };
     try std.testing.expect(!try validBashArguments(&duplicate));
 }
+
+test "every provider-run tool the Host offers is run by some provider" {
+    for (std.meta.tags(Tool)) |tool| {
+        const offered = record(tool);
+        if (offered.owner != .provider) continue;
+        var run = false;
+        for (std.enums.values(protocol.Provider)) |provider| run = run or provider.runsTool(offered.name);
+        try std.testing.expect(run);
+    }
+}
