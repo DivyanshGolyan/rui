@@ -1,6 +1,7 @@
 """The Store schema version moves only past a release, a released row of
 bootstrap_digests is never edited, and neither is a shipped migration step:
-one whose `from` is below the released schema_version.
+one whose `from` is below the released schema_version. Every step is string
+literals only, so the source compared is the text that runs.
 
 Concurrent PRs that change the schema share main's unreleased number and
 update its row's digest in place, instead of each appending the next number:
@@ -20,6 +21,9 @@ VERSION = re.compile(r"^pub const schema_version: u32 = (\d+);$", re.MULTILINE)
 TAG = re.compile(r"v0\.(\d+)\.\d+")
 MIGRATIONS = re.compile(r"^pub const migrations = \[_\]Migration\{", re.MULTILINE)
 FROM = re.compile(r"\.from\s*=\s*(\d+)")
+STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+LITERALS = r'(?:"(?:,")*,?)?'
+LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
 
 
 def schema_version(source):
@@ -66,6 +70,12 @@ def migration_steps(source):
             steps[int(FROM.search(text)[1])] = text
             entry = []
         position += 1
+
+
+def non_literal_steps(steps):
+    """The `from` of each step whose statements are not all string literals:
+    a helper call or a `++` would let shared code change a step's text."""
+    return sorted(start for start, text in steps.items() if not LITERAL_STEP.fullmatch(STRING.sub('"', text)))
 
 
 def edited_shipped_steps(candidate, shipped, released):
@@ -124,10 +134,23 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(edited_shipped_steps(released, {}, 52), [51], "a step added below the release")
         self.assertEqual(migration_steps("pub const schema_version: u32 = 50;\n"), {})
 
+    def test_steps_are_literals_only(self):
+        steps = migration_steps(textwrap.dedent("""\
+            pub const migrations = [_]Migration{
+                .{ .from = 51, .sqlite = &.{ "A", "B \\"q\\" ++", }, .mysql = &.{} },
+                .{ .from = 52, .sqlite = &.{"CREATE TABLE t(x INTEGER CHECK(" ++ migrationExpression(.sqlite, "t", "x>0") ++ "))"}, .mysql = &.{} },
+                .{ .from = 53, .sqlite = &.{"A"}, .mysql = &.{ "B" ++ "C" } },
+                .{ .from = 54, .sqlite = rebuild, .mysql = &.{} },
+            };
+            """))
+        self.assertEqual(non_literal_steps(steps), [52, 53, 54])
+
     def test_reads_the_steps_owner(self):
         source = (ROOT / SCHEMA).read_text()
         self.assertIsNotNone(MIGRATIONS.search(source), "schema.zig declares `migrations` as this test reads it")
         self.assertEqual(len(migration_steps(source)), schema_version(source) - 51)
+        self.assertEqual(non_literal_steps(migration_steps(source)), [],
+                         "each statement of a migration step is one string literal: write out the text that runs")
 
     def test_schema_version_moves_once_per_release(self):
         tag = released_tag(ROOT)

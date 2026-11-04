@@ -53,11 +53,13 @@ pub const migration_baseline: u32 = 51;
 /// One forward step of the Store format, from `from` to `from + 1`, as
 /// statements per engine. SQLite runs `sqlite` when a Store opens
 /// (`openExisting`). Rui runs no DDL on MySQL (D203): the DB team runs
-/// `mysql`, which `mysqlMigration` joins. A CHECK or predicate in either
-/// is spliced from `migrationExpression`, so it meets the rules schema
-/// text meets. A step's text is frozen once its `from + 1` is released:
-/// tests/ci/test_store_schema_version.py compares every step whose `from`
-/// is below the released schema_version with its text at the release.
+/// `mysql`, which `mysqlMigration` joins. Every statement is one string
+/// literal, so the source is the text that runs: a CHECK or predicate is
+/// copied from the schema's rendered text (`ddl`), whose source passed
+/// `rsql.expressionError`, and the migration tests hold the migrated Store
+/// to that text. tests/ci/test_store_schema_version.py refuses an entry
+/// that is anything but literals, and compares every step whose `from` is
+/// below the released schema_version with its text at the release.
 ///
 /// SQLite keeps each CREATE text as run, and a Store opens only when every
 /// object's text equals a fresh bootstrap's. ALTER TABLE ADD COLUMN splices
@@ -110,12 +112,6 @@ pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
-}
-
-/// `text`, a CHECK or index predicate on `table`, in `dialect`'s spelling,
-/// once it meets the rules schema text meets (`expression`).
-pub fn migrationExpression(comptime dialect: rsql.Dialect, comptime table: []const u8, comptime text: []const u8) []const u8 {
-    return comptime expression(dialect, tables[tablePosition(&tables, table)], text);
 }
 
 /// SQL membership of `column` in a closed set of enum tags or text literals:
