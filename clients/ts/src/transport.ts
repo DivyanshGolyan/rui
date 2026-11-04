@@ -12,6 +12,11 @@ export const WIRE_VERSION = "8";
 /** The largest reply body read. The Host's own replies stay far below it. */
 const MAX_REPLY_BYTES = 64 * 1024 * 1024;
 
+/** After the request is sent, the longest the Host may stay silent before its first reply byte. */
+const RESPONSE_WAIT_MS = 5_000;
+/** The longest a transfer, in either direction, may make no byte of progress. */
+const TRANSFER_IDLE_MS = 60_000;
+
 export interface Post {
 	socketPath: string;
 	path: string;
@@ -28,6 +33,10 @@ export interface Post {
 export interface ReplyLimits {
 	prefix?: number;
 	max?: number;
+	/** The longest silence before the first reply byte, once the request is sent. Default 5 s. */
+	responseMs?: number;
+	/** The longest a transfer may make no byte of progress. Default 60 s. */
+	idleMs?: number;
 }
 
 /** A failure to reach the Host at all, as opposed to a refusal from it. */
@@ -47,8 +56,14 @@ export function post(call: Post): Promise<Buffer> {
 	if (call.environment !== undefined) headers["X-Rui-Environment-Bytes"] = String(call.environment.length);
 	return new Promise((resolve, reject) => {
 		const outgoing = request({ socketPath: call.socketPath, path: call.path, method: "POST", headers, agent: false });
+		const idle = call.limits?.idleMs ?? TRANSFER_IDLE_MS;
+		outgoing.setTimeout(idle);
+		outgoing.on("timeout", () => outgoing.destroy(new Error("the Host made no progress in time")));
+		// Silence after the whole request went out gets the short budget; any byte of progress renews the long one.
+		outgoing.on("finish", () => outgoing.setTimeout(call.limits?.responseMs ?? RESPONSE_WAIT_MS));
 		outgoing.on("error", (error) => reject(new ConnectionError(error.message, { cause: error })));
 		outgoing.on("response", (incoming) => {
+			outgoing.setTimeout(idle);
 			const chunks: Buffer[] = [];
 			let length = 0;
 			incoming.on("data", (chunk: Buffer) => {

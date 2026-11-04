@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { encodeFrame, startError } from "../src/client.ts";
 import { RuiStartError } from "../src/errors.ts";
 import { listActivity } from "../src/feed.ts";
 import { environmentBytes, type Link } from "../src/sessions.ts";
-import { WIRE_VERSION } from "../src/transport.ts";
+import { ConnectionError, post, WIRE_VERSION } from "../src/transport.ts";
 
 test("the wire version is the one openapi.json describes", () => {
 	const document = JSON.parse(readFileSync(new URL("../../../openapi.json", import.meta.url), "utf8"));
@@ -57,4 +60,36 @@ test("an aborted feed drops the page its pending read returns", async () => {
 	controller.abort();
 	release();
 	assert.equal((await pending).done, true);
+});
+
+async function stalledHost(reply: string): Promise<{ socketPath: string; close: () => void }> {
+	const socketPath = join(mkdtempSync(join(tmpdir(), "rui-ts-stall-")), "s");
+	const open = new Set<import("node:net").Socket>();
+	const server = createServer((socket) => {
+		open.add(socket);
+		socket.on("error", () => {});
+		socket.on("data", () => reply && socket.write(reply));
+	});
+	await new Promise<void>((ready) => server.listen(socketPath, ready));
+	return { socketPath, close: () => { for (const socket of open) socket.destroy(); server.close(); } };
+}
+
+test("a Host that never answers ends the call after the response wait", async () => {
+	const host = await stalledHost("");
+	try {
+		const started = Date.now();
+		await assert.rejects(post({ socketPath: host.socketPath, path: "/v1/x", body: "{}", limits: { responseMs: 200 } }), ConnectionError);
+		assert.ok(Date.now() - started < 3_000);
+	} finally {
+		host.close();
+	}
+});
+
+test("a reply that stops partway ends the call after the idle budget", async () => {
+	const host = await stalledHost("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial");
+	try {
+		await assert.rejects(post({ socketPath: host.socketPath, path: "/v1/x", body: "{}", limits: { responseMs: 5_000, idleMs: 200 } }), ConnectionError);
+	} finally {
+		host.close();
+	}
 });
