@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const codec_abi = @import("../../codec_abi.zig");
+const output_format = @import("../../output_format.zig");
 const model_capability = @import("../../model_capability.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -645,19 +647,30 @@ pub fn openPublicConversationContent(a: *ReadAccess, request: *const protocol.Co
 // only the requested position interval through the existing history index.
 // Compaction messages deliberately have no Conversation certificate.
 /// A row exactly when the assistant entry at position ?2 is the answer of
-/// a Turn that completed at or before end ?3: its causing Operation's
-/// selected message, the last of that Operation's messages with its text.
-const answer_entry = rsql.Read(.{
-    .sql = "SELECT 1 AS final FROM conversation_entry e JOIN turn t ON t.turn_id=e.turn_id " ++
-        "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind=3 AND t.session_ref=e.session_ref " ++
-        "AND t.outcome_code='" ++ TurnOutcome.completed_code ++ "' AND t.outcome_position<=?3 " ++
-        "AND e.source_operation_id=t.operation_id AND e.content_id=t.outcome_content_id " ++
-        "AND NOT EXISTS(SELECT 1 FROM model_output_item later WHERE later.operation_id=e.source_operation_id " ++
-        "AND later.item_ordinal>e.source_item_ordinal AND later.item_kind=2 AND later.message_content_id=e.content_id)",
-    .Args = struct { session: []const u8, position: u64, end: u64 },
-    .Row = struct { final: bool },
-    .cardinality = .optional,
-});
+/// a Turn that completed at or before end ?3: the message its causing
+/// Operation selected, by `output_decode.AnswerSelection`'s rule over that
+/// Operation's messages: the last `final_answer`, or with no phased
+/// message the last one. Each message is an entry, so the item names it.
+const answer_entry = blk: {
+    const Phase = codec_abi.Phase;
+    const final_answer = std.fmt.comptimePrint("{d}", .{@backingInt(Phase.final_answer)});
+    const unphased = std.fmt.comptimePrint("{d}", .{@backingInt(Phase.unphased)});
+    const message = std.fmt.comptimePrint("{d}", .{@backingInt(output_format.OutputItemKind.message)});
+    break :blk rsql.Read(.{
+        .sql = "SELECT 1 AS final FROM conversation_entry e JOIN turn t ON t.turn_id=e.turn_id " ++
+            "JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+            "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind=3 AND t.session_ref=e.session_ref " ++
+            "AND t.outcome_code='" ++ TurnOutcome.completed_code ++ "' AND t.outcome_position<=?3 AND e.source_operation_id=t.operation_id " ++
+            "AND ((item.phase=" ++ final_answer ++ " AND NOT EXISTS(SELECT 1 FROM model_output_item later WHERE later.operation_id=item.operation_id " ++
+            "AND later.item_ordinal>item.item_ordinal AND later.item_kind=" ++ message ++ " AND later.phase=" ++ final_answer ++ ")) " ++
+            "OR (NOT EXISTS(SELECT 1 FROM model_output_item other WHERE other.operation_id=item.operation_id AND other.item_kind=" ++ message ++ " AND other.phase<>" ++ unphased ++ ") " ++
+            "AND NOT EXISTS(SELECT 1 FROM model_output_item later WHERE later.operation_id=item.operation_id " ++
+            "AND later.item_ordinal>item.item_ordinal AND later.item_kind=" ++ message ++ ")))",
+        .Args = struct { session: []const u8, position: u64, end: u64 },
+        .Row = struct { final: bool },
+        .cardinality = .optional,
+    });
+};
 
 pub const missing_assistant_entry = rsql.Read(.{
     .sql = "SELECT 1 AS missing FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
