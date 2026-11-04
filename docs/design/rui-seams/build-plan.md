@@ -153,7 +153,8 @@ DB: 6b ─► 7 ─► 8 ─► 9 (extends A2)
 - Hub PRs first. T1a, F1 and T1b unblock the most units, so they get the first reviews.
 - Keep T1b reviewable despite its reach: T1a moves all logic to records first, so T1b is mostly storage and wire.
 - Every wire PR regenerates `openapi.json` in the same commit; the CI diff check from A1 turns a forgotten regeneration into a red build instead of a review finding (orchestration rule 5).
-- Measure per-stage times (build, review, CI, Codex, merge) on the first three PRs before naming a pace limit (orchestration rule 11).
+- No Claude code or bug review of implementation PRs, and no reviewer subagents (Divyansh 2026-11-04 06:57Z). Codex on the PR is the code review. Claude still does design reviews, and a fresh-context redesign when the same class of finding keeps coming back.
+- Measure per-stage times (build, CI, Codex, merge) on the first three PRs before naming a pace limit (orchestration rule 11).
 
 ## Threads to start
 
