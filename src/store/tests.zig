@@ -4866,9 +4866,10 @@ test "historical preparation yields covered group populations under small allowa
         try testingHistoricalStep(&view, &after, &bytes, &items);
         if (after != before) served += 1;
     }
-    // One user input, 8 groups of 16 calls, their 8 result groups and the
-    // end, each served by its own step after discovery yields.
-    try std.testing.expectEqual(@as(usize, 1 + 8 * calls.len + 8 + 1), served);
+    // One user input, 8 Operations each with its group of 16 calls, their
+    // 8 result groups and the end, each served by its own step after
+    // discovery yields.
+    try std.testing.expectEqual(@as(usize, 1 + 8 + 8 * calls.len + 8 + 1), served);
     try std.testing.expect(turns > served);
     try std.testing.expect(!storage.isFenced());
 }
@@ -4981,7 +4982,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
                         // The view never reaches its end, so no request seals.
                         if (!bytes_fault) return error.MissingCorruptionFailure;
                         served = entry.?.*;
-                        if (served.?.kind == .user) continue;
+                        if (served.?.kind == .user or served.?.kind == .operation) continue;
                         try std.testing.expectEqual(HistoricalEntryKind.provider_output, served.?.kind);
                         const output = try view.openOutput(served.?.position);
                         try std.testing.expectEqual(OutputItemKind.function_call, output.kind);
@@ -6753,7 +6754,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try execSessionSql(storage.database, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", created_session_0.slice());
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session"));
     for ([_][:0]const u8{
         "UPDATE session SET provider='Codex' WHERE session_ref=?1",
         "UPDATE session_revision SET provider='9codex' WHERE session_ref=?1",
@@ -6772,7 +6773,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
 test "a Session pinned to a codec this Host cannot build fences its settings" {
     for ([_]?[:0]const u8{
         null,
-        "UPDATE session SET codec='openai-responses/2' WHERE session_ref=?1",
+        "UPDATE session SET codec='openai-responses/3' WHERE session_ref=?1",
         "UPDATE session SET codec_options=x'00' WHERE session_ref=?1",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
@@ -6781,7 +6782,7 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
-        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session"));
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session"));
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try execSessionSql(storage.database, sql, session.slice());
