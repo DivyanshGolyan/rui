@@ -1796,6 +1796,64 @@
               "value"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "position": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "at": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "value": {
+                "type": "object",
+                "properties": {
+                  "session_changed": {
+                    "type": "object",
+                    "properties": {
+                      "revision": {
+                        "$ref": "#/components/schemas/Decimal"
+                      },
+                      "field": {
+                        "type": "string",
+                        "enum": [
+                          "provider",
+                          "model",
+                          "instructions",
+                          "tools",
+                          "permission_mode",
+                          "output_schema",
+                          "compaction_trigger",
+                          "output_reservation",
+                          "reasoning_effort",
+                          "label"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "revision",
+                      "field"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "session_changed"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "position",
+              "ordinal",
+              "at",
+              "value"
+            ],
+            "additionalProperties": false
           }
         ]
       },
@@ -1932,7 +1990,8 @@
                 "sent",
                 "send_failed",
                 "received",
-                "approval_requested"
+                "approval_requested",
+                "session_changed"
               ]
             },
             "uniqueItems": true,

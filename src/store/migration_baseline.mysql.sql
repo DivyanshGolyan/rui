@@ -156,6 +156,23 @@ CREATE TABLE session_revision(
  CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),
  CHECK(label IS NULL OR OCTET_LENGTH(label) BETWEEN 1 AND 100)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE session_change(
+ session_ref VARCHAR(6) NOT NULL,
+ position BIGINT NOT NULL,
+ ordinal BIGINT NOT NULL,
+ revision BIGINT NOT NULL,
+ field VARCHAR(18) NOT NULL,
+ changed_at BIGINT NOT NULL,
+ PRIMARY KEY(session_ref,position,ordinal),
+ UNIQUE(session_ref,revision,field),
+ FOREIGN KEY(session_ref) REFERENCES session(session_ref),
+ FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),
+ CHECK(position>0),
+ CHECK(ordinal>=0),
+ CHECK(revision>1),
+ CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label')),
+ CHECK(changed_at>0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 CREATE TABLE message_admission(
  admission_id BIGINT NOT NULL,
  session_ref VARCHAR(6) NOT NULL,

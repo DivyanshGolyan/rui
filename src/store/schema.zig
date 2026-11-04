@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x9dc0d23fd8743bd4 },
+    .{ .schema_version = 51, .digest = 0x8382406a3bf20730 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -395,6 +395,29 @@ pub const tables = [_]Table{
             references("instructions_content_id", "content", content_reference),
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
+        // The feed's change list (D138, D218): one row per setting a
+        // revision changed, written in the revision's own commit and never
+        // edited. The revision keeps the current values; a row records
+        // when its change was accepted. A revision's rows share one
+        // position, one ordinal each.
+        .name = "session_change",
+        .columns = &.{
+            .{ .name = "session_ref", .type = .{ .text = null } },
+            .{ .name = "position", .type = .int, .check = "position>0" },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "revision", .type = .int, .check = "revision>1" },
+            .{ .name = "field", .type = .{ .tag = &.{ "provider", "model", "instructions", "tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation", "reasoning_effort", "label" } } },
+            .{ .name = "changed_at", .type = .int, .check = "changed_at>0" },
+        },
+        .primary_key = &.{ "session_ref", "position", "ordinal" },
+        .uniques = &.{&.{ "session_ref", "revision", "field" }},
+        .foreign_keys = &.{
+            references("session_ref", "session", session_reference),
+            .{ .columns = &.{ "session_ref", "revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
         },
         .without_rowid = true,
     },

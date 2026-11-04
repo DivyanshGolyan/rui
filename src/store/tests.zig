@@ -5406,8 +5406,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             const first = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 16), first.count);
             try std.testing.expect(first.more);
-            try std.testing.expectEqual(@as(u64, 40), first.items[0].position);
-            try std.testing.expectEqual(@as(u64, 25), first.items[15].position);
+            try std.testing.expectEqual(@as(u64, 41), first.items[0].position);
+            try std.testing.expectEqual(@as(u64, 26), first.items[15].position);
             for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
             try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
             try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{
@@ -5418,7 +5418,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             }));
             try std.testing.expect(!storage.isFenced());
             var unicode_reader: ContentReader = undefined;
-            unicode_reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = 40 }));
+            unicode_reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = 41 }));
             var lead: [1]u8 = undefined;
             var rest: [4]u8 = undefined;
             try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -5448,8 +5448,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             const older = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 4), older.count);
             try std.testing.expect(!older.more);
-            try std.testing.expectEqual(@as(u64, 24), older.items[0].position);
-            try std.testing.expectEqual(@as(u64, 21), older.items[3].position);
+            try std.testing.expectEqual(@as(u64, 25), older.items[0].position);
+            try std.testing.expectEqual(@as(u64, 22), older.items[3].position);
             try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
             const fresh = try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session });
             try std.testing.expectEqual(@as(usize, 16), fresh.count);
@@ -5462,10 +5462,10 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
             try std.testing.expectEqualStrings("xx", &tail);
             reader.close();
-            read.position = 41; // the applied instruction is not public content
+            read.position = 42; // the applied instruction is not public content
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&read));
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = .{}, .position = 1 }));
-            try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 21, .start = 1024 * 1024 + 1 }));
+            try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 22, .start = 1024 * 1024 + 1 }));
             try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
             try std.testing.expect(!storage.isFenced());
         }
@@ -6106,7 +6106,7 @@ test "every activity row is dated by the fact that owns it" {
                     .stop => 108,
                     // Asked when its call was made.
                     .approval_requested => 104,
-                    .hosted_call, .sent, .send_failed, .received => unreachable,
+                    .hosted_call, .sent, .send_failed, .received, .session_changed => unreachable,
                 };
                 try std.testing.expectEqual(expected, item.at);
                 seen.insert(item.value);
@@ -9597,6 +9597,65 @@ test "a Current report's work grows linearly in one Operation's calls, as main's
                 std.debug.print("rounds: {any}\n", .{rounds});
                 return err;
             };
+        }
+    }.run);
+}
+
+test "each setting a revision changes is one session_changed row at the position it was accepted" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("change-create", "", workspace, "model-a");
+            const session = storage.configure(&create, .{}).accepted.session;
+            var request: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
+            try request.session.set(session.slice());
+            // A creation is no change.
+            try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
+            try submitTestMessage(&storage, &tmp, "change-before", "change-before", session.slice(), "before");
+            var change = try completeConfiguration("change-mode-label", session.slice(), workspace, "model-a");
+            change.configuration.permission_mode.state = .value;
+            // The default is bypass.
+            try change.configuration.permission_mode.value.set("ask");
+            change.configuration.label.state = .value;
+            try change.configuration.label.value.set("renamed");
+            try std.testing.expect(storage.configure(&change, .{}) == .accepted);
+            // A revision that changes nothing writes no row.
+            var same = try completeConfiguration("change-same", session.slice(), workspace, "model-a");
+            try std.testing.expect(storage.configure(&same, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "change-after", "change-after", session.slice(), "after");
+            const page = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 2), page.count);
+            const expected = [_]protocol.SessionField{ .permission_mode, .label };
+            for (page.items[0..2], expected, 0..) |item, field, ordinal| {
+                try std.testing.expectEqual(page.items[0].position, item.position);
+                try std.testing.expectEqual(@as(u64, ordinal), item.ordinal);
+                try std.testing.expectEqual(@as(u64, 2), item.value.session_changed.revision);
+                try std.testing.expectEqual(field, item.value.session_changed.field);
+            }
+            // The rows sit between the Messages admitted before and after.
+            var all: protocol.ActivityPage = .{};
+            try all.session.set(session.slice());
+            const every = try store_core.activityPageForTesting(&storage, all);
+            var admissions: [2]u64 = undefined;
+            var seen: usize = 0;
+            for (every.items[0..every.count]) |item| if (item.value == .admission) {
+                admissions[seen] = item.position;
+                seen += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 2), seen);
+            try std.testing.expect(admissions[0] < page.items[0].position and page.items[0].position < admissions[1]);
+            // Backward from the end, the same rows come in reverse.
+            request.direction = .backward;
+            const backward = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 2), backward.count);
+            try std.testing.expectEqual(protocol.SessionField.label, backward.items[0].value.session_changed.field);
+            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }

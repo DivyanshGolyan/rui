@@ -1506,7 +1506,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sendFailed(sink, failed.target, compact_tools);
             },
             // The call's own line and the work status show the wait.
-            .approval_requested => {},
+            .approval_requested, .session_changed => {},
         }
     }
     return drawn;

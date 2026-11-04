@@ -704,6 +704,10 @@ pub const NamedPeer = struct {
     }
 };
 
+/// A Session setting a revision can change, named on the wire as in a
+/// configuration.
+pub const SessionField = enum { provider, model, instructions, tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+
 pub const ActivityItem = struct {
     position: u64,
     ordinal: u64 = 0,
@@ -712,7 +716,7 @@ pub const ActivityItem = struct {
     value: Value,
     /// `admission` is a Message a person or script sent; `received` one
     /// another Session sent, which always names it as `sender`.
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested };
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
@@ -741,6 +745,9 @@ pub const ActivityItem = struct {
     /// for approval when it was made: `action` is the id a
     /// `permission_decision` names. The row follows its call at ordinal 1.
     pub const ApprovalRequested = struct { action: u64, operation: u64, call_ordinal: u64 };
+    /// One setting a revision changed, at the position the revision was
+    /// accepted; a revision's changes share it, one ordinal each.
+    pub const SessionChanged = struct { revision: u64, field: SessionField };
 
     /// Holes: position, ordinal, at; then the value's shape, then `tail`.
     pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
@@ -772,6 +779,8 @@ pub const ActivityItem = struct {
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
         /// Holes: action, operation, call ordinal.
         pub const approval_requested = .{ "{\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
+        /// Holes: revision, field.
+        pub const session_changed = .{ "{\"revision\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = SessionField }, "\"}" };
     };
     pub const max_json_bytes = blk: {
         @setEvalBranchQuota(10_000);
@@ -792,6 +801,7 @@ pub const ActivityItem = struct {
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.action, request.operation, request.call_ordinal }),
+            .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{presentation}),
