@@ -213,6 +213,21 @@ class StackFramesTest(unittest.TestCase):
         _, failures = gate(SEEDED, debugging)
         self.assertEqual([failure.split(":")[0] for failure in failures], ["debug.print"])
 
+    def test_jobs_run_through_a_pointer_count_on_their_threads_chain(self):
+        # The worker's anchor runs client.only through a pointer: 0x40000
+        # more on its chain, and none on the main thread's.
+        threads = {"worker": "worker.receive"}
+        rules = policy(SEEDED, threads, ceilings={"worker": 0x46000})
+        rules["threads"]["worker"]["jobs"] = "client."
+        rules["exceptions"].append({"function": "client.only", "frame_bytes": 0x40000, "cause": "fixture"})
+        report, failures = check(parse(DISASSEMBLY), rules)
+        self.assertEqual(failures, [])
+        self.assertEqual(check(parse(DISASSEMBLY), policy(SEEDED))[1], [])
+        self.assertIn("    262144 client.only", report)
+        rules["threads"]["worker"]["jobs"] = "absent."
+        with self.assertRaisesRegex(ValueError, "no jobs absent."):
+            check(parse(DISASSEMBLY), rules)
+
     def test_every_spawned_thread_is_named_by_exactly_one_anchor(self):
         with self.assertRaisesRegex(ValueError, "reaches anchors \\[\\]"):
             gate(SEEDED, threads={"worker": "client.only"})
@@ -278,11 +293,17 @@ class StackFramesTest(unittest.TestCase):
                                               ceilings={"main thread": 0x7000, "engine": 0x1000},
                                               threads={"worker": "worker.receive", "engine": "engine.run"})))
             commit("candidate grows allowance")
+            # A new thread brings its reviewed ceiling, as the seed did.
             self.assertEqual(allowance_growth(root, path), [
                 "a.big: frame_bytes 20480 exceeds the trusted 16384",
                 "b.new: frame_bytes 12288 exceeds the trusted absence",
                 "main thread: chain_ceiling 28672 exceeds the trusted 24576",
-                "engine: chain_ceiling 4096 exceeds the trusted absence",
+            ])
+            # A renamed thread is no new one: it keeps the trusted ceiling.
+            renamed = policy({"a.big": 0x4000}, threads={"renamed": "worker.receive"}, ceilings={"renamed": 0x9000})
+            path.write_text(json.dumps(renamed))
+            self.assertEqual(allowance_growth(root, path), [
+                "renamed: chain_ceiling 36864 exceeds the trusted absence (threads ['worker'] left the policy)",
             ])
             rules = policy({"a.big": 0x4000})
             rules["budget_bytes"] = 16384

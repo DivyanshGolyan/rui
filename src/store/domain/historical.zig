@@ -422,6 +422,10 @@ pub const HistoricalReader = struct {
 pub const OutputItemKind = output_format.OutputItemKind;
 
 fn readHistoricalSettings(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
+    return self.worker().call(readHistoricalSettingsOnWorker, .{ self, view, out });
+}
+
+fn readHistoricalSettingsOnWorker(self: *Store, view: *HistoricalView, out: *HistoricalSettings) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -503,6 +507,10 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
 }
 
 fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
+    return self.worker().call(readHistoricalEntryOnWorker, .{ self, view, after_position });
+}
+
+fn readHistoricalEntryOnWorker(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -511,6 +519,10 @@ fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64)
 }
 
 fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
+    return self.worker().call(validateHistoricalOutputsStepOnWorker, .{ self, view });
+}
+
+fn validateHistoricalOutputsStepOnWorker(self: *Store, view: *HistoricalView) !bool {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -519,6 +531,10 @@ fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
 }
 
 fn readPrefixSeal(self: *Store, binding: AttemptBinding) !?PrefixSeal {
+    return self.worker().call(readPrefixSealOnWorker, .{ self, binding });
+}
+
+fn readPrefixSealOnWorker(self: *Store, binding: AttemptBinding) !?PrefixSeal {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -545,6 +561,10 @@ pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
 }
 
 pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+    return self.worker().call(recordPrefixSealOnWorker, .{ self, binding, seal });
+}
+
+fn recordPrefixSealOnWorker(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var a: store_access.Access(.write, error{}) = .open(&entry);
@@ -570,6 +590,10 @@ pub fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !voi
 }
 
 fn readCompactionAnchor(self: *Store, base_id: u64) !u64 {
+    return self.worker().call(readCompactionAnchorOnWorker, .{ self, base_id });
+}
+
+fn readCompactionAnchorOnWorker(self: *Store, base_id: u64) !u64 {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -975,6 +999,10 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?Historic
 }
 
 fn readHistoricalOutput(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
+    return self.worker().call(readHistoricalOutputOnWorker, .{ self, view, position });
+}
+
+fn readHistoricalOutputOnWorker(self: *Store, view: *HistoricalView, position: u64) !HistoricalOutput {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -1054,6 +1082,10 @@ fn outputAt(a: *ReadAccess, view: *HistoricalView, position: u64) !HistoricalOut
 }
 
 fn readHistoricalPart(self: *Store, view: *HistoricalView) !?HistoricalPart {
+    return self.worker().call(readHistoricalPartOnWorker, .{ self, view });
+}
+
+fn readHistoricalPartOnWorker(self: *Store, view: *HistoricalView) !?HistoricalPart {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -1142,6 +1174,13 @@ fn viewBag(view: *HistoricalView, content_id: u64, row: *const content_metadata.
 }
 
 fn readHistoricalToolResult(
+    self: *Store,
+    view: *HistoricalView,
+) !?HistoricalToolResult {
+    return self.worker().call(readHistoricalToolResultOnWorker, .{ self, view });
+}
+
+fn readHistoricalToolResultOnWorker(
     self: *Store,
     view: *HistoricalView,
 ) !?HistoricalToolResult {

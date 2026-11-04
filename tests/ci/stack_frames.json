@@ -1,10 +1,11 @@
 {
   "budget_bytes": 8192,
   "threads": {
-    "main thread": {"anchor": "server.serve", "chain_ceiling": 45056},
-    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 32768},
-    "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 32768},
-    "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672}
+    "main thread": {"anchor": "server.serve", "chain_ceiling": 32768},
+    "intake worker": {"anchor": "server.Intake.Exchange.receive", "chain_ceiling": 20480},
+    "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 28672},
+    "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672},
+    "Store worker": {"anchor": "store.worker.Worker.serve", "chain_ceiling": 24576, "jobs": "store.worker.Worker.Request("}
   },
   "host_modules": [
     "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "change_ring",

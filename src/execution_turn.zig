@@ -74,7 +74,8 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
     return made_progress;
 }
 
-fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error{Fence}!bool {
+/// Noinline: the stack-frame gate names the engine thread by it.
+noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error{Fence}!bool {
     var made_progress = false;
     const capacity_released = state.capacity_was_full and context.freeSlots() != 0;
     const retry_poll_due = if (state.last_retry_poll) |last|

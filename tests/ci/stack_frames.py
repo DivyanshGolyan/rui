@@ -10,7 +10,8 @@ std.Io vtable leave no direct call, so every function of a module named in
 host_modules is walked as well. The walk stops at the panic handlers, which run
 only as the thread dies.
 
-stack_frames.json holds the budget, each Host thread's anchor and chain ceiling,
+stack_frames.json holds the budget, each Host thread's anchor and chain ceiling
+(and, for a thread that runs jobs through a function pointer, their name prefix),
 the Host modules, and shrink-only exceptions. An exception's frame_bytes and a
 thread's chain_ceiling are ceilings in whole pages, the unit the probe makes
 resident, so CPU-model noise of a few bytes moves no verdict. A frame or chain
@@ -207,11 +208,31 @@ def deepest(functions, roots):
     return {root: depth(root) for root in roots}
 
 
+def dispatch_jobs(functions, threads):
+    """Make each thread's anchor call the jobs it runs through a pointer.
+
+    A thread whose spec names "jobs", a name prefix, runs every function of
+    that prefix from its anchor through a function pointer, which leaves no
+    direct call; its deepest chain counts them as the anchor's callees.
+    """
+    for label, spec in threads.items():
+        if "jobs" not in spec:
+            continue
+        anchors = [name for name in functions if normalize(name) == spec["anchor"]]
+        jobs = {name for name in functions if normalize(name).startswith(spec["jobs"])}
+        if not anchors or not jobs:
+            raise ValueError(f"{label}: no anchor {spec['anchor']} or no jobs {spec['jobs']} in the binary; "
+                             "update stack_frames.json threads")
+        for anchor in anchors:
+            functions[anchor]["calls"] |= jobs
+
+
 def check(functions, policy):
     """(report lines, failures) for the Host stacks in functions under policy."""
     budget = policy["budget_bytes"]
     exceptions = {entry["function"]: entry["frame_bytes"] for entry in policy["exceptions"]}
     threads = policy["threads"]
+    dispatch_jobs(functions, threads)
     roots = host_roots(functions, threads)
     report, failures = [], []
     # Name -> (largest reachable frame of that name, call path to it).
@@ -279,10 +300,16 @@ def allowance_growth(root=ROOT, policy_path=POLICY):
             grown.append(f"{entry['function']}: frame_bytes {entry['frame_bytes']} exceeds the trusted "
                          f"{before.get(entry['function'], 'absence')}")
     ceilings = {label: spec["chain_ceiling"] for label, spec in trusted["threads"].items()}
+    # A new Host thread is a first introduction, as the seed was: its reviewed
+    # ceiling is its allowance. Only while every trusted thread keeps its
+    # label, so a renamed thread cannot pass as a new one.
+    gone = sorted(set(ceilings) - set(policy["threads"]))
     for label, spec in policy["threads"].items():
+        if label not in ceilings and not gone:
+            continue
         if spec["chain_ceiling"] > ceilings.get(label, 0):
             grown.append(f"{label}: chain_ceiling {spec['chain_ceiling']} exceeds the trusted "
-                         f"{ceilings.get(label, 'absence')}")
+                         f"{ceilings.get(label, 'absence')}" + (f" (threads {gone} left the policy)" if gone else ""))
     return grown
 
 

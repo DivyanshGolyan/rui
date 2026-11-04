@@ -1205,8 +1205,8 @@ const ControlTiming = struct {
         var candidates = std.mem.splitScalar(u8, gate_hook.keys, ',');
         while (candidates.next()) |candidate| {
             if (!std.mem.eql(u8, candidate, self.command_key.slice())) continue;
-            // Integration tests deliberately hold this acquired Store mutex
-            // until intake routes a competing control. Their keeper
+            // Integration tests deliberately hold this acquired Store entry
+            // (on the Store worker, which runs nothing else) until intake routes a competing control. Their keeper
             // descriptor prevents FIFO-open deadlock; process teardown bounds
             // a missing release without granting this gate semantic authority.
             var gate = std.Io.Dir.cwd().openFile(self.host.io, gate_hook.path, .{}) catch return;
