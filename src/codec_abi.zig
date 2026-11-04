@@ -33,9 +33,10 @@ pub const ObservedHeaders = struct {
 // after `history_end`.
 
 /// The neutral items of a request, in the order the Host yields them:
-/// settings, instructions, the history items, history_end,
-/// compaction_trigger (compaction requests only), tools_start, one tool or
-/// web_search per enabled tool, text_format, request_end.
+/// settings, instructions, the history items, history_end, the current
+/// Operation's boundary, compaction_trigger (compaction requests only),
+/// tools_start, one tool or web_search per enabled tool, text_format,
+/// request_end.
 pub const ItemKind = enum(u8) {
     /// The frozen settings, the model included. Handle 0: that same model,
     /// which the codec writes by a content piece so the Host escapes it.
@@ -54,6 +55,10 @@ pub const ItemKind = enum(u8) {
     output_close,
     /// Handle 0: the call_id; handle 1: the output.
     tool_result,
+    /// Where an Operation was admitted, with the effort it froze: a history
+    /// element at each earlier Operation's place, and once more after
+    /// `history_end` for the Operation being prepared. No handles.
+    operation,
     /// After the last history item: the end of the append-only span.
     history_end,
     compaction_trigger,
@@ -70,7 +75,7 @@ pub const ItemKind = enum(u8) {
     /// The items the Host resumes the codec from its carry before.
     pub fn resumes(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_open, .tool_result, .history_end => true,
+            .message, .output_open, .tool_result, .operation, .history_end => true,
             else => false,
         };
     }
@@ -79,7 +84,7 @@ pub const ItemKind = enum(u8) {
     /// the codec's carry.
     pub fn endsElement(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_close, .tool_result => true,
+            .message, .output_close, .tool_result, .operation => true,
             else => false,
         };
     }
@@ -106,6 +111,8 @@ pub const Item = union(ItemKind) {
     output_part: struct { array: PartArray, kind: PartKind },
     output_close,
     tool_result,
+    /// The Operation's frozen effort; null when its binding has none.
+    operation: ?Effort,
     history_end,
     compaction_trigger,
     tools_start,
@@ -121,8 +128,12 @@ pub const max_model_bytes = 256;
 /// Frozen request settings, carried by the settings item and read by a
 /// codec's request headers.
 pub const Settings = struct {
-    /// Null when the binding has no effort; the codec then sends none.
+    /// This Operation's frozen effort. Null when the binding has no effort;
+    /// the codec then sends none.
     effort: ?Effort,
+    /// The frozen effort of the Session's first Operation, which a codec
+    /// that changes effort inside the history keeps at the top.
+    starting_effort: ?Effort = null,
     /// The Session's provider affinity: fixed for the Session's life and
     /// distinct across Sessions and Stores.
     session_affinity: [16]u8,

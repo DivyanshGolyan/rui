@@ -1685,6 +1685,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     var position: u64 = 0;
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
     position = (try view.nextEntry(position)).?.position;
+    // The Operation that proposed the calls, at its admission position.
+    const proposing = (try view.nextEntry(position)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.operation, proposing.kind);
+    position = proposing.position;
     for (0..calls.len) |_| {
         const item = (try view.nextEntry(position)).?;
         try std.testing.expectEqual(HistoricalEntryKind.provider_output, item.kind);
@@ -1939,9 +1943,10 @@ test "historical preparation yields covered group populations under small allowa
         try testingHistoricalStep(&view, &after, &bytes, &items);
         if (after != before) served += 1;
     }
-    // One user input, 8 groups of 16 calls, their 8 result groups and the
-    // end, each served by its own step after discovery yields.
-    try std.testing.expectEqual(@as(usize, 1 + 8 * calls.len + 8 + 1), served);
+    // One user input, 8 Operations each with its group of 16 calls, their
+    // 8 result groups and the end, each served by its own step after
+    // discovery yields.
+    try std.testing.expectEqual(@as(usize, 1 + 8 + 8 * calls.len + 8 + 1), served);
     try std.testing.expect(turns > served);
     try std.testing.expect(!storage.isFenced());
 }
@@ -2054,7 +2059,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
                         // The view never reaches its end, so no request seals.
                         if (!bytes_fault) return error.MissingCorruptionFailure;
                         served = entry.?.*;
-                        if (served.?.kind == .user) continue;
+                        if (served.?.kind == .user or served.?.kind == .operation) continue;
                         try std.testing.expectEqual(HistoricalEntryKind.provider_output, served.?.kind);
                         const output = try view.openOutput(served.?.position);
                         try std.testing.expectEqual(OutputItemKind.function_call, output.kind);
@@ -3055,7 +3060,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session", .{}));
     for ([_][:0]const u8{
         "UPDATE session SET provider='Codex' WHERE session_ref=?1",
         "UPDATE session_revision SET provider='9codex' WHERE session_ref=?1",
@@ -3074,7 +3079,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
 test "a Session pinned to a codec this Host cannot build fences its settings" {
     for ([_]?[:0]const u8{
         null,
-        "UPDATE session SET codec='openai-responses/2' WHERE session_ref=?1",
+        "UPDATE session SET codec='openai-responses/3' WHERE session_ref=?1",
         "UPDATE session SET codec_options=x'00' WHERE session_ref=?1",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
@@ -3083,7 +3088,7 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/1' AND codec_options IS NULL FROM session", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session", .{}));
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try store_testing.sqliteExec(storage.database, sql, .{session.slice()});
@@ -4919,7 +4924,8 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
     try std.testing.expectEqual(@as(u64, 0), later_settings.tool_count);
     var position: u64 = 0;
-    for ([_]HistoricalEntryKind{ .user, .user, .instruction, .user }) |kind| {
+    // The failed first Operation keeps its boundary between the inputs.
+    for ([_]HistoricalEntryKind{ .user, .user, .instruction, .operation, .user }) |kind| {
         const entry = (try later_view.nextEntry(position)).?;
         try std.testing.expectEqual(kind, entry.kind);
         position = entry.position;
