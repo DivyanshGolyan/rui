@@ -3,6 +3,7 @@
 //! against a server named by RUI_TEST_PG_PORT (CI runs postgres:15).
 const std = @import("std");
 const pg = @import("pg.zig");
+const required_engines = @import("required_engines.zig");
 const tls = pg.tls;
 
 fn hex(comptime text: []const u8) []const u8 {
@@ -371,7 +372,7 @@ const Live = struct {
     const Config = struct { port: u16, password: []const u8, ca_file: []const u8 };
 
     fn config(environ: *const std.process.Environ.Map) !?Config {
-        const required = if (environ.get("RUI_TEST_REQUIRE_ENGINES")) |list| std.mem.indexOf(u8, list, "postgres") != null else false;
+        const required = (try required_engines.fromEnviron(environ)).contains(.postgres);
         const port = environ.get("RUI_TEST_PG_PORT") orelse return if (required) error.PostgresRequired else null;
         return .{
             .port = try std.fmt.parseUnsigned(u16, port, 10),

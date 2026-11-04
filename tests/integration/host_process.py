@@ -467,7 +467,8 @@ WIRE_VERSION = _wire_version()
 
 
 # The Store format fixtures expect, stated independently of src/store.zig so a
-# format change must update its fixtures deliberately.
+# format change must update its fixtures deliberately;
+# tests/ci/test_store_schema_fixtures.py fails until it does.
 STORE_SCHEMA = 51
 
 
