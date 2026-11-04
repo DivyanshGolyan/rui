@@ -53,7 +53,7 @@ pub const Error = Request.Error || request.Error || error{
     /// Two tools share a name, or a schema already names
     /// `rui_call_description`; `collision` says which tool.
     ToolNameCollision,
-    /// A tool's schema is not shaped as JSON Schema objects are.
+    /// The answer is not a tool list.
     BadSchema,
 };
 
@@ -183,6 +183,7 @@ fn add(self: *Listing, tool: reply.Tool) Error!void {
         }
     }
     if (self.count == self.storage.entries.len) return error.TooMany;
+    const mark = self.arena_used;
     const name = try self.copy(tool.name);
     const description: ?[]const u8 = if (tool.description) |text| try self.copy(text) else null;
     const room = self.storage.arena[self.arena_used..];
@@ -193,7 +194,12 @@ fn add(self: *Listing, tool: reply.Tool) Error!void {
             self.collision = name;
             return error.ToolNameCollision;
         },
-        error.Malformed => return error.BadSchema,
+        error.Malformed => {
+            // Only this tool is unusable; its copies are dropped.
+            self.arena_used = mark;
+            self.left_out += 1;
+            return;
+        },
     };
     const schema = writer.buffered();
     self.arena_used += schema.len;
@@ -288,6 +294,19 @@ test "a tool with a bad definition or name is left out and counted" {
     try std.testing.expectEqual(Outcome.listed, try run(&script, room.storage(), &listing));
     try std.testing.expectEqual(@as(usize, 1), listing.entries().len);
     try std.testing.expectEqual(@as(usize, 2), listing.leftOut());
+}
+
+test "a tool whose schema is malformed is left out and its siblings are kept" {
+    const malformed = "{\"name\":\"bad\",\"description\":\"x\",\"inputSchema\":{\"properties\":[]}},{\"name\":\"worse\",\"inputSchema\":{\"required\":\"q\"}},";
+    var script: Script = .{ .reply = pageOf(malformed ++ write, null) };
+    var room: TestRoom = .{};
+    var listing: Listing = undefined;
+    try std.testing.expectEqual(Outcome.listed, try run(&script, room.storage(), &listing));
+    try std.testing.expectEqual(@as(usize, 1), listing.entries().len);
+    try std.testing.expectEqualStrings("write", listing.entries()[0].name);
+    try std.testing.expectEqual(@as(usize, 2), listing.leftOut());
+    // The dropped tools' copies were not kept.
+    try std.testing.expectEqual(listing.entries()[0].name.ptr, @as([*]const u8, &room.arena));
 }
 
 test "two tools of one name fail the listing and name the tool" {
