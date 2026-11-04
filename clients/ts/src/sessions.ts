@@ -64,6 +64,8 @@ export interface ModelSummary {
 	known: boolean;
 }
 
+const TOOLS = ["bash", "web_search"] as const;
+
 /** Every row kind: the Host refuses an empty set. */
 const ALL_KINDS = JSON.stringify(["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "sent", "send_failed", "received"]);
 
@@ -92,7 +94,8 @@ function configuration(spec: SessionSpec): string {
 		optional(spec.provider, text),
 		optional(spec.model, text),
 		optional(spec.instructions, text),
-		optional(spec.tools, (tools) => JSON.stringify(tools)),
+		// The Host takes the catalog order, each tool once.
+		optional(spec.tools, (tools) => JSON.stringify(TOOLS.filter((tool) => tools.includes(tool)))),
 		optional(spec.permissionMode, text),
 		OMITTED, // output_schema
 		clearable(spec.compactAt, (tokens) => JSON.stringify(String(tokens))),
@@ -191,7 +194,13 @@ export class Session {
 		const idempotencyKey = key(options);
 		const body = (store: string) =>
 			`{"version":"8","kind":"model_interruption","store":${JSON.stringify(store)},"key":${JSON.stringify(idempotencyKey)},"target":{"session":${JSON.stringify(this.id)},"turn":${JSON.stringify(turn)},"operation":${JSON.stringify(operation)}}}`;
-		accepted(parse<Schemas["ModelInterruptionReply"]>(await this.#link.exchange("/v1/control/model-interruption", body)).answer);
+		try {
+			accepted(parse<Schemas["ModelInterruptionReply"]>(await this.#link.exchange("/v1/control/model-interruption", body)).answer);
+		} catch (error) {
+			// The call ended before the cut reached it, or this key already cut an earlier call: nothing is left to do.
+			const gone = error instanceof RuiRequestError && (error.code === "operation_resolved" || error.code === "target_mismatch" || error.code === "idempotency_key_conflict");
+			if (!gone) throw error;
+		}
 	}
 
 	/** Answers an approval. `requestId` is the Action id of the `approval_requested` entry (D15). */
