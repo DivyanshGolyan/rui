@@ -16,7 +16,7 @@ pub const ContentReference = struct {
     digest: [32]u8,
 };
 
-/// Where one canonical content value is, resolved under the Store lock.
+/// Where one canonical content value is, resolved in one Store entry point.
 /// Read only by `ContentReader.open`.
 pub const ContentLocation = struct {
     store: *Store,
@@ -268,6 +268,10 @@ pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
 }
 
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
+    return self.queue().run(openContentIdentityHeld, .{ self, reference, private });
+}
+
+fn openContentIdentityHeld(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     const id = try entry.finish(Ordinary.none, readContentId(&entry, reference, private));
@@ -298,13 +302,17 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     if (start > reader.reference.length) return error.RangeOutOfBounds;
     const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
     if (wanted != 0) reader.prepareRead();
+    try self.queue().run(readOwnedContentHeld, .{ self, reader, start, destination[0..wanted] });
+    if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
+    return wanted;
+}
+
+fn readOwnedContentHeld(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var a: Access(.read, error{}) = .open(&entry);
     defer a.deinit();
-    try entry.finish(Ordinary.none, readWindow(&a, reader, start, destination[0..wanted]));
-    if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
-    return wanted;
+    try entry.finish(Ordinary.none, readWindow(&a, reader, start, destination));
 }
 
 /// Fills all of `destination` from `reader`'s content at `start`, or

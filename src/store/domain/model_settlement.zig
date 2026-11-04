@@ -130,6 +130,10 @@ pub const ValidatedOutput = struct {
 /// The purpose of the Attempt `binding` names, in an Entry of its own,
 /// while the binding is current (`attemptKind`).
 pub fn checkAttempt(self: *Store, binding: AttemptBinding) !ModelOperationKind {
+    return self.queue().run(checkAttemptHeld, .{ self, binding });
+}
+
+fn checkAttemptHeld(self: *Store, binding: AttemptBinding) !ModelOperationKind {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     return entry.finish(Ordinary.attempt_binding, readAttemptKind(&entry, binding));
@@ -508,7 +512,7 @@ const ExhaustedChoice = struct {
 /// read Access `candidate` scans outside any transaction, so a pass that
 /// finds none runs only the scan; the scan stops at the first Attempt
 /// `active` does not hold, after at most one more than it can exclude.
-/// The held Store mutex excludes every other writer, so the write Access
+/// The Store runs no other entry point meanwhile, so the write Access
 /// `a` writes from what the scan read, in one round.
 pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: ActiveOperationFilter) !bool {
     var choice: ExhaustedChoice = .{ .active = active };

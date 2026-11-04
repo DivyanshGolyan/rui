@@ -11,6 +11,7 @@ host_modules is walked as well. The walk stops at the panic handlers, which run
 only as the thread dies.
 
 stack_frames.json holds the budget, each Host thread's anchor and chain ceiling,
+the functions that run others through a pointer (dispatches),
 the Host modules, and shrink-only exceptions. An exception's frame_bytes and a
 thread's chain_ceiling are ceilings in whole pages, the unit the probe makes
 resident, so CPU-model noise of a few bytes moves no verdict. A frame or chain
@@ -207,11 +208,29 @@ def deepest(functions, roots):
     return {root: depth(root) for root in roots}
 
 
+def dispatch(functions, dispatches):
+    """Make each dispatcher call the functions it runs through a pointer.
+
+    A dispatch names a caller and a name prefix: the caller runs every
+    function of that prefix through a function pointer, which leaves no
+    direct call, so each chain through the caller counts them as callees.
+    """
+    for entry in dispatches:
+        callers = [name for name in functions if normalize(name) == entry["caller"]]
+        callees = {name for name in functions if normalize(name).startswith(entry["callees"])}
+        if not callers or not callees:
+            raise ValueError(f"no dispatcher {entry['caller']} or no {entry['callees']} functions in the binary; "
+                             "update stack_frames.json dispatches")
+        for caller in callers:
+            functions[caller]["calls"] |= callees
+
+
 def check(functions, policy):
     """(report lines, failures) for the Host stacks in functions under policy."""
     budget = policy["budget_bytes"]
     exceptions = {entry["function"]: entry["frame_bytes"] for entry in policy["exceptions"]}
     threads = policy["threads"]
+    dispatch(functions, policy.get("dispatches", []))
     roots = host_roots(functions, threads)
     report, failures = [], []
     # Name -> (largest reachable frame of that name, call path to it).

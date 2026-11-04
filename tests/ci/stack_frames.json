@@ -6,6 +6,9 @@
     "engine": {"anchor": "execution_turn.admitWork", "chain_ceiling": 32768},
     "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672}
   },
+  "dispatches": [
+    {"caller": "store.queue.Queue.release", "callees": "store.queue.Queue.Write(", "cause": "the Store's holder runs queued writes"}
+  ],
   "host_modules": [
     "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "change_ring",
     "codex_auth", "codex_credential_policy", "codex_credentials", "codex_token_wire", "execution",
