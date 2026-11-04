@@ -1334,7 +1334,7 @@ pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !voi
 /// (`validateCurrent`) and every foreign key holds. A Store whose
 /// store_meta format is not `from` is a WrongStoreVersion, and any failure
 /// leaves the Store as it was.
-pub fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
     try migrationBackup(io, database, from);
     // Both outside the transaction, where PRAGMA foreign_keys takes effect.
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
@@ -1380,23 +1380,22 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3, from: u32) !void {
     const path = std.mem.span(c.sqlite3_db_filename(database, "main") orelse return error.MigrationBackupFailed);
     const directory_path = std.fs.path.dirname(path) orelse return error.MigrationBackupFailed;
     const file = std.fs.path.basename(path);
-    var prefix_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}.migration-", .{file});
     var directory = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
     defer directory.close(io);
     deleting: while (true) {
         var iterator = directory.iterate();
         while (try iterator.next(io)) |entry| {
-            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-            var name_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buffer, "{s}", .{entry.name});
-            try directory.deleteFile(io, name);
+            if (!std.mem.startsWith(u8, entry.name, file) or !std.mem.startsWith(u8, entry.name[file.len..], ".migration-")) continue;
+            // The iteration restarts after the delete, so the entry's name stays valid for it.
+            try directory.deleteFile(io, entry.name);
             continue :deleting;
         }
         break;
     }
-    var backup_buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
-    const backup = try std.fmt.bufPrintSentinel(&backup_buffer, "{s}.migration-{d}-to-{d}", .{ path, from, schema_version }, 0);
+    // SQLite's allocator, not a path-sized stack buffer: the Host's stack frame budget.
+    const backup_text = c.sqlite3_mprintf("%s.migration-%u-to-%u", path.ptr, @as(c_uint, from), @as(c_uint, schema_version)) orelse return error.MigrationBackupFailed;
+    defer c.sqlite3_free(backup_text);
+    const backup = std.mem.span(backup_text);
     // The online backup API, not VACUUM INTO: the build sets
     // SQLITE_MAX_ATTACHED=0, and VACUUM INTO attaches its target.
     {
