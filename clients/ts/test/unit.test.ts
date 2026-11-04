@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import { encodeFrame, startError } from "../src/client.ts";
 import { RuiStartError } from "../src/errors.ts";
+import { environmentBytes } from "../src/sessions.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 
 test("the wire version is the one openapi.json describes", () => {
@@ -25,4 +26,9 @@ test("the refusal line becomes a RuiStartError", () => {
 	assert.equal(refusal.message, "another Host holds this Store");
 	assert.equal(startError(""), undefined);
 	assert.equal(startError("not json\n"), undefined);
+});
+
+test("environment entries the Host would refuse are left out, never split", () => {
+	const bytes = environmentBytes({ SAFE: "ok\0OTHER=value", "A=B": "x", "": "y", RUI_X: "z", GOOD: "1", ALSO: "two" });
+	assert.equal(bytes.toString("utf8"), "GOOD=1\0ALSO=two\0");
 });

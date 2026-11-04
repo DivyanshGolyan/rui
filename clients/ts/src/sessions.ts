@@ -7,11 +7,12 @@ import { randomUUID } from "node:crypto";
 
 import { RuiRequestError } from "./errors.ts";
 import { listActivity, readContent, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import type { ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 /** What a Session handle needs from the client. */
 export interface Link {
-	exchange(path: string, build: (store: string) => string, environment?: Buffer, prefixBytes?: number): Promise<Buffer>;
+	exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer>;
 }
 
 type Schemas = components["schemas"];
@@ -124,10 +125,12 @@ function accepted<A extends { status: string; code?: string }>(answer: A): Extra
 	return answer as Extract<A, { status: "accepted" }>;
 }
 
-/** `NAME=VALUE\0` for each entry, ahead of the message record (D121). */
-function environmentBytes(env: Record<string, string> | undefined): Buffer {
-	const entries = Object.entries(env ?? {});
-	return Buffer.from(entries.map(([name, entry]) => `${name}=${entry}\0`).join(""), "utf8");
+/** `NAME=VALUE\0` for each entry the Host would keep (D121): a name that is not empty, holds no `=` or NUL and does not start with `RUI_`, and a value without NUL. The rest are left out, because after encoding the Host could not tell where an entry ended. */
+export function environmentBytes(env: Record<string, string> | undefined): Buffer {
+	const forwarded = Object.entries(env ?? {}).filter(
+		([name, entry]) => name !== "" && !name.startsWith("RUI_") && !/[=\0]/.test(name) && !entry.includes("\0"),
+	);
+	return Buffer.from(forwarded.map(([name, entry]) => `${name}=${entry}\0`).join(""), "utf8");
 }
 
 export class Session {

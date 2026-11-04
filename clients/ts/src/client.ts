@@ -14,7 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
 import { models, Session, Sessions, setPaused, type ModelSummary } from "./sessions.ts";
-import { ConnectionError, post, WIRE_VERSION } from "./transport.ts";
+import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 export interface ConnectOptions {
@@ -183,7 +183,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	 * waits for the restarted Host and is sent once more. Internal: the
 	 * package's calls are built on it.
 	 */
-	async call(path: string, body: string, environment?: Buffer, prefixBytes?: number): Promise<Buffer> {
+	async call(path: string, body: string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer> {
 		let retried = false;
 		for (;;) {
 			const host = await this.#ready();
@@ -194,7 +194,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 					body,
 					instance: host.instance,
 					...(environment ? { environment } : {}),
-					...(prefixBytes !== undefined ? { prefixBytes } : {}),
+					...(limits ? { limits } : {}),
 				});
 			} catch (error) {
 				if (!(error instanceof ConnectionError)) throw error;
@@ -210,9 +210,9 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	 * canonical Store name the Host reported at readiness. Internal: the
 	 * package's calls are built on it.
 	 */
-	async exchange(path: string, build: (store: string) => string, environment?: Buffer, prefixBytes?: number): Promise<Buffer> {
+	async exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer> {
 		const host = await this.#ready();
-		return this.call(path, build(host.info.store), environment, prefixBytes);
+		return this.call(path, build(host.info.store), environment, limits);
 	}
 
 	/** The running child's process id. Internal. */

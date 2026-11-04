@@ -105,9 +105,12 @@ function contentBody(store: string, session: string, entry: { position: string; 
 	return `{"version":"8","kind":"activity_content","store":${JSON.stringify(store)},"session":${JSON.stringify(session)},"position":${JSON.stringify(entry.position)},"ordinal":${JSON.stringify(entry.ordinal)}}`;
 }
 
+/** The Host stores up to a little under 1 GiB of text in one entry. */
+const MAX_CONTENT_BYTES = 1024 * 1024 * 1024;
+
 /** The whole text of an entry that has some, however long (D134). */
 export async function readContent(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<string> {
-	const bytes = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry));
+	const bytes = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry), undefined, { max: MAX_CONTENT_BYTES });
 	return bytes.toString("utf8");
 }
 
@@ -133,7 +136,7 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 				if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
 					entry.truncated = true;
 				} else {
-					const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, INLINE_TEXT_BYTES);
+					const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });
 					entry.text = prefix.toString("utf8");
 				}
 			}
