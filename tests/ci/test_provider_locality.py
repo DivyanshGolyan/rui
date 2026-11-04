@@ -1,7 +1,7 @@
 """Core names no provider detail: see provider_locality.py."""
 import unittest
 
-from provider_locality import ALLOWED, RULES, SRC, production, violations
+from provider_locality import ALLOWED, CODEC_RULES, RULES, SRC, codec_violations, production, violations
 
 
 class ProviderLocalityTest(unittest.TestCase):
@@ -9,6 +9,20 @@ class ProviderLocalityTest(unittest.TestCase):
         found = violations()
         self.assertEqual(found, [], "core special-cases a provider; ask the provider table or sign-in source:\n"
                          + "\n".join(found))
+
+    def test_codecs_treat_every_model_alike(self):
+        found = codec_violations()
+        self.assertEqual(found, [], "a codec branches on the model; put the fact in model_capability.zig:\n"
+                         + "\n".join(found))
+
+    def test_a_codec_rule_catches_what_it_names(self):
+        code = production('const models = [_][]const u8{"gpt-5.5"};\n'
+                          'const p = parallel(settings.modelName());\n'
+                          'test "x" {\n    _ = "GPT-6.1-sol";\n}\n'
+                          'const q = "gpt"; // "o3-mini"\n')
+        hits = [(name, match.group(0)) for name, pattern in CODEC_RULES for match in pattern.finditer(code)]
+        self.assertEqual(hits, [("reads the model name", "modelName("), ("names a model", '"gpt-5.5"'),
+                                ("names a model", '"gpt"')])
 
     def test_a_rule_catches_what_it_names(self):
         code = production('const a = @import("codex_auth.zig");\n'
