@@ -8,6 +8,7 @@ const std = @import("std");
 const api_key = @import("api_key.zig");
 const protocol = @import("protocol.zig");
 const platform = @import("platform.zig");
+const http1 = @import("http1/request.zig");
 
 /// The one frame version.
 pub const version = 1;
@@ -34,8 +35,26 @@ pub const Frame = struct {
     active_capacity: ?usize = null,
     /// The Host opens with Turns paused, as if `host_pause` had just run (D196).
     paused: bool = false,
+    /// The MCP servers whose tools the Host offers (D120).
+    mcp_servers: [max_mcp_servers]McpServer = @splat(.{}),
+    mcp_server_count: usize = 0,
 
     pub const max_base_url_bytes = 2048;
+    pub const max_mcp_servers = 8;
+    pub const max_mcp_name_bytes = 64;
+
+    /// One entry of `mcpServers`. The name labels the server in errors; the
+    /// token is a secret and is wiped with the key.
+    pub const McpServer = struct {
+        name: protocol.Bounded(max_mcp_name_bytes) = .{},
+        url: protocol.Bounded(http1.max_url_bytes) = .{},
+        bearer_token: api_key.Key = .{},
+        call_timeout_ms: u32 = 0,
+    };
+
+    pub fn mcpServerSlice(self: *const Frame) []const McpServer {
+        return self.mcp_servers[0..self.mcp_server_count];
+    }
 
     /// Where the Store is. A `mysql://` prefix selects the URL form, which
     /// the Store thread's Host wiring adds (D175); anything else is a
@@ -46,6 +65,7 @@ pub const Frame = struct {
 
     pub fn wipe(self: *Frame) void {
         self.key.wipe();
+        for (&self.mcp_servers) |*server| server.bearer_token.wipe();
     }
 
     /// `runtimeDir/rui.sock`.
@@ -89,8 +109,8 @@ fn refuse(refusal: *Refusal, message: []const u8) error{LaunchFrameInvalid} {
     return error.LaunchFrameInvalid;
 }
 
-/// The frame as JSON. Unknown fields are refused: `mcpServers` and
-/// `presets` arrive with the units that use them.
+/// The frame as JSON. Unknown fields are refused: `presets` arrives with
+/// the unit that uses it.
 const Wire = struct {
     v: i64,
     store: []const u8,
@@ -98,6 +118,7 @@ const Wire = struct {
     runtimeDir: []const u8,
     activeCapacity: ?i64 = null,
     paused: bool = false,
+    mcpServers: []const struct { name: []const u8, url: []const u8, bearerToken: []const u8, callTimeoutMs: i64 } = &.{},
 };
 
 /// Parses `bytes` into `frame`; the key is copied, and every other copy of
@@ -110,6 +131,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
         else => return refuse(refusal, "the frame is not a JSON object of v, store, provider, runtimeDir and optional activeCapacity"),
     };
     defer std.crypto.secureZero(u8, @constCast(wire.provider.key));
+    defer for (wire.mcpServers) |server| std.crypto.secureZero(u8, @constCast(server.bearerToken));
+    errdefer frame.wipe();
     if (wire.v != version) return refuse(refusal, "v must be 1");
     if (wire.store.len == 0) return refuse(refusal, "store must name a Store directory");
     if (std.mem.startsWith(u8, wire.store, "mysql://")) return refuse(refusal, "this build opens SQLite Stores only");
@@ -129,6 +152,29 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
         frame.active_capacity = std.math.cast(usize, capacity) orelse return refuse(refusal, "activeCapacity is too large");
     }
     frame.paused = wire.paused;
+    if (wire.mcpServers.len > Frame.max_mcp_servers) return refuse(refusal, "mcpServers names too many servers");
+    for (wire.mcpServers, 0..) |server, at| {
+        if (!validServerName(server.name)) return refuse(refusal, "an mcpServers name must be 1 to 64 letters, digits, hyphens or underscores");
+        for (wire.mcpServers[0..at]) |earlier| {
+            if (std.mem.eql(u8, earlier.name, server.name)) return refuse(refusal, "mcpServers names must differ");
+        }
+        _ = http1.parseTarget(server.url) catch return refuse(refusal, "an mcpServers url must be plain http to a loopback address");
+        if (!api_key.valid(server.bearerToken)) return refuse(refusal, "an mcpServers bearerToken must be one line of visible characters, at most 1024 bytes");
+        if (server.callTimeoutMs < 1) return refuse(refusal, "an mcpServers callTimeoutMs must be at least 1");
+        const entry = &frame.mcp_servers[at];
+        entry.name.set(server.name) catch unreachable;
+        entry.url.set(server.url) catch unreachable;
+        @memcpy(entry.bearer_token.bytes[0..server.bearerToken.len], server.bearerToken);
+        entry.bearer_token.len = server.bearerToken.len;
+        entry.call_timeout_ms = std.math.cast(u32, server.callTimeoutMs) orelse return refuse(refusal, "an mcpServers callTimeoutMs is too large");
+        frame.mcp_server_count = at + 1;
+    }
+}
+
+fn validServerName(name: []const u8) bool {
+    if (name.len == 0 or name.len > Frame.max_mcp_name_bytes) return false;
+    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
+    return true;
 }
 
 /// The one stdout line a refused launch writes before exiting.
@@ -166,6 +212,65 @@ test "a launch frame carries the Store, provider key and runtime directory" {
     try std.testing.expectEqual(@as(?usize, 4), frame.active_capacity);
     var buffer: [platform.max_launch_socket_path_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("/tmp/r/rui.sock", frame.socketPath(&buffer));
+}
+
+test "a launch frame carries MCP servers" {
+    var frame: Frame = .{};
+    defer frame.wipe();
+    var refusal: Refusal = undefined;
+    try parse(std.testing.allocator,
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"drift","url":"http://127.0.0.1:3000/mcp","bearerToken":"t0k","callTimeoutMs":1800000}]}
+    , &frame, &refusal);
+    try std.testing.expectEqual(@as(usize, 1), frame.mcpServerSlice().len);
+    const server = frame.mcpServerSlice()[0];
+    try std.testing.expectEqualStrings("drift", server.name.slice());
+    try std.testing.expectEqualStrings("http://127.0.0.1:3000/mcp", server.url.slice());
+    try std.testing.expectEqualStrings("t0k", server.bearer_token.slice());
+    try std.testing.expectEqual(@as(u32, 1800000), server.call_timeout_ms);
+    frame.wipe();
+    try std.testing.expectEqual(@as(usize, 0), frame.mcp_servers[0].bearer_token.len);
+}
+
+test "a launch frame refuses a bad MCP server" {
+    const head =
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[
+    ;
+    const cases = [_][]const u8{
+        head ++
+            \\{"name":"a b","url":"http://127.0.0.1/m","bearerToken":"t","callTimeoutMs":1}]}
+        ,
+        head ++
+            \\{"name":"","url":"http://127.0.0.1/m","bearerToken":"t","callTimeoutMs":1}]}
+        ,
+        head ++
+            \\{"name":"a","url":"http://example.com/m","bearerToken":"t","callTimeoutMs":1}]}
+        ,
+        head ++
+            \\{"name":"a","url":"https://127.0.0.1/m","bearerToken":"t","callTimeoutMs":1}]}
+        ,
+        head ++
+            \\{"name":"a","url":"http://127.0.0.1/m","bearerToken":"two words","callTimeoutMs":1}]}
+        ,
+        head ++
+            \\{"name":"a","url":"http://127.0.0.1/m","bearerToken":"t","callTimeoutMs":0}]}
+        ,
+        head ++
+            \\{"name":"a","url":"http://127.0.0.1/m","bearerToken":"t","callTimeoutMs":99999999999}]}
+        ,
+        head ++
+            \\{"name":"a","url":"http://127.0.0.1/m","bearerToken":"t","callTimeoutMs":1},{"name":"a","url":"http://127.0.0.1/n","bearerToken":"t","callTimeoutMs":1}]}
+        ,
+        head ++
+            \\{"name":"a","url":"http://127.0.0.1/m","bearerToken":"t"}]}
+        ,
+    };
+    for (cases) |json| {
+        var frame: Frame = .{};
+        var refusal: Refusal = undefined;
+        try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, json, &frame, &refusal));
+        try std.testing.expectEqual(StartError.launch_frame_invalid, refusal.code);
+        for (frame.mcp_servers) |server| try std.testing.expectEqual(@as(usize, 0), server.bearer_token.len);
+    }
 }
 
 test "a launch frame can open the Host paused" {

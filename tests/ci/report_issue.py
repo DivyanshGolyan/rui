@@ -39,6 +39,11 @@ ZIG_FAIL = re.compile(r"^\d+/\d+ (\S[^\n]*?)\.\.\.(?:(?!\n\d+/\d+ ).)*?FAIL \((\
 # subtest's parameters follow the id and stay out of the signature.
 UNITTEST = re.compile(r"^(?:ERROR|FAIL): \w+ \(([\w.]+)\)[^\n]*\n-{70}\n(.*?)(?=^[=-]{70}$|\Z)", re.M | re.S)
 GATE = re.compile(r"^([a-z][\w-]*(?: [\w-]+)*) gate failed: (.+)$", re.M)
+# `git diff --check`, which the plan job runs first: one line per problem.
+WHITESPACE = re.compile(r"^([^\s:][^:\n]*):\d+: (trailing whitespace|new blank line at EOF|space before tab in indent|"
+                        r"indent with spaces|tab in indent|leftover conflict marker)\.$", re.M)
+# A sweep of vendored files names thousands; the first few say what to remove.
+WHITESPACE_PATHS = 10
 CARETS = re.compile(r"[\s~^]+")
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
 # check.yml's linux and macos aggregates only require their needs' results; a
@@ -170,6 +175,11 @@ def failure_causes(log, cases):
         found.append(Cause(f"python test '{test}': {failure}", paths, raised[1] if raised else ""))
     for gate, message in GATE.findall(log):
         found.append(Cause(f"{gate} gate failed: {message}"))
+    if problems := WHITESPACE.findall(log):
+        paths = sorted({path for path, _ in problems})
+        detail = "\n".join(f"{path}: {kind}" for path, kind in problems[:5])
+        found.append(Cause("whitespace check (git diff --check) failed", paths[:WHITESPACE_PATHS],
+                           f"{len(problems)} problems in {len(paths)} files, first:\n{detail}"))
     # A record the logs explain elsewhere (a Zig binary's case) adds nothing.
     found += [cause for cause in unparsed if cause.paths or not found]
     unique = {}
