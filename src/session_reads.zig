@@ -774,7 +774,7 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     const file = try tmp.dir.createFile(io, "output", .{ .read = true });
     defer file.close(io);
     var task: Task = .{ .io = io };
-    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null } } };
+    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null } } };
     const stop: protocol.ActivityItem = .{ .position = 20, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 5, .completion = .completed } } };
     // Another Session's Message 5 showed as its Admission and has no row:
     // nothing may begin a transcript until the stop answers it.
@@ -1597,14 +1597,14 @@ fn beginningBefore(first: protocol.ActivityItem, end: u64) ?protocol_reply.Conve
 fn conversationItem(value: protocol.ActivityItem.Value) bool {
     return switch (value) {
         .user, .assistant, .tool_result, .hosted_call => true,
-        .admission, .received, .call, .outcome, .stop, .sent, .send_failed => false,
+        .admission, .received, .call, .turn_ended, .stop, .sent, .send_failed => false,
     };
 }
 
 test "a live page's beginning precedes its first item, without repeating or skipping one" {
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content, .admitted_at = 1 };
-    const outcome: protocol.ActivityItem.Outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null };
+    const outcome: protocol.ActivityItem.TurnEnded = .{ .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null };
     const Case = struct { item: protocol.ActivityItem, cursor: ?protocol_reply.ConversationCursor };
     for ([_]Case{
         .{ .item = .{ .position = 5, .at = 1, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
@@ -1616,7 +1616,7 @@ test "a live page's beginning precedes its first item, without repeating or skip
         // Conversation before them ends at 3, so position 4's results stay
         // live and none repeats in the older page.
         .{ .item = .{ .position = 4, .at = 1, .value = .{ .admission = message } }, .cursor = .{ .end = 3 } },
-        .{ .item = .{ .position = 4, .at = 1, .value = .{ .outcome = outcome } }, .cursor = .{ .end = 3 } },
+        .{ .item = .{ .position = 4, .at = 1, .value = .{ .turn_ended = outcome } }, .cursor = .{ .end = 3 } },
         .{ .item = .{ .position = 1, .at = 1, .value = .{ .admission = message } }, .cursor = null },
     }) |case| try std.testing.expectEqualDeep(case.cursor, beginningBefore(case.item, 9));
 }
@@ -1794,7 +1794,7 @@ const FakeHost = struct {
         if (position <= self.history) {
             var code: Bounded(protocol.max_code_bytes) = .{};
             code.set("completed") catch unreachable;
-            return .{ .position = position, .at = 1, .value = .{ .outcome = .{ .turn = position, .operation = position, .code = code, .content = content() } } };
+            return .{ .position = position, .at = 1, .value = .{ .turn_ended = .{ .turn = position, .operation = position, .ending = .done, .code = code, .content = content() } } };
         }
         const tail = self.tail[position - self.history - 1];
         var value = tail.value;

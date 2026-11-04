@@ -29,7 +29,10 @@ const ModelOperationKind = historical_domain.ModelOperationKind;
 const SessionFacts = configuration_domain.SessionFacts;
 const accepted_resolutions = store_schema.accepted_resolutions;
 
-pub const ModelAdmissionKind = enum { message, tool_continuation };
+/// `message` takes up waiting Messages, starting a Turn or joining an
+/// open one; `open_turn_message` only joins an open Turn, as a Host that
+/// holds new Turns does (D193).
+pub const ModelAdmissionKind = enum { message, open_turn_message, tool_continuation };
 /// Whether the Turn's `current` Operation proposed tool calls and each is
 /// rejected or its action resolved. Each table it reads is tied to
 /// `current`'s Session (`rsql.tiedRefs`), for a write that reads it. The
@@ -66,14 +69,17 @@ const queued_input_sql =
     " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
     " AND m.admission_id<=stopped.admission_cutoff" ++
     ")";
-const runnable_eligibility_sql =
-    queued_input_sql ++ " AND (NOT EXISTS(" ++
-    " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
-    ") OR EXISTS(" ++
+/// The Session's open Turn takes waiting input at its next model call.
+const open_turn_takes_input_sql =
+    "EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
     " AND " ++ continues_with_input_sql ++
-    "))";
+    ")";
+const runnable_eligibility_sql =
+    queued_input_sql ++ " AND (NOT EXISTS(" ++
+    " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
+    ") OR " ++ open_turn_takes_input_sql ++ ")";
 /// The Session a model admission takes up, as its selection reads it:
 /// its head, the Messages it binds (`first_admission` to `cutoff`, and
 /// how many), and the Turn it continues, if any.
@@ -85,23 +91,30 @@ const Selection = struct {
     turn_id: ?rsql.Positive,
 };
 
-const runnable_selection = rsql.Read(.{
-    .sql = "WITH candidate AS (" ++
-        "SELECT m.session_ref FROM message_admission m @index(message_admission_pending) WHERE " ++
-        configuration_domain.servedProviderSql("(SELECT provider FROM session WHERE session_ref=m.session_ref)") ++ " AND " ++ runnable_eligibility_sql ++
-        " ORDER BY m.admission_id LIMIT 1) " ++
-        "SELECT " ++ rsql.session_head_columns ++ ",min(m.admission_id) AS first_admission,max(m.admission_id) AS cutoff,count(*) AS selected," ++
-        "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
-        "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-        "AND " ++ continues_with_input_sql ++ ") AS turn_id " ++
-        "FROM candidate chosen JOIN message_admission m @index(message_admission_session_order) " ++
-        "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
-        "WHERE " ++ runnable_eligibility_sql ++
-        " GROUP BY m.session_ref",
-    .Args = struct {},
-    .Row = Selection,
-    .cardinality = .optional,
-});
+/// The Session whose oldest waiting Message is oldest, among those whose
+/// input `eligibility` admits, with the Messages it takes.
+fn RunnableSelection(comptime eligibility: []const u8) type {
+    return rsql.Read(.{
+        .sql = "WITH candidate AS (" ++
+            "SELECT m.session_ref FROM message_admission m @index(message_admission_pending) WHERE " ++
+            configuration_domain.servedProviderSql("(SELECT provider FROM session WHERE session_ref=m.session_ref)") ++ " AND " ++ eligibility ++
+            " ORDER BY m.admission_id LIMIT 1) " ++
+            "SELECT " ++ rsql.session_head_columns ++ ",min(m.admission_id) AS first_admission,max(m.admission_id) AS cutoff,count(*) AS selected," ++
+            "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+            "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
+            "AND " ++ continues_with_input_sql ++ ") AS turn_id " ++
+            "FROM candidate chosen JOIN message_admission m @index(message_admission_session_order) " ++
+            "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
+            "WHERE " ++ runnable_eligibility_sql ++
+            " GROUP BY m.session_ref",
+        .Args = struct {},
+        .Row = Selection,
+        .cardinality = .optional,
+    });
+}
+const runnable_selection = RunnableSelection(runnable_eligibility_sql);
+/// While new Turns are held: only Sessions whose open Turn takes the input.
+const open_turn_selection = RunnableSelection(queued_input_sql ++ " AND " ++ open_turn_takes_input_sql);
 /// `runnable_selection` as SQLite runs it.
 pub const runnable_selection_sql = runnable_selection.sql;
 
@@ -545,6 +558,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     var found: runnable_selection.Result = undefined;
     switch (kind) {
         .message => reader.read(runnable_selection, .{}, &found),
+        .open_turn_message => reader.read(open_turn_selection, .{}, &found),
         .tool_continuation => reader.read(tool_continuation_selection, .{}, &found),
     }
     try store_access.runAs(reader, error.RunnableSelectionFailed);

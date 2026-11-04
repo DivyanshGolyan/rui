@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const codec_abi = @import("../../codec_abi.zig");
+const output_format = @import("../../output_format.zig");
 const model_capability = @import("../../model_capability.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -121,6 +123,7 @@ pub const read_failures = .{
     .{ public_tool_result, error.PublicContentReadFailed },
     .{ hosted_call, error.ActivityReadFailed },
     .{ activity_item, error.ActivityReadFailed },
+    .{ answer_entry, error.ActivityReadFailed },
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
@@ -187,11 +190,12 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
             "WHERE session_ref=?1 AND item_kind=3 AND " ++ on(4) ++ " AND " ++ range("session_position", "0") ++ order,
         // A tool group's results sit at its last acceptance, one per call,
-        // ordered by call.
-        "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last " ++
+        // ordered by call. Each `last` names its acceptance index, as
+        // `call_candidates_sql`.
+        "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last @index(model_tool_call_acceptance) " ++
             "JOIN model_tool_call tool_call ON tool_call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id") ++
-            " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last " ++
+            " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last @index(action_operation_acceptance) " ++
             "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
             " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn @index(turn_outcome_position) WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ on(6) ++ " AND " ++ range("outcome_position", "0") ++
@@ -214,7 +218,7 @@ fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
         .assistant => 3,
         .call => 4,
         .tool_result => 5,
-        .outcome => 6,
+        .turn_ended => 6,
         .stop => 7,
         .sent => 8,
         .send_failed => 9,
@@ -641,6 +645,32 @@ pub fn openPublicConversationContent(a: *ReadAccess, request: *const protocol.Co
 // would disappear from an inventory rooted in conversation_entry. Inspect
 // only the requested position interval through the existing history index.
 // Compaction messages deliberately have no Conversation certificate.
+/// A row exactly when the assistant entry at position ?2 is the answer of
+/// a Turn that completed at or before end ?3: the message its causing
+/// Operation selected, by `output_decode.AnswerSelection`'s rule over that
+/// Operation's messages: the last `final_answer`, or with no phased
+/// message the last one. Each message is an entry, so the item names it.
+const answer_entry = blk: {
+    const Phase = codec_abi.Phase;
+    const final_answer = std.fmt.comptimePrint("{d}", .{@backingInt(Phase.final_answer)});
+    const unphased = std.fmt.comptimePrint("{d}", .{@backingInt(Phase.unphased)});
+    const message = std.fmt.comptimePrint("{d}", .{@backingInt(output_format.OutputItemKind.message)});
+    break :blk rsql.Read(.{
+        .sql = "SELECT 1 AS final FROM conversation_entry e JOIN turn t ON t.turn_id=e.turn_id " ++
+            "JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+            "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind=3 AND t.session_ref=e.session_ref " ++
+            "AND t.outcome_code='" ++ TurnOutcome.completed_code ++ "' AND t.outcome_position<=?3 AND e.source_operation_id=t.operation_id " ++
+            "AND ((item.phase=" ++ final_answer ++ " AND NOT EXISTS(SELECT 1 FROM model_output_item later WHERE later.operation_id=item.operation_id " ++
+            "AND later.item_ordinal>item.item_ordinal AND later.item_kind=" ++ message ++ " AND later.phase=" ++ final_answer ++ ")) " ++
+            "OR (NOT EXISTS(SELECT 1 FROM model_output_item other WHERE other.operation_id=item.operation_id AND other.item_kind=" ++ message ++ " AND other.phase<>" ++ unphased ++ ") " ++
+            "AND NOT EXISTS(SELECT 1 FROM model_output_item later WHERE later.operation_id=item.operation_id " ++
+            "AND later.item_ordinal>item.item_ordinal AND later.item_kind=" ++ message ++ ")))",
+        .Args = struct { session: []const u8, position: u64, end: u64 },
+        .Row = struct { final: bool },
+        .cardinality = .optional,
+    });
+};
+
 pub const missing_assistant_entry = rsql.Read(.{
     .sql = "SELECT 1 AS missing FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
         "LEFT JOIN conversation_entry e ON e.session_ref=item.session_ref AND e.session_position=item.session_position " ++
@@ -655,26 +685,34 @@ pub const missing_assistant_entry = rsql.Read(.{
 });
 
 /// A read of Conversation entries `e`: `SELECT columns`, then a
-/// `consistent` column, `FROM conversation_entry e` with the rows that
-/// make an entry public, then `rest` (its WHERE and order). An entry is
-/// consistent when `also` holds (an SQL condition and `OR`, or empty), or
-/// when it is public: its content is, and its message or assistant
-/// provenance agrees with it. Its joins are LEFT JOINs, which keep damage
-/// instead of hiding a missing row, under the aliases t, m, o, item and c,
-/// which `columns` and `rest` may also read.
+/// `consistent` column (`publicEntryColumns`), `FROM conversation_entry e`
+/// with the rows that make an entry public (`public_entry_joins`), then
+/// `rest` (its WHERE and order).
 pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, comptime rest: []const u8) []const u8 {
-    return "SELECT " ++ columns ++ ",CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+    return "SELECT " ++ columns ++ "," ++ publicEntryColumns(also) ++ " FROM conversation_entry e " ++ public_entry_joins ++ " " ++ rest;
+}
+
+/// The `consistent` column of an entry `e` joined by `public_entry_joins`.
+/// An entry is consistent when `also` holds (an SQL condition and `OR`, or
+/// empty), or when it is public: its content is, and its message or
+/// assistant provenance agrees with it.
+pub fn publicEntryColumns(comptime also: []const u8) []const u8 {
+    return "CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
         "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
         "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
         "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
         "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
-        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent " ++
-        "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
-        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
-        "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
-        "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
-        "LEFT JOIN content c ON c.content_id=e.content_id " ++ rest;
+        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent";
 }
+
+/// The rows that make an entry `e` public. LEFT JOINs, which keep damage
+/// instead of hiding a missing row, under the aliases t, m, o, item and c,
+/// which a read's columns and WHERE may also read.
+pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+    "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+    "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+    "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+    "LEFT JOIN content c ON c.content_id=e.content_id";
 
 /// An ordinary entry at a position, with the provenance that makes it
 /// public. One indexed ordinary identity owns provenance for pages,
@@ -691,9 +729,9 @@ const public_entry = rsql.Read(.{
 /// its group has public provenance and when the group completed.
 const public_tool_result = rsql.Read(.{
     // Only an Operation with an acceptance at the position can complete
-    // there.
-    .sql = "WITH last AS (SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position=?2 " ++
-        "UNION ALL SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position=?2) " ++
+    // there. Each arm names its acceptance index, as `call_candidates_sql`.
+    .sql = "WITH last AS (SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position=?2 " ++
+        "UNION ALL SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position=?2) " ++
         "SELECT coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id,NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
         "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
         "LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
@@ -1072,10 +1110,13 @@ const ItemAt = struct { position: u64, ordinal: u64 };
 /// (?2, ?3), with each group's position, and their calls after it, as the
 /// CTE `candidates`. A group still waiting has an Action without its
 /// result; one that completes after the page has an acceptance after it.
-/// Only those Operations are grouped, not the Session's history.
+/// Only those Operations are grouped, not the Session's history. Each
+/// acceptance read names its acceptance index: the Full results' indexes
+/// hold the same rows, keyed by Operation first, and SQLite would walk
+/// the Session's whole range of one of them.
 const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
-    "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
-    "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
+    "UNION SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2 " ++
+    "UNION SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2), " ++
     "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
     "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -1281,10 +1322,13 @@ const send_failure = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// A Turn's outcome at position ?2, with its causing Operation's.
+/// A Turn's outcome at position ?2, with its causing Operation's, and
+/// whether a Session stop selected the Turn.
 const turn_outcome = rsql.Read(.{
     .sql = "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
-        "AND o.resolution_code IS NOT NULL AS consistent,o.resolution_content_id,t.outcome_at FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+        "AND o.resolution_code IS NOT NULL AS consistent,o.resolution_content_id,t.outcome_at," ++
+        "EXISTS(SELECT 1 FROM session_stop stop @index(session_stop_turn) WHERE stop.selected_turn_id=t.turn_id) AS stopped " ++
+        "FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
         "WHERE t.session_ref=?1 AND t.outcome_position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {
@@ -1295,6 +1339,7 @@ const turn_outcome = rsql.Read(.{
         consistent: bool,
         resolution_content_id: ?rsql.Positive,
         outcome_at: rsql.Positive,
+        stopped: bool,
     },
     .cardinality = .each,
 });
@@ -1422,7 +1467,7 @@ const FailureRead = struct {
 /// `outcome`; its content, if any, is the next round's.
 const OutcomeRead = struct {
     position: u64,
-    outcome: *protocol.ActivityItem.Outcome,
+    outcome: *protocol.ActivityItem.TurnEnded,
     content_id: ?u64 = null,
     at: u64 = 0,
     count: RowCount = .{},
@@ -1437,13 +1482,14 @@ const OutcomeRead = struct {
 
     fn keep(read: *OutcomeRead, row: *const turn_outcome.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
-        read.outcome.* = .{ .turn = row.turn_id.get(), .operation = row.operation_id.get(), .code = row.outcome_code, .content = null };
         read.content_id = if (row.outcome_content_id) |id| id.get() else null;
-        switch (try TurnOutcome.decode(read.outcome.code.slice(), if (read.content_id) |id| @intCast(id) else null)) {
+        const outcome = try TurnOutcome.decode(row.outcome_code.slice(), if (read.content_id) |id| @intCast(id) else null);
+        switch (outcome) {
             // A completed Turn answers with its causing Operation's Resolution.
             .completed => |answer| if (row.resolution_content_id == null or row.resolution_content_id.?.get() != answer) return error.CorruptStore,
             .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
         }
+        read.outcome.* = .{ .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = row.outcome_code, .content = null };
         read.at = row.outcome_at.get();
     }
 };
@@ -1493,7 +1539,7 @@ const ItemRead = struct {
     state: union {
         first: struct { missing: missing_assistant_entry.Result, row: activity_item.Result },
         message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
-        content: struct { read: PublicContentRead, presentation: PresentationRead = undefined },
+        content: struct { read: PublicContentRead, presentation: PresentationRead = undefined, answer: answer_entry.Result = null },
         call: struct { proposal: ProposalRead, resolved: call_resolved.Row = undefined },
         hosted: HostedRead,
         sent: struct { read: SentRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined },
@@ -1532,6 +1578,7 @@ const ItemRead = struct {
                     1 => content.read.queue(a, session),
                     2 => {
                         content.read.queueMetadata(a);
+                        if (read.kind == 3) a.read(answer_entry, .{ .session = session, .position = read.position, .end = end }, &content.answer);
                         if (read.kind == 5) {
                             item.value = .{ .tool_result = undefined };
                             content.presentation = .init(content.read.content.tool_operation.?, read.ordinal - 1, read.position, &item.value.tool_result.presentation);
@@ -1607,8 +1654,8 @@ const ItemRead = struct {
                         item.at = found.at;
                         const value: protocol.ActivityItem.Content = .{ .length = found.metadata.length, .digest = found.metadata.digest };
                         if (read.kind == 3) {
-                            item.value = .{ .assistant = value };
-                            read.exposes(@intCast(found.id), &item.value.assistant);
+                            item.value = .{ .assistant = .{ .content = value, .final = content.answer != null } };
+                            read.exposes(@intCast(found.id), &item.value.assistant.content);
                             read.done = true;
                             return;
                         }
@@ -1658,8 +1705,8 @@ const ItemRead = struct {
                     if (outcome.read.content_id != null) return;
                 } else {
                     const content = try content_domain.publicMetadata(&outcome.metadata);
-                    item.value.outcome.content = .{ .length = content.length, .digest = content.digest };
-                    read.exposes(outcome.read.content_id.?, &item.value.outcome.content.?);
+                    item.value.turn_ended.content = .{ .length = content.length, .digest = content.digest };
+                    read.exposes(outcome.read.content_id.?, &item.value.turn_ended.content.?);
                 }
             },
             7 => {
@@ -1714,8 +1761,8 @@ const ItemRead = struct {
                 read.state = .{ .failure = .{ .read = .{ .position = read.position, .failed = &item.value.send_failed } } };
             },
             6 => {
-                item.value = .{ .outcome = undefined };
-                read.state = .{ .outcome = .{ .read = .{ .position = read.position, .outcome = &item.value.outcome } } };
+                item.value = .{ .turn_ended = undefined };
+                read.state = .{ .outcome = .{ .read = .{ .position = read.position, .outcome = &item.value.turn_ended } } };
             },
             7 => {
                 item.value = .{ .stop = undefined };

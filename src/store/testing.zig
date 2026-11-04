@@ -469,6 +469,12 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
 /// which the last message's whole text is `answer`; its function calls
 /// count as the output's calls.
 pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, answer: []const u8) !void {
+    return settleSelectedItemsForTesting(storage, tmp, binding, items, null, answer);
+}
+
+/// `settleItemsForTesting` with the answer the message at `selected`, when
+/// given, as phase selection picks one before later messages.
+pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const source = try tmp.dir.createFile(std.testing.io, "items-output", .{ .read = true, .truncate = true });
     defer source.close(std.testing.io);
@@ -496,7 +502,7 @@ pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding:
         .metadata = metadata.file,
         .item_count = items.len,
         .call_count = calls,
-        .answer_item_ordinal = answer_item,
+        .answer_item_ordinal = selected orelse answer_item,
         .answer_length = answer.len,
         .answer_digest = protocol.contentDigest(answer),
         .response_id = .{},

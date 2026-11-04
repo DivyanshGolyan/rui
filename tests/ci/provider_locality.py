@@ -7,6 +7,10 @@ commands that sign a provider in. Every other file in src/ is core, and its
 production code (tests and comments aside) names none of it. Core asks the
 provider table or the sign-in source a question instead.
 
+A codec, in turn, treats every model alike: it writes the model's name into
+the request and never branches on it. A per-model fact belongs in the model
+catalog (`model_capability.zig`), which every provider's models share.
+
 Run directly to list violations; test_provider_locality.py gates on it.
 """
 import re
@@ -44,6 +48,14 @@ RULES = (
         r"refresh_token_reused|refresh_token_invalidated)\b")),
     ("names a ChatGPT endpoint", re.compile(r"chatgpt\.com")),
     ("switches on a provider", re.compile(r"\bProvider\.(?:codex|openai)\b|\.(?:codex|openai)\s*=>")),
+)
+
+# What a codec's production code may not do: read the model's name, or name
+# a model. Writing the name goes through its handle, not `modelName()`.
+CODEC_RULES = (
+    ("reads the model name", re.compile(r"\bmodelName\(")),
+    # A quoted or `\\` multiline string that is a model ID.
+    ("names a model", re.compile(r'(?:"|\\\\)(?:gpt|o\d|codex)[-\w.]*(?:"|$)', re.IGNORECASE | re.MULTILINE)),
 )
 
 # Core files that must name a provider fact, each with why.
@@ -84,15 +96,13 @@ def owned(relative):
     return any(Path(relative).match(pattern) for pattern in PROVIDER_OWNED)
 
 
-def violations(root=SRC):
+def scan(paths, root, rules, allowed=frozenset()):
     found = []
-    for path in sorted(root.rglob("*.zig")):
+    for path in paths:
         relative = path.relative_to(root).as_posix()
-        if owned(relative):
-            continue
         code = production(path.read_text())
-        for name, pattern in RULES:
-            if (relative, name) in ALLOWED:
+        for name, pattern in rules:
+            if (relative, name) in allowed:
                 continue
             for match in pattern.finditer(code):
                 line = code.count("\n", 0, match.start()) + 1
@@ -100,7 +110,17 @@ def violations(root=SRC):
     return found
 
 
+def violations(root=SRC):
+    core = [path for path in sorted(root.rglob("*.zig")) if not owned(path.relative_to(root).as_posix())]
+    return scan(core, root, RULES, ALLOWED)
+
+
+def codec_violations(root=SRC):
+    return scan(sorted((root / "codecs").rglob("*.zig")), root, CODEC_RULES)
+
+
 if __name__ == "__main__":
-    for violation in violations():
+    found = violations() + codec_violations()
+    for violation in found:
         print(violation)
-    sys.exit(1 if violations() else 0)
+    sys.exit(1 if found else 0)

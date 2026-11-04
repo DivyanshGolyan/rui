@@ -322,7 +322,7 @@ Before `zig build measure-*`, run `GOTOOLCHAIN=local go -C tests/qualification m
 Record Go and gopsutil versions, `go.sum` and binary hashes, platform, Git revision and dirty state.
 Measurement provenance reports a revision only when `git -C` resolves the measurement root as its top level; otherwise both fields are unavailable.
 
-Release evidence includes deterministic Session, model, tool, permission, context, compaction, workflow and server fixtures; hard-termination recovery at each acknowledgement and effect boundary; compiler-backed discovery of both production graphs; and the opt-in live Codex repair through those owners.
+Release evidence includes deterministic Session, model, tool, permission, context, compaction and server fixtures; hard-termination recovery at each acknowledgement and effect boundary; compiler-backed discovery of both production graphs; and the opt-in live Codex repair through those owners.
 Classify unused, conditional and test declarations and remove obsolete interfaces.
 Never label interrupted or unrun checks passed.
 ### Product tenets
@@ -535,7 +535,7 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 | An environment over 64 KiB is refused before connecting, naming its largest variables, and its capture recovers from a smaller environment; no environment value reaches a caller record | `bash_environment_integration.py`, `'a Message uploads its environment ahead of the unchanged record'` | None |
 | Host refuses a missing header, an oversized or malformed environment, a repeated name and the header on another route before admission | `bash_environment_integration.py`, `"a Message's environment header and entries are checked before admission"` | None |
 | Evidence layers | `test-logic`, `bash-owner-integration`, `bash-lifecycle-integration` | No reruns to pass |
-| [Frozen catalog and permission mode](ARCHITECTURE.md#authorizing-exact-actions) | `'frozen catalog'`, `'allow once survives'` | Workflow bypass across restart: none located |
+| [Frozen catalog and permission mode](ARCHITECTURE.md#authorizing-exact-actions) | `'frozen catalog'`, `'allow once survives'` | None |
 | Bash-only catalog and configuration: exact `bash`/`none` CLI, `["bash"]`/`[]` wire; removed Edit and duplicate/alternate spellings reject | `human_cli_integration.py`, `dispatch_integration.py`, `'Current facts'` | Public arrays and private SQLite masks remain distinct representations |
 
 ## Exact Edit
@@ -544,28 +544,10 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 | --- | --- | --- |
 | [Exact Edit](ARCHITECTURE.md#exact-edit) ranges, copyback, failures | none located | Edit execution is unimplemented |
 
-## Workflow replay and cancellation
-
-### Creation and public calls
+## Submission recovery
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Compile-only entry/import validation](ARCHITECTURE.md#evaluator-containment) | none located | Workflow Runtime unimplemented |
-| [Workflow identity, creation keys, Session functions](ARCHITECTURE.md#workflow-identity-and-saved-calls) | none located | Workflow Runtime unimplemented |
-
-### Evaluation and result binding
-
-| Contract | Canonical checks | Limits and exceptions |
-| --- | --- | --- |
-| Restricted Promise and global surface | none located | Workflow Runtime unimplemented |
-| [Evaluator output and scratch ownership](ARCHITECTURE.md#owning-evaluator-input-and-output) | none located | Workflow Runtime unimplemented |
-| [Saved-result binding and selection](ARCHITECTURE.md#reevaluating-from-saved-results) | none located | Workflow Runtime unimplemented |
-
-### Cancellation and submission recovery
-
-| Contract | Canonical checks | Limits and exceptions |
-| --- | --- | --- |
-| [Workflow cancellation, intent tokens](ARCHITECTURE.md#cancelling-a-workflow) | none located | Workflow Runtime unimplemented |
 | [Same-key caller recovery](ARCHITECTURE.md#caller-capture-and-recovery) | `human_cli_integration.py`, `control_integration.py` | Direct clients only |
 
 ## Controls, inspection and local server
@@ -591,7 +573,6 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Sessions associated with a Workflow](ARCHITECTURE.md#inspecting-sessions-associated-with-a-workflow) | none located | Host facts only; reject local-record or SQLite discovery. Declarations or rejections alone add no Session |
 | [Default and terminal-only waits](ARCHITECTURE.md#work-state-and-wait-conditions) | none located | Waits never start, resume or follow future work. Permission returns do not replace exact-target validation |
 | Opening and older history: frozen opening, exact pending count without previews, each admitted Message exactly once across older pages, listing and retained copy after eviction | `human_cli_integration.py` | Equal-content Messages included; labels as of their read |
 | Current selection, pending count, ten recent Messages | `'Current facts'`, `current-facts-integration`, `store/sqlite_tests.zig` `'Current selects active then queued'` | Suppressing callbacks beyond 128 rows must fail the complete count. Fixed storage is not process memory or Mac evidence |
@@ -728,13 +709,6 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | [Settings and faults](ARCHITECTURE.md#sqlite-and-representation) | `'production Store applies finite durable SQLite settings'`, `'an outside SQLite writer cannot take the open Store's lock'`, `'real SQLite full during import publishes no canonical prefix'`, `'measurement Store can force a smaller SQLite cache without changing production defaults'` | None |
 | [Store durability](ARCHITECTURE.md#store-durability) | `'Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash copy, checkpoint and restore'`, `'fresh Store uses current schema and rejects the prior version'`, process-crash recovery in `bash-recovery-integration` and `admission-debug-integration` | The crash copy is a file snapshot of an open Store, not an OS crash; no power-loss test |
 
-## Evaluator lifecycle and limit replacement
-
-| Contract | Canonical checks | Limits and exceptions |
-| --- | --- | --- |
-| [Evaluator containment](ARCHITECTURE.md#evaluator-containment): 16 MiB heap, 1 s CPU, 5 s lifetime, stack, descriptors | none located | Workflow Runtime unimplemented. Limit readback is not enforcement |
-| Integration measurements before delivery replacement | none located | Prepared/requested ratio alone does not justify it |
-
 ## Diagnostics
 
 ### Native owner observations
@@ -770,7 +744,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 Package under the Rui identity and verify executable and package names, state and credential identifiers, build and distribution references, and fixtures.
 Fixture recreation under the [Store format policy](ARCHITECTURE.md#store-format-and-upgrades) does not authorize changing user Stores; state packaging, state-path and credential-identifier obligations explicitly before release.
 
-Release demonstrations cover explicit start, no-client progress, restart, direct Sessions, first configuration, cross-Workflow inspected-reference reuse, fan-out and joins, permissions, ordered tools, uncertain Bash and Edit, and shared cancellation.
+Release demonstrations cover explicit start, no-client progress, restart, direct Sessions, first configuration, permissions, ordered tools, uncertain Bash and Edit, and shared cancellation.
 Independent native or Cloudflare walkthroughs add no embedding or cloud release requirement.
 Keep evidence attached to the real owners and label remaining gaps before claiming release readiness.
 

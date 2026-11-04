@@ -374,9 +374,7 @@ def run():
                 mismatches.append((model, "reasoning", request.get("reasoning")))
             if request.get("text") != {"verbosity": "low"}:
                 mismatches.append((model, "text", request.get("text")))
-            # Codex suppresses parallel calls on Responses-lite bindings even
-            # when the catalog advertises supports_parallel_tool_calls=true.
-            if request.get("parallel_tool_calls") is not (model == "gpt-5.5"):
+            if request.get("parallel_tool_calls") is not True:
                 mismatches.append((model, "parallel_tool_calls", request.get("parallel_tool_calls")))
             if endpoint.user_agents[4 + index] != expected_agent:
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))

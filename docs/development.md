@@ -77,5 +77,4 @@ See [the walkthrough's checks](../VERIFICATION.md#runnable-bash-caller-acceptanc
 
 ## What's next
 
-[Durable JavaScript workflows](https://github.com/DivyanshGolyan/rui/issues/273) are still in development.
 The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) tracks feature work, separately from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231).

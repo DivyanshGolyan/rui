@@ -13,7 +13,6 @@ const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
-const pages = @import("../../os/pages.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
@@ -1309,20 +1308,21 @@ const work_latest = rsql.Read(.{
 });
 
 /// One aggregate over an active Turn's Operation's Actions, bounded by
-/// its calls. On SQLite it renders as main's text, with column names.
+/// its calls. Its last resolution seeks the Session's results index.
 const work_actions = rsql.Read(.{
     .sql = "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
         "@count_where(a.resolution_code IS NULL AND a.authorized=0) AS awaiting," ++
         "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END) AS first_awaiting," ++
         "@count_where(a.resolution_code IS NULL AND a.attempt_ordinal=1) AS running," ++
         // The last resolution is the one at the greatest position.
-        "(SELECT resolved_at FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
+        "(SELECT resolved_at FROM action_operation WHERE session_ref=?2 AND parent_operation_id=?1 AND acceptance_position IS NOT NULL " ++
+        "ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
         // Under an `ask` revision only an `allow_once` decision
         // authorizes; under `bypass` the proposal did.
         "@max_where(a.decided_at,a.resolution_code IS NULL AND r.permission_mode=0) AS latest_decision_at " ++
         "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
         "WHERE a.parent_operation_id=?1",
-    .Args = struct { operation: u64 },
+    .Args = struct { operation: u64, session: []const u8 },
     .Row = struct {
         total: u64,
         unresolved: u64,
@@ -1435,7 +1435,7 @@ pub const WorkRead = struct {
     pub fn queue(w: *WorkRead, a: *ReadAccess) bool {
         switch (w.stage) {
             .latest => reads_domain.readFirst(a, work_latest, .{ .session = w.session }, w),
-            .actions => reads_domain.readFirst(a, work_actions, .{ .operation = w.inputs.latest.?.operation_id }, w),
+            .actions => reads_domain.readFirst(a, work_actions, .{ .operation = w.inputs.latest.?.operation_id, .session = w.session }, w),
             .oldest => reads_domain.readFirst(a, work_oldest, .{ .operation = w.inputs.latest.?.operation_id }, w),
             .cutoff => reads_domain.readFirst(a, command_domain.stop_cutoff, .{ .session = w.session }, w),
             .queued => reads_domain.readFirst(a, work_queued, .{ .session = w.session, .cutoff = w.cutoff }, w),
@@ -1587,30 +1587,38 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
 pub fn renderFull(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
     try capture.append(",\"full\":{\"session_revisions\":[");
     try renderRevisions(a, session_ref, capture);
-    try renderRun(a, .{Messages}, session_ref, capture);
-    try renderRun(a, .{ Conversation, Turns, Operations }, session_ref, capture);
-    try renderRun(a, .{Calls}, session_ref, capture);
-    try renderRun(a, .{Actions}, session_ref, capture);
-    try renderRun(a, .{ Decisions, Stops, Interruptions, Results }, session_ref, capture);
+    inline for (full_runs) |run| try renderRun(a, run, session_ref, capture);
     try capture.append("]}");
 }
 
-/// The rows a Full list renders per chunk. Each list's text reads one row
-/// more (`chunk_limit`), so a list of at most this many rows without
+/// The Full lists after the revisions, in main's order, as runs
+/// (`renderRun`). Every list's statement is an `rsql.Page`: its keyset is
+/// the key of the index it walks on its own table, so a chunk after the
+/// first seeks where the one before stopped and never sorts or rescans;
+/// the tests read every list's plan from here (`full_pages`).
+pub const full_runs = .{ .{Messages}, .{ Conversation, Turns, Operations }, .{Calls}, .{Actions}, .{ Decisions, Stops, Interruptions, Results } };
+
+/// The statements of the Full lists, revisions first: what the plan and
+/// step tests walk. Derived from `full_runs`, never listed apart.
+pub const full_pages = blk: {
+    var statements: []const type = &.{full_revisions};
+    for (full_runs) |run| for (run) |L| {
+        statements = statements ++ .{L.S};
+    };
+    break :blk statements;
+};
+
+/// The rows a Full list renders per chunk in the pass. Each list's Page
+/// reads one row more, so a list of at most this many rows without
 /// inline content takes one statement, and each further `chunk_rows`
 /// rows take one more.
 const chunk_rows = 256;
-const chunk_limit = std.fmt.comptimePrint(" LIMIT {d}", .{chunk_rows + 1});
 
-/// The hooks a list without them declares: no state, no check, and no
-/// first read.
-pub const NoState = struct {};
-pub fn noCheck(_: *NoState, _: anytype) error{}!void {}
-pub const NoFirst = struct {};
-pub fn noQueueFirst(_: *ReadAccess, _: []const u8, _: *NoFirst) void {}
-pub fn noCheckFirst(_: *const NoFirst) error{}!void {}
-pub fn streamsNever(_: anytype) bool {
-    return false;
+/// The rows a list's chunk takes: `chunk_rows` when it renders in the
+/// pass (`kept_rows` 0), else `kept_rows`, every one kept for after the
+/// round. Its Page reads one more.
+fn takes(comptime kept_rows: u8) u16 {
+    return if (kept_rows == 0) chunk_rows else kept_rows;
 }
 
 /// Where a list stands in its run (`renderRun`), as the lists after it in
@@ -1631,12 +1639,12 @@ const ListStatus = struct {
     empty: bool = false,
 
     /// Whether every row of the list is rendered once this round's pass
-    /// reaches the list after it: done before, or read in this round
-    /// after every list before it finished, with no row past its chunk
-    /// and none kept.
+    /// reaches the list after it: done before, found empty, or read in
+    /// this round after every list before it finished, with no row past
+    /// its chunk and none kept.
     fn finished(list: *const ListStatus) bool {
         if (list.done) return true;
-        return list.queued and list.previousFinished() and !list.more and !list.kept and !list.failed;
+        return (list.queued or list.empty) and list.previousFinished() and !list.more and !list.kept and !list.failed;
     }
 
     fn previousFinished(list: *const ListStatus) bool {
@@ -1656,35 +1664,100 @@ const Headers = struct {
     }
 };
 
-/// One round's chunk of a Full list (`renderRun`). `L` declares, all
-/// required:
-/// - `S`, its statement, whose Args are the Session and the key after
-///   which a chunk starts, 0 before the first;
-/// - `after(session, row)`, the Args of the chunk after `row`;
+/// Holds a Full list's declarations to exactly these, all pub:
+/// - `S`, its statement, an `rsql.Page` that takes `takes(kept_rows)`
+///   rows;
 /// - `failed`, the name main gave its statement's failed step;
 /// - `header`, the text that opens the list;
-/// - `kept_rows`, how many rows a chunk keeps for after its round: the
-///   first row that shows content whole (`streams(row)`) and every row
-///   after it in the chunk, since rows render in order;
+/// - `kept_rows`: 0 for a list that renders its rows in the pass, else
+///   how many rows a chunk takes and keeps for after its round, to show
+///   their content whole;
 /// - `render(a, capture, row)`, which streams the row's inline content;
-/// - `State` and `check(state, row)`, run for every row in order;
-/// - `First`, `queueFirst` and `checkFirst`: a read the list's first
-///   round queues before it, judged before any of its rows' failures.
-/// `NoState`, `noCheck`, `NoFirst`, `noQueueFirst`, `noCheckFirst` and
-/// `streamsNever` are the hooks of a list that has none.
+/// - optionally `State` and `check(state, row)`, run for every row in
+///   order;
+/// - optionally `First`, `FirstRead`, `queueFirst` and `checkFirst`: a
+///   read the list's first round queues before it, judged before any of
+///   its rows' failures.
+/// Any other pub declaration, or a hook missing from its group, fails the
+/// build, so a misspelt pub hook is never ignored. A hook that is not pub
+/// is invisible here and to `Chunk` alike (`@hasDecl` and `decl_names`
+/// see pub declarations only), so it never runs; beside a pub hook of its
+/// group it fails the group rule.
+fn checkList(comptime L: type) void {
+    if (comptime listError(L)) |message| @compileError(message);
+}
+
+/// Why `L` is not a Full list, or null when it is: it declares pub
+/// `S`, `failed`, `header`, `kept_rows` and `render`, and each group of
+/// hooks whole or not at all, and nothing else.
+pub fn listError(comptime L: type) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(20_000);
+        const required = [_][]const u8{ "S", "failed", "header", "kept_rows", "render" };
+        const groups = [_][]const []const u8{ &.{ "State", "check" }, &.{ "First", "FirstRead", "queueFirst", "checkFirst" } };
+        for (@typeInfo(L).@"struct".decl_names) |name| {
+            var known = false;
+            for (required) |each| known = known or std.mem.eql(u8, each, name);
+            for (groups) |group| for (group) |each| {
+                known = known or std.mem.eql(u8, each, name);
+            };
+            if (!known) return "a Full list declares only its statement, failed, header, kept_rows, render and its hooks, not " ++ name ++ ": " ++ @typeName(L);
+        }
+        for (required) |name| if (!declares(L, name)) return "a Full list declares pub " ++ name ++ ": " ++ @typeName(L);
+        for (groups) |group| {
+            const present = declares(L, group[0]);
+            for (group) |name| {
+                if (declares(L, name) != present) return "a Full list declares all of a group of hooks or none: " ++ name ++ " in " ++ @typeName(L);
+            }
+        }
+        return null;
+    }
+}
+
+fn declares(comptime L: type, comptime name: []const u8) bool {
+    for (@typeInfo(L).@"struct".decl_names) |each| if (std.mem.eql(u8, each, name)) return true;
+    return false;
+}
+
+fn ErrorOf(comptime f: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?).error_union.error_set;
+}
+
+/// A list's state across its rows, `struct {}` without one.
+fn ListState(comptime L: type) type {
+    return if (@hasDecl(L, "State")) L.State else struct {};
+}
+
+/// A list's first read's result, `void` without one.
+fn ListFirst(comptime L: type) type {
+    return if (@hasDecl(L, "First")) L.First else void;
+}
+
+fn CheckError(comptime L: type) type {
+    return if (@hasDecl(L, "check")) ErrorOf(L.check) else error{};
+}
+
+fn CheckFirstError(comptime L: type) type {
+    return if (@hasDecl(L, "checkFirst")) ErrorOf(L.checkFirst) else error{};
+}
+
+/// One round's chunk of a Full list `L` (`checkList`), read by `renderRun`.
 fn Chunk(comptime L: type) type {
+    comptime {
+        checkList(L);
+        if (!@hasDecl(L.S, "page_walk")) @compileError("a Full list's statement is an rsql.Page: " ++ @typeName(L));
+        if (L.S.take != takes(L.kept_rows)) @compileError("a Full list's Page takes takes(kept_rows) rows: " ++ @typeName(L));
+    }
     return struct {
         const Row = L.S.Row;
-        const Failure = @typeInfo(@typeInfo(@TypeOf(L.render)).@"fn".return_type.?).error_union.error_set ||
-            @typeInfo(@typeInfo(@TypeOf(L.check)).@"fn".return_type.?).error_union.error_set ||
-            SessionReportCapture.AppendError;
+        const Failure = error{CorruptStore} || ErrorOf(L.render) || CheckError(L) || SessionReportCapture.AppendError;
 
         a: *ReadAccess,
         capture: *SessionReportCapture,
         headers: *Headers,
         list: usize,
         first: *bool,
-        state: *L.State,
+        state: *ListState(L),
         status: *ListStatus,
         after: L.S.Args,
         rows: u16 = 0,
@@ -1695,20 +1768,26 @@ fn Chunk(comptime L: type) type {
         count: u8 = 0,
         failure: ?Failure = null,
 
-        /// Takes `row` once every list before it finished, unless the
-        /// chunk is full, of rows or of kept rows: then `row` is the next
-        /// chunk's first, and the chunk stops. Before every list before
-        /// it finished, it stops at its first row and takes nothing.
+        /// Once every list before it finished: refuses a row not strictly
+        /// after the last taken (`L.S.next`), the look-ahead row
+        /// included; stops at the row past `L.S.take`, the next chunk's
+        /// first; else takes the row. Before every list before it
+        /// finished, it stops at its first row and takes nothing.
         pub fn visit(chunk: *@This(), row: *const Row) bool {
             const ready = chunk.ready orelse chunk.status.previousFinished();
             chunk.ready = ready;
             if (!ready) return false;
-            if (chunk.rows == chunk_rows or (L.kept_rows != 0 and chunk.count == L.kept_rows)) {
+            const next = L.S.next(chunk.after, row) orelse {
+                chunk.failure = error.CorruptStore;
+                chunk.status.failed = true;
+                return false;
+            };
+            if (chunk.rows == L.S.take) {
                 chunk.status.more = true;
                 return false;
             }
             chunk.rows += 1;
-            chunk.after = L.after(chunk.after.session, row);
+            chunk.after = next;
             chunk.take(row) catch |err| {
                 chunk.failure = err;
                 chunk.status.failed = true;
@@ -1717,11 +1796,11 @@ fn Chunk(comptime L: type) type {
             return true;
         }
 
-        /// Renders `row` in the pass, unless it or a row before it in
-        /// this chunk shows content whole: then keeps it, in order.
+        /// `check`, then renders `row` in the pass (`kept_rows` 0), or
+        /// keeps it, in order.
         fn take(chunk: *@This(), row: *const Row) Failure!void {
-            try L.check(chunk.state, row);
-            if (L.kept_rows == 0 or (chunk.count == 0 and !L.streams(row))) return chunk.render(row);
+            if (@hasDecl(L, "check")) try L.check(chunk.state, row);
+            if (L.kept_rows == 0) return chunk.render(row);
             chunk.kept[chunk.count] = row.*;
             chunk.count += 1;
             chunk.status.kept = true;
@@ -1739,13 +1818,14 @@ fn Chunk(comptime L: type) type {
 /// A list's place in its run across rounds.
 fn ListRun(comptime L: type) type {
     return struct {
-        state: L.State = .{},
+        state: ListState(L) = .{},
+        /// No row rendered yet.
         first: bool = true,
         after: L.S.Args,
         status: ListStatus,
         /// The chunk read this round, and the first read with it.
         chunk: Chunk(L) = undefined,
-        first_read: L.First = undefined,
+        first_read: ListFirst(L) = undefined,
         first_queued: bool = false,
         /// Whether `checkFirst` passed, in the round that rendered the
         /// list's first rows.
@@ -1763,23 +1843,23 @@ fn RunState(comptime Ls: anytype) type {
 /// What a failed round of run `Ls` can answer (`runFailure`).
 fn RunError(comptime Ls: anytype) type {
     var set = @typeInfo(@typeInfo(@TypeOf(ReadAccess.run)).@"fn".return_type.?).error_union.error_set;
-    for (Ls) |L| set = set || @TypeOf(L.failed) || Chunk(L).Failure ||
-        @typeInfo(@typeInfo(@TypeOf(L.checkFirst)).@"fn".return_type.?).error_union.error_set;
+    for (Ls) |L| set = set || @TypeOf(L.failed) || Chunk(L).Failure || CheckFirstError(L);
     return set;
 }
 
 /// Renders lists `Ls` in order, each in keyset chunks, a round per chunk.
 /// A list's chunk renders its rows as the pass steps them, so the next
 /// list's rows can render in the same pass only once it finished: every
-/// list but the last keeps no rows (`kept_rows` 0), and each round reads
-/// the first list not done and the first chunk of each list after it.
-/// A list reached before the lists ahead of it finished takes one row
-/// and nothing from it, and is read again, its first read not; one with
-/// no row is not read again. That happens only after a list of more than
-/// `chunk_rows` rows. After the round, each finished
-/// list's kept rows render with their content. A failed step answers the
-/// name of the list whose statement failed; a step failure of a list
-/// read ahead answers before the content of the lists before it.
+/// list but the last keeps no rows (`kept_rows` 0). Each round reads the
+/// first list not done and, while that list has taken no row, the first
+/// chunk of each list after it: a list read ahead costs its read once,
+/// not once per round of a long list before it. A list reached before
+/// the lists ahead of it finished takes nothing from its first row, and
+/// is read again once they finished, its first read not; one with no row
+/// is not read again. After the round, each finished list's kept rows
+/// render with their content. A failed step answers the name of the list
+/// whose statement failed; a step failure of a list read ahead answers
+/// before the content of the lists before it.
 /// Not inlined, so each run's kept rows take only their own chain.
 pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []const u8, capture: *SessionReportCapture) !void {
     comptime for (0..Ls.len - 1) |i| std.debug.assert(Ls[i].kept_rows == 0);
@@ -1797,38 +1877,49 @@ pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []c
     };
     var current: usize = 0;
     while (current < Ls.len) {
-        inline for (Ls, 0..) |L, i| if (i >= current and !lists[i].status.empty) {
+        var ahead = false;
+        inline for (0..Ls.len) |i| if (i == current) {
+            ahead = lists[i].first;
+        };
+        inline for (Ls, 0..) |L, i| if (i >= current) {
             const list = &lists[i];
-            list.status.queued = true;
-            list.status.more = false;
-            list.status.kept = false;
-            list.status.failed = false;
-            if (!list.begun and !list.first_queued) {
-                L.queueFirst(a, session_ref, &list.first_read);
-                list.first_queued = true;
+            list.status.queued = false;
+            if (!list.status.empty and (i == current or ahead)) {
+                list.status.queued = true;
+                list.status.more = false;
+                list.status.kept = false;
+                list.status.failed = false;
+                if (@hasDecl(L, "First") and !list.begun and !list.first_queued) {
+                    L.queueFirst(a, session_ref, &list.first_read);
+                    list.first_queued = true;
+                }
+                list.chunk = .{ .a = a, .capture = capture, .headers = &headers, .list = i, .first = &list.first, .state = &list.state, .status = &list.status, .after = list.after };
+                a.readEach(L.S, list.after, L.S.limit, &list.chunk);
             }
-            list.chunk = .{ .a = a, .capture = capture, .headers = &headers, .list = i, .first = &list.first, .state = &list.state, .status = &list.status, .after = list.after };
-            a.readEach(L.S, list.after, chunk_rows + 1, &list.chunk);
         };
         a.run() catch |err| return runFailure(a, Ls, &lists, current, err);
         var blocked = false;
         inline for (Ls, 0..) |L, i| if (i >= current) {
             const list = &lists[i];
-            if (blocked or !list.status.previousFinished()) {
+            if (!list.status.queued and !list.status.empty) {
+                // Not read this round: read once the lists before it
+                // finished.
+                blocked = true;
+            } else if (blocked or !list.status.previousFinished()) {
                 // Read ahead of a list not finished: read again, unless it
                 // has no row. The snapshot is the report's, so its first
                 // read stands.
                 blocked = true;
-                if (list.chunk.ready == null) list.status.empty = true;
+                if (list.status.queued and list.chunk.ready == null) list.status.empty = true;
             } else {
-                if (!list.begun) {
-                    try L.checkFirst(&list.first_read);
-                    list.begun = true;
-                }
-                if (list.chunk.failure) |err| return err;
-                try headers.open(i);
-                for (list.chunk.kept[0..list.chunk.count]) |*row| try list.chunk.render(row);
-                list.after = list.chunk.after;
+                if (@hasDecl(L, "checkFirst") and !list.begun) try L.checkFirst(&list.first_read);
+                list.begun = true;
+                if (list.status.queued) {
+                    if (list.chunk.failure) |err| return err;
+                    try headers.open(i);
+                    for (list.chunk.kept[0..list.chunk.count]) |*row| try list.chunk.render(row);
+                    list.after = list.chunk.after;
+                } else try headers.open(i);
                 if (list.status.more) {
                     blocked = true;
                     current = i;
@@ -1848,14 +1939,14 @@ pub noinline fn renderRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []c
 fn runFailure(a: *const ReadAccess, comptime Ls: anytype, lists: *RunState(Ls), current: usize, err: RunError(Ls)) RunError(Ls) {
     if (err != error.StatementFailed) return err;
     var failed: ?usize = null;
-    inline for (Ls, 0..) |L, i| if (failed == null and i >= current) {
+    inline for (Ls, 0..) |L, i| if (failed == null and i >= current and lists[i].status.queued) {
         if (a.failedOn(L.S) or failedOnFirst(a, L)) failed = i;
     };
     const index = failed orelse return err;
     inline for (Ls, 0..) |L, i| if (i >= current and i <= index) {
         const list = &lists[i];
         if (i == index) return list.chunk.failure orelse L.failed;
-        if (!list.begun) L.checkFirst(&list.first_read) catch |check| return check;
+        if (@hasDecl(L, "checkFirst") and !list.begun) L.checkFirst(&list.first_read) catch |check| return check;
         if (list.chunk.failure) |row| return row;
     };
     unreachable;
@@ -1863,7 +1954,7 @@ fn runFailure(a: *const ReadAccess, comptime Ls: anytype, lists: *RunState(Ls), 
 
 /// Whether list `L`'s first read recorded the round's failure.
 fn failedOnFirst(a: *const ReadAccess, comptime L: type) bool {
-    return if (L.First == NoFirst) false else a.failedOn(L.FirstRead);
+    return if (@hasDecl(L, "FirstRead")) a.failedOn(L.FirstRead) else false;
 }
 
 /// A content value a Full row shows whole, with the metadata its row
@@ -1899,66 +1990,14 @@ pub const ContentOwner = struct {
     revision: u64,
     field: RevisionContentField,
 
-    /// One integer that orders owners as they occur.
+    /// One integer that orders owners as they occur: `full_revisions`
+    /// reads each content's least.
     fn slot(owner: ContentOwner) u64 {
         return owner.revision * 2 + @as(u64, @intCast(@backingInt(owner.field)));
     }
 
     fn ofSlot(value: u64) ContentOwner {
         return .{ .revision = value / 2, .field = if (value % 2 == 0) .instructions else .output_schema };
-    }
-};
-
-/// The owner of each content value the revisions listed so far hold, by
-/// content id: an open-addressing table in pages of its own
-/// (`pages.mapZeroed`), so no frame holds it, mapped for one report and
-/// doubled whenever it is half full. It holds every value the Session's
-/// revisions hold, as main's ownership statement sorted them, so each
-/// lookup and insertion is one probe sequence however many revisions
-/// there are. Revisions list in order, so a value not found here occurs
-/// first in the row that holds it.
-pub const ContentOwners = struct {
-    pub const initial_capacity = 1024;
-
-    /// `id` 0 is an empty entry: content ids are positive.
-    const Entry = struct { id: u64, slot: u64 };
-
-    entries: []Entry,
-    count: usize = 0,
-
-    fn map() error{SessionReadFailed}!ContentOwners {
-        return .{ .entries = pages.mapZeroed(Entry, initial_capacity) catch return error.SessionReadFailed };
-    }
-
-    fn unmap(owners: *ContentOwners) void {
-        pages.unmapZeroed(owners.entries);
-    }
-
-    /// The entry holding `id`, or the empty one where it would go.
-    fn probe(entries: []Entry, id: u64) *Entry {
-        var at: usize = @intCast((id *% 0x9E3779B97F4A7C15) >> 32 & (entries.len - 1));
-        while (entries[at].id != 0 and entries[at].id != id) at = (at + 1) & (entries.len - 1);
-        return &entries[at];
-    }
-
-    fn find(owners: *const ContentOwners, id: u64) ?ContentOwner {
-        const entry = probe(owners.entries, id);
-        return if (entry.id == id) .ofSlot(entry.slot) else null;
-    }
-
-    /// Adds `id`, which it does not hold, doubling the table first when
-    /// the addition would fill it past half.
-    fn add(owners: *ContentOwners, id: u64, owner: ContentOwner) error{SessionReadFailed}!void {
-        if (2 * (owners.count + 1) > owners.entries.len) {
-            const grown = pages.mapZeroed(Entry, 2 * owners.entries.len) catch return error.SessionReadFailed;
-            for (owners.entries) |entry| if (entry.id != 0) {
-                probe(grown, entry.id).* = entry;
-            };
-            pages.unmapZeroed(owners.entries);
-            owners.entries = grown;
-        }
-        probe(owners.entries, id).* = .{ .id = id, .slot = owner.slot() };
-        owners.count += 1;
     }
 };
 
@@ -1984,22 +2023,44 @@ const RevisionRow = struct {
     output_schema_id: ?rsql.Positive,
     output_schema_length: ?u64,
     output_schema_digest: ?[32]u8,
+    instructions_owner: u64,
+    output_schema_owner: ?u64,
 };
 
-/// The Session's revisions after ?2, by `revision`, with each content's
-/// metadata; `ContentOwners` names the owners.
-pub const full_revisions = rsql.Read(.{
-    .sql = "SELECT r.revision,(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
-        "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.tools_mask,r.permission_mode," ++
-        "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
-        "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest " ++
-        "FROM session_revision r LEFT JOIN content instructions ON instructions.content_id=r.instructions_content_id " ++
-        "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id " ++
-        "WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY r.revision" ++ chunk_limit,
-    .Args = struct { session: []const u8, after: u64 = 0 },
+/// The Session's revisions, by `revision`, with each content's metadata
+/// and owner: the least `ContentOwner.slot` among the Session's revisions
+/// that hold it, one seek each in `session_revision_instructions` and
+/// `session_revision_output_schema`, whose keys end in `revision`. A row
+/// holds its own instructions, so that owner is never NULL, and two-argument
+/// min is NULL when either is, hence the coalesce. On SQLite:
+///   ... FROM session_revision r LEFT JOIN content instructions ON ...
+///   WHERE r.session_ref=?1 AND r.revision>?2 ORDER BY revision LIMIT 257
+pub const full_revisions = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .primary_key = "session_revision" },
+        .alias = "r",
+        .columns = "(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
+            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.tools_mask,r.permission_mode," ++
+            "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
+            "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
+            owner_column("instructions") ++ " AS instructions_owner," ++ owner_column("output_schema") ++ " AS output_schema_owner",
+        .joins = "LEFT JOIN content instructions ON instructions.content_id=r.instructions_content_id " ++
+            "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id",
+    }},
     .Row = RevisionRow,
-    .cardinality = .each,
+    .take = chunk_rows,
 });
+
+/// The owner of revision `r`'s `field` content: the least slot of its
+/// first holder as instructions (2*revision) and as an output schema
+/// (2*revision+1). NULL where `r` holds no such content.
+fn owner_column(comptime field: []const u8) []const u8 {
+    const as_instructions = "(SELECT min(revision)*2 FROM session_revision WHERE session_ref=?1 AND instructions_content_id=r." ++ field ++ "_content_id)";
+    const as_output_schema = "(SELECT min(revision)*2+1 FROM session_revision WHERE session_ref=?1 AND output_schema_content_id=r." ++ field ++ "_content_id)";
+    const own = if (std.mem.eql(u8, field, "instructions")) as_instructions else as_output_schema;
+    const other = if (std.mem.eql(u8, field, "instructions")) as_output_schema else as_instructions;
+    return "min(" ++ own ++ ",coalesce(" ++ other ++ "," ++ own ++ "))";
+}
 
 /// A revision's content, as its row shows it: whole where the revision
 /// owns it, else a reference to its owner.
@@ -2054,20 +2115,23 @@ const RevisionTail = struct {
 const RevisionChunk = struct {
     a: *ReadAccess,
     capture: *SessionReportCapture,
-    owners: *ContentOwners,
     first: bool,
-    after: u64,
+    after: full_revisions.Args,
     rows: u16 = 0,
     more: bool = false,
     tail: ?RevisionTail = null,
     failure: ?Failure = null,
     decoded: RevisionRow = undefined,
 
-    const Failure = SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore, SessionReadFailed } ||
+    const Failure = SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore } ||
         @typeInfo(@typeInfo(@TypeOf(RevisionTail.render)).@"fn".return_type.?).error_union.error_set;
 
     pub fn visit(chunk: *RevisionChunk, row: *const RevisionRow) bool {
-        if (chunk.rows == chunk_rows) {
+        const next = full_revisions.next(chunk.after, row) orelse {
+            chunk.failure = error.CorruptStore;
+            return false;
+        };
+        if (chunk.rows == full_revisions.take) {
             chunk.more = true;
             return false;
         }
@@ -2076,7 +2140,7 @@ const RevisionChunk = struct {
             return false;
         };
         chunk.rows += 1;
-        chunk.after = row.revision.get();
+        chunk.after = next;
         if (!tail.streams()) {
             tail.render(chunk.a, chunk.capture) catch |err| {
                 chunk.failure = err;
@@ -2096,18 +2160,20 @@ const RevisionChunk = struct {
         const output_schema_here: ContentOwner = .{ .revision = revision, .field = .output_schema };
         const instructions: InlineValue = .{ .id = row.instructions_id.get(), .length = row.instructions_length, .digest = row.instructions_digest };
         const output_schema = try optionalValue(row.output_schema_id, row.output_schema_length, row.output_schema_digest);
-        const instructions_owner = try chunk.ownerOf(instructions.id, instructions_here);
-        const output_schema_content: ?RevisionContent = if (output_schema) |value| .of(value, try chunk.ownerOf(value.id, output_schema_here), output_schema_here) else null;
+        const instructions_owner = try ownerOf(row.instructions_owner, instructions_here);
+        const output_schema_content: ?RevisionContent = if (output_schema) |value|
+            .of(value, try ownerOf(row.output_schema_owner orelse return error.CorruptStore, output_schema_here), output_schema_here)
+        else
+            null;
         try chunk.renderSettings(row);
         return .{ .instructions = .of(instructions, instructions_owner, instructions_here), .output_schema = output_schema_content };
     }
 
-    /// The owner of content `id` at `here`: from `ContentOwners`, else
-    /// `here`, which it then adds.
-    fn ownerOf(chunk: *RevisionChunk, id: u64, here: ContentOwner) error{SessionReadFailed}!ContentOwner {
-        if (chunk.owners.find(id)) |owner| return owner;
-        try chunk.owners.add(id, here);
-        return here;
+    /// The owner `slot` names: `here` or a revision before it, since the
+    /// Session's revisions hold `here`'s content at `here`.
+    fn ownerOf(slot: u64, here: ContentOwner) error{CorruptStore}!ContentOwner {
+        if (slot > here.slot()) return error.CorruptStore;
+        return .ofSlot(slot);
     }
 
     fn renderSettings(chunk: *RevisionChunk, row: *const RevisionRow) (SessionReportCapture.AppendError || error{ ReportEncodingFailed, CorruptStore })!void {
@@ -2141,16 +2207,14 @@ const RevisionChunk = struct {
 };
 
 /// The revisions list (`RevisionChunk`), whose step failure is main's
-/// `SessionReadFailed`, as is a failed map of `ContentOwners`' pages.
+/// `SessionReadFailed`.
 /// Not inlined: its chunk holds a decoded row.
 noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
-    var owners: ContentOwners = try .map();
-    defer owners.unmap();
     var first = true;
-    var after: u64 = 0;
+    var after: full_revisions.Args = .{ .session = session_ref };
     while (true) {
-        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .owners = &owners, .first = first, .after = after };
-        a.readEach(full_revisions, .{ .session = session_ref, .after = after }, chunk_rows + 1, &chunk);
+        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .first = first, .after = after };
+        a.readEach(full_revisions, after, full_revisions.limit, &chunk);
         const ran = store_access.runAs(a, error.SessionReadFailed);
         if (chunk.failure) |err| return err;
         try ran;
@@ -2161,27 +2225,33 @@ noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *S
     }
 }
 
-/// The Session's Messages, by `admission_position` and then id, each
-/// with its content, its Turn's outcome and, for one no Turn took, the
-/// stop with the least cutoff that reaches it, the first by position
-/// among equal cutoffs. Main walked the stops in command order and took
-/// the first that reaches it: the same stop, since a stop's cutoff is its
-/// Session's newest admission when it commits and its position is claimed
-/// in that commit, so neither falls in command order. Nothing checks this
-/// at run time. The seek (`session_stop_exclusion`) keeps the work linear
-/// in Messages and stops.
-pub const full_messages = rsql.Read(.{
-    .sql = "SELECT m.admission_position,m.admission_id,m.command_key,m.content_id,input.byte_length AS content_length,input.digest AS content_digest," ++
-        "m.turn_id,t.operation_id,o.attempt_ordinal,t.outcome_code,t.outcome_content_id,outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest," ++
-        "CASE WHEN m.turn_id IS NULL THEN (SELECT stopped.command_key FROM session_stop stopped " ++
-        "WHERE stopped.session_ref=m.session_ref AND stopped.admission_cutoff>=m.admission_id " ++
-        "ORDER BY stopped.admission_cutoff,stopped.position LIMIT 1) END AS excluding_stop " ++
-        "FROM message_admission m @index(message_admission_position) LEFT JOIN content input ON input.content_id=m.content_id " ++
-        "LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
-        "LEFT JOIN content outcome ON outcome.content_id=t.outcome_content_id " ++
-        "WHERE m.session_ref=?1 AND m.admission_position>=?2 AND (m.admission_position>?2 OR m.admission_id>?3) " ++
-        "ORDER BY m.admission_position,m.admission_id" ++ chunk_limit,
-    .Args = struct { session: []const u8, position: u64 = 0, admission: u64 = 0 },
+/// The Session's Messages, by `admission_position`, each with its
+/// content, its Turn's outcome and, for one no Turn took, the stop with
+/// the least cutoff that reaches it, the first by position among equal
+/// cutoffs. Main walked the stops in command order and took the first
+/// that reaches it: the same stop, since a stop's cutoff is its Session's
+/// newest admission when it commits and its position is claimed in that
+/// commit, so neither falls in command order. Nothing checks this at run
+/// time. The seek (`session_stop_exclusion`) keeps the work linear in
+/// Messages and stops. Positions are unique per Session, one
+/// compare-and-set claiming each (`access.zig`), and main listed by
+/// admission: `Messages.check` holds the admissions ascending, and a
+/// repeated position is `CorruptStore` (`next`). On SQLite:
+///   ... FROM message_admission m INDEXED BY message_admission_position ...
+///   WHERE m.session_ref=?1 AND m.admission_position>?2 ORDER BY admission_position LIMIT 5
+pub const full_messages = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "message_admission_position" },
+        .alias = "m",
+        .columns = "m.admission_id,m.command_key,m.content_id,input.byte_length AS content_length,input.digest AS content_digest," ++
+            "m.turn_id,t.operation_id,o.attempt_ordinal,t.outcome_code,t.outcome_content_id,outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest," ++
+            "CASE WHEN m.turn_id IS NULL THEN (SELECT stopped.command_key FROM session_stop stopped " ++
+            "WHERE stopped.session_ref=m.session_ref AND stopped.admission_cutoff>=m.admission_id " ++
+            "ORDER BY stopped.admission_cutoff,stopped.position LIMIT 1) END AS excluding_stop",
+        .joins = "LEFT JOIN content input ON input.content_id=m.content_id " ++
+            "LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+            "LEFT JOIN content outcome ON outcome.content_id=t.outcome_content_id",
+    }},
     .Row = struct {
         admission_position: rsql.Positive,
         admission_id: rsql.Positive,
@@ -2198,7 +2268,7 @@ pub const full_messages = rsql.Read(.{
         outcome_digest: ?[32]u8,
         excluding_stop: ?protocol.Bounded(128),
     },
-    .cardinality = .each,
+    .take = takes(Messages.kept_rows),
 });
 
 /// Whether the Session has a Message without a position, which a list by
@@ -2211,19 +2281,15 @@ const unpositioned_message = rsql.Read(.{
 });
 
 pub const Messages = struct {
-    const S = full_messages;
-    const failed = error.MessageReadFailed;
-    const header = "],\"messages\":[";
+    pub const S = full_messages;
+    pub const failed = error.MessageReadFailed;
+    pub const header = "],\"messages\":[";
     pub const kept_rows = 4;
     pub const First = unpositioned_message.Result;
-    const FirstRead = unpositioned_message;
+    pub const FirstRead = unpositioned_message;
     /// The last admission listed: main listed Messages by admission, so
     /// positions must order them the same way.
     pub const State = struct { admission: u64 = 0 };
-
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .position = row.admission_position.get(), .admission = row.admission_id.get() };
-    }
 
     pub fn queueFirst(a: *ReadAccess, session: []const u8, found: *First) void {
         a.read(unpositioned_message, .{ .session = session }, found);
@@ -2240,11 +2306,7 @@ pub const Messages = struct {
         state.admission = row.admission_id.get();
     }
 
-    fn streams(_: *const S.Row) bool {
-        return true;
-    }
-
-    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         const projection = try command_domain.projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
         try capture.appendFmt("{{\"admission\":\"{d}\",\"command_key\":", .{projection.admission_id});
         try capture.appendJsonString(projection.command_key.slice());
@@ -2294,15 +2356,15 @@ fn checkOutcome(code: anytype, content_id: ?rsql.Positive) error{CorruptStore}!v
 
 /// The Session's Conversation entries, by `entry_ordinal`, each with its
 /// content's metadata and, for a message or assistant entry, whether it
-/// is public (`reads.publicEntryRead`), which main read per row.
-const full_conversation = rsql.Read(.{
-    .sql = reads_domain.publicEntryRead(
-        "e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id," ++
-            "c.byte_length AS content_length,c.digest AS content_digest",
-        "e.entry_kind=2 OR ",
-        "WHERE e.session_ref=?1 AND e.entry_ordinal>?2 ORDER BY e.entry_ordinal" ++ chunk_limit,
-    ),
-    .Args = struct { session: []const u8, after: u64 = 0 },
+/// is public (`reads.publicEntryColumns`), which main read per row.
+const full_conversation = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .primary_key = "conversation_entry" },
+        .alias = "e",
+        .columns = "e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id," ++
+            "c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("e.entry_kind=2 OR "),
+        .joins = reads_domain.public_entry_joins,
+    }},
     .Row = struct {
         entry_ordinal: rsql.Positive,
         session_position: rsql.Positive,
@@ -2315,23 +2377,16 @@ const full_conversation = rsql.Read(.{
         content_digest: [32]u8,
         consistent: bool,
     },
-    .cardinality = .each,
+    .take = takes(Conversation.kept_rows),
 });
 
 pub const Conversation = struct {
-    const S = full_conversation;
-    const failed = error.ConversationReadFailed;
-    const header = "],\"conversation\":[";
-    const State = NoState;
-    const check = noCheck;
-    const streams = streamsNever;
+    pub const S = full_conversation;
+    pub const failed = error.ConversationReadFailed;
+    pub const header = "],\"conversation\":[";
     pub const kept_rows = 0;
     pub const First = reads_domain.missing_assistant_entry.Result;
-    const FirstRead = reads_domain.missing_assistant_entry;
-
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.entry_ordinal.get() };
-    }
+    pub const FirstRead = reads_domain.missing_assistant_entry;
 
     /// Every accepted assistant message has its entry, at any position,
     /// as main checked before the list; it implies main's check per row.
@@ -2343,7 +2398,7 @@ pub const Conversation = struct {
         if (missing.* != null) return error.CorruptStore;
     }
 
-    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         if (row.entry_kind < 1 or row.entry_kind > 3 or !row.consistent) return error.CorruptStore;
         try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":\"{d}\",\"source_admission\":", .{
             row.entry_ordinal.get(),
@@ -2371,13 +2426,16 @@ fn appendOptionalPositive(value: ?rsql.Positive, capture: *SessionReportCapture)
     if (value) |positive| try capture.appendFmt("\"{d}\"", .{positive.get()}) else try capture.append("null");
 }
 
-/// The Session's Turns, by `turn_id`, with their outcomes' metadata.
-const full_turns = rsql.Read(.{
-    .sql = "SELECT t.turn_id,t.first_admission_id,t.input_cutoff,t.operation_id,t.outcome_code,t.outcome_content_id," ++
-        "outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest " ++
-        "FROM turn t @index(turn_session_latest) LEFT JOIN content outcome ON outcome.content_id=t.outcome_content_id " ++
-        "WHERE t.session_ref=?1 AND t.turn_id>?2 ORDER BY t.turn_id" ++ chunk_limit,
-    .Args = struct { session: []const u8, after: u64 = 0 },
+/// The Session's Turns, by `turn_id`, with their outcomes' metadata; the
+/// index is descending, walked backward.
+const full_turns = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "turn_session_latest" },
+        .alias = "t",
+        .columns = "t.first_admission_id,t.input_cutoff,t.operation_id,t.outcome_code,t.outcome_content_id," ++
+            "outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest",
+        .joins = "LEFT JOIN content outcome ON outcome.content_id=t.outcome_content_id",
+    }},
     .Row = struct {
         turn_id: rsql.Positive,
         first_admission_id: rsql.Positive,
@@ -2388,26 +2446,16 @@ const full_turns = rsql.Read(.{
         outcome_length: ?u64,
         outcome_digest: ?[32]u8,
     },
-    .cardinality = .each,
+    .take = takes(Turns.kept_rows),
 });
 
 const Turns = struct {
-    const S = full_turns;
-    const failed = error.TurnReadFailed;
-    const header = "],\"turns\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
-    const streams = streamsNever;
+    pub const S = full_turns;
+    pub const failed = error.TurnReadFailed;
+    pub const header = "],\"turns\":[";
     pub const kept_rows = 0;
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.turn_id.get() };
-    }
-
-    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         if (row.input_cutoff < row.first_admission_id.get()) return error.CorruptStore;
         try checkOutcome(&row.outcome_code, row.outcome_content_id);
         try capture.appendFmt("{{\"turn\":\"{d}\",\"first_admission\":\"{d}\",\"input_cutoff\":\"{d}\",\"operation\":\"{d}\",\"outcome\":", .{
@@ -2429,12 +2477,14 @@ const Turns = struct {
 
 /// The Session's Operations, by `operation_id`, with their resolutions'
 /// metadata.
-const full_operations = rsql.Read(.{
-    .sql = "SELECT o.operation_id,o.turn_id,o.resolution_code,o.resolution_content_id,resolution.byte_length AS resolution_length," ++
-        "resolution.digest AS resolution_digest,o.interrupted_by_command_key,o.settings_revision,o.request_id,o.reasoning_effort " ++
-        "FROM model_operation o @index(model_operation_session_history) LEFT JOIN content resolution ON resolution.content_id=o.resolution_content_id " ++
-        "WHERE o.session_ref=?1 AND o.operation_id>?2 ORDER BY o.operation_id" ++ chunk_limit,
-    .Args = struct { session: []const u8, after: u64 = 0 },
+const full_operations = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "model_operation_session_history" },
+        .alias = "o",
+        .columns = "o.turn_id,o.resolution_code,o.resolution_content_id,resolution.byte_length AS resolution_length," ++
+            "resolution.digest AS resolution_digest,o.interrupted_by_command_key,o.settings_revision,o.request_id,o.reasoning_effort",
+        .joins = "LEFT JOIN content resolution ON resolution.content_id=o.resolution_content_id",
+    }},
     .Row = struct {
         operation_id: rsql.Positive,
         turn_id: rsql.Positive,
@@ -2447,29 +2497,16 @@ const full_operations = rsql.Read(.{
         request_id: ?protocol.Bounded(256),
         reasoning_effort: ?protocol.ReasoningEffort,
     },
-    .cardinality = .each,
+    .take = takes(Operations.kept_rows),
 });
 
 const Operations = struct {
-    const S = full_operations;
-    const failed = error.OperationReadFailed;
-    const header = "],\"model_operations\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
+    pub const S = full_operations;
+    pub const failed = error.OperationReadFailed;
+    pub const header = "],\"model_operations\":[";
     pub const kept_rows = 4;
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.operation_id.get() };
-    }
-
-    fn streams(row: *const S.Row) bool {
-        return row.resolution_content_id != null;
-    }
-
-    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         try checkOutcome(&row.resolution_code, row.resolution_content_id);
         try capture.appendFmt("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"resolution\":", .{ row.operation_id.get(), row.turn_id.get() });
         if (row.resolution_code) |*code| {
@@ -2499,22 +2536,27 @@ fn appendOptionalText(text: anytype, capture: *SessionReportCapture) !void {
     if (text.*) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
 }
 
+const call_contents = "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id " ++
+    "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+    "LEFT JOIN content arguments_content ON arguments_content.content_id=tool_call.arguments_content_id " ++
+    "LEFT JOIN content rejection_content ON rejection_content.content_id=tool_call.rejection_content_id";
+
 /// The Session's calls, by Operation and ordinal, each with its contents'
-/// metadata.
-const full_calls = rsql.Read(.{
-    .sql = "SELECT tool_call.operation_id,tool_call.call_ordinal,tool_call.item_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
-        "tool_call.name_content_id AS name_id,name_content.byte_length AS name_length,name_content.digest AS name_digest," ++
-        "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
-        "tool_call.arguments_content_id AS arguments_id,arguments_content.byte_length AS arguments_length,arguments_content.digest AS arguments_digest," ++
-        "tool_call.rejection_content_id AS rejection_id,rejection_content.byte_length AS rejection_length,rejection_content.digest AS rejection_digest " ++
-        "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
-        "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id " ++
-        "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
-        "LEFT JOIN content arguments_content ON arguments_content.content_id=tool_call.arguments_content_id " ++
-        "LEFT JOIN content rejection_content ON rejection_content.content_id=tool_call.rejection_content_id " ++
-        "WHERE operation.session_ref=?1 AND operation.operation_id>=?2 AND (operation.operation_id>?2 OR tool_call.call_ordinal>=?3) " ++
-        "ORDER BY operation.operation_id,tool_call.call_ordinal" ++ chunk_limit,
-    .Args = struct { session: []const u8, operation: u64 = 0, ordinal: u64 = 0 },
+/// metadata. On SQLite:
+///   ... FROM model_tool_call tool_call INDEXED BY model_tool_call_session_order ...
+///   WHERE tool_call.session_ref=?1 AND (tool_call.operation_id,tool_call.call_ordinal)>(?2,?3)
+///   ORDER BY operation_id,call_ordinal LIMIT 9
+pub const full_calls = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "model_tool_call_session_order" },
+        .alias = "tool_call",
+        .columns = "tool_call.item_ordinal,tool_call.rejection_code,tool_call.acceptance_position," ++
+            "tool_call.name_content_id AS name_id,name_content.byte_length AS name_length,name_content.digest AS name_digest," ++
+            "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
+            "tool_call.arguments_content_id AS arguments_id,arguments_content.byte_length AS arguments_length,arguments_content.digest AS arguments_digest," ++
+            "tool_call.rejection_content_id AS rejection_id,rejection_content.byte_length AS rejection_length,rejection_content.digest AS rejection_digest",
+        .joins = call_contents,
+    }},
     .Row = struct {
         operation_id: rsql.Positive,
         call_ordinal: u64,
@@ -2534,29 +2576,16 @@ const full_calls = rsql.Read(.{
         rejection_length: ?u64,
         rejection_digest: ?[32]u8,
     },
-    .cardinality = .each,
+    .take = takes(Calls.kept_rows),
 });
 
 const Calls = struct {
-    const S = full_calls;
-    const failed = error.CallReadFailed;
-    const header = "],\"tool_calls\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
+    pub const S = full_calls;
+    pub const failed = error.CallReadFailed;
+    pub const header = "],\"tool_calls\":[";
     pub const kept_rows = 8;
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .operation = row.operation_id.get(), .ordinal = row.call_ordinal + 1 };
-    }
-
-    fn streams(_: *const S.Row) bool {
-        return true;
-    }
-
-    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"item_ordinal\":\"{d}\",\"rejection\":", .{ row.operation_id.get(), row.call_ordinal, row.item_ordinal });
         try appendOptionalText(&row.rejection_code, capture);
         try capture.append(",\"acceptance_position\":");
@@ -2574,13 +2603,15 @@ const Calls = struct {
 };
 
 /// The Session's Actions, by `action_id`, with their results' metadata.
-const full_actions = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.parent_operation_id,action.call_ordinal,action.permission_revision," ++
-        "CASE WHEN @same(action.resolution_code,'denied') THEN 'denied' WHEN action.authorized=1 THEN 'authorized' ELSE 'requested' END AS permission," ++
-        "action.resolution_code,action.resolution_content_id,result.byte_length AS result_length,result.digest AS result_digest,action.acceptance_position " ++
-        "FROM action_operation action @index(action_operation_session_order) LEFT JOIN content result ON result.content_id=action.resolution_content_id " ++
-        "WHERE action.session_ref=?1 AND action.action_id>?2 ORDER BY action.action_id" ++ chunk_limit,
-    .Args = struct { session: []const u8, after: u64 = 0 },
+const full_actions = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "action_operation_session_order" },
+        .alias = "action",
+        .columns = "action.parent_operation_id,action.call_ordinal,action.permission_revision," ++
+            "CASE WHEN @same(action.resolution_code,'denied') THEN 'denied' WHEN action.authorized=1 THEN 'authorized' ELSE 'requested' END AS permission," ++
+            "action.resolution_code,action.resolution_content_id,result.byte_length AS result_length,result.digest AS result_digest,action.acceptance_position",
+        .joins = "LEFT JOIN content result ON result.content_id=action.resolution_content_id",
+    }},
     .Row = struct {
         action_id: rsql.Positive,
         parent_operation_id: rsql.Positive,
@@ -2593,29 +2624,16 @@ const full_actions = rsql.Read(.{
         result_digest: ?[32]u8,
         acceptance_position: ?rsql.Positive,
     },
-    .cardinality = .each,
+    .take = takes(Actions.kept_rows),
 });
 
 const Actions = struct {
-    const S = full_actions;
-    const failed = error.ActionReadFailed;
-    const header = "],\"actions\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
+    pub const S = full_actions;
+    pub const failed = error.ActionReadFailed;
+    pub const header = "],\"actions\":[";
     pub const kept_rows = 4;
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.action_id.get() };
-    }
-
-    fn streams(row: *const S.Row) bool {
-        return row.resolution_content_id != null;
-    }
-
-    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"permission_revision\":\"{d}\",\"permission\":\"{s}\",\"resolution\":", .{
             row.action_id.get(),
             row.parent_operation_id.get(),
@@ -2633,12 +2651,17 @@ const Actions = struct {
 };
 
 /// The Session's permission decisions, by command order, as main scanned
-/// the commands.
-const full_decisions = rsql.Read(.{
-    .sql = "SELECT command.command_seq,decision.command_key,decision.action_id,decision.decision,command.accepted,command.code " ++
-        "FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key " ++
-        "WHERE command.kind=5 AND command.target=?1 AND command.command_seq>?2 ORDER BY command.command_seq" ++ chunk_limit,
-    .Args = struct { session: []const u8, after: u64 = 0 },
+/// the commands: `core_command` first (it holds the order), its decision
+/// row by key, which every decision command writes (`command.zig`), so
+/// one without it is `CorruptStore`.
+const full_decisions = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "core_command_target_order" },
+        .alias = "command",
+        .fixed = &.{.{ .column = "kind", .value = "5" }},
+        .columns = "decision.command_key,decision.action_id,decision.decision,command.accepted,command.code",
+        .joins = "LEFT JOIN permission_decision_command decision ON decision.command_key=command.command_key",
+    }},
     .Row = struct {
         command_seq: rsql.Positive,
         command_key: protocol.Bounded(128),
@@ -2647,26 +2670,16 @@ const full_decisions = rsql.Read(.{
         accepted: bool,
         code: protocol.Bounded(96),
     },
-    .cardinality = .each,
+    .take = takes(Decisions.kept_rows),
 });
 
 const Decisions = struct {
-    const S = full_decisions;
-    const failed = error.PermissionReadFailed;
-    const header = "],\"permission_decisions\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
-    const streams = streamsNever;
+    pub const S = full_decisions;
+    pub const failed = error.PermissionReadFailed;
+    pub const header = "],\"permission_decisions\":[";
     pub const kept_rows = 0;
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.command_seq.get() };
-    }
-
-    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         try capture.append("{\"command_key\":");
         try capture.appendJsonString(row.command_key.slice());
         try capture.append(",\"action\":");
@@ -2682,11 +2695,14 @@ fn status(accepted: bool) []const u8 {
 }
 
 /// The Session's stop commands, by command order, as main scanned them.
-pub const full_stops = rsql.Read(.{
-    .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff " ++
-        "FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key " ++
-        "WHERE command.kind=3 AND command.target=?1 AND command.command_seq>?2 ORDER BY command.command_seq" ++ chunk_limit,
-    .Args = struct { session: []const u8, after: u64 = 0 },
+pub const full_stops = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "core_command_target_order" },
+        .alias = "command",
+        .fixed = &.{.{ .column = "kind", .value = "3" }},
+        .columns = "command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff",
+        .joins = "LEFT JOIN session_stop stop ON stop.command_key=command.command_key",
+    }},
     .Row = struct {
         command_seq: rsql.Positive,
         command_key: protocol.Bounded(128),
@@ -2695,26 +2711,16 @@ pub const full_stops = rsql.Read(.{
         selected_turn_id: ?rsql.Positive,
         admission_cutoff: ?u64,
     },
-    .cardinality = .each,
+    .take = takes(Stops.kept_rows),
 });
 
 const Stops = struct {
-    const S = full_stops;
-    const failed = error.SessionStopReadFailed;
-    const header = "],\"session_stops\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
-    const streams = streamsNever;
+    pub const S = full_stops;
+    pub const failed = error.SessionStopReadFailed;
+    pub const header = "],\"session_stops\":[";
     pub const kept_rows = 0;
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.command_seq.get() };
-    }
-
-    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         try capture.append("{\"command_key\":");
         try capture.appendJsonString(row.command_key.slice());
         try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{status(row.accepted)});
@@ -2727,13 +2733,20 @@ const Stops = struct {
     }
 };
 
-/// The Session's interruption commands, by command order, as main sorted
-/// them: CROSS JOIN keeps main's plan, the Session's interruptions first.
-pub const full_interruptions = rsql.Read(.{
-    .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id " ++
-        "FROM model_interruption_command interruption CROSS JOIN core_command command ON command.command_key=interruption.command_key " ++
-        "WHERE interruption.session_ref=?1 AND command.command_seq>?2 ORDER BY command.command_seq" ++ chunk_limit,
-    .Args = struct { session: []const u8, after: u64 = 0 },
+/// The Session's interruption commands, by command order, each with its
+/// interruption row by key. Every interruption command writes that row,
+/// naming the command's target as its Session, in the command's
+/// transaction (`command.zig`), so one without it, or naming another
+/// Session, is `CorruptStore` (`Interruptions.check`).
+pub const full_interruptions = rsql.Page(.{
+    .arms = &.{.{
+        .on = .{ .index = "core_command_target_order" },
+        .alias = "command",
+        .fixed = &.{.{ .column = "kind", .value = "4" }},
+        .columns = "command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id",
+        .joins = "LEFT JOIN model_interruption_command interruption ON interruption.command_key=command.command_key " ++
+            "AND interruption.session_ref=command.target",
+    }},
     .Row = struct {
         command_seq: rsql.Positive,
         command_key: protocol.Bounded(128),
@@ -2742,26 +2755,23 @@ pub const full_interruptions = rsql.Read(.{
         turn_id: protocol.Bounded(20),
         operation_id: protocol.Bounded(20),
     },
-    .cardinality = .each,
+    .take = takes(Interruptions.kept_rows),
 });
 
 const Interruptions = struct {
-    const S = full_interruptions;
-    const failed = error.InterruptionReadFailed;
-    const header = "],\"model_interruptions\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
-    const streams = streamsNever;
+    pub const S = full_interruptions;
+    pub const failed = error.InterruptionReadFailed;
+    pub const header = "],\"model_interruptions\":[";
     pub const kept_rows = 0;
+    pub const State = struct {};
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.command_seq.get() };
+    /// The LEFT JOIN's missing row decodes its NULL text as empty, and a
+    /// stored `turn_id` has at least one digit (its CHECK).
+    pub fn check(_: *State, row: *const S.Row) error{CorruptStore}!void {
+        if (row.turn_id.slice().len == 0) return error.CorruptStore;
     }
 
-    fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         try capture.append("{\"command_key\":");
         try capture.appendJsonString(row.command_key.slice());
         try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{status(row.accepted)});
@@ -2774,25 +2784,44 @@ const Interruptions = struct {
     }
 };
 
-/// The Session's Tool Results, by Operation, then acceptance and ordinal.
-pub const full_results = rsql.Read(.{
-    .sql = "SELECT tool_call.operation_id,tool_call.call_ordinal,coalesce(tool_call.acceptance_position,action.acceptance_position) AS acceptance_position," ++
-        "tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length,call_id_content.digest AS call_id_digest," ++
-        "coalesce(tool_call.rejection_code,action.resolution_code) AS code," ++
-        "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS result_id,result.byte_length AS result_length,result.digest AS result_digest " ++
-        "FROM model_operation operation @index(model_operation_session_history) CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
-        "LEFT JOIN content result ON result.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
-        "WHERE operation.session_ref=?1 AND coalesce(tool_call.rejection_code,action.resolution_code) IS NOT NULL " ++
-        "AND operation.operation_id>=?2 AND (operation.operation_id>?2 OR coalesce(tool_call.acceptance_position,action.acceptance_position)>?3 " ++
-        "OR (coalesce(tool_call.acceptance_position,action.acceptance_position)=?3 AND tool_call.call_ordinal>=?4)) " ++
-        "ORDER BY operation.operation_id,coalesce(tool_call.acceptance_position,action.acceptance_position),tool_call.call_ordinal" ++ chunk_limit,
-    .Args = struct { session: []const u8, operation: u64 = 0, acceptance: u64 = 0, ordinal: u64 = 0 },
+/// The Session's Tool Results, by Operation, then acceptance: a rejected
+/// call's result is its rejection, an accepted call's its Action's
+/// resolution (the tables' checks keep a rejected call without an
+/// Action), each walked on its own table's index and merged. Positions
+/// are unique per Session, so the key orders every result; `next` makes
+/// a tie `CorruptStore`. A resolution's call is a LEFT JOIN: a missing
+/// call decodes NULL into `call_id`, which is `CorruptStore`, never a
+/// dropped row. On SQLite, each arm:
+///   ... FROM model_tool_call tool_call INDEXED BY model_tool_call_session_results ...
+///   WHERE tool_call.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL
+///   AND (tool_call.operation_id,tool_call.acceptance_position)>(?2,?3)
+/// merged by ORDER BY operation_id,acceptance_position LIMIT 9.
+pub const full_results = rsql.Page(.{
+    .arms = &.{
+        .{
+            .on = .{ .index = "model_tool_call_session_results" },
+            .alias = "tool_call",
+            .columns = "tool_call.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
+                "call_id_content.digest AS call_id_digest,tool_call.rejection_code AS code,tool_call.rejection_content_id AS result_id," ++
+                "result.byte_length AS result_length,result.digest AS result_digest",
+            .joins = "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+                "LEFT JOIN content result ON result.content_id=tool_call.rejection_content_id",
+        },
+        .{
+            .on = .{ .index = "action_operation_session_results" },
+            .alias = "action",
+            .columns = "action.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
+                "call_id_content.digest AS call_id_digest,action.resolution_code AS code,action.resolution_content_id AS result_id," ++
+                "result.byte_length AS result_length,result.digest AS result_digest",
+            .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+                "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+                "LEFT JOIN content result ON result.content_id=action.resolution_content_id",
+        },
+    },
     .Row = struct {
         operation_id: rsql.Positive,
-        call_ordinal: u64,
         acceptance_position: rsql.Positive,
+        call_ordinal: u64,
         call_id: rsql.Positive,
         call_id_length: u64,
         call_id_digest: [32]u8,
@@ -2801,29 +2830,16 @@ pub const full_results = rsql.Read(.{
         result_length: u64,
         result_digest: [32]u8,
     },
-    .cardinality = .each,
+    .take = takes(Results.kept_rows),
 });
 
 const Results = struct {
-    const S = full_results;
-    const failed = error.CallReadFailed;
-    const header = "],\"tool_results\":[";
-    const State = NoState;
-    const check = noCheck;
-    const First = NoFirst;
-    const queueFirst = noQueueFirst;
-    const checkFirst = noCheckFirst;
+    pub const S = full_results;
+    pub const failed = error.CallReadFailed;
+    pub const header = "],\"tool_results\":[";
     pub const kept_rows = 8;
 
-    fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .operation = row.operation_id.get(), .acceptance = row.acceptance_position.get(), .ordinal = row.call_ordinal + 1 };
-    }
-
-    fn streams(_: *const S.Row) bool {
-        return true;
-    }
-
-    fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
+    pub fn render(a: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"acceptance_position\":\"{d}\",\"call_id\":", .{ row.operation_id.get(), row.call_ordinal, row.acceptance_position.get() });
         try streamInline(a, capture, .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest });
         try capture.append(",\"code\":");

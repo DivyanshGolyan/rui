@@ -138,7 +138,7 @@ def run(*, observed=False, intake=100):
             assert headers[b"user-agent"] == expected_agent, headers
             request = json.loads(body)
             assert request["text"] == {"verbosity": "low"}, request
-            assert request["parallel_tool_calls"] is False, request
+            assert request["parallel_tool_calls"] is True, request
         # The codec's headers follow h2's and content-type, ahead of the
         # credential path's fields.
         for index, headers in enumerate(endpoint.request_headers):
