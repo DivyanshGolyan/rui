@@ -257,6 +257,23 @@ D174. The change list (D53, D138) is `session_revision` plus each Operation's fr
 D175. Replaces D108's owner. The launch frame is built early in its own PR with `store` as a SQLite directory; the DB thread's PR 9 adds the MySQL URL form, `runtimeDir` rules and the Store id. Drift runs only on MySQL (Divyansh 06:46Z), so the DB series is Drift's critical path; the early frame only lets the TS client and MCP work be tested before it lands.
 D176. D169's inherited environment is the parent's environment held in Host memory (SessionEnvironments.zig), never stored. D76's cache proof tests are at src/model_adapter.zig:3566, :3594 and :3630.
 
+## Decided from Drift's review of #872 (11-04 07:00Z, my technical calls; drift-review-triage.md)
+
+D177. Every MCP `tools/call` carries the calling Session's id, parent and root in `_meta`. Arguments are unchanged. It is context, not a call id, so D61 stands.
+D178. `sessions.create` accepts `parent`, with `start_agent`'s rules (inherit, only narrow). No Session tags: the caller keeps its own mapping keyed by Session id.
+D179. Replaces D73. The feed has a `model_call` entry per model call: model, served model, input, output and cached tokens, latency, time to first event, status.
+D180. A child's `turn_ended` appears in every ancestor's feed with its `sessionId`, as approvals do (D135).
+D181. `activeCapacity` travels in the launch frame (today's `--active-capacity`). Rui adds no priority.
+D182. An MCP result follows Bash's model-facing output bound; the full result is kept and read with `read_transcript(full)`.
+D183. `Rui.connect` retries `store_locked` until `lockWaitMs` (default 120 s), then fails with `RuiStartError store_locked`.
+D184. Within one reply, MCP tools without `readOnlyHint: true` run one at a time in reply order; read-only ones run at once. The hint orders calls only.
+D185. The TS package starts Rui with only `PATH`, `HOME` and `TMPDIR`. Docs state `rui.shell` runs as the host's user and is not a sandbox.
+D186. `rui-linux-arm64` joins the release platforms.
+D187. TS docs: one `Rui.connect` per process (cache on `globalThis` in Next.js).
+D188. D82's Prisma reason is removed (Drift uses `migrate deploy`). Drift's pool still carries MCP tool calls; Drift bounds them.
+D189. Marlin's `GET /v1/models` is unprobed; Drift probes it before the port, and D80 is revisited only if it fails.
+D190. #840 measured: 249.3 MiB idle, 282.1 (1 agent), 285.7 (8), 298.0 (9), 312.8 three minutes after release.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
