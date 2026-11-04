@@ -92,6 +92,15 @@ pub const Store = struct {
     read_blob: ContentBlob = .{},
     /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
+    /// The batch of writes the holder is running (`Queue.Batch`). `.ready`
+    /// until a write opens the transaction; `.first` while that write runs,
+    /// with no savepoint, so a lone write costs BEGIN and COMMIT as before;
+    /// `.open` once it commits, each later write in a savepoint; `.lost`
+    /// once a rollback failed, so the batch never commits. A write outside
+    /// a batch (a test's own Entry) opens and commits its own.
+    batch: enum(u8) { none, ready, first, open, lost } = .none,
+    /// Whether the current write's savepoint is open in the batch.
+    savepoint: bool = false,
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
 
@@ -263,7 +272,7 @@ pub const Store = struct {
         ids.* = .{ .next = undefined };
         self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = ids };
         self.served = options.served;
-        self.queue().* = .init(io);
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
         // The Store is in final storage, so the function may keep its address.
         if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
             return error.StoreOpenFailed;
@@ -274,6 +283,8 @@ pub const Store = struct {
         errdefer self.statements.deinit();
         // Error paths then roll back without preparing or allocating.
         _ = try controlStatement(self, .rollback);
+        _ = try controlStatement(self, .rollback_to);
+        _ = try controlStatement(self, .release);
         try loadIdentities(self, .full);
         self.queue().opened();
     }
@@ -1311,15 +1322,78 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
 /// here; only opening the Store, in `schema.bootstrap`, issues a BEGIN of
 /// its own, before any entry point can run.
 pub fn begin(self: *Store) !void {
-    std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
-    try control(self, .begin);
+    switch (self.batch) {
+        .none => {
+            std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
+            try control(self, .begin);
+            return;
+        },
+        .ready => {
+            std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
+            try control(self, .begin);
+            self.batch = .first;
+            return;
+        },
+        .open => {},
+        .first, .lost => unreachable,
+    }
+    std.debug.assert(!self.savepoint);
+    try control(self, .savepoint);
+    self.savepoint = true;
 }
 
-/// Commits the open transaction; the identities it took stay taken.
+/// Commits the open transaction; the identities it took stay taken. In a
+/// batch, releases the write's savepoint: the batch commits at its end,
+/// with one second and one set of taken identities for all its writes.
 pub fn commit(self: *Store) !void {
+    switch (self.batch) {
+        .first => {
+            self.batch = .open;
+            return;
+        },
+        .open => {
+            try control(self, .release);
+            self.savepoint = false;
+            return;
+        },
+        .none => {},
+        .ready, .lost => unreachable,
+    }
     try control(self, .commit);
     self.ids.taken = .empty;
     self.ids.second = 0;
+}
+
+fn startBatch(context: *anyopaque) void {
+    const self: *Store = @ptrCast(@alignCast(context));
+    std.debug.assert(self.batch == .none and !self.savepoint);
+    self.batch = .ready;
+}
+
+/// Commits the batch's transaction, if a write opened one, and answers
+/// whether its writes are durable. A failed COMMIT, or a rollback that
+/// failed inside the batch, fences the Store, and the batch's writers all
+/// hear it; closing rolls back what was left open, as it does for a lone
+/// write whose rollback failed.
+fn finishBatch(context: *anyopaque) bool {
+    const self: *Store = @ptrCast(@alignCast(context));
+    std.debug.assert(!self.savepoint);
+    defer {
+        self.batch = .none;
+        self.ids.taken = .empty;
+        self.ids.second = 0;
+    }
+    commitBatch(self) catch return false;
+    return true;
+}
+
+fn commitBatch(self: *Store) !void {
+    switch (self.batch) {
+        .ready => {},
+        .open => control(self, .commit) catch |err| return fence(self, err),
+        .lost => return fence(self, error.CanonicalRollbackFailed),
+        .none, .first => unreachable,
+    }
 }
 
 /// The open transaction's second, bound to every `@now` in it: read from
@@ -1420,12 +1494,19 @@ const Control = enum {
     begin,
     commit,
     rollback,
+    savepoint,
+    release,
+    rollback_to,
 
     fn sql(comptime which: Control) [:0]const u8 {
         return switch (which) {
             .begin => "BEGIN IMMEDIATE",
             .commit => "COMMIT",
             .rollback => "ROLLBACK",
+            // One write at a time holds the batch's one savepoint.
+            .savepoint => "SAVEPOINT write",
+            .release => "RELEASE write",
+            .rollback_to => "ROLLBACK TO write",
         };
     }
 };
@@ -1558,6 +1639,38 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     // SQLite may already have rolled back what the entry point touched.
     self.touched.everything = true;
+    switch (self.batch) {
+        .open => {
+            // Back to the write's savepoint; the batch's earlier writes
+            // stay. A transaction SQLite rolled back whole took them with
+            // it, so the batch is lost.
+            const savepoint = self.savepoint;
+            self.savepoint = false;
+            errdefer self.batch = .lost;
+            if (c.sqlite3_get_autocommit(self.database) != 0) return error.CanonicalRollbackFailed;
+            if (savepoint) {
+                if (faults.rollback_failure) return error.CanonicalRollbackFailed;
+                control(self, .rollback_to) catch return error.CanonicalRollbackFailed;
+                control(self, .release) catch return error.CanonicalRollbackFailed;
+            }
+            loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
+            return;
+        },
+        // The batch's first write rolls back as a lone write does, and the
+        // batch is ready again for the next.
+        .first => {
+            errdefer self.batch = .lost;
+            try rollbackTransaction(self, faults);
+            self.batch = .ready;
+            return;
+        },
+        .none, .ready => return rollbackTransaction(self, faults),
+        // A rollback that failed once fails again: nothing undid the write.
+        .lost => return error.CanonicalRollbackFailed,
+    }
+}
+
+fn rollbackTransaction(self: *Store, faults: Faults) error{CanonicalRollbackFailed}!void {
     if (c.sqlite3_get_autocommit(self.database) == 0) {
         if (faults.rollback_failure) return error.CanonicalRollbackFailed;
         control(self, .rollback) catch return error.CanonicalRollbackFailed;
