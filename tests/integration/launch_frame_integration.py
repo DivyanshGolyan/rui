@@ -34,11 +34,20 @@ def launch(raw):
 
 
 def host_info(path, store):
-    body = json.dumps({"version": WIRE, "kind": "host_info", "store": store}).encode()
+    return post(path, "host-info", {"version": WIRE, "kind": "host_info", "store": store})
+
+
+def host_stop(path, store, instance):
+    return post(path, "control/host-stop", {"version": WIRE, "kind": "host_stop", "store": store},
+                b"X-Rui-Host-Instance: " + instance.encode() + b"\r\n")
+
+
+def post(path, route, request, extra=b""):
+    body = json.dumps(request).encode()
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(10)
         connection.connect(str(path))
-        connection.sendall(b"POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\n"
+        connection.sendall(b"POST /v1/" + route.encode() + b" HTTP/1.1\r\nContent-Type: application/json\r\n" + extra +
                            b"X-Rui-Wire-Version: " + WIRE.encode() + b"\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         reply = b""
         while chunk := connection.recv(65536):
@@ -88,12 +97,41 @@ def main():
     second = launch(frame(dict(good, runtimeDir=str(other))))
     assert refusal(second)["code"] == "store_locked"
 
+    # Another Store may not share the runtime directory: the first Host keeps
+    # its socket.
+    shared = launch(frame(dict(good, store=str(root / "store2"))))
+    refused = refusal(shared)
+    assert refused["code"] == "runtime_dir_unusable", refused
+    assert info == host_info(sock, str(store))
+
+    # A runtime directory others can write to is refused before any bind.
+    open_dir = root / "open"
+    open_dir.mkdir()
+    open_dir.chmod(0o777)
+    insecure = launch(frame(dict(good, store=str(root / "store3"), runtimeDir=str(open_dir))))
+    refused = refusal(insecure)
+    assert refused["code"] == "runtime_dir_unusable", refused
+    assert not (open_dir / "rui.sock").exists()
+
+    # A runtimeDir that is a file is a structured refusal too.
+    not_a_dir = root / "file"
+    not_a_dir.write_text("x")
+    refused = refusal(launch(frame(dict(good, store=str(root / "store4"), runtimeDir=str(not_a_dir)))))
+    assert refused["code"] == "runtime_dir_unusable", refused
+
     # Closing stdin stops the Host; its socket goes with it.
     started = time.monotonic()
     host.stdin.close()
     assert host.wait(timeout=30) == 0, host.communicate()
     elapsed = time.monotonic() - started
     assert elapsed < 10, elapsed
+    assert not sock.exists()
+
+    # host-stop before stdin closes stops a launched Host too.
+    host = launch(frame(good))
+    wait_for_socket(sock, host)
+    host_stop(sock, str(store), host_info(sock, str(store))["instance"])
+    assert host.wait(timeout=30) == 0, host.communicate()
     assert not sock.exists()
 
     for raw, message in [
@@ -107,7 +145,7 @@ def main():
         refused = refusal(process)
         assert refused["code"] == "launch_frame_invalid", refused
         assert message in refused["message"], refused
-    print(f"launch frame: ready, store_locked, stdin close stopped the Host in {elapsed:.2f} s, four refusals")
+    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, four refusals")
 
 
 if __name__ == "__main__":
