@@ -158,9 +158,7 @@ pub fn shadowPrepareFixture(comptime text: []const u8) void {
 /// rendering's refusal of `text` in its place.
 fn once(comptime text: []const u8, comptime unrendered: ?[]const u8) void {
     if (!@import("builtin").is_test) @compileError("test-only check");
-    const Seen = struct {
-        var done: std.atomic.Value(bool) = .init(false);
-    };
+    const Seen = Once(text);
     if (Seen.done.load(.acquire)) return;
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -175,6 +173,16 @@ fn once(comptime text: []const u8, comptime unrendered: ?[]const u8) void {
         return;
     } orelse return;
     std.log.err("MySQL 8.4 refused to PREPARE: {f}\n  {s}", .{ refused, text });
+}
+
+/// The flag that `text` was checked in this process. The struct names
+/// `text`, so each text gets its own type and flag: a struct that names
+/// no comptime value is one type however often it is instantiated.
+fn Once(comptime text: []const u8) type {
+    return struct {
+        const key = text;
+        var done: std.atomic.Value(bool) = .init(false);
+    };
 }
 
 /// `PREPARE ... FROM` `text` as a string literal, then DEALLOCATE. MySQL
@@ -211,6 +219,11 @@ fn statements(comptime text: []const u8) []const []const u8 {
 fn piece(comptime text: []const u8) []const []const u8 {
     const trimmed = std.mem.trim(u8, text, " \t\n");
     return if (trimmed.len == 0) &.{} else &.{trimmed};
+}
+
+test "each text has its own checked flag" {
+    try std.testing.expect(&Once("SELECT 1").done != &Once("SELECT 2").done);
+    try std.testing.expect(&Once("SELECT 1").done == &Once("SELECT 1").done);
 }
 
 test "fixture text splits at semicolons outside string literals, and PREPARE quotes it whole" {
