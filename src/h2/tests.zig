@@ -48,6 +48,9 @@ const Harness = struct {
     peer: *Peer,
     receiver: Receiver,
     endpoint: h2.Endpoint,
+    /// How long `runUntil` steps: past the client's own setup deadline, so
+    /// a slow setup ends by its own cause rather than the harness's.
+    limit_ns: u64,
 
     const Config = struct {
         peer: Peer.Options = .{},
@@ -70,6 +73,7 @@ const Harness = struct {
         self.peer = try Peer.start(allocator, config.peer);
         errdefer self.peer.stop();
         self.receiver = .{};
+        self.limit_ns = @max(5 * std.time.ns_per_s, config.connect_timeout_ns + std.time.ns_per_s);
         try self.client.init(allocator, config.io, .{
             .stream_capacity = config.capacity,
             .inactivity_ns = config.inactivity_ns,
@@ -100,11 +104,11 @@ const Harness = struct {
         try self.client.wait(1);
     }
 
-    /// Steps until `done` holds, failing after five seconds.
+    /// Steps until `done` holds, failing after `limit_ns`.
     fn runUntil(self: *Harness, context: anytype, comptime done: fn (*Harness, @TypeOf(context)) bool) !void {
         const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         while (!done(self, context)) {
-            if (std.Io.Clock.awake.now(std.testing.io).nanoseconds - start > 5 * std.time.ns_per_s) {
+            if (std.Io.Clock.awake.now(std.testing.io).nanoseconds - start > self.limit_ns) {
                 std.debug.print("timed out: finished={d} peer_streams={d} peer_conns={d}\n", .{ self.client.finishedCount(), self.peer.streams.items.len, self.peer.seen.connections });
                 return error.Timeout;
             }
