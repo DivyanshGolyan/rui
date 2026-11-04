@@ -12,6 +12,7 @@ const output_decode = @import("../output_decode.zig");
 const store_core = @import("Store.zig");
 const rsql = @import("rsql.zig");
 const sqlite = @import("sqlite.zig");
+const mysql_dialect_check = @import("mysql_dialect_check.zig");
 const Store = store_core.Store;
 const historical_domain = @import("domain/historical.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
@@ -107,8 +108,12 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
     }
 }
 
+/// `text`, once it passes `fixtureTextError`. Each call also hands its
+/// MySQL spelling to the live MySQL check
+/// (`mysql_dialect_check.shadowPrepareFixture`).
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
     if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
+    mysql_dialect_check.shadowPrepareFixture(text);
     return text;
 }
 

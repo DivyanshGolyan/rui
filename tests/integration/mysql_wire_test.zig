@@ -1,13 +1,16 @@
-//! The MySQL wire client against a real MySQL 8.4 server, through a blocking
-//! driver that exists only here. mysql_wire_integration.py starts the server
-//! and passes its socket, port and passwords in the environment; this binary
-//! fails rather than skips when they are missing.
+//! The MySQL wire client against a real MySQL 8.4 server, through the
+//! blocking test driver (src/store/wire/mysql_driver.zig).
+//! mysql_wire_integration.py starts the server and passes its socket, port
+//! and passwords in the environment; this binary fails rather than skips
+//! when they are missing.
 //!
 //! The server starts with an empty authentication cache, so the first test
 //! sees the cold-cache logins before any login fills it. Tests run in
 //! declaration order.
 const std = @import("std");
-const mysql = @import("mysql_wire");
+const mysql_driver = @import("mysql_driver");
+const mysql = mysql_driver.mysql;
+const Driver = mysql_driver.Driver;
 
 const Server = struct {
     socket: []const u8,
@@ -30,77 +33,6 @@ const Server = struct {
 
     fn deinit(self: *Server) void {
         self.environ.deinit();
-    }
-};
-
-const Login = struct {
-    transport: mysql.Transport,
-    user: []const u8 = "rui",
-    password: []const u8,
-};
-
-const Driver = struct {
-    stream: std.Io.net.Stream,
-    reader: std.Io.net.Stream.Reader,
-    writer: std.Io.net.Stream.Writer,
-    client: mysql.Client,
-    read_buffer: [mysql.receive_buffer_min]u8,
-    write_buffer: [256]u8,
-    out: [mysql.send_buffer_min]u8,
-
-    /// Stores a server's refusal of the login in `refusal`, or leaves it null
-    /// once the client is ready. Closes the connection unless ready.
-    fn open(self: *Driver, server: *const Server, login: Login, refusal: *?Transcript) !void {
-        const io = std.testing.io;
-        self.stream = switch (login.transport) {
-            .unix_socket => try (try std.Io.net.UnixAddress.init(server.socket)).connect(io),
-            .tcp => try (std.Io.net.IpAddress{ .ip4 = .loopback(server.port) }).connect(io, .{ .mode = .stream }),
-            .tcp_tls => unreachable,
-        };
-        errdefer self.stream.close(io);
-        self.reader = self.stream.reader(io, &self.read_buffer);
-        self.writer = self.stream.writer(io, &self.write_buffer);
-        self.client = try .init(.{ .user = login.user, .password = login.password, .database = "rui", .transport = login.transport });
-        const event = try self.next();
-        if (event == .ready) return;
-        var transcript: Transcript = .init();
-        try transcript.add(event);
-        refusal.* = transcript;
-        self.stream.close(io);
-    }
-
-    fn close(self: *Driver) !void {
-        try self.writer.interface.writeAll(&self.client.quit());
-        try self.writer.interface.flush();
-        self.stream.close(std.testing.io);
-    }
-
-    /// The next event other than a send, which it performs.
-    fn next(self: *Driver) !mysql.Event {
-        const in = &self.reader.interface;
-        while (true) {
-            const step = try self.client.read(in.buffered(), &self.out);
-            in.toss(step.consumed);
-            if (step.event) |event| switch (event) {
-                .send => |n| {
-                    try self.writer.interface.writeAll(self.out[0..n]);
-                    try self.writer.interface.flush();
-                },
-                .start_tls => return error.TlsNotDriven,
-                else => return event,
-            } else if (step.consumed == 0) try in.fillMore();
-        }
-    }
-
-    /// Runs `text` and renders every event of its results.
-    fn run(self: *Driver, text: []const u8) !Transcript {
-        try self.writer.interface.writeAll(&try self.client.query(text.len));
-        try self.writer.interface.writeAll(text);
-        try self.writer.interface.flush();
-        var transcript: Transcript = .init();
-        errdefer transcript.deinit();
-        while (!self.client.isReady()) try transcript.add(try self.next());
-        return transcript;
     }
 };
 
@@ -137,14 +69,37 @@ const Transcript = struct {
     }
 };
 
+const Login = struct {
+    transport: enum { tcp, unix_socket },
+    user: []const u8 = "rui",
+    password: []const u8,
+};
+
+/// Logs in to the database `rui`; a refusal's event goes to `refusal`.
+fn open(driver: *Driver, server: *const Server, login: Login, refusal: *std.Io.Writer) !void {
+    const address: mysql_driver.Address = switch (login.transport) {
+        .unix_socket => .{ .unix_socket = server.socket },
+        .tcp => .{ .tcp = server.port },
+    };
+    try driver.open(std.testing.io, address, .{ .user = login.user, .password = login.password, .database = "rui" }, refusal);
+}
+
 fn openReady(driver: *Driver, server: *const Server, login: Login) !void {
-    var refusal: ?Transcript = null;
-    try driver.open(server, login, &refusal);
-    if (refusal) |*transcript| {
-        defer transcript.deinit();
-        std.debug.print("login refused: {s}\n", .{transcript.text.written()});
-        return error.LoginRefused;
-    }
+    var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer refusal.deinit();
+    open(driver, server, login, &refusal.writer) catch |err| {
+        if (err == error.LoginRefused) std.debug.print("login refused: {s}\n", .{refusal.written()});
+        return err;
+    };
+}
+
+/// Runs `text` and renders every event of its results.
+fn run(driver: *Driver, text: []const u8) !Transcript {
+    try driver.query(text);
+    var transcript: Transcript = .init();
+    errdefer transcript.deinit();
+    while (!driver.client.isReady()) try transcript.add(try driver.next());
+    return transcript;
 }
 
 test "logins: plaintext TCP with a cold cache, the full exchange over a Unix socket, then the cached scramble over TCP" {
@@ -152,24 +107,22 @@ test "logins: plaintext TCP with a cold cache, the full exchange over a Unix soc
     defer server.deinit();
     const driver = try std.testing.allocator.create(Driver);
     defer std.testing.allocator.destroy(driver);
-    var refusal: ?Transcript = null;
+    var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer refusal.deinit();
 
     // No login has cached the account's hash, so the server asks for the
     // password itself, which plaintext TCP must not carry.
-    try std.testing.expectError(error.AuthMethodRefused, driver.open(&server, .{ .transport = .tcp, .password = server.password }, &refusal));
+    try std.testing.expectError(error.AuthMethodRefused, open(driver, &server, .{ .transport = .tcp, .password = server.password }, &refusal.writer));
 
-    try driver.open(&server, .{ .transport = .unix_socket, .password = "not the password" }, &refusal);
-    try std.testing.expect(refusal != null);
-    try std.testing.expectStringStartsWith(refusal.?.text.written(), "err 1045 28000 Access denied for user 'rui'@'localhost'");
-    refusal.?.deinit();
-    refusal = null;
+    try std.testing.expectError(error.LoginRefused, open(driver, &server, .{ .transport = .unix_socket, .password = "not the password" }, &refusal.writer));
+    try std.testing.expectStringStartsWith(refusal.written(), "err 1045 28000 Access denied for user 'rui'@'localhost'");
 
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
     try driver.close();
 
     // The Unix socket login cached the hash; the scramble alone now suffices.
     try openReady(driver, &server, .{ .transport = .tcp, .password = server.password });
-    var transcript = try driver.run("SELECT CURRENT_USER()");
+    var transcript = try run(driver, "SELECT CURRENT_USER()");
     try transcript.expect(
         \\columns 1
         \\column CURRENT_USER() var_string
@@ -181,10 +134,10 @@ test "logins: plaintext TCP with a cold cache, the full exchange over a Unix soc
 
     // FLUSH PRIVILEGES empties the cache, so plaintext TCP is refused again.
     try openReady(driver, &server, .{ .transport = .unix_socket, .user = "root", .password = server.root_password });
-    transcript = try driver.run("FLUSH PRIVILEGES");
+    transcript = try run(driver, "FLUSH PRIVILEGES");
     try transcript.expect("ok 0");
     try driver.close();
-    try std.testing.expectError(error.AuthMethodRefused, driver.open(&server, .{ .transport = .tcp, .password = server.password }, &refusal));
+    try std.testing.expectError(error.AuthMethodRefused, open(driver, &server, .{ .transport = .tcp, .password = server.password }, &refusal.writer));
 }
 
 test "a multi-statement query reports each statement, matched rows and every value kind" {
@@ -194,7 +147,8 @@ test "a multi-statement query reports each statement, matched rows and every val
     defer std.testing.allocator.destroy(driver);
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
 
-    var transcript = try driver.run(
+    var transcript = try run(
+        driver,
         "SET SESSION sql_mode = 'STRICT_ALL_TABLES,NO_BACKSLASH_ESCAPES';" ++
             "CREATE TABLE t (id BIGINT PRIMARY KEY, v VARBINARY(16) NOT NULL, n BIGINT NULL);" ++
             "INSERT INTO t VALUES (1, X'6869', NULL), (2, X'', 7);" ++
@@ -231,14 +185,15 @@ test "a failing statement ends the query, and the statements after it never run"
     defer std.testing.allocator.destroy(driver);
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
 
-    var transcript = try driver.run(
+    var transcript = try run(
+        driver,
         "INSERT INTO t VALUES (3, X'', NULL); INSERT INTO t VALUES (3, X'', NULL); INSERT INTO t VALUES (4, X'', NULL)",
     );
     try transcript.expect(
         \\ok 1 more
         \\err 1062 23000 Duplicate entry '3' for key 't.PRIMARY'
     );
-    transcript = try driver.run("SELECT COUNT(*) FROM t WHERE id = 4");
+    transcript = try run(driver, "SELECT COUNT(*) FROM t WHERE id = 4");
     try transcript.expect(
         \\columns 1
         \\column COUNT(*) longlong not_null binary
@@ -256,7 +211,7 @@ test "OK packets report an open transaction" {
     defer std.testing.allocator.destroy(driver);
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
 
-    var transcript = try driver.run("BEGIN; UPDATE t SET n = 1 WHERE id = 1; ROLLBACK");
+    var transcript = try run(driver, "BEGIN; UPDATE t SET n = 1 WHERE id = 1; ROLLBACK");
     try transcript.expect(
         \\ok 0 more in_transaction
         \\ok 1 more in_transaction
@@ -273,7 +228,7 @@ test "a value larger than the receive buffer streams through it" {
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
 
     const len = 200_000;
-    var transcript = try driver.run(std.fmt.comptimePrint("SELECT REPEAT('x', {d}) AS big", .{len}));
+    var transcript = try run(driver, std.fmt.comptimePrint("SELECT REPEAT('x', {d}) AS big", .{len}));
     defer transcript.deinit();
     try std.testing.expect(transcript.chunks > len / mysql.receive_buffer_min);
     const head = "columns 1\ncolumn big medium_blob\nrow\nvalue 200000 ";

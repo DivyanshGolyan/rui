@@ -30,7 +30,7 @@ STORE_FACADE = "src/store.zig"
 STORE_WIRE = "src/store/wire/"
 STORE_TESTS = "src/store/tests.zig"
 # Test files hold no entry point, so the lock-and-fence test does not read them.
-STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig")
+STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig", "src/store/mysql_dialect_check.zig")
 ACCESS_TEST = re.compile(r'^test "Store entry points lock and fence only through canonical access" \{\n(.*?)^\}$', re.M | re.S)
 BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
 # Preserve strings as tokens so braces/import spellings inside them are inert.

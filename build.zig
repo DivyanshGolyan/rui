@@ -405,8 +405,8 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
     });
-    mysql_wire_tests.root_module.addImport("mysql_wire", b.createModule(.{
-        .root_source_file = b.path("src/store/wire/mysql.zig"),
+    mysql_wire_tests.root_module.addImport("mysql_driver", b.createModule(.{
+        .root_source_file = b.path("src/store/wire/mysql_driver.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
     }));

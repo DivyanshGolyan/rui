@@ -262,12 +262,32 @@ jobs:
       fail-fast: false
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
+    env:
+      # The shards that run the unit binary, whose live dialect check
+      # requires MySQL here (src/store/mysql_dialect_check.zig).
+      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.targets }}
           compiled: 'true'
+      - name: Start MySQL 8.4 for the unit binary's live dialect check
+        if: ${{ env.LIVE_MYSQL == 'true' }}
+        # In the background, so the pull and initialisation overlap the
+        # restore; "Wait for MySQL 8.4" collects the outcome.
+        run: |
+          set -euo pipefail
+          socket_dir="$RUNNER_TEMP/mysql"
+          mkdir -p "$socket_dir"
+          password=$(openssl rand -hex 16)
+          RUI_TEST_MYSQL_ROOT_PASSWORD="$password" nohup python3 -B tests/integration/mysql_server.py \
+            start rui-mysql "$socket_dir" "$RUNNER_TEMP/mysql-started" > "$RUNNER_TEMP/mysql-start.log" 2>&1 &
+          {
+            echo "RUI_TEST_REQUIRE_ENGINES=${RUI_TEST_REQUIRE_ENGINES:+$RUI_TEST_REQUIRE_ENGINES,}mysql"
+            echo "RUI_TEST_MYSQL_SOCKET=$socket_dir/mysqld.sock"
+            echo "RUI_TEST_MYSQL_ROOT_PASSWORD=$password"
+          } >> "$GITHUB_ENV"
       - name: Use the verified producer artifact or compile locally
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
@@ -295,7 +315,7 @@ jobs:
           done
           docker exec rui-pg pg_isready -h 127.0.0.1 -U postgres
           {
-            echo "RUI_TEST_REQUIRE_ENGINES=postgres"
+            echo "RUI_TEST_REQUIRE_ENGINES=${RUI_TEST_REQUIRE_ENGINES:+$RUI_TEST_REQUIRE_ENGINES,}postgres"
             echo "RUI_TEST_PG_PORT=5432"
             echo "RUI_TEST_PG_PASSWORD=$password"
             echo "RUI_TEST_PG_CA_FILE=$certs/server.crt"
@@ -313,6 +333,11 @@ jobs:
           tmp=/var/folders/rq/rui0linux0shaped0like0darwin00/T/
           test "$(realpath "$tmp")" = "$real"
           echo "TMPDIR=$tmp" >> "$GITHUB_ENV"
+      - name: Wait for MySQL 8.4
+        if: ${{ env.LIVE_MYSQL == 'true' }}
+        run: |
+          python3 -B tests/integration/mysql_server.py wait rui-mysql "$RUNNER_TEMP/mysql-started" \
+            || { cat "$RUNNER_TEMP/mysql-start.log"; exit 1; }
       - name: Run selected targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
