@@ -89,6 +89,13 @@ pub const routes = [_]Route{
         .reply = jsonReply(.{.{protocol.host_stop_ack}}),
     },
     .{
+        .path = "/v1/control/host-pause",
+        .kind = .host_pause,
+        .summary = "Holds every new Turn while paused, or releases them. Running work continues.",
+        .variants = &.{variant(protocol.host_pause_request, .{})},
+        .reply = jsonReply(.{protocol.host_pause_reply}),
+    },
+    .{
         .path = protocol.CommandKind.configure.route(),
         .kind = .configure,
         .summary = "Creates or reconfigures a Session. Retried by its key.",

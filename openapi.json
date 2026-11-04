@@ -98,6 +98,52 @@
         }
       }
     },
+    "/v1/control/host-pause": {
+      "post": {
+        "operationId": "hostPause",
+        "summary": "Holds every new Turn while paused, or releases them. Running work continues.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HostPauseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostPauseReply"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/configure": {
       "post": {
         "operationId": "configure",
@@ -3466,6 +3512,9 @@
           "custody_occupied": {
             "$ref": "#/components/schemas/Decimal"
           },
+          "paused": {
+            "type": "boolean"
+          },
           "capabilities": {
             "type": "object",
             "properties": {
@@ -3518,6 +3567,7 @@
           "descriptor_limit",
           "started_at",
           "custody_occupied",
+          "paused",
           "capabilities"
         ],
         "additionalProperties": false
@@ -3541,6 +3591,52 @@
           "version",
           "kind",
           "store"
+        ],
+        "additionalProperties": false
+      },
+      "HostPauseReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "type": {
+            "const": "host_pause_reply"
+          },
+          "paused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "paused"
+        ],
+        "additionalProperties": false
+      },
+      "HostPauseRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "kind": {
+            "const": "host_pause"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "paused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "paused"
         ],
         "additionalProperties": false
       },
