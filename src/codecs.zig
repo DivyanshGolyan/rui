@@ -211,7 +211,7 @@ test "a tool entry escapes its name and description as JSON strings" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, written, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("say \"hi\"\\\n\x01é", parsed.value.object.get("description").?.string);
-    try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"t\",\"description\":\"say \\\"hi\\\"\\\\\\n\\u0001é\",\"strict\":true,\"parameters\":{}}", written);
+    try std.testing.expectEqualStrings("{\"type\":\"function\",\"name\":\"t\",\"description\":\"say \\\"hi\\\"\\\\\\n\\u0001é\",\"strict\":false,\"parameters\":{}}", written);
 }
 
 test "hosted web search follows the function tools and asks for live pages" {
@@ -224,7 +224,7 @@ test "hosted web search follows the function tools and asks for live pages" {
         .{ .item = .web_search },
         .{ .item = .text_format },
     }, &out);
-    try std.testing.expectEqualStrings("],\"tools\":[{\"type\":\"function\",\"name\":\"bash\",\"description\":\"d\",\"strict\":true,\"parameters\":{}}," ++
+    try std.testing.expectEqualStrings("],\"tools\":[{\"type\":\"function\",\"name\":\"bash\",\"description\":\"d\",\"strict\":false,\"parameters\":{}}," ++
         "{\"type\":\"web_search\",\"external_web_access\":true}],\"text\":{\"verbosity\":\"low\"}", out.buffered());
 }
 

@@ -401,14 +401,15 @@ fn completeModelInterruption(
     return command;
 }
 
-fn expectActivityOutcome(storage: *Store, session: []const u8, binding: AttemptBinding, code: []const u8) !void {
+fn expectActivityOutcome(storage: *Store, session: []const u8, binding: AttemptBinding, ending: protocol.TurnEnding, code: []const u8) !void {
     var request: protocol.ActivityPage = .{ .direction = .backward };
     try request.session.set(session);
     const page = try store_core.activityPageForTesting(storage, request);
-    try std.testing.expect(page.count != 0 and page.items[0].value == .outcome);
-    const outcome = page.items[0].value.outcome;
+    try std.testing.expect(page.count != 0 and page.items[0].value == .turn_ended);
+    const outcome = page.items[0].value.turn_ended;
     try std.testing.expectEqual(binding.turn_id, outcome.turn);
     try std.testing.expectEqual(binding.operation_id, outcome.operation);
+    try std.testing.expectEqual(ending, outcome.ending);
     try std.testing.expectEqualStrings(code, outcome.code.slice());
     try std.testing.expectEqual(page.end, page.items[0].position);
 }
@@ -3467,6 +3468,31 @@ fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
     return if (c.sqlite3_extended_errcode(database) == c.SQLITE_CONSTRAINT_CHECK) .check_violation else .other_failure;
 }
 
+test "a Bash call the Operation did not offer is rejected and keeps its description" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools.count = 0;
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    try submitTestMessage(&storage, &tmp, "unoffered-message", "unoffered-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "unoffered-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'"));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
+}
+
 test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itself" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3969,7 +3995,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
     const expected_outputs = [_][]const u8{
         "Permission denied.",
         "Unknown tool: unknown.",
-        "Invalid arguments for tool 'bash'.",
+        "Invalid arguments for tool 'bash': the arguments are not one well-formed JSON object.",
         "Permission denied.",
     };
     for (expected_call_ids, expected_outputs, 0..) |expected_call_id, expected_output, ordinal| {
@@ -4280,8 +4306,11 @@ test "production turn preserves skipped continuation preference through actual S
             self.model = admission.permit.consume() catch unreachable;
             return .admitted;
         }
-        pub fn admitNewModel(self: *@This()) turn.Admission {
-            return self.admit(.message);
+        pub fn turnsPaused(_: *@This()) bool {
+            return false;
+        }
+        pub fn admitNewModel(self: *@This(), paused: bool) turn.Admission {
+            return self.admit(if (paused) .open_turn_message else .message);
         }
         pub fn admitToolContinuation(self: *@This()) turn.Admission {
             return self.admit(.tool_continuation);
@@ -5487,6 +5516,110 @@ fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: 
     try settleItemsForTesting(storage, tmp, binding, &items, answer);
 }
 
+test "each saved outcome names one feed ending" {
+    const cases = .{
+        .{ turn_domain.TurnOutcome{ .completed = 1 }, false, protocol.TurnEnding.done },
+        .{ turn_domain.TurnOutcome{ .cancelled = {} }, true, protocol.TurnEnding.stopped },
+        .{ turn_domain.TurnOutcome{ .cancelled = {} }, false, protocol.TurnEnding.interrupted },
+        .{ turn_domain.TurnOutcome{ .retry_exhausted = null }, false, protocol.TurnEnding.provider_unavailable },
+        .{ turn_domain.TurnOutcome{ .resource_exceeded = 2 }, false, protocol.TurnEnding.context_full },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_policy", .report = 3 } }, false, protocol.TurnEnding.provider_refused },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_http_400", .report = null } }, false, protocol.TurnEnding.provider_refused },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_api_key_rejected", .report = null } }, false, protocol.TurnEnding.provider_refused },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_tls_verification_failed", .report = null } }, false, protocol.TurnEnding.provider_unavailable },
+        // A stop that selected a Turn a failure ended first leaves its ending.
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "malformed_provider_output", .report = null } }, true, protocol.TurnEnding.failed },
+    };
+    inline for (cases) |case| try std.testing.expectEqual(case[2], case[0].ending(case[1]));
+}
+
+test "while new Turns are held, waiting input joins only an open Turn" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const open = try configureTestSession(&storage, "held-open-config");
+    try submitTestMessage(&storage, &tmp, "held-first", "held-first-key", open.slice(), "first");
+    const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    // A Message that arrives while the answer is being made keeps its Turn open.
+    try submitTestMessage(&storage, &tmp, "held-second", "held-second-key", open.slice(), "second");
+    try settleMessagesForTesting(&storage, &tmp, first, 1, false, null);
+    const idle = try configureTestSession(&storage, "held-idle-config");
+    try submitTestMessage(&storage, &tmp, "held-new", "held-new-key", idle.slice(), "new");
+    // Held: the open Turn takes its input; the idle Session starts nothing.
+    const joined = (try storage.admitModelAttempt(.open_turn_message, .{})).?.permit.binding;
+    try std.testing.expectEqual(first.turn_id, joined.turn_id);
+    try settleMessagesForTesting(&storage, &tmp, joined, 1, false, null);
+    try std.testing.expect((try storage.admitModelAttempt(.open_turn_message, .{})) == null);
+    // Resumed: the held Message starts its Turn.
+    const started = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try std.testing.expect(started.turn_id != first.turn_id);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "the final row is the answer phase selection picked, even when later text repeats it or it is blank" {
+    const final_then_commentary = [_][]const u8{
+        "{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"same\"}]}",
+        "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"same\"}]}",
+    };
+    const blank = [_][]const u8{
+        "{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"working\"}]}",
+        "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"  \"}]}",
+    };
+    const Case = struct { items: []const []const u8, selected: u64, answer: []const u8 };
+    for ([_]Case{
+        .{ .items = &final_then_commentary, .selected = 0, .answer = "same" },
+        // A blank answer saves as empty content; its row keeps the blank text.
+        .{ .items = &blank, .selected = 1, .answer = "" },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "selected-config");
+        try submitTestMessage(&storage, &tmp, "selected-input", "selected-key", session.slice(), "answer");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try store_testing.settleSelectedItemsForTesting(&storage, &tmp, binding, case.items, case.selected, case.answer);
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        request.kinds = .initMany(&.{ .assistant, .turn_ended });
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(@as(usize, 3), page.count);
+        try std.testing.expectEqual(protocol.TurnEnding.done, page.items[2].value.turn_ended.ending);
+        for (page.items[0..2], 0..) |item, index| try std.testing.expectEqual(index == case.selected, item.value.assistant.final);
+    }
+}
+
+test "a done Turn marks its answer final once its ending is within the page" {
+    // Three messages, the last the answer; with one text repeated, only
+    // the answer itself, the last, is final.
+    for ([_]bool{ false, true }) |same_text| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "final-config");
+        try submitTestMessage(&storage, &tmp, "final-input", "final-key", session.slice(), "answer");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleMessagesForTesting(&storage, &tmp, binding, 3, same_text, null);
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session.slice());
+        request.kinds = .initMany(&.{ .assistant, .turn_ended });
+        const page = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(@as(usize, 4), page.count);
+        for (page.items[0..3], 0..) |item, index| try std.testing.expectEqual(index == 2, item.value.assistant.final);
+        try std.testing.expectEqual(protocol.TurnEnding.done, page.items[3].value.turn_ended.ending);
+        // A page that ends before the ending marks nothing final yet.
+        request.end = page.items[2].position;
+        const earlier = try store_core.activityPageForTesting(&storage, request);
+        try std.testing.expectEqual(@as(usize, 3), earlier.count);
+        for (earlier.items[0..3]) |item| try std.testing.expect(!item.value.assistant.final);
+    }
+}
+
 test "an item id repeated in a later batch or the same batch fails the settlement" {
     inline for (.{ 65, 1 }) |repeat_at| {
         var tmp = std.testing.tmpDir(.{});
@@ -6340,7 +6473,7 @@ test "controls remove scheduled retries and replay without cancelling newer work
             try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
         }
         try std.testing.expect((try admitRetryForTesting(&storage)) == null);
-        try expectActivityOutcome(&storage, session.slice(), binding, "cancelled");
+        try expectActivityOutcome(&storage, session.slice(), binding, if (is_stop) .stopped else .interrupted, "cancelled");
 
         try submitTestMessage(&storage, &tmp, "retry-newer", "retry-newer-message", session.slice(), "newer");
         const newer_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -10105,7 +10238,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(!first_reader.usable());
 
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
-    try expectActivityOutcome(&storage, created_session_0.slice(), binding, "provider_http_422");
+    try expectActivityOutcome(&storage, created_session_0.slice(), binding, .provider_refused, "provider_http_422");
     const failed = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
     const failure = switch (failed.state) {
         .failed => |value| value,
@@ -10366,7 +10499,7 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
             try std.testing.expect(full.get("turns").?.array.items[0].object.get("outcome").?.object.get("content").? == .null);
             try std.testing.expectEqual(@as(u64, if (request_id.len == 0) 0 else 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id IS NOT NULL"));
             try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
-            try expectActivityOutcome(&storage, session.slice(), binding, "unsupported_provider_output");
+            try expectActivityOutcome(&storage, session.slice(), binding, .failed, "unsupported_provider_output");
         }
     }
 }
@@ -10507,7 +10640,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
             else => return error.ExpectedFailedObservation,
         };
         try std.testing.expectEqualStrings("retry_exhausted", failure.code.slice());
-        try expectActivityOutcome(&storage, created_session_0.slice(), replacement_binding, "retry_exhausted");
+        try expectActivityOutcome(&storage, created_session_0.slice(), replacement_binding, .provider_unavailable, "retry_exhausted");
     }
 }
 
@@ -10587,10 +10720,10 @@ test "a failed Turn's activity outcome references the provider's report" {
         try submitTestMessage(&storage, &tmp, message, message, session.slice(), "work");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_policy", .request_id = .{}, .report = words } }, .ordinary, .{});
-        try expectActivityOutcome(&storage, session.slice(), binding, "provider_policy");
+        try expectActivityOutcome(&storage, session.slice(), binding, .provider_refused, "provider_policy");
         var request: protocol.ActivityPage = .{ .direction = .backward };
         try request.session.set(session.slice());
-        const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.outcome;
+        const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.turn_ended;
         if (words.len == 0) {
             // No words, no report: never an empty one.
             try std.testing.expect(outcome.content == null);
@@ -10846,7 +10979,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         else => return error.ExpectedFailedObservation,
     };
     try std.testing.expectEqualStrings("retry_exhausted", failure.code.slice());
-    try expectActivityOutcome(&storage, created_session_0.slice(), fourth, "retry_exhausted");
+    try expectActivityOutcome(&storage, created_session_0.slice(), fourth, .provider_unavailable, "retry_exhausted");
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     const statement = try sqlite.prepare(
         storage.database,
@@ -11590,7 +11723,7 @@ test "activity fixed admission prefix survives later application and stop" {
     _ = try admitted.permit.consume();
     var stop = try completeSessionStop("activity-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try expectActivityOutcome(&storage, session.slice(), admitted.permit.binding, "cancelled");
+    try expectActivityOutcome(&storage, session.slice(), admitted.permit.binding, .stopped, "cancelled");
     request.end = queued.end;
     const frozen = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expectEqual(@as(usize, 2), frozen.count);
@@ -11827,7 +11960,7 @@ test "every activity row is dated by the fact that owns it" {
             .assistant => 103,
             .call => 104,
             .tool_result => 106,
-            .outcome => 107,
+            .turn_ended => 107,
             .stop => 108,
             .hosted_call, .sent, .send_failed, .received => unreachable,
         };
@@ -12779,7 +12912,7 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
         // authorize another compaction.
         try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
-        try expectActivityOutcome(&storage, created_session_0.slice(), successor, "ResourceExceeded");
+        try expectActivityOutcome(&storage, created_session_0.slice(), successor, .context_full, "ResourceExceeded");
     }
 }
 

@@ -62,6 +62,11 @@ const Intake = struct {
     workers: [2]Worker = undefined,
     threads: [2]std.Thread = undefined,
     started: usize = 0,
+    /// A launched Host's stdin, watched for its close (D5, D118).
+    stdin: ?std.posix.fd_t = null,
+    /// Set for a Host started from a launch frame; its shutdown is bounded.
+    launched: bool = false,
+    deadline_armed: bool = false,
 
     const Worker = struct {
         owner: *Intake,
@@ -332,6 +337,7 @@ const Intake = struct {
                     const limit: u64 = switch (self.route.?) {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
+                        .host_pause => protocol.max_host_pause_request_bytes,
                         .session_stop => protocol.max_session_stop_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
@@ -565,7 +571,7 @@ const Intake = struct {
                     continue;
                 }
                 if (exchange.state != .ready) continue;
-                if (exchange.route == .host_info or exchange.route == .host_stop) continue;
+                if (exchange.route) |route| if (route.atomicOnly()) continue;
                 if (next == null) next = exchange;
             }
             if (next) |exchange| {
@@ -587,6 +593,31 @@ const Intake = struct {
         }
     }
 
+    /// stdin carries nothing after the launch frame; its close, or any
+    /// failure to read it, stops the Host. Shutdown then has 10 seconds
+    /// before the alarm's default action ends the process (D118).
+    fn readStdin(self: *Intake) void {
+        var bytes: [256]u8 = undefined;
+        const count = std.c.read(self.stdin.?, &bytes, bytes.len);
+        if (count > 0) return;
+        if (count < 0 and std.posix.errno(count) == .INTR) return;
+        self.stdin = null;
+        traceSubject(self.host, "launch_stdin_closed", "host", "launch");
+        self.armShutdownDeadline();
+        _ = self.host.advance(.stopping);
+    }
+
+    /// A launched Host's shutdown, however it began (stdin close or
+    /// `host-stop`), ends the process 10 seconds later if cleanup is still
+    /// running; the alarm survives the drains after intake returns.
+    fn armShutdownDeadline(self: *Intake) void {
+        if (!self.launched or self.deadline_armed) return;
+        self.deadline_armed = true;
+        const default: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
+        std.posix.sigaction(.ALRM, &default, null);
+        _ = std.c.alarm(launch_shutdown_seconds);
+    }
+
     fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
         try setNonblocking(listener.socket.handle);
         var failure: ?anyerror = null;
@@ -597,6 +628,7 @@ const Intake = struct {
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
             if (self.host.stopping()) {
+                self.armShutdownDeadline();
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
             }
             self.serviceWorkers();
@@ -631,7 +663,7 @@ const Intake = struct {
                             wake_at = @min(wake_at, exchange.deadline);
                         }
                     },
-                    .ready => if (exchange.route == .host_info or exchange.route == .host_stop) {
+                    .ready => if (exchange.route.?.atomicOnly()) {
                         exchange.state = .reply;
                         exchange.prepare() catch |err| exchange.fail(err);
                         wake_at = now;
@@ -664,6 +696,7 @@ const Intake = struct {
                 }
                 try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
             }
+            try self.polls.append(self.host.allocator, .{ .fd = self.stdin orelse -1, .events = std.posix.POLL.IN, .revents = 0 });
             self.serviceWorkers();
             // Worker results applied above can leave closures to destroy or
             // cleanup to retry. A worker owns its exchange's fields meanwhile.
@@ -676,7 +709,8 @@ const Intake = struct {
             const wait_ms: c_int = @intCast(@divFloor(@max(wake_at - now, 0) + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), wait_ms);
             if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
-            for (self.exchanges.items, self.polls.items[2..]) |exchange, poll| {
+            if (self.polls.items[self.polls.items.len - 1].revents != 0) self.readStdin();
+            for (self.exchanges.items, self.polls.items[2..][0..self.exchanges.items.len]) |exchange, poll| {
                 if (poll.revents == 0) continue;
                 switch (exchange.state) {
                     .header, .body => exchange.read() catch |err| exchange.fail(err),
@@ -808,6 +842,17 @@ fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.T
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
+/// A Host started with a launch frame: its socket path, in the caller's
+/// runtime directory, and the stdin whose close stops it.
+pub const Launch = struct {
+    runtime_dir: []const u8,
+    socket_path: []const u8,
+    stdin: std.posix.fd_t,
+};
+
+/// How long a launched Host's shutdown may take after stdin closes.
+pub const launch_shutdown_seconds = 10;
+
 pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -819,6 +864,7 @@ pub fn serve(
     bash_path: []const u8,
     bash_timeout_ms: u64,
     home: ?[]const u8,
+    launch: ?Launch,
 ) !void {
     // The Host owns child waits. Automatic reaping or an inherited handler
     // would release process identities before their signal owners retire.
@@ -883,6 +929,7 @@ pub fn serve(
         "unlimited";
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
+    if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
     // startup diagnostic, through readiness delivery and failed unwind.
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
@@ -1004,6 +1051,10 @@ pub fn serve(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
+    if (launch) |value| {
+        intake.stdin = value.stdin;
+        intake.launched = true;
+    }
     host.intake_wake = intake.wake[1];
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
@@ -1196,6 +1247,7 @@ const ControlTiming = struct {
 const Route = enum {
     host_info,
     host_stop,
+    host_pause,
     configure,
     message,
     session_stop,
@@ -1215,7 +1267,13 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .host_pause or self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+    }
+
+    /// Answered on the listener from atomics and fixed values alone,
+    /// never by a worker or SQLite.
+    fn atomicOnly(self: Route) bool {
+        return self == .host_info or self == .host_stop or self == .host_pause;
     }
 
     fn kind(self: Route) protocol.Kind {
@@ -1286,7 +1344,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.providers.routes() });
+            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes() });
+        },
+        .host_pause => |pause| {
+            if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+            // Execution reads the flag at its next admission pass.
+            host.turns_paused.store(pause.paused, .release);
+            try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), renderHostPause, .{pause.paused});
         },
         .host_stop => {
             if (host.advance(.stopping) != .stopping) wakeListener(host);
@@ -1598,6 +1662,8 @@ const HeaderReader = struct {
             .host_info
         else if (std.mem.eql(u8, path, "/v1/control/host-stop"))
             .host_stop
+        else if (std.mem.eql(u8, path, "/v1/control/host-pause"))
+            .host_pause
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
@@ -2001,11 +2067,16 @@ fn renderHostInfo(
     descriptor_soft_limit: ?u64,
     started_at: u64,
     custody_occupied: u64,
+    paused: bool,
     routes: protocol.Routes,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, routes.codex, routes.openai });
+    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
+}
+
+fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
+    try response.appendShape(protocol.host_pause_reply, .{paused});
 }
 
 /// Nothing changed since the token: it comes back, with no rows.
@@ -2995,7 +3066,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, protocol.routesAll(.chatgpt_device) });
+    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device) });
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
@@ -3073,11 +3144,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     const values = [_]protocol.ActivityItem.Value{
         .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
         .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .assistant = reference },
+        .{ .assistant = .{ .content = reference, .final = false } },
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field) } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
-        .{ .outcome = .{ .turn = max, .operation = max, .code = code, .content = reference } },
+        .{ .turn_ended = .{ .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
@@ -3161,6 +3232,7 @@ test "retired reserved exchanges cannot block their successors while workers are
             const path = switch (route) {
                 .host_info => "host-info",
                 .host_stop => "control/host-stop",
+                .host_pause => "control/host-pause",
                 .session_stop => "control/session-stop",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
