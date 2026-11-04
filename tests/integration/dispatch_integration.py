@@ -440,7 +440,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
         assert compaction["text"] == {"verbosity": "low"}, compaction
-        assert compaction["parallel_tool_calls"] is False, compaction
+        assert compaction["parallel_tool_calls"] is True, compaction
         assert user_texts(compaction) == ["covered user input"], compaction
         # Admission fixes coverage. Later settings and messages cannot enter it.
         patch(store, session, f"{route}-policy", "--compaction-trigger", "1", "--output-reservation", "0")
@@ -1720,7 +1720,7 @@ def main(mode="all", correlation_case="all"):
         assert [item["output"] for item in output_items] == [
             "Permission denied.",
             "Unknown tool: missing-tool.",
-            "Invalid arguments for tool 'bash'.",
+            "Invalid arguments for tool 'bash': the arguments are not one well-formed JSON object.",
             "Permission denied.",
         ], output_items
         assert [
@@ -3549,7 +3549,7 @@ def main(mode="all", correlation_case="all"):
             "model": "gpt-6-sol",
             "store": False,
             "stream": True,
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"effort": "medium"},
             "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
@@ -3566,20 +3566,20 @@ def main(mode="all", correlation_case="all"):
                 {
                     "type": "function",
                     "name": "bash",
-                    "strict": True,
+                    "strict": False,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "cmd": {"type": "string"},
-                            "stdin": {"type": ["string", "null"]},
+                            "stdin": {"type": "string"},
                             "description": {"type": "string"},
                             "timeout_ms": {
-                                "type": ["integer", "null"],
+                                "type": "integer",
                                 "minimum": 1,
                                 "maximum": 9223372036854775807,
                             },
                         },
-                        "required": ["cmd", "stdin", "description", "timeout_ms"],
+                        "required": ["cmd", "description"],
                         "additionalProperties": False,
                     },
                 },

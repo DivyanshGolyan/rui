@@ -140,7 +140,7 @@ pub const ContentReader = struct {
         if (self.prefetch) |bytes| self.allocator.rawFree(bytes, .of(u8), @returnAddress());
         self.prefetch = null;
         self.active = false;
-        if (@import("builtin").is_test) _ = self.store.testing_work.closes.fetchAdd(1, .monotonic);
+        if (@import("builtin").is_test) _ = self.store.testing_content_work.closes.fetchAdd(1, .monotonic);
     }
 };
 
@@ -303,7 +303,7 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     var a: Access(.read, error{}) = .open(&entry);
     defer a.deinit();
     try entry.finish(Ordinary.none, readWindow(&a, reader, start, destination[0..wanted]));
-    if (@import("builtin").is_test) _ = self.testing_work.read.fetchAdd(wanted, .monotonic);
+    if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
 }
 

@@ -92,15 +92,7 @@ pub const Store = struct {
     /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
     // Source-level proof only: no counters/storage in the production Store.
-    // Content bytes read through readers and blob handles, reader closes,
-    // and every Access round on this Store (`Access.run`, `commit` and
-    // `readRaw`), for the round budgets.
-    testing_work: if (@import("builtin").is_test) struct {
-        read: std.atomic.Value(u64) = .init(0),
-        blob: std.atomic.Value(u64) = .init(0),
-        closes: std.atomic.Value(u32) = .init(0),
-        rounds: u32 = 0,
-    } else void = if (@import("builtin").is_test) .{} else {},
+    testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
 
     /// Whether nothing changed since `since` on this opening: atomics only,
     /// no lock. Never while fenced, so a read reports the failure.
@@ -871,11 +863,27 @@ pub const SqliteDiagnostic = struct {
     journal_mode: ?protocol.Bounded(16) = null,
 };
 
+/// Test builds' counters on a Store. `read` and `blob` count content bytes
+/// read through readers and through `Access.readRaw`, and `closes` counts
+/// reader closes. `rounds` counts `Access.run` and `commit`, and
+/// `content_rounds` counts `readRaw` windows, for the round budgets.
+/// `closes` is a u32 and the round counts u16 so the counters stay 24
+/// bytes: no test closes 4 billion readers or runs 65,535 rounds on one
+/// Store, and a round count past that traps in test builds.
+const TestingContentWork = struct {
+    read: std.atomic.Value(u64) = .init(0),
+    blob: std.atomic.Value(u64) = .init(0),
+    closes: std.atomic.Value(u32) = .init(0),
+    rounds: u16 = 0,
+    content_rounds: u16 = 0,
+};
+
 // The frame that holds a Store keeps every byte of it resident, so a fixed
-// buffer belongs in memory of its own, like the change ring's. The production
-// Store is 744 bytes; test builds add 24 bytes of counters and sit exactly at
-// 768, so a new field must come out of existing padding, or out of the Store.
+// buffer belongs in memory of its own, like the change ring's. Test builds
+// add `TestingContentWork` and stay within 768 bytes, so a new field must
+// come out of existing padding, or out of the Store.
 comptime {
+    if (@sizeOf(TestingContentWork) != 24) @compileError("TestingContentWork grew past 24 bytes; the test-build Store has no room");
     if (@sizeOf(Store) > 768) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
 

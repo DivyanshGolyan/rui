@@ -526,7 +526,7 @@ def prove_reused_session(state):
         assert output_by_call["reuse-fast-call"].startswith(
             "Bash succeeded. Exit code: 0.\n"
         ), output_by_call
-        assert output_by_call["reuse-invalid-call"] == "Invalid arguments for tool 'bash'."
+        assert output_by_call["reuse-invalid-call"] == "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters."
         first_semantic_input = [
             ("user", item["content"][0]["text"])
             if item.get("role") == "user"
@@ -1341,7 +1341,7 @@ def main():
             "success-invalid-call",
         ], outputs
         assert outputs[1]["output"] == "Unknown tool: missing-tool.", outputs
-        assert outputs[2]["output"] == "Invalid arguments for tool 'bash'.", outputs
+        assert outputs[2]["output"] == "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters.", outputs
         output = outputs[0]["output"]
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and "[earlier output omitted]" in output, output

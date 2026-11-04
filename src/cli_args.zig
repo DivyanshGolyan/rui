@@ -62,7 +62,7 @@ pub const Command = enum {
             .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets --active-capacity N, default {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports, and stderr says so when --active-capacity differs.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{value("active-capacity", "N")} },
             .host_pause => .{ .resource = .host, .name = "pause", .description = "Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
-            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
+            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}. --launch-frame reads the Store, the OpenAI key and the runtime directory from one frame on stdin instead, and the Host stops when stdin closes.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS"), flag("launch-frame") } ++ serve_test, .conflicts = endpoint_conflicts ++ launch_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default leaves each model at its own.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[8] }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
@@ -151,6 +151,17 @@ const settings = &[_]Option{
 const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7], settings[8], settings[9] };
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
 /// The managed endpoint and development endpoints are exclusive.
+/// A launch frame on stdin names the Store, the provider and the capacity.
+const launch_conflicts = &[_][2][]const u8{
+    .{ "launch-frame", "store" },
+    .{ "launch-frame", "store-hex" },
+    .{ "launch-frame", "provider" },
+    .{ "launch-frame", "provider-endpoint" },
+    .{ "launch-frame", "provider-ca-file" },
+    .{ "launch-frame", "active-capacity" },
+    .{ "launch-frame", "test-codex-fixture-endpoint" },
+    .{ "launch-frame", "test-openai-fixture-endpoint" },
+};
 const endpoint_conflicts = &[_][2][]const u8{
     .{ "provider", "provider-endpoint" },
     .{ "provider", "provider-ca-file" },

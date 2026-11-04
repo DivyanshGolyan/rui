@@ -140,7 +140,7 @@ Keep unrelated cleanup separate; exclude personal style, speculative extensibili
 Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`.
 Before every push, including review-fix rounds and after merging main, run only these checks:
 
-- `python3 tests/ci/prepush.py`, which runs `zig fmt --check`, `python3 -B -m unittest discover -s tests/ci`, `ruff check --select F821 tests`, the `select_tests.py --phase development` targets and, when Zig changed, `zig build typecheck-macos`
+- `python3 tests/ci/prepush.py`, which runs `git diff --check` against the merge base, `zig fmt --check`, `python3 -B -m unittest discover -s tests/ci`, `ruff check --select F821 tests`, the `select_tests.py --phase development` targets and, when Zig changed, `zig build typecheck-macos`
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 
