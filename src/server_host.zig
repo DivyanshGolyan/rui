@@ -294,6 +294,9 @@ pub const Host = struct {
     custody: execution.CustodyPool = .{ .records = &.{} },
     phase: std.atomic.Value(Phase) = .init(.open),
     controls_changed: std.atomic.Value(bool) = .init(false),
+    /// Whether execution holds every new Turn (D193): Messages still queue
+    /// and running Turns go on. Host memory only; `host_pause` sets it.
+    turns_paused: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
     intake_wake: ?std.posix.fd_t = null,

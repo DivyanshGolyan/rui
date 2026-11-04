@@ -314,6 +314,7 @@ pub const HostStatus = union(enum) {
         descriptor_limit: ?usize = null,
         started_at: u64,
         custody_occupied: usize,
+        paused: bool,
         capabilities: @FieldType(protocol.HostInfo, "capabilities"),
     },
     unavailable,
@@ -406,12 +407,13 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
         .descriptor_limit = descriptor_limit,
         .started_at = started_at,
         .custody_occupied = custody_occupied,
+        .paused = info.paused,
         .capabilities = info.capabilities,
     } };
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
-    const golden = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}";
+    const golden = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}";
     const result = try parseHostInfo(golden, "/one");
     try std.testing.expect(result.ready.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
@@ -421,6 +423,7 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     // The Host's start time and slots in use, which never exceed its capacity.
     try std.testing.expectEqual(@as(u64, 1792918800), result.ready.started_at);
     try std.testing.expectEqual(@as(usize, 17), result.ready.custody_occupied);
+    try std.testing.expect(result.ready.paused);
     for ([_][2][]const u8{
         .{ "\"started_at\":\"1792918800\"", "\"started_at\":\"0\"" },
         .{ "\"started_at\":\"1792918800\"", "\"started_at\":\"01792918800\"" },
@@ -434,23 +437,23 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
         defer std.testing.allocator.free(malformed);
         try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(malformed, "/one"));
     }
-    // Both are required: a reply without them is from an incompatible Host.
-    inline for (.{ "\"started_at\":\"1792918800\",", "\"custody_occupied\":\"17\"," }) |field| {
+    // Each is required: a reply without one is from an incompatible Host.
+    inline for (.{ "\"started_at\":\"1792918800\",", "\"custody_occupied\":\"17\",", "\"paused\":true," }) |field| {
         const missing = try std.mem.replaceOwned(u8, std.testing.allocator, golden, field, "");
         defer std.testing.allocator.free(missing);
         try std.testing.expectError(error.MissingField, parseHostInfo(missing, "/one"));
     }
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
         "/one",
     ));
     for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {
