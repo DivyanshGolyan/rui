@@ -1241,7 +1241,7 @@ pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !voi
 /// store_meta format is not `from` is a WrongStoreVersion, and any failure
 /// leaves the Store as it was.
 pub fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
-    try migrationBackup(io, database, from);
+    try migrationBackup(io, database);
     // Both outside the transaction, where PRAGMA foreign_keys takes effect.
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
     defer sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch {};
@@ -1265,15 +1265,17 @@ pub fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32
     try sqlite.exec(database, "COMMIT");
 }
 
-/// Before a migration, a copy of the Store at `from` beside its file, named
-/// `<file>.migration-<from>-to-<schema_version>` and written page by page
-/// through SQLite's online backup API, so it holds the last committed state
-/// and is as large as the Store. Any earlier copy of
-/// this kind for the same file is deleted first, so at most one exists. The
-/// copy and its directory entry are synced before the migration starts.
-/// Every failure is a MigrationBackupFailed.
-fn migrationBackup(io: std.Io, database: *c.sqlite3, from: u32) !void {
-    return writeMigrationBackup(io, database, from) catch |err| switch (err) {
+/// Before a migration, a copy of the Store at `from` beside its file: for
+/// `<name>.sqlite3`, `<name>.backup`, written page by page through SQLite's
+/// online backup API, so it holds the last committed state and is as large
+/// as the Store. Its path is a byte shorter than the Store's, so it and its
+/// journal fit wherever the Store's do. The one name per file means an
+/// earlier copy is replaced and nothing else beside the Store is touched;
+/// the copy's own user_version says which format it holds. The copy and
+/// its directory entry are synced before the migration starts. Every
+/// failure is a MigrationBackupFailed.
+fn migrationBackup(io: std.Io, database: *c.sqlite3) !void {
+    return writeMigrationBackup(io, database) catch |err| switch (err) {
         error.MigrationBackupFailed => err,
         else => {
             std.log.warn("Store migration backup failed: {s}", .{@errorName(err)});
@@ -1282,27 +1284,26 @@ fn migrationBackup(io: std.Io, database: *c.sqlite3, from: u32) !void {
     };
 }
 
-fn writeMigrationBackup(io: std.Io, database: *c.sqlite3, from: u32) !void {
+const store_extension = ".sqlite3";
+const backup_extension = ".backup";
+comptime {
+    if (backup_extension.len >= store_extension.len) @compileError("a backup's path must be shorter than its Store's");
+}
+
+fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
     const path = std.mem.span(c.sqlite3_db_filename(database, "main") orelse return error.MigrationBackupFailed);
+    if (!std.mem.endsWith(u8, path, store_extension)) return error.MigrationBackupFailed;
     const directory_path = std.fs.path.dirname(path) orelse return error.MigrationBackupFailed;
-    const file = std.fs.path.basename(path);
-    var prefix_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}.migration-", .{file});
+    // Iterable, so the handle is a real descriptor (not O_PATH) that fsync takes.
     var directory = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
     defer directory.close(io);
-    deleting: while (true) {
-        var iterator = directory.iterate();
-        while (try iterator.next(io)) |entry| {
-            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-            var name_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buffer, "{s}", .{entry.name});
-            try directory.deleteFile(io, name);
-            continue :deleting;
-        }
-        break;
-    }
     var backup_buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
-    const backup = try std.fmt.bufPrintSentinel(&backup_buffer, "{s}.migration-{d}-to-{d}", .{ path, from, schema_version }, 0);
+    const backup = try std.fmt.bufPrintSentinel(&backup_buffer, "{s}" ++ backup_extension, .{path[0 .. path.len - store_extension.len]}, 0);
+    const backup_name = backup[directory_path.len + 1 ..];
+    directory.deleteFile(io, backup_name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
     // The online backup API, not VACUUM INTO: the build sets
     // SQLITE_MAX_ATTACHED=0, and VACUUM INTO attaches its target.
     {
@@ -1314,7 +1315,7 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3, from: u32) !void {
         const stepped = c.sqlite3_backup_step(copying, -1);
         if (c.sqlite3_backup_finish(copying) != c.SQLITE_OK or stepped != c.SQLITE_DONE) return error.MigrationBackupFailed;
     }
-    var copy = try directory.openFile(io, backup[directory_path.len + 1 ..], .{});
+    var copy = try directory.openFile(io, backup_name, .{});
     defer copy.close(io);
     try copy.sync(io);
     if (std.c.fsync(directory.handle) != 0) return error.MigrationBackupFailed;

@@ -8097,16 +8097,21 @@ test "a migration whose step fails leaves its backup and the original Store read
     var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const store = try storeAtFormat(&tmp, &path_buffer, &root_buffer, 7);
-    const backup_name = std.fmt.comptimePrint("store.sqlite3.migration-7-to-{d}", .{store_schema.schema_version});
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "store.sqlite3.migration-3-to-4", .data = "earlier" });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "store.sqlite3.kept", .data = "kept" });
+    const backup_name = "store.backup";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = backup_name, .data = "earlier" });
+    // Names that only begin like the copy's are someone else's.
+    for ([_][]const u8{ "store.sqlite3.kept", "store.backup.saved", "store.backup-old" }) |kept| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = kept, .data = "kept" });
+    }
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
         try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
     }
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "store.sqlite3.migration-3-to-4", .{}));
-    _ = try tmp.dir.statFile(std.testing.io, "store.sqlite3.kept", .{});
+    for ([_][]const u8{ "store.sqlite3.kept", "store.backup.saved", "store.backup-old" }) |kept| {
+        var kept_buffer: [8]u8 = undefined;
+        try std.testing.expectEqualStrings("kept", try tmp.dir.readFile(std.testing.io, kept, &kept_buffer));
+    }
     var backup_path_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const backup_path = try std.fmt.bufPrint(&backup_path_buffer, "{s}/" ++ backup_name, .{store.root});
     for ([_][]const u8{ store.path, backup_path }) |path| {
@@ -8120,7 +8125,7 @@ test "a migration whose step fails leaves its backup and the original Store read
     }
     // A backup that cannot be written refuses the Store before any step runs.
     try tmp.dir.deleteFile(std.testing.io, backup_name);
-    try tmp.dir.createDir(std.testing.io, "store.sqlite3.migration-2-to-3", .default_dir);
+    try tmp.dir.createDir(std.testing.io, backup_name, .default_dir);
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
@@ -8128,7 +8133,31 @@ test "a migration whose step fails leaves its backup and the original Store read
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
     }
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, backup_name, .{}));
+    try std.testing.expect((try tmp.dir.statFile(std.testing.io, backup_name, .{})).kind == .directory);
+}
+
+test "a Store at the maximum path backs itself up before a migration" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store_path = try createMaximumCanonicalStore(&tmp, &store_buffer);
+    const paths = try platform.resolveClientPaths(io, store_path);
+    const database = paths.database.slice();
+    try std.testing.expectEqual(@as(usize, platform.max_database_path_bytes), database.len);
+    {
+        var storage: Store = undefined;
+        try storage.open(io, database, paths.store.slice());
+        defer storage.close() catch unreachable;
+        _ = try configureTestSession(&storage, "migration-session");
+    }
+    const raw = try openRaw(database);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, "UPDATE store_meta SET meta_value='7' WHERE meta_key='format';PRAGMA user_version=7");
+    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, paths.store.slice(), 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
+    var backup_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const backup = try std.fmt.bufPrint(&backup_buffer, "{s}/rui.backup", .{paths.store.slice()});
+    try std.testing.expect((try std.Io.Dir.cwd().statFile(io, backup, .{})).size > 0);
 }
 
 /// `object`'s CREATE text in the current schema.
