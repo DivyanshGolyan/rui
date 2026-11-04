@@ -861,6 +861,15 @@ At an Operation whose effort differs from the one in force, the codec writes `{"
 A compaction base covers the Operation elements before its anchor with the output it covers, so effort there is the top's again.
 Every Operation is placed, whatever its outcome, because its own request carried its boundary; effort is null for a whole Session or for none of it, so a boundary never returns to no effort.
 
+#### Tools inside the history
+
+Under `openai-responses/2` function tools are declared inside the history too, so adding, rewording or removing one keeps the provider cache (D53-D55, D75).
+After each Operation element the history view declares, with `{"type":"additional_tools","role":"developer","tools":[…]}`, the function tools that Operation's frozen set holds and the set of the last earlier Operation since the span's start lacks; a tool record is saved once, so a reworded tool is a new record and is declared again.
+The first Operation after the span's start, or after a compaction base's anchor, declares its whole set, since the base covers the earlier declarations.
+A removed tool stays declared in the history, and a call to it gets the tool result `This tool was removed.`: settlement offers the Operation's own set and withdraws every tool an earlier revision of the Session offered.
+The top-level `tools` holds only the provider-run tools (web search), which OpenAI ignores inside the history ([live check](research/responses-tools-probe/README.md)); turning one on or off changes the top and costs that one request the cache.
+Under `openai-responses/1` the top-level `tools` holds the Operation's whole set, as before.
+
 ### Codex wire binding
 
 Every request sets `text.verbosity` to `low` and `parallel_tool_calls` to `true`, for every model.
@@ -1502,6 +1511,9 @@ Uncertainty alone requires neither User intervention nor Turn termination; SQLit
 One thread at a time holds the Store: its connection, its scratch and its id allocator.
 A caller that finds the Store free holds it and runs its entry point on its own thread; a caller that finds it busy queues its request and sleeps, and the holder runs queued requests in arrival order before it lets go, so each waiter wakes once, with its answer.
 A holder runs at most 64 requests for others, then hands the Store to the next waiter.
+Writes the holder runs back to back share one transaction and one fsync: each later write runs in a savepoint, so a write that fails rolls back alone, and no caller hears its answer until the batch's COMMIT; a failed COMMIT fences the Store and every write in the batch hears the Store as fenced.
+A lone write costs BEGIN and COMMIT, as before.
+A Message's commit callback runs at its write's end, before the batch's COMMIT.
 A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
 
 The Host opens the Store database with `locking_mode=EXCLUSIVE`, `journal_mode=WAL`, `synchronous=FULL` (with `fullfsync` on macOS) and a 4-MiB `journal_size_limit`.

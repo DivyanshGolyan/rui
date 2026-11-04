@@ -531,15 +531,17 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
 
 /// What settling a success reads beside its Attempt: the Operation's
 /// frozen tools, null when its revision row is missing (main's
-/// `StaleAttemptBinding`), the Session's permission mode and revision,
-/// and the last Conversation ordinal.
+/// `StaleAttemptBinding`), the tools of every revision up to it, the
+/// Session's permission mode and revision, and the last Conversation
+/// ordinal.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("r.tool_set_id") ++ " END AS tools_mask,s.permission_mode,s.revision," ++
+    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("r.tool_set_id") ++ " END AS tools_mask," ++
+        tool_set.everMaskSql("o.session_ref", "o.settings_revision") ++ " AS ever_mask,s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { tools_mask: ?u8, permission_mode: bool, revision: rsql.Positive, entry_base: u64 },
+    .Row = struct { tools_mask: ?u8, ever_mask: u8, permission_mode: bool, revision: rsql.Positive, entry_base: u64 },
     .cardinality = .optional,
 });
 
@@ -1191,7 +1193,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .positions = positions,
         .first_item_position = try positions.take(output.item_count),
         .purpose = purpose,
-        .tools = .of(try configuration_domain.toolSet(tools_mask)),
+        .tools = .since(try configuration_domain.toolSet(tools_mask), try configuration_domain.toolSet(settling.ever_mask)),
         .settling = settling,
         .call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count),
     };
@@ -1759,7 +1761,7 @@ noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetad
     var encoded: output_format.JsonStringSource = .{
         .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },
     };
-    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded, offered.slice());
+    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded, offered);
 }
 
 /// noinline: its read buffer serves the rare schema check, not every

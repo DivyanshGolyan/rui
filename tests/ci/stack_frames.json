@@ -7,7 +7,7 @@
     "AuthWorker": {"anchor": "codex_credentials.Owner.publish", "chain_ceiling": 28672}
   },
   "dispatches": [
-    {"caller": "store.queue.Queue.release", "callees": "store.queue.Queue.Write(", "cause": "the Store's holder runs queued writes"}
+    {"caller": "store.queue.Queue.drain", "callees": "store.queue.Queue.Write(", "cause": "the Store's holder runs queued writes"}
   ],
   "host_modules": [
     "HostDiagnostics", "TerminalText", "TestObservation", "bash", "bounded", "change_ring",

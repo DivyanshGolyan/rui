@@ -57,6 +57,21 @@ pub fn maskSql(comptime set_column: []const u8) []const u8 {
     }
 }
 
+/// SQL for the mask of every built-in in any set of `session`'s revisions
+/// up to `revision`, until the wire names tools.
+pub fn everMaskSql(comptime session: []const u8, comptime revision: []const u8) []const u8 {
+    comptime {
+        var sum: []const u8 = "(0";
+        for (std.enums.values(Tool)) |tool| sum = sum ++ std.fmt.comptimePrint(
+            "+CASE WHEN EXISTS(SELECT 1 FROM session_revision ever JOIN tool_set_member ever_member ON ever_member.tool_set_id=ever.tool_set_id " ++
+                "JOIN tool_record ever_tool ON ever_tool.tool_record_id=ever_member.tool_record_id " ++
+                "WHERE ever.session_ref={s} AND ever.revision<={s} AND ever_tool.name='{s}') THEN {d} ELSE 0 END",
+            .{ session, revision, @tagName(tool), tool_catalog.toolBit(tool) },
+        );
+        return sum ++ ")";
+    }
+}
+
 /// The records of `set`, in `Tool` order.
 pub const Members = struct {
     records: [tool_count]*const tool_catalog.Record = undefined,
