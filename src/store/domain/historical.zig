@@ -137,6 +137,10 @@ pub const HistoricalView = struct {
     output_frontier: ?u64 = null,
     // The selected base's Operation, found with the frontier; zero for none.
     selected_base: u64 = 0,
+    /// The floor the view omits history at or below (D217), zero for none,
+    /// read with the base; and the Session's first user Message, which
+    /// no floor drops.
+    floor: Floor = .{},
     selected_coverage: ?Coverage = null,
     output_boundary: u64 = 0,
     output_cursor: u64 = 0,
@@ -190,6 +194,21 @@ pub const HistoricalView = struct {
     pub const Coverage = struct {
         frontier: u64,
         anchor: ?u64,
+        floor: Floor,
+    };
+
+    /// The drop floor a view applies (D217): every host Message after the
+    /// Session's first and every model Operation, with its tool results,
+    /// that begins at or below `position` is left out; instruction entries
+    /// and the selected base are kept. A Message begins at its position and
+    /// an Operation at its admission position.
+    pub const Floor = struct {
+        /// Zero for none.
+        position: u64 = 0,
+        first_message: u64 = 0,
+        /// The floor is the view's own Operation's, deeper than its base's.
+        /// No memo or seal built on the base describes such a span.
+        own: bool = false,
     };
 
     // One population cursor, independent of group/call counts. No
@@ -274,6 +293,7 @@ pub const HistoricalView = struct {
         const value: Coverage = .{
             .frontier = self.output_frontier.?,
             .anchor = if (self.selected_base == 0) null else try readCompactionAnchor(self.store, self.selected_base),
+            .floor = self.floor,
         };
         self.selected_coverage = value;
         return value;
@@ -676,15 +696,19 @@ fn compactionAnchorOf(a: *ReadAccess, base_id: u64) !u64 {
 }
 
 /// The Operation's admission position and its selected Compaction Base:
-/// the latest compacted Operation admitted before it.
+/// the latest compacted Operation admitted before it; the floor each has,
+/// and, only under a floor, the Session's first user Message.
 const output_boundary = rsql.Read(.{
-    .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier " ++
+    .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier," ++
+        "current.history_floor AS own_floor,base.history_floor AS base_floor," ++
+        "CASE WHEN coalesce(current.history_floor,base.history_floor) IS NULL THEN 0 ELSE coalesce((SELECT min(first.session_position) " ++
+        "FROM conversation_entry first @index(conversation_entry_history) WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) END AS first_message " ++
         "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
         "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
         "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1) " ++
         "WHERE current.operation_id=?1",
     .Args = struct { operation: u64 },
-    .Row = struct { admission_position: rsql.Positive, operation_id: ?rsql.Positive, frontier: u64 },
+    .Row = struct { admission_position: rsql.Positive, operation_id: ?rsql.Positive, frontier: u64, own_floor: ?rsql.Positive, base_floor: ?rsql.Positive, first_message: u64 },
     .cardinality = .each,
 });
 
@@ -723,6 +747,15 @@ fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
         view.output_boundary = row.admission_position.get();
         view.selected_base = if (row.operation_id) |id| id.get() else 0;
         view.output_frontier = row.frontier;
+        const base_floor: u64 = if (row.base_floor) |floor| floor.get() else 0;
+        const own_floor: u64 = if (row.own_floor) |floor| floor.get() else 0;
+        // A deeper floor only ever drops more of the base's history.
+        if (own_floor != 0 and own_floor <= base_floor) return error.CorruptStore;
+        view.floor = .{
+            .position = @max(own_floor, base_floor),
+            .first_message = row.first_message,
+            .own = own_floor != 0,
+        };
         return false;
     }
     var found: output_source.Result = undefined;
@@ -794,7 +827,7 @@ const historical_entries = rsql.Read(.{
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
-        "AND e.entry_kind IN (1,2) UNION ALL " ++
+        "AND e.entry_kind IN (1,2) AND (e.entry_kind=2 OR e.session_position>?3 OR e.session_position=?4) UNION ALL " ++
         "SELECT item.session_position,3,NULL,NULL,NULL,NULL,r.model,r.provider,item.item_kind,item.item_id_digest," ++
         store_schema.oneOf("owner.resolution_code", &accepted_resolutions) ++ " AND owner.session_ref=item.session_ref " ++
         "AND owner_turn.session_ref=item.session_ref " ++
@@ -807,8 +840,9 @@ const historical_entries = rsql.Read(.{
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
         "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
+        "AND (owner.admission_position IS NULL OR owner.admission_position>?3 OR owner.operation_id=?5) " ++
         std.fmt.comptimePrint("ORDER BY 1 LIMIT {d}", .{HistoricalView.entry_batch}),
-    .Args = struct { operation: u64, after: u64 },
+    .Args = struct { operation: u64, after: u64, floor: u64, first_message: u64, base: u64 },
     .Row = struct {
         session_position: rsql.Positive,
         entry_kind: u8,
@@ -856,7 +890,13 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_posi
     view.entries_end = 0;
     errdefer view.entries_end = 0;
     var batch: EntryBatch = .{ .view = view };
-    a.readEach(historical_entries, .{ .operation = view.binding.operation_id, .after = after_position }, HistoricalView.entry_batch, &batch);
+    a.readEach(historical_entries, .{
+        .operation = view.binding.operation_id,
+        .after = after_position,
+        .floor = view.floor.position,
+        .first_message = view.floor.first_message,
+        .base = view.selected_base,
+    }, HistoricalView.entry_batch, &batch);
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
     if (batch.failure) |err| return err;
     return if (view.entries_end == 0) null else &view.entries[0];
@@ -970,15 +1010,16 @@ pub fn scannedCall(proposal: *const reads_domain.ProposalRead, found_outcome: ca
 }
 
 /// The Session's next Operation after the scan cursor ?2 and before the
-/// view's own, and whether it proposed tools.
+/// view's own, and whether it proposed tools. An Operation the floor ?3
+/// drops brings no tool group.
 const next_group_source = rsql.Read(.{
     .sql = "SELECT source.operation_id,current.admission_position AS boundary," ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " AS proposes," ++
         "source.admission_position,source.output_item_count FROM model_operation current " ++
         "JOIN model_operation source @index(model_operation_session_history) " ++
         "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 " ++
-        "AND source.operation_id>?2 AND source.operation_id<current.operation_id " ++
+        "AND source.operation_id>?2 AND source.operation_id<current.operation_id AND source.admission_position>?3 " ++
         "ORDER BY source.operation_id LIMIT 1",
-    .Args = struct { operation: u64, after: u64 },
+    .Args = struct { operation: u64, after: u64, floor: u64 },
     .Row = struct { operation_id: rsql.Positive, boundary: rsql.Positive, proposes: ?bool, admission_position: ?u64, output_item_count: ?u64 },
     .cardinality = .optional,
 });
@@ -1031,7 +1072,7 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView) !?Historic
         return error.HistoricalPending;
     }
     var found: next_group_source.Result = undefined;
-    a.read(next_group_source, .{ .operation = view.binding.operation_id, .after = view.tool_group_source_cursor }, &found);
+    a.read(next_group_source, .{ .operation = view.binding.operation_id, .after = view.tool_group_source_cursor, .floor = view.floor.position }, &found);
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
     const source = found orelse return null;
     if (source.proposes != true) {

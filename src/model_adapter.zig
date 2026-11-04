@@ -1033,6 +1033,8 @@ pub const Preparation = struct {
     /// stay out of the frame every history item uses.
     noinline fn startSpan(self: *Preparation) !Next {
         self.state.span = .{ .start = self.writer.offset };
+        // A compaction's own floor drops history its base's memo holds.
+        if ((try self.view.coverage()).floor.own) return .pending;
         const memos = self.state.memos orelse return .pending;
         const memo = memos.held(self.settings.session.slice()) orelse return .pending;
         const key = try self.memoKey();
@@ -1118,6 +1120,9 @@ pub const Preparation = struct {
     /// memo once the request seals.
     fn endSpan(self: *Preparation) !void {
         const span = &(self.state.span orelse return);
+        // No later request shares a span under a compaction's own floor:
+        // it neither seals nor keeps a memo.
+        if ((try self.view.coverage()).floor.own) return;
         span.next = .{
             .key = try self.memoKey(),
             .admission_position = self.view.admissionPosition(),
@@ -3340,6 +3345,89 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "covered-private") == null);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "compaction_trigger") == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+/// The texts of `request`'s input items, in order: a message's first
+/// text, else its type.
+fn inputTextsForTesting(request: []const u8, out: [][]const u8) ![]const []const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request, .{});
+    defer parsed.deinit();
+    const input = parsed.value.object.get("input").?.array.items;
+    std.debug.assert(input.len <= out.len);
+    for (input, 0..) |item, index| {
+        const label = if (item.object.get("content")) |content| content.array.items[0].object.get("text").?.string else item.object.get("type").?.string;
+        out[index] = try std.testing.allocator.dupe(u8, label);
+    }
+    return out[0..input.len];
+}
+
+fn expectInputTexts(request: []const u8, expected: []const []const u8) !void {
+    var buffer: [32][]const u8 = undefined;
+    const texts = try inputTextsForTesting(request, &buffer);
+    defer for (texts) |text| std.testing.allocator.free(text);
+    try std.testing.expectEqual(expected.len, texts.len);
+    for (expected, texts) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
+test "a compaction's floor drops whole exchanges and every request on its base respects it" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    // Positions: "do work", Operation 1 (reasoning and two calls, then their
+    // denied results), its successor's answer, then "second message", the
+    // new instructions, "answer two" and "third message".
+    const composed = try establishComposedHistory(&setup);
+    const session = composed.session;
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, composed.binding, &.{"{\"type\":\"message\",\"id\":\"a1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer one\"}]}"}, "answer one");
+    try setup.submit("floor-second", "floor-second-key", session.slice(), "second message");
+    {
+        const rules = "new rules";
+        const file = try setup.tmp.dir.createFile(std.testing.io, "floor-rules", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, rules);
+        try file.sync(std.testing.io);
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("floor-rules-config");
+        command.session = session;
+        command.configuration.instructions = .{ .state = .value, .file = file, .length = rules.len, .digest = protocol.contentDigest(rules) };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+    }
+    var third = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const third_binding = try third.permit.consume();
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, third_binding, &.{"{\"type\":\"message\",\"id\":\"a2\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer two\"}]}"}, "answer two");
+    try setup.submit("floor-third", "floor-third-key", session.slice(), "third message");
+    var fourth = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const fourth_binding = try fourth.permit.consume();
+    var memo_entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const full = try prepareMemoForTesting(&setup, fourth_binding, &memos, .{});
+    defer std.testing.allocator.free(full.bytes);
+    try expectInputTexts(full.bytes, &.{ "do work", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output", "answer one", "second message", "new rules", "answer two", "third message" });
+    const kept = memo_entries[0].memo.?;
+    try setup.storage.settleModelAttemptFailure(fourth_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const compact_binding = try compact.permit.consume();
+    // The floor sits on the instruction entry: "second message" and every
+    // Operation admitted before it go, with Operation 1's results; the first
+    // Message and the instructions stay.
+    try store.setHistoryFloorForTesting(&setup.storage, compact_binding.operation_id, "new rules", 1);
+    const compaction = try prepareMemoForTesting(&setup, compact_binding, &memos, .{});
+    defer std.testing.allocator.free(compaction.bytes);
+    try expectInputTexts(compaction.bytes, &.{ "do work", "new rules", "answer two", "third message", "compaction_trigger" });
+    // The base's memo spans dropped history: the compaction rebuilds and
+    // keeps no memo of its own floor.
+    try std.testing.expectEqual(@as(usize, 0), compaction.copied);
+    try std.testing.expect(memo_entries[0].memo.?.identical(&kept));
+    try store.settleCompactionForTesting(&setup.storage, &setup.tmp, compact_binding, &.{ .compaction, .message });
+    try setup.submit("floor-later", "floor-later-key", session.slice(), "later message");
+    var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const successor_binding = try successor.permit.consume();
+    const after = try prepareMemoForTesting(&setup, successor_binding, &memos, .{});
+    defer std.testing.allocator.free(after.bytes);
+    try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message" });
+    // Requests on the base share its floor, so their memo serves again.
+    try std.testing.expect(try expectMemoRebuildEqual(&setup, successor_binding, &memos, .{}) > 0);
 }
 
 test "compaction public preparation rejects incompatible selected base and suffix bindings" {
