@@ -304,6 +304,8 @@ D207. (lane T question, my call) The catalog keeps one context window per model 
 D208. (lane T question, my call) The catalog's effort list is taken as listed, so `none` is accepted where models.dev lists it. A provider refusal is the faithful error.
 D209. (lane T question, my call) C1 lands after S1, which removes the default effort and the percentage trigger, so the catalog never needs a default effort.
 
+D210. (lane K question, my call) Refines D134, D168 and D170: the Host wire stays as it is. The TS client (A3c) encodes `entry.cursor` from each row's existing position and ordinal, and fills `entry.text` up to 16 KiB with `truncated` by reading each content row through the existing `/v1/activity-content`. Inlining on the Host would grow the Activity page reply buffer to about 1.5 MiB, a resident-memory cost. F1 is complete with #876.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
