@@ -125,6 +125,22 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 	}
 });
 
+test("an idle following feed ends when its signal aborts", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:abort" });
+		const controller = new AbortController();
+		const followed = session.listActivity({ follow: true, signal: controller.signal });
+		const pending = followed.next(); // nothing will arrive
+		setTimeout(() => controller.abort(), 300);
+		const result = await Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("hung"), 5_000))]);
+		assert.deepEqual(result, { value: undefined, done: true });
+	} finally {
+		await rui.close();
+	}
+});
+
 test("inline text keeps its last character and kind filters may come in any order", { skip }, async () => {
 	const rui = await connect();
 	try {

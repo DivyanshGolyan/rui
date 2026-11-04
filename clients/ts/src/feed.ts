@@ -3,7 +3,6 @@
 // references only, and no cursor type. The client encodes the cursor from a
 // row's position and ordinal, and fills `text` from /v1/activity-content, so
 // the Host holds no reply buffer for either (D168).
-import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Link } from "./sessions.ts";
 import type { components } from "./wire.ts";
@@ -30,6 +29,8 @@ export interface ListActivityOptions {
 	follow?: boolean;
 	/** Only these kinds, by their wire names. Left out, every kind. */
 	kinds?: readonly FeedKind[];
+	/** Ends the iterator, even while it waits for new entries: a pending `next()` then resolves as done. */
+	signal?: AbortSignal;
 }
 
 /**
@@ -114,6 +115,20 @@ export async function readContent(link: Link, session: string, entry: { position
 	return bytes.toString("utf8");
 }
 
+/** Waits `ms`, or less when `signal` aborts. */
+function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	return new Promise((resolve) => {
+		if (signal?.aborted) return resolve();
+		const done = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", done);
+			resolve();
+		};
+		const timer = setTimeout(done, ms);
+		signal?.addEventListener("abort", done, { once: true });
+	});
+}
+
 export async function* listActivity(link: Link, session: string, options: ListActivityOptions = {}): AsyncGenerator<FeedEntry, void, undefined> {
 	// The Host wants kinds in its own order, each once.
 	const kinds = options.kinds === undefined ? FEED_KINDS : FEED_KINDS.filter((kind) => options.kinds?.includes(kind));
@@ -126,7 +141,8 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 	}
 	let pinnedEnd: string | null = null;
 	let wait = FIRST_POLL_MS;
-	for (;;) {
+	const { signal } = options;
+	while (!signal?.aborted) {
 		const page = JSON.parse(
 			(await link.exchange("/v1/activity-page", (store) => activityBody(store, session, { end: pinnedEnd, position, ordinal, kinds }))).toString("utf8"),
 		) as Schemas["ActivityPageReply"];
@@ -153,7 +169,7 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 		if (!options.follow) return;
 		pinnedEnd = null;
 		if (page.items.length > 0) wait = FIRST_POLL_MS;
-		else await sleep(wait);
+		else await pause(wait, signal);
 		if (page.items.length === 0) wait = Math.min(wait * 2, MAX_POLL_MS);
 	}
 }
