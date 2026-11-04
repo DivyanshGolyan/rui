@@ -57,7 +57,9 @@ pub fn toolSet(mask: c_int) !tool_catalog.ToolSet {
 fn requestedTools(requested: *const protocol.Configuration) tool_catalog.ToolSet {
     if (requested.tools.state != .value) return toolSet(default_tools_mask) catch unreachable;
     var set: tool_catalog.ToolSet = .empty;
-    for (requested.tools.values[0..requested.tools.count]) |tool| set.insert(tool);
+    // The parser admits only tools the Host offers: the built-ins.
+    var names = requested.tools.iterator();
+    while (names.next()) |name| set.insert(tool_catalog.builtIn(name).?);
     return set;
 }
 

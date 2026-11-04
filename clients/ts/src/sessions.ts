@@ -26,7 +26,8 @@ export interface SessionSpec {
 	/** Fixed for the Session's life. */
 	model?: string;
 	instructions?: string;
-	tools?: ("bash" | "web_search")[];
+	/** Tool names the Host offers, such as `bash` and `web_search`. */
+	tools?: string[];
 	permissionMode?: "ask" | "bypass";
 	/** Reasoning effort. `null` returns to the model's default. */
 	effort?: string | null;
@@ -65,8 +66,6 @@ export interface ModelSummary {
 	known: boolean;
 }
 
-const TOOLS = ["bash", "web_search"] as const;
-
 /** Every row kind: the Host refuses an empty set. */
 const ALL_KINDS = JSON.stringify(["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "sent", "send_failed", "received"]);
 
@@ -95,8 +94,9 @@ function configuration(spec: SessionSpec): string {
 		optional(spec.provider, text),
 		optional(spec.model, text),
 		optional(spec.instructions, text),
-		// The Host takes the catalog order, each tool once.
-		optional(spec.tools, (tools) => JSON.stringify(TOOLS.filter((tool) => tools.includes(tool)))),
+		// The Host takes the names sorted by bytes, each once. Tool names are
+		// ASCII, so code-unit order is byte order.
+		optional(spec.tools, (tools) => JSON.stringify([...new Set(tools)].sort())),
 		optional(spec.permissionMode, text),
 		OMITTED, // output_schema
 		clearable(spec.compactAt, (tokens) => JSON.stringify(String(tokens))),
