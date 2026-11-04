@@ -315,6 +315,8 @@ D215. Schema numbers after 6d go to format PRs in landing order, whichever merge
 
 D216. (lane K P2 premise, accepted) Word search (F3): SQL only narrows candidates, and the Host matches by streaming content with an n-1 byte carry across chunk edges, so SQLite and MySQL give the same answers. Folding is ASCII case-insensitive, defined once in Zig. Each request has a fixed scan budget and returns a cursor to continue. Full-text indexes are deferred until measured. Premise: /mnt/project-files/rui-seams/spec/p2-word-search-premise.md.
 
+D217. (lane K K6 premise, accepted) D191's drop is a history floor: a nullable `model_operation.history_floor` that later requests carry forward, so dropped messages never return. The unit dropped is one host message, or one Operation's outputs together with its tool results; instructions and the first User Message are never dropped. It runs only when the provider rejects the compaction request itself for overflow. The first level targets the catalog window minus reservation at 4 bytes per token, and each further level halves it. After level 3, or when nothing is left to drop, the Turn ends `context_full`, so at most 4 requests. Every compaction adds a `compacted {dropped}` feed entry, including when nothing was dropped. Premise: /mnt/project-files/rui-seams/spec/k6-compaction-room-premise.md.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
