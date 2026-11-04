@@ -209,7 +209,7 @@ const Borrowed = if (poisons) struct {
     fn check(_: *const Borrowed) void {}
 };
 
-/// A count only tests read: logical rounds and engine passes.
+/// A count only tests read: engine passes.
 const TestCount = if (@import("builtin").is_test) u32 else u0;
 
 fn bump(count: *TestCount) void {
@@ -235,9 +235,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         failed_statement: ?*c.sqlite3_stmt = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
-        /// Logical rounds (`run` and `commit`), each one round trip on a
-        /// network engine, and the engine passes inside them.
-        rounds: TestCount = 0,
+        /// Engine passes. Rounds, each one round trip on a network
+        /// engine, count on the Store (`testing_content_work.rounds` for
+        /// `run` and `commit`, `.content_rounds` for `readRaw`).
         passes: TestCount = 0,
         /// None in a read Access, which claims no positions.
         claims: [if (mode == .read or mode == .single) 0 else max_claims]Positions = undefined,
@@ -355,7 +355,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Ends the round: runs every queued statement in order, and
         /// reports the first failure of this round's passes.
         pub fn run(a: *Self) Error!void {
-            bump(&a.rounds);
+            if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
             a.pass();
             if (a.failure) |err| return err;
         }
@@ -464,11 +464,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Reads exactly `destination.len` bytes of the content row
         /// `content_id`'s payload at `offset`, as a round of its own,
         /// through the Store's one reused blob handle, which the Entry
-        /// closes. Nothing may be queued, in every build.
+        /// closes. Nothing may be queued, in every build. An empty
+        /// `destination` reads nothing and counts no round.
         pub fn readRaw(a: *Self, content_id: u64, offset: u64, destination: []u8) Error!void {
             if (a.queued != 0) @panic("readRaw is a round of its own; run what is queued first");
             if (a.failure) |err| return err;
             if (destination.len == 0) return;
+            if (@import("builtin").is_test) a.store.testing_content_work.content_rounds += 1;
             if (offset > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
             const id: i64 = @intCast(content_id);
             const blob = &a.store.read_blob;
@@ -513,7 +515,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// itself.
         pub fn commit(a: *Self) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
-            bump(&a.rounds);
+            if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
             if (mode == .single) {
                 // A second statement would not commit with the first.
                 if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");
