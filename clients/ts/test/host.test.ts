@@ -27,6 +27,7 @@ function newStore(): string {
 	return join(realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-"))), "store");
 }
 
+// Test files run one at a time (--test-concurrency=1): another file's Hosts would show up here.
 function runtimeDirs(): Set<string> {
 	return new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("rui-")));
 }
