@@ -5410,8 +5410,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             const first = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 16), first.count);
             try std.testing.expect(first.more);
-            try std.testing.expectEqual(@as(u64, 40), first.items[0].position);
-            try std.testing.expectEqual(@as(u64, 25), first.items[15].position);
+            try std.testing.expectEqual(@as(u64, 41), first.items[0].position);
+            try std.testing.expectEqual(@as(u64, 26), first.items[15].position);
             for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
             try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
             try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{
@@ -5422,7 +5422,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             }));
             try std.testing.expect(!storage.isFenced());
             var unicode_reader: ContentReader = undefined;
-            unicode_reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = 40 }));
+            unicode_reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = 41 }));
             var lead: [1]u8 = undefined;
             var rest: [4]u8 = undefined;
             try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -5452,8 +5452,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             const older = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 4), older.count);
             try std.testing.expect(!older.more);
-            try std.testing.expectEqual(@as(u64, 24), older.items[0].position);
-            try std.testing.expectEqual(@as(u64, 21), older.items[3].position);
+            try std.testing.expectEqual(@as(u64, 25), older.items[0].position);
+            try std.testing.expectEqual(@as(u64, 22), older.items[3].position);
             try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
             const fresh = try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session });
             try std.testing.expectEqual(@as(usize, 16), fresh.count);
@@ -5466,10 +5466,10 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
             try std.testing.expectEqualStrings("xx", &tail);
             reader.close();
-            read.position = 41; // the applied instruction is not public content
+            read.position = 42; // the applied instruction is not public content
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&read));
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = .{}, .position = 1 }));
-            try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 21, .start = 1024 * 1024 + 1 }));
+            try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 22, .start = 1024 * 1024 + 1 }));
             try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
             try std.testing.expect(!storage.isFenced());
         }
