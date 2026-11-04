@@ -8304,6 +8304,8 @@ const EntryPoint = enum {
     admitNextActionAttempt,
     readBashExecutionInput,
     revokeActionSender,
+    nextCoreAction,
+    deliverAgentMessage,
     actionSupersededByStop,
     withActionDispatchHandoff,
     settleActionAttempt,
@@ -8355,6 +8357,8 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
     .revokeActionSender = 2,
+    .nextCoreAction = 3,
+    .deliverAgentMessage = 3,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
     .settleActionAttempt = 3,
@@ -8504,6 +8508,7 @@ test "each Store entry point takes its round budget on its common path" {
             try plainTurn(&storage, &tmp, &meter);
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);
+            try coreTurn(&storage, &tmp, &meter);
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
                 const measured = meter.measured.get(point) orelse {
@@ -8608,6 +8613,29 @@ test "each Store entry point takes its round budget on its common path" {
         /// Two Bash calls under ask: one allowed, run and settled, one
         /// denied; then the continuation's history, its failure, and the
         /// Session's reads.
+        fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("budget-core", "", workspace, "model-a");
+            command.configuration.tools.state = .value;
+            command.configuration.tools = try .of(&.{"message_agent"});
+            const session = storage.configure(&command, .{}).accepted.session;
+            try submitTestMessage(storage, tmp, "budget-core-input", "budget-core-key", session.slice(), "message yourself");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arguments_buffer: [64]u8 = undefined;
+            const decoded = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
+            var encoded_buffer: [96]u8 = undefined;
+            const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
+            const calls = [_]TestingCall{.{ .item_id = "core-item", .name = "message_agent", .encoded_call_id = "core-call", .decoded_call_id = "core-call", .encoded_arguments = encoded, .decoded_arguments = decoded }};
+            try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
+            meter.start();
+            const core = (try storage.nextCoreAction()).?;
+            meter.stop(.nextCoreAction);
+            meter.start();
+            try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
+            meter.stop(.deliverAgentMessage);
+        }
+
         fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSessionAsk(storage, "budget-tools");
             try submitTestMessage(storage, tmp, "budget-tools-input", "budget-tools-key", session.slice(), "run");

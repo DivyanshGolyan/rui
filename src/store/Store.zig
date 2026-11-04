@@ -809,6 +809,10 @@ pub const Store = struct {
 
     /// The next core tool call to run (D24), or null.
     pub fn nextCoreAction(self: *Store) !?CoreActionInput {
+        return self.queue().run(nextCoreActionHeld, .{self});
+    }
+
+    fn nextCoreActionHeld(self: *Store) !?CoreActionInput {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -819,6 +823,10 @@ pub const Store = struct {
     /// Runs the `message_agent` call `binding` names with its checked
     /// arguments, in one transaction.
     pub fn deliverAgentMessage(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
+        return self.queue().write(deliverAgentMessageHeld, .{ self, binding, target, text, faults });
+    }
+
+    fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
