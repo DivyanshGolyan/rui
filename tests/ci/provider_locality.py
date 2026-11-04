@@ -54,7 +54,8 @@ RULES = (
 # a model. Writing the name goes through its handle, not `modelName()`.
 CODEC_RULES = (
     ("reads the model name", re.compile(r"\bmodelName\(")),
-    ("names a model", re.compile(r'"(?:gpt|o\d|codex)[-\w.]*"', re.IGNORECASE)),
+    # A quoted or `\\` multiline string that is a model ID.
+    ("names a model", re.compile(r'(?:"|\\\\)(?:gpt|o\d|codex)[-\w.]*(?:"|$)', re.IGNORECASE | re.MULTILINE)),
 )
 
 # Core files that must name a provider fact, each with why.
@@ -91,15 +92,13 @@ def owned(relative):
     return any(Path(relative).match(pattern) for pattern in PROVIDER_OWNED)
 
 
-def violations(root=SRC):
+def scan(paths, root, rules, allowed=frozenset()):
     found = []
-    for path in sorted(root.rglob("*.zig")):
+    for path in paths:
         relative = path.relative_to(root).as_posix()
-        if owned(relative):
-            continue
         code = production(path.read_text())
-        for name, pattern in RULES:
-            if (relative, name) in ALLOWED:
+        for name, pattern in rules:
+            if (relative, name) in allowed:
                 continue
             for match in pattern.finditer(code):
                 line = code.count("\n", 0, match.start()) + 1
@@ -107,15 +106,13 @@ def violations(root=SRC):
     return found
 
 
+def violations(root=SRC):
+    core = [path for path in sorted(root.rglob("*.zig")) if not owned(path.relative_to(root).as_posix())]
+    return scan(core, root, RULES, ALLOWED)
+
+
 def codec_violations(root=SRC):
-    found = []
-    for path in sorted((root / "codecs").rglob("*.zig")):
-        code = production(path.read_text())
-        for name, pattern in CODEC_RULES:
-            for match in pattern.finditer(code):
-                line = code.count("\n", 0, match.start()) + 1
-                found.append(f"src/{path.relative_to(root).as_posix()}:{line}: {name}: {match.group(0)}")
-    return found
+    return scan(sorted((root / "codecs").rglob("*.zig")), root, CODEC_RULES)
 
 
 if __name__ == "__main__":

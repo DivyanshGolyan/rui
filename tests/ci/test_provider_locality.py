@@ -19,10 +19,12 @@ class ProviderLocalityTest(unittest.TestCase):
         code = production('const models = [_][]const u8{"gpt-5.5"};\n'
                           'const p = parallel(settings.modelName());\n'
                           'test "x" {\n    _ = "GPT-6.1-sol";\n}\n'
-                          'const q = "gpt"; // "o3-mini"\n')
+                          'const q = "gpt"; // "o3-mini"\n'
+                          'const r =\n    \\\\codex-mini\n;\n'
+                          'const s = "O0 k1";\n')
         hits = [(name, match.group(0)) for name, pattern in CODEC_RULES for match in pattern.finditer(code)]
         self.assertEqual(hits, [("reads the model name", "modelName("), ("names a model", '"gpt-5.5"'),
-                                ("names a model", '"gpt"')])
+                                ("names a model", '"gpt"'), ("names a model", "\\\\codex-mini")])
 
     def test_a_rule_catches_what_it_names(self):
         code = production('const a = @import("codex_auth.zig");\n'
