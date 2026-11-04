@@ -48,7 +48,7 @@ SQLITE_TESTS = "src/store/sqlite_tests.zig"
 # and a Store opened by its database path.
 SQLITE_CODE = re.compile(
     r"\bsqlite\.|\bc\.(?:sqlite3|SQLITE)|\.database\b|\bStatementCache\b|\bsqlite_heap_bytes\b|"
-    r"\.passes\b|\.statements\b|\btesting_work\.(?:read|blob|closes)\b|\.read_blob\b|"
+    r"\.passes\b|\.statements\b|\btesting_content_work\.(?:read|blob|closes)\b|\.read_blob\b|"
     r"\.open\(\s*(?:std\.testing\.)?io\s*,|\bopenWithOptions\b")
 # Fixture text that names a SQLite mechanism stays raw SQL.
 SQLITE_TEXT = re.compile(
@@ -459,7 +459,7 @@ REASONS = (
     ("a SQLite mechanism", re.compile(
         r"PRAGMA|pragmaInt|blob|wal_checkpoint|sqlite3_limit|heap|sqlite3_open|sqlite3_close|\.open\(\s*(?:std\.testing\.)?io\s*,|"
         r"openWithOptions|get_autocommit|txn_state|sqlite3_changes|sqlite_schema|TEMP TRIGGER|ALTER TABLE|CREATE |"
-        r"probeConstraint|touch_oracle_tables|sqliteDiagnostic|db_status|testing_work\\.(?:read|blob|closes)|read_blob|rawContentCount")),
+        r"probeConstraint|touch_oracle_tables|sqliteDiagnostic|db_status|testing_content_work\.(?:read|blob|closes)|read_blob|rawContentCount")),
     ("raw SQL the fixtures do not cover", re.compile(r".")),
 )
 

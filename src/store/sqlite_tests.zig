@@ -462,8 +462,9 @@ test "a round queues one statement any number of times, an engine pass before ea
         id.* = try a.identity(.content_id);
         a.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = digest.*, .length = index + 1 });
     }
+    const before = storage.testing_content_work.rounds;
     try a.run();
-    try std.testing.expectEqual(1, a.rounds);
+    try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
     try std.testing.expectEqual(9, a.passes);
     // Each binding stepped before the next replaced it: nine rows, in order.
     for (ids, 0..) |id, index| {
@@ -489,8 +490,9 @@ test "a full queue takes an engine pass and the round still counts once" {
     const id = try a.identity(.content_id);
     a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 8 });
     for (0..8) |index| a.writeContent(id, "ninefold"[index..][0..1]);
+    const before = storage.testing_content_work.rounds;
     try a.run();
-    try std.testing.expectEqual(1, a.rounds);
+    try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
     try std.testing.expectEqual(2, a.passes);
     try a.abandon(.{});
 }
@@ -4749,7 +4751,7 @@ test "a large message's parts read only their own ranges" {
     while (try cursor.next(&view)) |entry| {
         if (entry.kind != .provider_output) continue;
         _ = try view.openOutput(entry.position);
-        const before = storage.testing_work.blob.load(.monotonic);
+        const before = storage.testing_content_work.blob.load(.monotonic);
         var window: [4096]u8 = undefined;
         var text_bytes: u64 = 0;
         while (try view.nextOutputPart()) |part| {
@@ -4766,7 +4768,7 @@ test "a large message's parts read only their own ranges" {
             text_bytes += offset;
         }
         try std.testing.expectEqual(@as(u64, 64 + large.len), text_bytes);
-        try std.testing.expectEqual(text_bytes, storage.testing_work.blob.load(.monotonic) - before);
+        try std.testing.expectEqual(text_bytes, storage.testing_content_work.blob.load(.monotonic) - before);
         break;
     } else return error.MissingMessage;
     try std.testing.expect(!storage.isFenced());
@@ -7358,7 +7360,9 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     defer entry.release();
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
+    const before = storage.testing_content_work.rounds;
     try report_domain.renderSessionList(&a, &.{}, &capture);
+    const rounds = storage.testing_content_work.rounds - before;
     var report = try capture.seal();
     defer report.deinit();
     var bytes: [8192]u8 = undefined;
@@ -7371,7 +7375,7 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     // The stopped rows' seven: the page; the latest Turns and first-Message
     // seeks; the cutoff, the queue after it, the excluded Message and its
     // stop; the rows' settings. The awaiting rows end after their Actions.
-    try std.testing.expectEqual(7, a.rounds);
+    try std.testing.expectEqual(7, rounds);
     // A pass ends where a round queues a statement again, so a round takes
     // as many as its most repeated statement's rows: 1 for the page, 8 for
     // the rows' first reads, 6 cutoffs, 6 queue seeks, 2 excluded seeks, 2
@@ -7916,20 +7920,23 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
     {
         var a: store_access.Access(.read, error{}) = .open(&entry);
         defer a.deinit();
+        const before = storage.testing_content_work.rounds;
         _ = try model_settlement_domain.attemptKind(&a, attempt.binding);
-        try std.testing.expectEqual(1, a.rounds);
+        try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
     }
     {
         var a: store_access.Access(.write, error{}) = .open(&entry);
         defer a.deinit();
+        const before = storage.testing_content_work.rounds;
         try historical_domain.sealOn(&a, attempt.binding, &TestingAttempt.seal);
-        try std.testing.expectEqual(2, a.rounds);
+        try std.testing.expectEqual(2, storage.testing_content_work.rounds - before);
     }
     {
         var a: store_access.Access(.read, error{}) = .open(&entry);
         defer a.deinit();
+        const before = storage.testing_content_work.rounds;
         _ = try content_domain.contentIdOf(&a, attempt.content, false);
-        try std.testing.expectEqual(1, a.rounds);
+        try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
     }
 }
 

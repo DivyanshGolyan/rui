@@ -2317,7 +2317,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
         }
     };
     var peer = Peer{ .fd = sockets[1] };
-    storage.testing_work = .{};
+    storage.testing_content_work = .{};
     {
         // Drain during delivery: the response exceeds Darwin's socket queue.
         // The parent owns both FDs and keeps peer storage alive until join,
@@ -2329,18 +2329,18 @@ test "Conversation stream native delivery reads each byte once and closes on fai
         }
         try deliverConversationContent(&host, sockets[0], command);
     }
-    try std.testing.expectEqual(@as(u64, expected.len), storage.testing_work.read.load(.monotonic));
-    try std.testing.expectEqual(@as(u64, 1), storage.testing_work.closes.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.read.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
     try std.testing.expect(!peer.failed);
     const body_start = (std.mem.indexOf(u8, peer.received[0..peer.used], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
     try std.testing.expectEqualStrings(expected, peer.received[body_start..peer.used]);
     // Failed delivery is not canonical corruption; the one reader still closes
     // without traversing the rest of the content or keeping caller storage.
-    storage.testing_work = .{};
+    storage.testing_content_work = .{};
     try deliverConversationContent(&host, -1, command);
-    try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_work.read.load(.monotonic));
-    try std.testing.expectEqual(@as(u64, 1), storage.testing_work.closes.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
 }
 

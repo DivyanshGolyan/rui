@@ -209,17 +209,11 @@ const Borrowed = if (poisons) struct {
     fn check(_: *const Borrowed) void {}
 };
 
-/// A count only tests read: logical rounds and engine passes.
+/// A count only tests read: engine passes.
 const TestCount = if (@import("builtin").is_test) u32 else u0;
 
 fn bump(count: *TestCount) void {
     if (TestCount != u0) count.* += 1;
-}
-
-/// Counts one round on the Access and, in test builds, on its Store.
-fn countRound(rounds: *TestCount, store: *Store) void {
-    bump(rounds);
-    if (@import("builtin").is_test) store.testing_work.rounds += 1;
 }
 
 pub fn Access(comptime mode: Mode, comptime Guards: type) type {
@@ -241,11 +235,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         failed_statement: ?*c.sqlite3_stmt = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
-        /// Logical rounds (`run`, `commit`, and `readRaw` of a non-empty
-        /// destination),
-        /// each one round trip on a network engine, and the engine passes
-        /// inside them.
-        rounds: TestCount = 0,
+        /// Engine passes. Rounds, each one round trip on a network
+        /// engine, count on the Store (`testing_content_work.rounds` for
+        /// `run` and `commit`, `.content_rounds` for `readRaw`).
         passes: TestCount = 0,
         /// None in a read Access, which claims no positions.
         claims: [if (mode == .read or mode == .single) 0 else max_claims]Positions = undefined,
@@ -363,7 +355,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Ends the round: runs every queued statement in order, and
         /// reports the first failure of this round's passes.
         pub fn run(a: *Self) Error!void {
-            countRound(&a.rounds, a.store);
+            if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
             a.pass();
             if (a.failure) |err| return err;
         }
@@ -478,7 +470,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (a.queued != 0) @panic("readRaw is a round of its own; run what is queued first");
             if (a.failure) |err| return err;
             if (destination.len == 0) return;
-            countRound(&a.rounds, a.store);
+            if (@import("builtin").is_test) a.store.testing_content_work.content_rounds += 1;
             if (offset > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
             const id: i64 = @intCast(content_id);
             const blob = &a.store.read_blob;
@@ -492,7 +484,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 blob.content_id = id;
             }
             if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(offset)) != c.SQLITE_OK) return error.ContentReadFailed;
-            if (@import("builtin").is_test) _ = a.store.testing_work.blob.fetchAdd(destination.len, .monotonic);
+            if (@import("builtin").is_test) _ = a.store.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
         }
 
         /// A sink for the payload of the content row `content_id`. It
@@ -523,7 +515,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// itself.
         pub fn commit(a: *Self) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
-            countRound(&a.rounds, a.store);
+            if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
             if (mode == .single) {
                 // A second statement would not commit with the first.
                 if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");

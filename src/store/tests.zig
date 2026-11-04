@@ -5824,16 +5824,18 @@ fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, a
         defer entry.release();
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
+        const before = storage.testing_content_work.rounds;
         try reads_domain.publicConversationPage(&a, conversation, &public_page);
-        result.rounds[0] = a.rounds;
+        result.rounds[0] = storage.testing_content_work.rounds - before;
     }
     {
         const entry = try store_core.enter(storage, .none);
         defer entry.release();
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
+        const before = storage.testing_content_work.rounds;
         try reads_domain.activityPage(&a, activity, &activity_page);
-        result.rounds[1] = a.rounds;
+        result.rounds[1] = storage.testing_content_work.rounds - before;
     }
     result.conversation = public_page.count;
     result.activity = activity_page.count;
@@ -7180,14 +7182,16 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
     defer entry.release();
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
+    const before = storage.testing_content_work.rounds;
     try report_domain.renderSessionList(&a, &.{}, &capture);
+    const rounds = storage.testing_content_work.rounds - before;
     var report = try capture.seal();
     defer report.deinit();
     var bytes: [8192]u8 = undefined;
     const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
     // Every shown row's work went through its stop.
     try std.testing.expectEqual(count, std.mem.count(u8, bytes[0..read], "\"kind\":\"stopped\""));
-    return a.rounds;
+    return rounds;
 }
 
 test "a list page's rows share their rounds, so eight rows take as many as one" {
@@ -7300,8 +7304,9 @@ fn reportRoundsForTesting(case: *store_testing.Case, shape: TestingWorkShape) !u
     defer entry.release();
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
+    const before = storage.testing_content_work.rounds;
     try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
-    return a.rounds;
+    return storage.testing_content_work.rounds - before;
 }
 
 /// One tool cycle of the cost fixture: a Message whose Operation proposes
@@ -7352,7 +7357,8 @@ test "a Current report takes its reads' dependency depth in rounds, not its rows
 
 /// `session`'s Full history rendered alone, on an Access of its own, as
 /// `renderFull` follows the Current facts, inside `{"head":0...}` so it
-/// parses. The bytes are the caller's; `rounds` gets the Access's rounds.
+/// parses. The bytes are the caller's; `rounds` gets the rounds
+/// `renderFull` ran, not its `readRaw` windows.
 pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, rounds: ?*u32) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
@@ -7366,9 +7372,10 @@ pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try capture.append("{\"head\":0");
+        const before = storage.testing_content_work.rounds;
         try report_domain.renderFull(&a, session, &capture);
         try capture.append("}");
-        if (rounds) |out| out.* = a.rounds;
+        if (rounds) |out| out.* = storage.testing_content_work.rounds - before;
     }
     var report = try capture.seal();
     defer report.deinit();
@@ -7494,16 +7501,21 @@ test "Full history takes a round per chunk" {
             const answer = [_]TestingAnswerPart{.{ .encoded = "hello", .decoded = "hello" }};
             try answerTestTurn(&storage, &tmp, session.slice(), "history-rounds", &answer);
             var rounds: u32 = 0;
+            const content_before = storage.testing_content_work.content_rounds;
             std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), &rounds));
             // Every list fits one chunk, so the rounds are the reads' depth: one
             // for the revisions, whose one revision's empty instructions read no
             // content, then one per run of `renderFull`: Messages; Conversation,
             // Turns and Operations; calls; Actions; decisions, stops,
             // interruptions and results. A run's lists share a round because
-            // every list but its last renders all its rows in the pass. The
-            // Message's and the answer's content windows are a `readRaw` round
-            // each.
-            try std.testing.expectEqual(@as(u32, 1 + 5 + 2), rounds);
+            // every list but its last renders all its rows in the pass.
+            try std.testing.expectEqual(@as(u32, 1 + 5), rounds);
+            // The Message's and the answer's content are content rounds,
+            // which differ by engine: on SQLite a `readRaw` window each.
+            const content_rounds: u16 = switch (case.engine) {
+                .sqlite => 2,
+            };
+            try std.testing.expectEqual(content_rounds, storage.testing_content_work.content_rounds - content_before);
         }
     }.run);
 }
@@ -7788,8 +7800,10 @@ const EntryPoint = enum {
     checkAttempt,
 };
 
-/// Each entry point's rounds (`Store.testing_work.rounds`) on the path the
-/// round budget test drives it, measured on SQLite at 5e-3's head.
+/// Each entry point's rounds (`Access.run` and `commit`, counted in
+/// `Store.testing_content_work.rounds`) on the path the round budget test
+/// drives it. Content rounds (`readRaw` windows) differ by engine, so
+/// `content_round_budgets` holds them apart.
 const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .configure = 3,
     .submitMessageWithModel = 2,
@@ -7823,7 +7837,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .recoverOneExhaustedModelAttempt = 1,
     .settleModelSuccess = 2,
     .openContentIdentity = 1,
-    .readOwnedContent = 1,
+    .readOwnedContent = 0,
     .readHistoricalSettings = 2,
     .readHistoricalEntry = 10,
     .validateHistoricalOutputsStep = 1,
@@ -7836,7 +7850,28 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .checkAttempt = 1,
 });
 
+/// Each entry point's content rounds (`readRaw` windows, counted in
+/// `Store.testing_content_work.content_rounds`) on the same path, per
+/// engine: how many windows a blob read takes depends on the engine's
+/// blob access, so each engine states its own. An entry point left out
+/// takes none.
+fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
+    return switch (engine) {
+        // One window holds the driven content.
+        .sqlite => switch (point) {
+            .readOwnedContent => 1,
+            else => 0,
+        },
+    };
+}
+
+/// The functions that enter the Store only to serve tests, so they take
+/// no round budget.
+const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting" };
+
 test "every function that enters the Store has a round budget" {
+    // Every Store file but its test files and wire clients;
+    // import_architecture.py checks this list against src/store/.
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
@@ -7850,17 +7885,39 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("rsql.zig"),
+        @embedFile("schema.zig"),
+        @embedFile("sqlite.zig"),
+        @embedFile("testing.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
+    var fixtures: [entering_fixtures.len]bool = @splat(false);
     inline for (sources) |source| {
         var at: usize = 0;
-        while (std.mem.indexOfPos(u8, source, at, "enter" ++ "(self, ")) |index| : (at = index + 1) {
+        while (std.mem.indexOfPos(u8, source, at, "enter" ++ "(")) |index| : (at = index + 1) {
+            if (index > 0 and (std.ascii.isAlphanumeric(source[index - 1]) or source[index - 1] == '_')) continue;
+            if (std.mem.endsWith(u8, source[0..index], "fn ")) continue;
+            // Every call enters with the Store it is a method of.
+            if (!std.mem.startsWith(u8, source[index..], "enter" ++ "(self, ")) {
+                std.debug.print("an enter call takes another first argument: {s}\n", .{source[index..][0..@min(40, source.len - index)]});
+                return error.EnterWithoutSelf;
+            }
             const before = source[0..index];
             const fn_at = @max(std.mem.lastIndexOf(u8, before, " fn ") orelse 0, std.mem.lastIndexOf(u8, before, "\nfn ") orelse 0) + " fn ".len;
             var end = fn_at;
             while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
             const name = source[fn_at..end];
-            if (std.mem.endsWith(u8, name, "ForTesting")) continue;
+            if (std.mem.endsWith(u8, name, "ForTesting")) {
+                const listed = for (entering_fixtures, 0..) |fixture, position| {
+                    if (std.mem.eql(u8, fixture, name)) break position;
+                } else {
+                    std.debug.print("{s} enters the Store but is not in entering_fixtures\n", .{name});
+                    return error.UnlistedFixture;
+                };
+                try std.testing.expect(!fixtures[listed]);
+                fixtures[listed] = true;
+                continue;
+            }
             const point = std.meta.stringToEnum(EntryPoint, name) orelse {
                 std.debug.print("{s} enters the Store but has no round budget\n", .{name});
                 return error.EntryPointWithoutBudget;
@@ -7870,20 +7927,28 @@ test "every function that enters the Store has a round budget" {
         }
     }
     try std.testing.expectEqual(std.enums.values(EntryPoint).len, found.count());
+    for (fixtures) |seen| try std.testing.expect(seen);
 }
 
 const RoundMeter = struct {
     storage: *Store,
-    before: u32 = 0,
-    measured: std.EnumArray(EntryPoint, ?u32) = .initFill(null),
+    rounds_before: u16 = 0,
+    content_before: u16 = 0,
+    measured: std.EnumArray(EntryPoint, ?Measured) = .initFill(null),
+
+    const Measured = struct { rounds: u16, content_rounds: u16 };
 
     fn start(meter: *RoundMeter) void {
-        meter.before = meter.storage.testing_work.rounds;
+        meter.rounds_before = meter.storage.testing_content_work.rounds;
+        meter.content_before = meter.storage.testing_content_work.content_rounds;
     }
 
     fn stop(meter: *RoundMeter, point: EntryPoint) void {
         std.debug.assert(meter.measured.get(point) == null);
-        meter.measured.set(point, meter.storage.testing_work.rounds - meter.before);
+        meter.measured.set(point, .{
+            .rounds = meter.storage.testing_content_work.rounds - meter.rounds_before,
+            .content_rounds = meter.storage.testing_content_work.content_rounds - meter.content_before,
+        });
     }
 };
 
@@ -7906,10 +7971,20 @@ test "each Store entry point takes its round budget on its common path" {
                     failed = true;
                     continue;
                 };
-                if (measured != round_budgets.get(point)) failed = true;
+                if (measured.rounds != round_budgets.get(point)) failed = true;
+                if (measured.content_rounds != contentRoundBudget(case.engine, point)) failed = true;
             }
             if (failed) {
-                for (std.enums.values(EntryPoint)) |point| std.debug.print(".{s} = {?d}, budget {d}\n", .{ @tagName(point), meter.measured.get(point), round_budgets.get(point) });
+                for (std.enums.values(EntryPoint)) |point| {
+                    const measured = meter.measured.get(point) orelse continue;
+                    std.debug.print(".{s} = {d} (budget {d}), content {d} (budget {d})\n", .{
+                        @tagName(point),
+                        measured.rounds,
+                        round_budgets.get(point),
+                        measured.content_rounds,
+                        contentRoundBudget(case.engine, point),
+                    });
+                }
                 return error.RoundBudgetChanged;
             }
             try std.testing.expect(!storage.isFenced());
