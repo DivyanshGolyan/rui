@@ -6110,7 +6110,7 @@ test "every activity row is dated by the fact that owns it" {
                     .stop => 108,
                     // Asked when its call was made.
                     .approval_requested => 104,
-                    .hosted_call, .sent, .send_failed, .received, .session_changed => unreachable,
+                    .hosted_call, .sent, .send_failed, .received, .session_changed, .compacted => unreachable,
                 };
                 try std.testing.expectEqual(expected, item.at);
                 seen.insert(item.value);
@@ -9670,6 +9670,66 @@ test "each setting a revision changes is one session_changed row at the position
             try std.testing.expectEqual(@as(usize, 2), backward.count);
             try std.testing.expectEqual(protocol.SessionField.label, backward.items[0].value.session_changed.field);
             try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "each compaction that succeeds is one compacted row, with the entries its floor dropped" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("compacted-create", "", workspace, "model-a");
+            const session = storage.configure(&create, .{}).accepted.session;
+            var request: protocol.ActivityPage = .{ .kinds = .initOne(.compacted) };
+            try request.session.set(session.slice());
+            // model-a's levels aim at 512,000, 128,000 and 32,000 bytes:
+            // level 1 drops the 600 KB Message and keeps the first and last.
+            const big = try std.testing.allocator.alloc(u8, 600_000);
+            defer std.testing.allocator.free(big);
+            @memset(big, 'b');
+            try submitTestMessage(&storage, &tmp, "compacted-first", "compacted-first", session.slice(), "first");
+            try submitTestMessage(&storage, &tmp, "compacted-big", "compacted-big", session.slice(), big);
+            try submitTestMessage(&storage, &tmp, "compacted-last", "compacted-last", session.slice(), "last");
+            const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const full = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            // An overflowed compaction has no row.
+            try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
+            const room = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // A poll while the compaction runs reads a frozen end past its
+            // admission; the row then takes a later position, so that
+            // prefix never gains it and a poll from its end finds it.
+            const frozen = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 0), frozen.count);
+            try settleCompactionForTesting(&storage, &tmp, room, &.{.compaction});
+            var reread = request;
+            reread.end = frozen.end;
+            try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, reread)).count);
+            var follow = request;
+            follow.position = frozen.end;
+            const followed = try store_core.activityPageForTesting(&storage, follow);
+            try std.testing.expectEqual(@as(usize, 1), followed.count);
+            try std.testing.expectEqual(room.operation_id, followed.items[0].value.compacted.operation);
+            // A later compaction without a floor drops nothing.
+            try submitTestMessage(&storage, &tmp, "compacted-again", "compacted-again", session.slice(), "again");
+            const again = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(again, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const plain = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCompactionForTesting(&storage, &tmp, plain, &.{.compaction});
+            const page = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 2), page.count);
+            for (page.items[0..2], [_]u64{ room.operation_id, plain.operation_id }, [_]u64{ 1, 0 }) |item, operation, dropped| {
+                try std.testing.expectEqual(protocol.ActivityItem.Compacted{ .operation = operation, .dropped = dropped }, item.value.compacted);
+                try std.testing.expectEqual(@as(u64, 0), item.ordinal);
+            }
+            try std.testing.expect(page.items[0].position < page.items[1].position);
         }
     }.run);
 }

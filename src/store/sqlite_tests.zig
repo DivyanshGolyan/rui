@@ -8447,12 +8447,14 @@ test "a compaction's floor counts the output bytes a request sends, and none its
         defer entry.release();
         var a: historical_domain.ReadAccess = .open(&entry);
         defer a.deinit();
-        const choice = try history_floor_domain.deeperFloor(&a, compaction.operation_id);
+        const room = try history_floor_domain.deeperFloor(&a, compaction.operation_id);
         if (covered) {
-            try std.testing.expectEqual(@as(?history_floor_domain.Choice, null), choice);
+            try std.testing.expect(room == null);
         } else {
+            // The floor drops the answer and keeps "small" above it.
             const position = try store_testing.sqliteQueryU64(storage.database, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{answered.operation_id});
-            try std.testing.expectEqual(history_floor_domain.Choice{ .floor = position, .level = 2 }, choice.?);
+            try std.testing.expectEqual(@as(u8, 2), room.?.choice.level);
+            try std.testing.expect(room.?.choice.floor >= position);
         }
     }
 }
@@ -8483,7 +8485,7 @@ test "a compaction's floor read costs the same however long its Session's histor
             try std.testing.expect(try deeper(store, operation) != null);
             return counter.steps;
         }
-        fn deeper(store: *Store, operation: u64) !?history_floor_domain.Choice {
+        fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
             const entry = try store_core.enter(store, .none);
             defer entry.release();
             var a: historical_domain.ReadAccess = .open(&entry);

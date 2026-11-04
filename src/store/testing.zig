@@ -474,7 +474,7 @@ pub fn setHistoryFloorForTesting(storage: *Store, operation: u64, text: []const 
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const digest = protocol.contentDigest(text);
     try exec(storage, "UPDATE model_operation SET history_floor=(SELECT e.session_position FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
-        "WHERE e.session_ref=model_operation.session_ref AND c.digest=?2 AND c.private=0),history_level=?3 WHERE operation_id=?1", .{ operation, Blob{ .bytes = &digest }, level });
+        "WHERE e.session_ref=model_operation.session_ref AND c.digest=?2 AND c.private=0),history_level=?3,history_dropped=0 WHERE operation_id=?1", .{ operation, Blob{ .bytes = &digest }, level });
 }
 
 /// Whether Turn `turn` ended with `outcome`.
