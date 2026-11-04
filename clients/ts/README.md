@@ -14,6 +14,12 @@ rui.on("exit", ({ code, signal, restarting }) => console.warn("rui exited", { co
 await rui.close();
 ```
 
+## Install
+
+The `rui` package carries the client. The `rui` executable comes from the platform package beside it
+(`rui-linux-x64`, `rui-linux-arm64` or `rui-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
+Pass `binary` to `Rui.connect` to name one yourself.
+
 `Rui.connect` writes the Store, the provider key and a private runtime directory to the child's stdin.
 The key never reaches the child's argv, environment or disk.
 The child gets only `PATH`, `HOME` and `TMPDIR` from your environment.
@@ -38,5 +44,8 @@ npm run generate   # after openapi.json changes
 npm run check      # wire.ts is fresh, and the package type-checks
 RUI_BINARY=../../zig-out/bin/rui npm test
 ```
+
+`node scripts/pack.mjs <version> <outdir> <platform>=<executable> ...` builds the release tarballs (the compiled client and one package per platform).
+It publishes nothing; the first npm publish waits for the maintainer.
 
 The repository's `zig build ts-client` runs the tests against the Rui it builds.
