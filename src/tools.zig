@@ -28,10 +28,10 @@ pub const Record = struct {
 
 /// The longest function name a provider accepts (OpenAI: 64 characters);
 /// a longer call name cannot match any record.
-pub const max_name_bytes = 64;
+pub const max_name_bytes = protocol.max_tool_name_bytes;
 
 /// The most tools one set offers.
-pub const max_tools = 128;
+pub const max_tools = protocol.max_tools;
 
 /// The identity of an ordered set of records, which the Store saves once:
 /// each member's name, owner and the content digests of its description
@@ -334,7 +334,10 @@ pub const BashArguments = struct {
     stdin_present: bool = false,
 };
 
-pub const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
+/// The built-in tools; the wire owns their names.
+pub const Tool = protocol.BuiltInTool;
+pub const builtIn = protocol.builtInTool;
+
 pub const ToolSet = std.EnumSet(Tool);
 
 /// Persisted tools_mask bit shared by Store encoding and model preparation.

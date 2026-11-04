@@ -1677,7 +1677,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     var configuration: protocol.ConfigureCommand = .{};
     try configuration.key.set("peer-tools");
     configuration.session = peer;
-    configuration.configuration.tools = .{ .state = .value, .count = 1, .values = .{ .bash, undefined } };
+    configuration.configuration.tools = try .of(&.{"bash"});
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("bypass");
     try std.testing.expect(setup.storage.configure(&configuration, .{}) == .accepted);
@@ -2002,8 +2002,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
         command.configuration.tools.state = .value;
-        command.configuration.tools.count = 1;
-        command.configuration.tools.values[0] = .bash;
+        command.configuration.tools = try .of(&.{"bash"});
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("ask");
         command.configuration.output_schema = .{
@@ -2503,8 +2502,7 @@ test "request preparation freezes settings at admission" {
         try update.key.set("prep-settings-catalog");
         update.session = session;
         update.configuration.tools.state = .value;
-        update.configuration.tools.count = 1;
-        update.configuration.tools.values[0] = .bash;
+        update.configuration.tools = try .of(&.{"bash"});
         try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
     }
     try setup.submit("prep-settings-file", "prep-settings-message", session.slice(), "hi");
@@ -3512,8 +3510,7 @@ fn configureMemoSessionForTesting(setup: *PreparationTestSetup) !protocol.Bounde
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
     command.configuration.tools.state = .value;
-    command.configuration.tools.count = 1;
-    command.configuration.tools.values[0] = .bash;
+    command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
     const reply = setup.storage.configure(&command, .{});
