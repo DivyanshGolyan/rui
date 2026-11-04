@@ -538,7 +538,7 @@ func requestHistoryValid(body []byte, current, workspace, session string) bool {
 		})
 	}
 	expected := map[string]any{
-		"model": "gpt-6-luna", "parallel_tool_calls": false, "store": false, "stream": true,
+		"model": "gpt-6-luna", "parallel_tool_calls": true, "store": false, "stream": true,
 		"include": []any{"reasoning.encrypted_content"}, "instructions": measurement.ModelInstructions(workspace, session), "tools": []any{},
 		"input": expectedInput, "text": map[string]any{"verbosity": "low"}, "reasoning": map[string]any{"effort": "medium"},
 	}

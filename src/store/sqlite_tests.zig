@@ -1271,6 +1271,31 @@ fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
     return if (c.sqlite3_extended_errcode(database) == c.SQLITE_CONSTRAINT_CHECK) .check_violation else .other_failure;
 }
 
+test "a Bash call the Operation did not offer is rejected and keeps its description" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools.count = 0;
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    try submitTestMessage(&storage, &tmp, "unoffered-message", "unoffered-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "unoffered-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+}
+
 test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itself" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
