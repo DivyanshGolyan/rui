@@ -56,7 +56,9 @@ pub const migration_baseline: u32 = 51;
 /// (`openExisting`). Rui runs no DDL on MySQL (D203): the DB team runs
 /// `mysql`, which `mysqlMigration` joins. A CHECK or predicate in either
 /// is spliced from `migrationExpression`, so it meets the rules schema
-/// text meets. `digest` pins the text (`migrationDigest`).
+/// text meets. A step's text is frozen once its `from + 1` is released:
+/// tests/ci/test_store_schema_version.py compares every step whose `from`
+/// is below the released schema_version with its text at the release.
 ///
 /// SQLite keeps each CREATE text as run, and a Store opens only when every
 /// object's text equals a fresh bootstrap's. ALTER TABLE ADD COLUMN splices
@@ -70,15 +72,13 @@ pub const Migration = struct {
     from: u32,
     sqlite: []const [:0]const u8,
     mysql: []const [:0]const u8,
-    digest: u64,
 };
 
 /// Every step from `migration_baseline` to `schema_version`, oldest first.
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
-/// chain grows. Only the last step, whose schema_version is unreleased
-/// (tests/ci/test_store_schema_version.py), may change, with its digest.
+/// chain grows. Only a step past the released schema_version may change.
 pub const migrations = [_]Migration{
-    .{ .from = 51, .sqlite = &migration_52.sqlite, .mysql = &migration_52.mysql, .digest = 0x80f33b4403025b79 },
+    .{ .from = 51, .sqlite = &migration_52.sqlite, .mysql = &migration_52.mysql },
 };
 const migration_52 = @import("migration_52.zig");
 comptime {
@@ -93,28 +93,18 @@ comptime {
             "migrations: the step from {d} moves past schema_version {d}: set schema_version to {d} and append its bootstrap_digests row, or drop the step",
             .{ step.from, schema_version, step.from + 1 },
         ));
-        if (step.digest != migrationDigest(step)) @compileError(if (step.from + 1 == schema_version) std.fmt.comptimePrint(
-            "migrations: the step from {d} changed: set its digest to 0x{x:0>16}",
-            .{ step.from, migrationDigest(step) },
-        ) else std.fmt.comptimePrint(
-            "migrations: the step from {d} shipped with digest 0x{x:0>16}, and its text now digests to 0x{x:0>16}: restore its text, and put the change in a new step",
-            .{ step.from, step.digest, migrationDigest(step) },
-        ));
     }
     if (migrations.len < schema_version - migration_baseline) @compileError(std.fmt.comptimePrint(
-        "migrations: schema_version is {d}, and no step moves a Store from {d}: append .{{ .from = {d}, .sqlite = ..., .mysql = ..., .digest = ... }}",
+        "migrations: schema_version is {d}, and no step moves a Store from {d}: append .{{ .from = {d}, .sqlite = ..., .mysql = ... }}",
         .{ schema_version, migration_baseline + migrations.len, migration_baseline + migrations.len },
     ));
 }
 
-/// FNV-1a over a step's SQLite statements, then its MySQL statements.
-pub fn migrationDigest(comptime step: Migration) u64 {
-    return statementsDigest(&.{ step.sqlite, step.mysql });
-}
-
 /// The statements of the step from `from`, as one text for the DB team to
 /// run on a MySQL Store at `from`; `ddl(.mysql)` is a new MySQL Store's.
-/// PR 8's `rui store schema --engine mysql [--from N]` prints them.
+/// PR 8's `rui store schema --engine mysql [--from N]` prints them. Rui takes
+/// no backup of a MySQL Store: backing it up before applying the text is the
+/// DB team's job.
 pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
     return comptime blk: {
         if (from < migration_baseline or from - migration_baseline >= migrations.len)
@@ -1162,18 +1152,9 @@ fn joinLines(comptime lines: []const []const u8) []const u8 {
 /// SHA-256: it is a fixed algorithm, and SHA-256 costs seconds of every
 /// compile.
 pub fn digest() u64 {
-    return statementsDigest(&.{&bootstrap_sql});
-}
-
-/// FNV-1a over each statement of each group, NUL after each statement and
-/// 0x01 between groups.
-fn statementsDigest(comptime groups: []const []const [:0]const u8) u64 {
     return comptime blk: {
         var text: []const u8 = "";
-        for (groups, 0..) |group, position| {
-            if (position != 0) text = text ++ "\x01";
-            for (group) |statement| text = text ++ statement ++ "\x00";
-        }
+        for (bootstrap_sql) |statement| text = text ++ statement ++ "\x00";
         @setEvalBranchQuota(10 * text.len + 1000);
         break :blk std.hash.Fnv1a_64.hash(text);
     };
@@ -1294,21 +1275,23 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
 
 /// Opens a Store of this application at schema_version, or moves one at a
 /// format from migration_baseline on to it first (`migrate`).
-pub fn openExisting(database: *c.sqlite3, selector: []const u8) !void {
+pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
     if (found == schema_version) return validateCurrent(database, selector);
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
-    return migrate(database, selector, found, migrations[found - migration_baseline ..]);
+    return migrate(io, database, selector, found, migrations[found - migration_baseline ..]);
 }
 
-/// In one transaction: runs `steps`' SQLite statements on a Store at
+/// First writes `migrationBackup`; a Store whose backup fails is refused
+/// with nothing migrated. Then, in one transaction: runs `steps`' SQLite statements on a Store at
 /// format `from`, sets its format to schema_version, and commits only if
 /// the Store then validates as a fresh bootstrap's would
 /// (`validateCurrent`) and every foreign key holds. A Store whose
 /// store_meta format is not `from` is a WrongStoreVersion, and any failure
 /// leaves the Store as it was.
-pub fn migrate(database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+pub fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+    try migrationBackup(io, database, from);
     // Both outside the transaction, where PRAGMA foreign_keys takes effect.
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
     defer sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch {};
@@ -1330,6 +1313,61 @@ pub fn migrate(database: *c.sqlite3, selector: []const u8, from: u32, steps: []c
     try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
     try validateCurrent(database, selector);
     try sqlite.exec(database, "COMMIT");
+}
+
+/// Before a migration, a copy of the Store at `from` beside its file, named
+/// `<file>.migration-<from>-to-<schema_version>` and written page by page
+/// through SQLite's online backup API, so it holds the last committed state
+/// and is as large as the Store. Any earlier copy of
+/// this kind for the same file is deleted first, so at most one exists. The
+/// copy and its directory entry are synced before the migration starts.
+/// Every failure is a MigrationBackupFailed.
+fn migrationBackup(io: std.Io, database: *c.sqlite3, from: u32) !void {
+    return writeMigrationBackup(io, database, from) catch |err| switch (err) {
+        error.MigrationBackupFailed => err,
+        else => {
+            std.log.warn("Store migration backup failed: {s}", .{@errorName(err)});
+            return error.MigrationBackupFailed;
+        },
+    };
+}
+
+fn writeMigrationBackup(io: std.Io, database: *c.sqlite3, from: u32) !void {
+    const path = std.mem.span(c.sqlite3_db_filename(database, "main") orelse return error.MigrationBackupFailed);
+    const directory_path = std.fs.path.dirname(path) orelse return error.MigrationBackupFailed;
+    const file = std.fs.path.basename(path);
+    var prefix_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}.migration-", .{file});
+    var directory = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
+    defer directory.close(io);
+    deleting: while (true) {
+        var iterator = directory.iterate();
+        while (try iterator.next(io)) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+            var name_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buffer, "{s}", .{entry.name});
+            try directory.deleteFile(io, name);
+            continue :deleting;
+        }
+        break;
+    }
+    var backup_buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    const backup = try std.fmt.bufPrintSentinel(&backup_buffer, "{s}.migration-{d}-to-{d}", .{ path, from, schema_version }, 0);
+    // The online backup API, not VACUUM INTO: the build sets
+    // SQLITE_MAX_ATTACHED=0, and VACUUM INTO attaches its target.
+    {
+        var target: ?*c.sqlite3 = null;
+        defer _ = c.sqlite3_close(target);
+        if (c.sqlite3_open_v2(backup, &target, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX, null) != c.SQLITE_OK)
+            return error.MigrationBackupFailed;
+        const copying = c.sqlite3_backup_init(target, "main", database, "main") orelse return error.MigrationBackupFailed;
+        const stepped = c.sqlite3_backup_step(copying, -1);
+        if (c.sqlite3_backup_finish(copying) != c.SQLITE_OK or stepped != c.SQLITE_DONE) return error.MigrationBackupFailed;
+    }
+    var copy = try directory.openFile(io, backup[directory_path.len + 1 ..], .{});
+    defer copy.close(io);
+    try copy.sync(io);
+    if (std.c.fsync(directory.handle) != 0) return error.MigrationBackupFailed;
 }
 
 /// Refuses a Store unless its tables and indexes are exactly the ones

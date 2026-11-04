@@ -232,7 +232,7 @@ pub const Store = struct {
         try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
         if (existing) {
             if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
-            try store_schema.openExisting(database.?, selector);
+            try store_schema.openExisting(io, database.?, selector);
         }
         try sqlite.exec(database.?, "PRAGMA busy_timeout=0");
         try sqlite.exec(database.?, "PRAGMA foreign_keys=ON");

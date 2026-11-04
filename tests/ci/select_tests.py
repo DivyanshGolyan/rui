@@ -280,18 +280,21 @@ def select(paths, phase, available):
     manual_checks = set()
     linux_memory_checks = False
     for path in paths:
+        # A shortcut only adds its reason, and stops the fallbacks below; every
+        # rule, LIVE_RULES included, still matches the path.
+        shortcut = False
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
-            continue
-        if (any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)
+            shortcut = True
+        elif (any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)
                 and not any(fnmatch.fnmatchcase(path, pattern) for pattern in FRONTEND)):
             targets.add("stack-frames")
             reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
         if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
                 or path == "tests/integration/previous_release_upgrade.py"):
             reasons.add("CI policy: the policy job runs selector and workflow checks")
-            continue
-        matched = False
+            shortcut = True
+        matched = shortcut
         for patterns, checks, native_checks, reason in RULES:
             if matches(path, patterns):
                 targets.update(checks)
@@ -302,6 +305,8 @@ def select(paths, phase, available):
             if matches(path, patterns):
                 live_targets.update(set(checks) & served_by)
                 live_reasons.add((reason, served_by))
+        if shortcut:
+            continue
         if path.startswith("tests/qualification/"):
             if path.endswith((".go", "go.mod", "go.sum")):
                 targets.add("measurement-check")
