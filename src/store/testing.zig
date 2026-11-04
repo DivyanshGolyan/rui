@@ -223,6 +223,10 @@ pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
 /// (`mysql_dialect_check.shadowPrepareFixture`).
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
     if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
+    switch (comptime rsql.mysqlRendering(text)) {
+        .refused => |message| @compileError("fixture: MySQL rendering refuses it: " ++ message ++ ": " ++ text),
+        .rendered => {},
+    }
     mysql_dialect_check.shadowPrepareFixture(text);
     return text;
 }
