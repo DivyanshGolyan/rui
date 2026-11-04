@@ -126,7 +126,14 @@ pub const StoreLease = struct {
     /// default one. The directory must be private, and an exclusive lock in
     /// it makes this Host the only owner of the socket there: reclaiming a
     /// stale socket is safe only while that lock is held.
-    pub fn useRuntimeDirectory(self: *StoreLease, runtime_path: []const u8, socket_path: []const u8) !void {
+    pub fn useRuntimeDirectory(self: *StoreLease, runtime_path: []const u8, socket_path: []const u8) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!void {
+        return self.openRuntimeDirectory(runtime_path, socket_path) catch |err| switch (err) {
+            error.RuntimeDirectoryInUse => error.RuntimeDirectoryInUse,
+            else => error.RuntimeDirectoryUnusable,
+        };
+    }
+
+    fn openRuntimeDirectory(self: *StoreLease, runtime_path: []const u8, socket_path: []const u8) !void {
         var dir = try std.Io.Dir.cwd().createDirPathOpen(self.io, runtime_path, .{
             .permissions = .fromMode(0o700),
         });

@@ -64,6 +64,9 @@ const Intake = struct {
     started: usize = 0,
     /// A launched Host's stdin, watched for its close (D5, D118).
     stdin: ?std.posix.fd_t = null,
+    /// Set for a Host started from a launch frame; its shutdown is bounded.
+    launched: bool = false,
+    deadline_armed: bool = false,
 
     const Worker = struct {
         owner: *Intake,
@@ -598,11 +601,20 @@ const Intake = struct {
         if (count > 0) return;
         if (count < 0 and std.posix.errno(count) == .INTR) return;
         self.stdin = null;
+        traceSubject(self.host, "launch_stdin_closed", "host", "launch");
+        self.armShutdownDeadline();
+        _ = self.host.advance(.stopping);
+    }
+
+    /// A launched Host's shutdown, however it began (stdin close or
+    /// `host-stop`), ends the process 10 seconds later if cleanup is still
+    /// running; the alarm survives the drains after intake returns.
+    fn armShutdownDeadline(self: *Intake) void {
+        if (!self.launched or self.deadline_armed) return;
+        self.deadline_armed = true;
         const default: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
         std.posix.sigaction(.ALRM, &default, null);
         _ = std.c.alarm(launch_shutdown_seconds);
-        traceSubject(self.host, "launch_stdin_closed", "host", "launch");
-        _ = self.host.advance(.stopping);
     }
 
     fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
@@ -615,6 +627,7 @@ const Intake = struct {
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
             if (self.host.stopping()) {
+                self.armShutdownDeadline();
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
             }
             self.serviceWorkers();
@@ -1037,7 +1050,10 @@ pub fn serve(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
-    if (launch) |value| intake.stdin = value.stdin;
+    if (launch) |value| {
+        intake.stdin = value.stdin;
+        intake.launched = true;
+    }
     host.intake_wake = intake.wake[1];
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {

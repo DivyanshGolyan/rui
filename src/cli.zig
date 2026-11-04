@@ -1578,8 +1578,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             launch_frame.writeRefusal(io, .{ .code = .store_locked, .message = "another Host owns this Store" });
         if (launched != null and err == error.RuntimeDirectoryInUse)
             launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "another Host owns this runtimeDir" });
-        if (launched != null and err == error.InsecureDirectoryPermissions)
-            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be private (mode 0700)" });
+        if (launched != null and err == error.RuntimeDirectoryUnusable)
+            launch_frame.writeRefusal(io, .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be a private (mode 0700) directory this Host can lock" });
         return err;
     };
 }
