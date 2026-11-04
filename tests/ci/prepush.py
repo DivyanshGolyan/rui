@@ -21,7 +21,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def checks(paths, available, base):
-    targets = select(paths, "development", available)["targets"]
+    development = select(paths, "development", available)
+    # Server targets need CI's live MySQL or Postgres; CI runs them on the draft.
+    targets = [target for target in development["targets"] if target not in development["server_targets"]]
     # check.yml's macos_typecheck runs whenever the review selection is non-empty.
     typecheck = bool(select(paths, "review", available)["targets"])
     # The plan job runs this first; a failure there turns every check red.

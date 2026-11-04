@@ -30,7 +30,7 @@ STORE_FACADE = "src/store.zig"
 STORE_WIRE = "src/store/wire/"
 STORE_TESTS = "src/store/tests.zig"
 # Test files hold no entry point, so the lock-and-fence test does not read them.
-STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig")
+STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig", "src/store/mysql_dialect_check.zig")
 # The tests that scan every Store file's source, each by its own embed list.
 SOURCE_SCAN_TESTS = ("Store entry points lock and fence only through canonical access",
                      "every function that enters the Store has a round budget")

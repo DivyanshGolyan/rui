@@ -848,6 +848,9 @@ pub const Launch = struct {
     runtime_dir: []const u8,
     socket_path: []const u8,
     stdin: std.posix.fd_t,
+    /// Open with Turns paused (D196): set before execution starts, so a Turn
+    /// recovered from the Store waits too.
+    paused: bool = false,
 };
 
 /// How long a launched Host's shutdown may take after stdin closes.
@@ -1015,6 +1018,7 @@ pub fn serve(
         .retention = undefined,
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
+        .turns_paused = .init(if (launch) |value| value.paused else false),
     };
     var observation: ?TestObservation = if (hooks.observation_fd) |fd|
         try TestObservation.init(fd, hooks.observation_state_fd orelse return error.MissingTestObservationState, hooks.observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
