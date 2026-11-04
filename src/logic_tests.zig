@@ -34,6 +34,7 @@ const cores = .{
     .{ "mcp/headers.zig", @import("mcp/headers.zig") },
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
     .{ "mcp/request.zig", @import("mcp/request.zig") },
+    .{ "mcp/shape.zig", @import("mcp/shape.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_list.zig", @import("model_list.zig") },
     .{ "model_picker.zig", @import("model_picker.zig") },

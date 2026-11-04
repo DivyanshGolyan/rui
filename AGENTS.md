@@ -85,10 +85,11 @@ Existing one-way-door approvals still apply.
   Its promotion job is serialized, and it first dispatches any genuinely missing Mac or upgrade qualification for current main; existing pending, offline, failed or cancelled runs are never automatically retried.
 - Run the independent review when [Review](CODING_STANDARDS.md#review) says; its signoff does not block green changes.
 - A PR whose CI is green and whose Codex review is clean merges now.
+  Green means the `linux` check on the PR's current head commit completed with success; pending, skipped, cancelled or a green run on an earlier head is not green, and main's ruleset requires it.
   Do not hold it for a local run of tests CI repeats (full `zig build test`, `check`, or a local mirror of Selected); [Evidence](CODING_STANDARDS.md#evidence) sets the focused pre-push checks.
   Ship post-merge fixes as follow-up PRs.
-  If main moved since the PR's CI ran, first merge `origin/main` into it locally and run `python3 tests/ci/prepush.py`, because two PRs green on their own can break main together (#768 and #769).
-  Fix any failure; once prepush passes, push the merge and merge the PR without waiting for CI to rerun.
+  Merge `origin/main` into a PR only when GitHub reports a conflict, then run `python3 tests/ci/prepush.py` and wait for that head's own CI: a merge commit is new content (#882 brought 2,129 untracked files in through one).
+  A PR that merely trails main merges as it is; two PRs green on their own can still break main together (#768 and #769), and main's CI catches that.
   If main's CI then fails, fix it forward in a new PR.
 - Never sit idle on CI or Codex, however long they take.
   Once a PR is pushed, start the next piece at once: independent work on a fresh branch from `origin/main`, dependent work on a branch stacked on the open one.
