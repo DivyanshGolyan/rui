@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
 import { models, Session, Sessions, setPaused, type ModelSummary } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
@@ -26,7 +27,7 @@ export interface ConnectOptions {
 	activeCapacity?: number;
 	/** How long connect keeps retrying while another Host holds the Store (D183, D198). Default 120 000. */
 	lockWaitMs?: number;
-	/** The `rui` executable. Default: `rui` on PATH. */
+	/** The `rui` executable. Default: the one from the installed platform package, else `rui` on PATH. */
 	binary?: string;
 }
 
@@ -300,7 +301,7 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		const value = process.env[name];
 		if (value !== undefined) env[name] = value;
 	}
-	return { binary: options.binary ?? "rui", frame, socketPath: join(runtimeDir, SOCKET_NAME), store, env };
+	return { binary: resolveBinary(options.binary), frame, socketPath: join(runtimeDir, SOCKET_NAME), store, env };
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */

@@ -1294,7 +1294,7 @@ Store identity binds the canonical original path; moving or copying its director
 Restoring a backup requires exclusive access to the original path and preservation of any replacement Store before restoration.
 The [recovery instructions](docs/store-reset.md) leave the original Store untouched.
 
-The Host runs a SQLite Store's pending migrations at startup under its Store ownership lock, and first backs the Store up itself, with no approval prompt: SQLite's online backup API copies it beside its file as `<file>.migration-<from>-to-<to>`, replacing any earlier copy of that kind so at most one exists, and syncs the copy and its directory.
+The Host runs a SQLite Store's pending migrations at startup under its Store ownership lock, and first backs the Store up itself, with no approval prompt: SQLite's online backup API copies `<name>.sqlite3` beside itself as `<name>.backup`, a path one byte shorter so it fits wherever the Store does, replacing an earlier copy and touching no other file, and syncs the copy and its directory.
 If the backup fails, nothing migrates and the Store is refused.
 The copy is as large as the Store and stays until the next migration replaces it or the user deletes it.
 On MySQL, backing the Store up before applying a migration's text is the DB team's job.
