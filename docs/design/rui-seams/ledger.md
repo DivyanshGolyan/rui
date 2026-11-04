@@ -276,6 +276,8 @@ D190. #840 measured: 249.3 MiB idle, 282.1 (1 agent), 285.7 (8), 298.0 (9), 312.
 
 D191. (Divyansh 07:02Z idea, "proceed" 07:03Z) When the compaction request itself would not fit, Rui drops the oldest messages from what it sends to compaction until it fits, then compacts; the feed records how many were dropped. The Session, its ID and its attached children carry on. "Context full" remains only for one item larger than the window. Changes ARCHITECTURE.md:657/:685 ("never truncate"). The card on restart-in-place/adopt was withdrawn.
 
+D192. (Divyansh 07:05Z, card) Replaces D29's "only the model is fixed" and D113's update exclusion of `model`. `session.update({model})` may change a running Session's model within the same provider. The next model request rebuilds from the visible conversation (messages, calls, tool results), dropping the old model's hidden reasoning and compacted items. It costs one cache miss, which a new model cannot avoid. The Session ID and its attached children carry on. The change is a revision with its `session_changed` row.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
