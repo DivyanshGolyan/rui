@@ -673,18 +673,20 @@ const Refused = error{Refused};
 ///   delete    := DELETE FROM table WHERE expr
 ///
 /// Expressions take OR, AND, NOT, the comparisons (`=`, `==`, `<>`, `!=`,
-/// `<`, `<=`, `>`, `>=`, IS [NOT] NULL, [NOT] IN (list or select)), `+`,
+/// `<`, `<=`, `>`, `>=`, IS [NOT] NULL, [NOT] IN (list or select),
+/// [NOT] BETWEEN a AND b), `+`,
 /// `-`, `*`, `/`, `%`, unary `-` and `+`, at SQLite's precedence; and as
 /// operands columns, `?N`, numbers, string literals, NULL, markers,
-/// function calls, CAST, CASE, EXISTS and parenthesized expressions or
+/// calls of the `functions` table's functions, CASE, EXISTS and parenthesized expressions or
 /// subqueries. The one window is `row_number() OVER (ORDER BY expr
 /// [ASC|DESC], ...)`, which every engine runs. Anything else (a named
 /// parameter, `*` as a column, a comma join, an unknown table, LIKE,
-/// BETWEEN, COLLATE, another window) is refused with the token it stopped
-/// at. Two more refusals hold on every dialect, for MySQL's sake: a call
-/// to `length`, which counts characters there and bytes on MySQL; and an
-/// UPDATE whose SET value reads a column an earlier assignment of the same
-/// SET writes (`readsAssigned`), because MySQL reads the new value.
+/// COLLATE, another window, CAST, a function `functions` lacks) is refused
+/// with the token it stopped at. Two more refusals hold on every dialect,
+/// for MySQL's sake: a call to `length` except on one of `bytes_columns`,
+/// because it counts characters of text on SQLite and bytes on MySQL; and
+/// an UPDATE whose SET value reads a column an earlier assignment of the
+/// same SET writes (`readsAssigned`), because MySQL reads the new value.
 const Parser = struct {
     tokens: []const Token,
     at: usize = 0,
@@ -701,6 +703,9 @@ const Parser = struct {
     next_query: usize = 0,
     /// Every column the text names as an operand, in order.
     columns: []const Column = &.{},
+    /// The columns `length` may count: a schema table's `.bytes` columns
+    /// (`expressionError`), and none in a typed statement.
+    bytes_columns: []const []const u8 = &.{},
 
     const Opened = struct { id: usize, parent: ?usize };
 
@@ -991,6 +996,13 @@ const Parser = struct {
                 try p.expect("NULL");
                 const tested = left;
                 left = if (!negated and tested == .column) .{ .is_null = tested.column } else .other;
+            } else if (p.peek().is("BETWEEN") or (p.peek().is("NOT") and p.peekAt(1).is("BETWEEN"))) {
+                _ = p.accept("NOT");
+                try p.expect("BETWEEN");
+                _ = try p.relation();
+                try p.expect("AND");
+                _ = try p.relation();
+                left = .other;
             } else if (p.peek().is("IN") or (p.peek().is("NOT") and p.peekAt(1).is("IN"))) {
                 if (p.accept("NOT")) {}
                 try p.expect("IN");
@@ -1081,30 +1093,34 @@ const Parser = struct {
             try p.expect("END");
             return .other;
         }
-        if (p.accept("CAST")) {
-            try p.expectSymbol("(");
-            _ = try p.expr();
-            try p.expect("AS");
-            _ = try p.name();
-            try p.expectSymbol(")");
-            return .other;
-        }
+        if (p.peek().is("CAST")) return p.refuseWith(cast_message);
         const first = try p.name();
         if (p.acceptSymbol("(")) {
-            if (std.ascii.eqlIgnoreCase(first, "length"))
-                return p.refuseWith("rsql: length() counts characters of text on SQLite and bytes on MySQL; write @octets(x)");
-            const arguments = !p.peek().isSymbol(")");
-            if (!p.acceptSymbol("*") and arguments) {
+            var values: []const Expr = &.{};
+            const count: usize = if (p.acceptSymbol("*")) 1 else if (p.peek().isSymbol(")")) 0 else count: {
                 _ = p.accept("DISTINCT");
-                _ = try p.expressions();
-            }
+                values = try p.expressions();
+                break :count values.len;
+            };
             try p.expectSymbol(")");
-            if (p.accept("OVER")) try p.window(std.ascii.eqlIgnoreCase(first, "row_number") and !arguments);
+            if (std.ascii.eqlIgnoreCase(first, "length") and !p.lengthOfBytes(values)) return p.refuseWith(length_message);
+            // A windowed call answers to the window rule, which owns it.
+            if (p.accept("OVER")) {
+                try p.window(std.ascii.eqlIgnoreCase(first, "row_number") and count == 0);
+            } else if (knownFunction(first, count) == null) return p.refuseWith(functionMessage(first, count));
             return .other;
         }
         const column: Column = if (p.acceptSymbol(".")) .{ .table = first, .name = try p.name() } else .{ .table = null, .name = first };
         p.columns = p.columns ++ .{column};
         return .{ .column = column };
+    }
+
+    /// Whether `length`'s arguments are one bare column of `bytes_columns`,
+    /// whose bytes it counts on every engine.
+    fn lengthOfBytes(p: *const Parser, values: []const Expr) bool {
+        if (values.len != 1 or values[0] != .column or values[0].column.table != null) return false;
+        for (p.bytes_columns) |bytes_column| if (std.mem.eql(u8, bytes_column, values[0].column.name)) return true;
+        return false;
     }
 
     /// The `(ORDER BY expr [ASC|DESC], ...)` after `OVER`, which only
@@ -1133,9 +1149,9 @@ const Parser = struct {
     }
 
     /// A marker in an expression: `@now` takes no arguments; `@session`
-    /// takes one parameter ?k; `@octets`, `@count_where` and `@served` one expression;
-    /// `@charset`, `@initial`, `@same`, `@distinct` and `@max_where` two. `@index` stands only after
-    /// a table (`source`), and any other name is refused.
+    /// takes one parameter ?k; each of `expression_markers` takes its
+    /// arity in expressions. `@index` stands only after a table (`source`),
+    /// and any other name is refused.
     fn marker(p: *Parser) Refused!Expr {
         const written = p.next().text;
         const marker_name = written[1..];
@@ -1154,11 +1170,7 @@ const Parser = struct {
             p.sessions = p.sessions ++ .{k};
             return .{ .session = k };
         }
-        const arity: usize = for ([_][]const u8{ "octets", "count_where", "served" }) |single| {
-            if (std.mem.eql(u8, marker_name, single)) break 1;
-        } else for ([_][]const u8{ "charset", "initial", "same", "distinct", "max_where" }) |binary| {
-            if (std.mem.eql(u8, marker_name, binary)) break 2;
-        } else return p.refuseWith("rsql: unknown marker " ++ written);
+        const arity = (expressionMarker(marker_name) orelse return p.refuseWith("rsql: unknown marker " ++ written)).arity;
         try p.expectSymbol("(");
         const arguments = try p.expressions();
         try p.expectSymbol(")");
@@ -1735,22 +1747,50 @@ fn renderSqlite(comptime text: []const u8) []const u8 {
     }
 }
 
+/// The markers an expression may hold, each with its argument count and
+/// its spelling per dialect. In a spelling, `arg_a` and `arg_b` stand for
+/// the first and second argument as rendered, `arg_set` for the second
+/// argument's character set (`characterSet`), and `served_slots` for one
+/// slot per `provider_name.Provider`, joined with commas. `@now`,
+/// `@session` and `@index` are not expressions: the parser and each
+/// renderer handle them on their own.
+const ExpressionMarker = struct { name: []const u8, arity: usize, sqlite: []const u8, mysql: []const u8 };
+const arg_a = "\x01";
+const arg_b = "\x02";
+const arg_set = "\x03";
+const served_slots = "\x04";
+const expression_markers = [_]ExpressionMarker{
+    .{ .name = "octets", .arity = 1, .sqlite = "length(CAST(" ++ arg_a ++ " AS BLOB))", .mysql = "OCTET_LENGTH(" ++ arg_a ++ ")" },
+    .{
+        .name = "charset",
+        .arity = 2,
+        .sqlite = "(" ++ arg_a ++ " NOT GLOB '*[^" ++ arg_set ++ "]*' AND length(" ++ arg_a ++ ")=length(CAST(" ++ arg_a ++ " AS BLOB)))",
+        .mysql = "(NOT REGEXP_LIKE(" ++ arg_a ++ ",'[^" ++ arg_set ++ "]','c'))",
+    },
+    .{ .name = "initial", .arity = 2, .sqlite = arg_a ++ " GLOB '[" ++ arg_set ++ "]*'", .mysql = "REGEXP_LIKE(" ++ arg_a ++ ",'^[" ++ arg_set ++ "]','c')" },
+    .{ .name = "same", .arity = 2, .sqlite = "(" ++ arg_a ++ " IS " ++ arg_b ++ ")", .mysql = "(" ++ arg_a ++ " <=> " ++ arg_b ++ ")" },
+    .{ .name = "distinct", .arity = 2, .sqlite = "(" ++ arg_a ++ " IS NOT " ++ arg_b ++ ")", .mysql = "(NOT (" ++ arg_a ++ " <=> " ++ arg_b ++ "))" },
+    .{ .name = "count_where", .arity = 1, .sqlite = "count(*) FILTER (WHERE " ++ arg_a ++ ")", .mysql = "count(CASE WHEN " ++ arg_a ++ " THEN 1 END)" },
+    .{ .name = "max_where", .arity = 2, .sqlite = "max(" ++ arg_a ++ ") FILTER (WHERE " ++ arg_b ++ ")", .mysql = "max(CASE WHEN " ++ arg_b ++ " THEN " ++ arg_a ++ " END)" },
+    .{ .name = "served", .arity = 1, .sqlite = "rui_served(" ++ arg_a ++ ")", .mysql = "(" ++ arg_a ++ " IN (" ++ served_slots ++ "))" },
+};
+
+fn expressionMarker(comptime name: []const u8) ?ExpressionMarker {
+    for (expression_markers) |each| if (std.mem.eql(u8, each.name, name)) return each;
+    return null;
+}
+
 fn marker(comptime name: []const u8, comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
-    const Marker = enum { octets, charset, initial, same, distinct, count_where, max_where, served };
-    const kind = std.meta.stringToEnum(Marker, name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
-    const arity: usize = if (kind == .octets or kind == .count_where or kind == .served) 1 else 2;
-    if (arguments.len != arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{arity}) ++ " arguments: " ++ text);
-    const first = renderSqlite(arguments[0]);
-    return switch (kind) {
-        .octets => "length(CAST(" ++ first ++ " AS BLOB))",
-        .charset => "(" ++ first ++ " NOT GLOB '*[^" ++ characterSet(arguments[1], text) ++ "]*' AND length(" ++ first ++ ")=length(CAST(" ++ first ++ " AS BLOB)))",
-        .initial => first ++ " GLOB '[" ++ characterSet(arguments[1], text) ++ "]*'",
-        .same => "(" ++ first ++ " IS " ++ renderSqlite(arguments[1]) ++ ")",
-        .distinct => "(" ++ first ++ " IS NOT " ++ renderSqlite(arguments[1]) ++ ")",
-        .count_where => "count(*) FILTER (WHERE " ++ first ++ ")",
-        .max_where => "max(" ++ first ++ ") FILTER (WHERE " ++ renderSqlite(arguments[1]) ++ ")",
-        .served => "rui_served(" ++ first ++ ")",
+    const kind = expressionMarker(name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
+    if (arguments.len != kind.arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{kind.arity}) ++ " arguments: " ++ text);
+    var out: []const u8 = "";
+    for (kind.sqlite) |byte| out = out ++ switch (byte) {
+        arg_a[0] => renderSqlite(arguments[0]),
+        arg_b[0] => renderSqlite(arguments[1]),
+        arg_set[0] => characterSet(arguments[1], text),
+        else => &[_]u8{byte},
     };
+    return out;
 }
 
 /// A place in MySQL text where PR 8's engine writes a literal, and where
@@ -1760,9 +1800,20 @@ pub const Slot = union(enum) {
     argument: usize,
     /// The Access's second, for `@now`.
     now,
-    /// This provider's place in `@served(x)`'s list.
+    /// This provider's place in `@served(x)`'s list, bound as
+    /// `servedBinding` gives.
     served: provider_name.Provider,
 };
+
+/// What an engine binds to a `served` slot: the provider's label when the
+/// opening serves it, else the empty string, which no stored label equals
+/// (`schema` checks a label's length is at least 1). Never NULL: `x IN
+/// (...,NULL)` is NULL where x matches nothing, so `NOT @served(x)` would be
+/// NULL where SQLite's `rui_served` makes it true. For a NULL x both
+/// spellings differ anyway: `rui_served(NULL)` is 0 and `NULL IN (...)` NULL.
+pub fn servedBinding(provider: provider_name.Provider, served: bool) []const u8 {
+    return if (served) @tagName(provider) else "";
+}
 
 /// Text in MySQL 8.4's spelling, with a slot between each two parts.
 pub const Template = struct {
@@ -1816,8 +1867,11 @@ fn mysqlTemplate(comptime text: []const u8) Template {
 ///                        column
 ///   a function call      its `functions` entry's MySQL name
 ///
-/// It refuses text `portabilityError` refuses, a call no `functions` entry
-/// names with that many arguments, CAST, and an unknown or malformed marker.
+/// String literals are copied unchanged, which reads them as SQLite does
+/// only under `schema.mysql_session`'s NO_BACKSLASH_ESCAPES. It refuses
+/// text `portabilityError` refuses, a call no `functions` entry names with
+/// that many arguments, and an unknown or malformed marker; the parser
+/// refuses those calls, and CAST, in every build before any rendering.
 pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
     comptime {
         @setEvalBranchQuota(200 * text.len + 10_000);
@@ -1831,12 +1885,12 @@ pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
 
 /// The functions Rui SQL may call, by name and argument count (null: any),
 /// with each one's MySQL name and the arguments MySQL's takes before
-/// Rui SQL's. MySQL rendering refuses any other call. `zeroblob(n)` is
-/// `REPEAT(X'00',n)`, the same n zero bytes, built where SQLite reserves
-/// them; PR 8 writes MySQL content in chunks instead.
-/// `length` counts characters of text on SQLite and bytes on MySQL, so a
-/// typed statement may not call it (`Parser.operand`); the schema's
-/// `.bytes` bounds do.
+/// Rui SQL's. The parser refuses any other call in every build, in typed
+/// statements and schema expressions alike (`Parser.operand`). `zeroblob(n)`
+/// is `REPEAT(X'00',n)`, the same n zero bytes, built where SQLite reserves
+/// them; it is NULL above MySQL's `max_allowed_packet`, and PR 8 writes
+/// MySQL content in chunks instead. `length` stands only on a schema
+/// table's `.bytes` column (`Parser.lengthOfBytes`).
 const functions = [_]struct { name: []const u8, arguments: ?usize, mysql: []const u8, leading: []const u8 = "" }{
     .{ .name = "abs", .arguments = 1, .mysql = "abs" },
     .{ .name = "coalesce", .arguments = null, .mysql = "coalesce" },
@@ -1850,6 +1904,41 @@ const functions = [_]struct { name: []const u8, arguments: ?usize, mysql: []cons
     .{ .name = "sum", .arguments = 1, .mysql = "sum" },
     .{ .name = "zeroblob", .arguments = 1, .mysql = "REPEAT", .leading = "X'00'," },
 };
+
+const Function = @typeInfo(@TypeOf(functions)).array.child;
+
+fn knownFunction(comptime name: []const u8, comptime count: usize) ?Function {
+    for (functions) |function| {
+        if (!std.ascii.eqlIgnoreCase(function.name, name)) continue;
+        if (function.arguments) |arguments| if (arguments != count) continue;
+        return function;
+    }
+    return null;
+}
+
+fn functionMessage(comptime name: []const u8, comptime count: usize) []const u8 {
+    return std.fmt.comptimePrint("rsql: no function {s} of {d} arguments; Rui SQL calls only `functions`", .{ name, count });
+}
+
+const cast_message = "rsql: CAST converts differently on each engine";
+const length_message = "rsql: length() counts characters of text on SQLite and bytes on MySQL; write @octets(x)";
+
+/// Why schema expression `text`, a CHECK or an index predicate on a table
+/// whose `.bytes` columns are `bytes_columns`, is refused, or null: the
+/// same rules a typed statement's expressions meet (`portabilityError`
+/// and `Parser.expr`), with `length` allowed on those columns.
+pub fn expressionError(comptime text: []const u8, comptime bytes_columns: []const []const u8) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(1000 * text.len + 20_000);
+        if (portabilityError(text, reserved_names_checked)) |message| return message;
+        var p: Parser = .{ .tokens = tokenize(text), .bytes_columns = bytes_columns };
+        _ = p.expr() catch return p.message;
+        if (p.peek().kind != .end) return switch (p.refuse("the end")) {
+            error.Refused => p.message,
+        };
+        return null;
+    }
+}
 
 const MysqlRenderer = struct {
     text: []const u8,
@@ -1898,16 +1987,11 @@ const MysqlRenderer = struct {
             },
             .marker => return r.marker(at, to),
             .word => {
-                if (current.is("CAST")) return r.refuse("rsql: CAST converts differently on each engine; MySQL rendering refuses it");
                 if (isCall(r.tokens, at, to)) {
                     const arguments = argumentRanges(r.tokens, at + 1, closingToken(r.tokens, at + 1, to).?).len;
-                    for (functions) |function| {
-                        if (!std.ascii.eqlIgnoreCase(function.name, current.text)) continue;
-                        if (function.arguments) |count| if (count != arguments) continue;
-                        r.emit(function.mysql ++ "(" ++ function.leading);
-                        return at + 2;
-                    }
-                    return r.refuse(std.fmt.comptimePrint("rsql: MySQL rendering knows no function {s} of {d} arguments", .{ current.text, arguments }));
+                    const function = knownFunction(current.text, arguments) orelse return r.refuse(functionMessage(current.text, arguments));
+                    r.emit(function.mysql ++ "(" ++ function.leading);
+                    return at + 2;
                 }
             },
             .symbol => {
@@ -1934,49 +2018,32 @@ const MysqlRenderer = struct {
         }
         const close = if (at + 1 < to and r.tokens[at + 1].isSymbol("(")) closingToken(r.tokens, at + 1, to) else null;
         const end = close orelse return r.refuse("rsql: @" ++ name ++ " needs its arguments in parentheses");
-        const Marker = enum { index, session, served, octets, charset, initial, same, distinct, count_where, max_where };
-        const kind = std.meta.stringToEnum(Marker, name) orelse return r.refuse("rsql: unknown marker @" ++ name);
         const arguments = argumentRanges(r.tokens, at + 1, end);
-        const arity: usize = switch (kind) {
-            .index, .session, .served, .octets, .count_where => 1,
-            .charset, .initial, .same, .distinct, .max_where => 2,
-        };
-        if (arguments.len != arity) return r.refuse(std.fmt.comptimePrint("rsql: @{s} takes {d} arguments", .{ name, arity }));
-        const a = arguments[0];
-        switch (kind) {
-            .index => {},
-            .session => try r.range(a[0], a[1]),
-            .served => {
-                r.emit("(");
-                try r.range(a[0], a[1]);
-                r.emit(" IN (");
-                for (std.enums.values(provider_name.Provider), 0..) |provider, index| {
-                    if (index != 0) r.emit(",");
-                    r.slot(.{ .served = provider });
-                }
-                r.emit("))");
-            },
-            .octets => try r.wrap("OCTET_LENGTH(", a, ")"),
-            .charset => try r.wrap("(NOT REGEXP_LIKE(", a, ",'[^" ++ try r.set(arguments[1]) ++ "]','c'))"),
-            .initial => try r.wrap("REGEXP_LIKE(", a, ",'^[" ++ try r.set(arguments[1]) ++ "]','c')"),
-            .same, .distinct => {
-                r.emit(if (kind == .same) "(" else "(NOT (");
-                try r.range(a[0], a[1]);
-                try r.wrap(" <=> ", arguments[1], if (kind == .same) ")" else "))");
-            },
-            .count_where => try r.wrap("count(CASE WHEN ", a, " THEN 1 END)"),
-            .max_where => {
-                try r.wrap("max(CASE WHEN ", arguments[1], " THEN ");
-                try r.wrap("", a, " END)");
-            },
+        if (std.mem.eql(u8, name, "index") or std.mem.eql(u8, name, "session")) {
+            if (arguments.len != 1) return r.refuse("rsql: @" ++ name ++ " takes 1 arguments");
+            if (std.mem.eql(u8, name, "session")) try r.range(arguments[0][0], arguments[0][1]);
+            return end + 1;
         }
+        const kind = expressionMarker(name) orelse return r.refuse("rsql: unknown marker @" ++ name);
+        if (arguments.len != kind.arity) return r.refuse(std.fmt.comptimePrint("rsql: @{s} takes {d} arguments", .{ name, kind.arity }));
+        var from: usize = 0;
+        for (kind.mysql, 0..) |byte, index| {
+            if (byte > served_slots[0]) continue;
+            r.emit(kind.mysql[from..index]);
+            from = index + 1;
+            switch (byte) {
+                arg_a[0] => try r.range(arguments[0][0], arguments[0][1]),
+                arg_b[0] => try r.range(arguments[1][0], arguments[1][1]),
+                arg_set[0] => r.emit(try r.set(arguments[1])),
+                served_slots[0] => for (std.enums.values(provider_name.Provider), 0..) |provider, position| {
+                    if (position != 0) r.emit(",");
+                    r.slot(.{ .served = provider });
+                },
+                else => unreachable,
+            }
+        }
+        r.emit(kind.mysql[from..]);
         return end + 1;
-    }
-
-    fn wrap(r: *MysqlRenderer, before: []const u8, argument: [2]usize, after: []const u8) Refused!void {
-        r.emit(before);
-        try r.range(argument[0], argument[1]);
-        r.emit(after);
     }
 
     /// A character set argument: one literal, held to `characterSet`.
@@ -2184,18 +2251,67 @@ test "@served is the opening's function on SQLite and a slot per provider on MyS
     try std.testing.expectEqualDeep(slots ++ &[_]Slot{.{ .argument = 0 }}, S.mysql.slots);
 }
 
-test "MySQL rendering calls only the functions it knows, by argument count" {
-    try std.testing.expectEqualStrings("rsql: MySQL rendering knows no function rui_served of 1 arguments", comptime mysqlRendering("rui_served(provider)=1").refused);
-    try std.testing.expectEqualStrings("rsql: MySQL rendering knows no function max of 3 arguments", comptime mysqlRendering("max(a,b,c)>0").refused);
+test "a statement calls only the functions every engine spells, by argument count, and no CAST" {
+    const Seq = struct { created_seq: u64 };
+    try std.testing.expectEqualStrings(
+        "rsql: no function rui_served of 1 arguments; Rui SQL calls only `functions`",
+        comptime statementError(.read, "SELECT created_seq FROM session WHERE rui_served(provider)=1", struct {}, Seq).?,
+    );
+    try std.testing.expectEqualStrings(
+        "rsql: no function max of 3 arguments; Rui SQL calls only `functions`",
+        comptime statementError(.read, "SELECT created_seq FROM session WHERE max(created_seq,1,2)>0", struct {}, Seq).?,
+    );
+    try std.testing.expectEqualStrings(
+        "rsql: CAST converts differently on each engine",
+        comptime statementError(.read, "SELECT created_seq FROM session WHERE CAST(provider AS BLOB)=1", struct {}, Seq).?,
+    );
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, "SELECT created_seq FROM session WHERE created_seq BETWEEN 1 AND 2", struct {}, Seq));
     try std.testing.expectEqualStrings("payload=REPEAT(X'00',byte_length)", comptime render(.mysql, "payload=zeroblob(byte_length)"));
     // Neither a WITH name's column list nor an INSERT's table is a call.
     const text = "WITH recent(turn_id) AS (SELECT count(*) AS n FROM turn) INSERT INTO turn(turn_id) SELECT turn_id FROM recent";
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
 }
 
-test "MySQL rendering refuses CAST and divides integers with DIV" {
-    try std.testing.expectEqualStrings("rsql: CAST converts differently on each engine; MySQL rendering refuses it", comptime mysqlRendering("CAST(payload AS TEXT)='x'").refused);
+test "a served slot never binds NULL, so NOT @served(x) agrees with rui_served" {
+    const sqlite = @import("sqlite.zig");
+    const c = sqlite.c;
+    const text = comptime mysqlRendering("SELECT NOT @served(?1)").rendered.prepared();
+    comptime var list: []const u8 = "?";
+    inline for (std.enums.values(provider_name.Provider)[1..]) |_| list = list ++ ",?";
+    try std.testing.expectEqualStrings("SELECT NOT (? IN (" ++ list ++ "))", text);
+    var database: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &database));
+    defer _ = c.sqlite3_close(database);
+    const statement = try sqlite.prepare(database.?, text);
+    defer _ = c.sqlite3_finalize(statement);
+    const providers = comptime std.enums.values(provider_name.Provider);
+    // Each provider as x, with only `served_one` served: NOT @served(x) holds exactly when x is not it.
+    for (providers) |served_one| for (providers) |x| {
+        _ = c.sqlite3_reset(statement);
+        try sqlite.bindText(statement, 1, @tagName(x));
+        for (providers, 2..) |provider, index| try sqlite.bindText(statement, @intCast(index), servedBinding(provider, provider == served_one));
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+        try std.testing.expectEqual(c.SQLITE_INTEGER, c.sqlite3_column_type(statement, 0));
+        try std.testing.expectEqual(@as(i64, @intFromBool(x != served_one)), c.sqlite3_column_int64(statement, 0));
+    };
+    // The binding it replaces: NULL for an unserved provider leaves NOT @served(x) NULL, not true.
+    _ = c.sqlite3_reset(statement);
+    try sqlite.bindText(statement, 1, @tagName(providers[0]));
+    for (2..providers.len + 2) |index| _ = c.sqlite3_bind_null(statement, @intCast(index));
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 0));
+}
+
+test "MySQL rendering divides integers with DIV" {
     try std.testing.expectEqualStrings("(mask DIV 2)%2=1", comptime render(.mysql, "(mask/2)%2=1"));
+}
+
+test "a schema expression meets a statement's rules, and length() counts only a .bytes column" {
+    const bytes: []const []const u8 = &.{"payload"};
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime expressionError("length(payload)=byte_length AND kind BETWEEN 1 AND 5", bytes));
+    try std.testing.expectEqualStrings("rsql: length() counts characters of text on SQLite and bytes on MySQL; write @octets(x)", comptime expressionError("length(label)<=8", bytes).?);
+    try std.testing.expectEqualStrings("rsql: no function ifnull of 2 arguments; Rui SQL calls only `functions`", comptime expressionError("ifnull(label,'')<>''", bytes).?);
+    try std.testing.expectEqualStrings("rsql: CAST converts differently on each engine", comptime expressionError("CAST(label AS BLOB)=x", bytes).?);
 }
 
 test "length() and an UPDATE that reads what its SET already wrote are refused on every dialect" {
@@ -2315,13 +2431,13 @@ test "a typed statement renders @now after its Args, @session as its parameter a
 
 test "@now inside a string literal is text, not the Host's second" {
     const S = Read(.{
-        .sql = "SELECT content_id FROM content WHERE content_id=?1 AND CAST(payload AS TEXT)<>'@now'",
+        .sql = "SELECT content_id FROM content WHERE content_id=?1 AND digest<>'@now'",
         .Args = struct { content_id: u64 },
         .Row = struct { content_id: Positive },
         .cardinality = .optional,
     });
     try std.testing.expect(!S.uses_now);
-    try std.testing.expectEqualStrings("SELECT content_id FROM content WHERE content_id=?1 AND CAST(payload AS TEXT)<>'@now'", S.sql);
+    try std.testing.expectEqualStrings("SELECT content_id FROM content WHERE content_id=?1 AND digest<>'@now'", S.sql);
 }
 
 test "a typed statement's text must agree with its Args and Row" {

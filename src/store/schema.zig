@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0x468844fb8174b4ec },
+    .{ .schema_version = 51, .digest = 0x65f259f9c7614afb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -163,11 +163,15 @@ const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
 const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true };
 
+/// store_meta's keys, as bootstrap writes them: a closed set, so a key is
+/// a tag, which MySQL can key.
+const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format" };
+
 pub const tables = [_]Table{
     .{
         .name = "store_meta",
         .columns = &.{
-            .{ .name = "meta_key", .type = .{ .text = .{ .max = 64 } } },
+            .{ .name = "meta_key", .type = .{ .tag = &meta_keys } },
             .{ .name = "meta_value", .type = .{ .text = null } },
         },
         .primary_key = &.{"meta_key"},
@@ -660,8 +664,16 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
-    if (std.mem.eql(u8, table, "model_interruption_command")) return false;
-    return hasColumn(table, "session_ref") or hasColumn(table, "sender_session_ref");
+    return tableCarriesSessions(tables[tablePosition(&tables, table)]);
+}
+
+/// The columns that name a Session, in the order `sessionColumns` lists them.
+pub const session_column_names = [_][]const u8{ "session_ref", "sender_session_ref" };
+
+fn tableCarriesSessions(comptime table: Table) bool {
+    if (std.mem.eql(u8, table.name, "model_interruption_command")) return false;
+    for (table.columns) |column| if (contains(&session_column_names, column.name)) return true;
+    return false;
 }
 
 /// Whether `table` has a column named `column`.
@@ -681,7 +693,7 @@ pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
 pub fn sessionColumns(comptime table: []const u8) []const []const u8 {
     comptime {
         var columns: []const []const u8 = &.{};
-        for ([_][]const u8{ "session_ref", "sender_session_ref" }) |column| {
+        for (session_column_names) |column| {
             if (hasColumn(table, column)) columns = columns ++ .{column};
         }
         return columns;
@@ -736,11 +748,12 @@ pub fn keys(comptime table: []const u8) []const []const []const u8 {
 }
 
 /// The branches rendering every object takes, which whichever statement
-/// first asks `hasIndex` spends. The test build needed between 5_000 and
-/// 6_250 per object (measured); this is twice the passing bound. A quota
+/// first asks `hasIndex` spends, now that each CHECK and predicate is also
+/// parsed (`expression`). The unit test binary's build failed at
+/// 30,000 per object (measured); this is four times that. A quota
 /// only raises the evaluation's limit, so a statement whose own quota is
 /// larger adds this to it (`rsql.renderStatement`).
-pub const objects_quota = 12_500 * (tables.len + indexes.len);
+pub const objects_quota = 120_000 * (tables.len + indexes.len);
 
 /// Whether the schema has an index named `name`.
 pub fn hasIndex(comptime name: []const u8) bool {
@@ -754,7 +767,7 @@ pub fn hasIndex(comptime name: []const u8) bool {
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
-        @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
+        @setEvalBranchQuota(objects_quota);
         var text: []const u8 = "";
         for (objects(dialect)) |object| text = text ++ object.sql ++ ";\n";
         const terminated = text ++ "\x00";
@@ -769,8 +782,7 @@ pub const Object = struct { kind: enum { table, index, foreign_key }, name: []co
 /// and on MySQL the foreign keys `mysqlObjects` adds after them.
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
-        // Format 47's 51 tables and indexes take about 129,000 branches (measured).
-        @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
+        @setEvalBranchQuota(objects_quota);
         if (dialect == .mysql) break :blk switch (mysqlObjects(&tables, &indexes)) {
             .refused => |message| @compileError(message),
             .objects => |result| result,
@@ -811,12 +823,21 @@ fn mysqlObjects(comptime all: []const Table, comptime all_indexes: []const Index
             for (table.columns) |column| {
                 const column_type = switch (mysqlColumnType(all, all_indexes, table, column)) {
                     .refused => |message| return .{ .refused = message },
-                    .name => |name| name,
+                    .type => |found| found,
                 };
-                lines = lines ++ .{" " ++ column.name ++ " " ++ column_type ++ (if (column.nullable) "" else " NOT NULL") ++
+                lines = lines ++ .{" " ++ column.name ++ " " ++ column_type.name ++ (if (column.nullable) "" else " NOT NULL") ++
                     (if (column.default) |value| " DEFAULT " ++ value else "")};
                 if (columnCheck(column)) |check| checks = checks ++ .{check};
             }
+            var keys_of: []const []const []const u8 = &.{table.primary_key};
+            keys_of = keys_of ++ table.uniques;
+            for (table.foreign_keys) |key| keys_of = keys_of ++ .{key.columns};
+            for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
+                var names: []const []const u8 = &.{};
+                for (index.columns) |column| names = names ++ .{indexColumn(column).name};
+                keys_of = keys_of ++ .{names};
+            };
+            for (keys_of) |key| if (mysqlKeyError(all, all_indexes, table, key)) |message| return .{ .refused = message };
             lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
             for (table.uniques) |unique| lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
             for (table.foreign_keys) |key| {
@@ -825,25 +846,46 @@ fn mysqlObjects(comptime all: []const Table, comptime all_indexes: []const Index
                     lines = lines ++ .{" " ++ clause};
                 } else later = later ++ .{Object{ .kind = .foreign_key, .name = table.name ++ "(" ++ list(key.columns) ++ ")", .sql = "ALTER TABLE " ++ table.name ++ " ADD " ++ clause }};
             }
-            for (checks ++ table.checks) |check| lines = lines ++ .{" CHECK(" ++ rsql.render(.mysql, check) ++ ")"};
+            for (checks ++ table.checks) |check| lines = lines ++ .{" CHECK(" ++ expression(.mysql, table, check) ++ ")"};
             result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = "CREATE TABLE " ++ table.name ++ "(\n" ++ joinLines(lines) ++
                 "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin" }};
         }
-        for (all_indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createMysqlIndex(index) }};
+        for (all_indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createMysqlIndex(all, index) }};
         return .{ .objects = result ++ later };
     }
 }
 
-const MysqlColumnType = union(enum) { refused: []const u8, name: []const u8 };
+/// The most bytes InnoDB keys in one index, under the DYNAMIC row format
+/// MySQL 8.4 defaults to.
+const innodb_key_bytes = 3072;
+
+/// Why `key`, columns of `table` that MySQL indexes together, is wider
+/// than `innodb_key_bytes`, or null. Each column counts its type's
+/// `key_bytes`; a `unique_when` part keys the same value as its column.
+fn mysqlKeyError(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime key: []const []const u8) ?[]const u8 {
+    var bytes: usize = 0;
+    for (key) |name| bytes += switch (mysqlColumnType(all, all_indexes, table, columnNamed(table, name))) {
+        .refused => 0,
+        .type => |found| found.key_bytes,
+    };
+    if (bytes <= innodb_key_bytes) return null;
+    return std.fmt.comptimePrint("schema: the key {s}({s}) is {d} bytes on MySQL, past InnoDB's {d}", .{ table.name, list(key), bytes, innodb_key_bytes });
+}
+
+/// A MySQL column type, and the bytes a key on it takes at most: 8 for
+/// BIGINT, 1 for TINYINT, 4 per character for utf8mb4 VARCHAR, n for
+/// VARBINARY(n), and 0 for TEXT and BLOB types, which no key holds.
+const MysqlType = struct { name: []const u8, key_bytes: usize };
+const MysqlColumnType = union(enum) { refused: []const u8, type: MysqlType };
 
 /// `column`'s MySQL type. A column of a foreign key takes the type of the
 /// column it references. Otherwise `.int` is BIGINT, `.flag` TINYINT and
 /// `.tag` VARCHAR of its longest tag; bounded `.text` and `.bytes` are
 /// VARCHAR and VARBINARY of their bound when `mysqlKeyed`, else TEXT and
 /// BLOB up to 65,535 bytes and LONGTEXT and LONGBLOB past it. An unbounded
-/// Session column (session_ref or sender_session_ref of a table that
-/// carries Sessions) takes session.session_ref's type, because rsql's
-/// write rules give it only a SessionHead's reference or a copy of one
+/// Session column (one of `session_column_names` in a table that carries
+/// Sessions) takes session.session_ref's type, because rsql's write rules
+/// give it only a SessionHead's reference or a copy of one
 /// (`rsql.sessionError`). Other unbounded text and bytes are LONGTEXT and
 /// LONGBLOB, and refused when keyed: MySQL keys only bounded values.
 fn mysqlColumnType(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime column: Column) MysqlColumnType {
@@ -854,28 +896,29 @@ fn mysqlColumnType(comptime all: []const Table, comptime all_indexes: []const In
         };
         const keyed = mysqlKeyed(all, all_indexes, table, column.name);
         const octets, const text = switch (column.type) {
-            .int => return .{ .name = "BIGINT" },
-            .flag => return .{ .name = "TINYINT" },
+            .int => return .{ .type = .{ .name = "BIGINT", .key_bytes = 8 } },
+            .flag => return .{ .type = .{ .name = "TINYINT", .key_bytes = 1 } },
             .tag => |values| {
                 var longest: usize = 0;
                 for (values) |value| longest = @max(longest, value.len);
-                return .{ .name = std.fmt.comptimePrint("VARCHAR({d})", .{longest}) };
+                return .{ .type = .{ .name = std.fmt.comptimePrint("VARCHAR({d})", .{longest}), .key_bytes = 4 * longest } };
             },
             .text => |bound| .{ bound, true },
             .bytes => |bound| .{ bound, false },
         };
-        if (octets) |bounds| return .{ .name = if (keyed)
-            std.fmt.comptimePrint("{s}({d})", .{ if (text) "VARCHAR" else "VARBINARY", bounds.max })
-        else if (bounds.max <= 65_535)
-            (if (text) "TEXT" else "BLOB")
-        else if (text) "LONGTEXT" else "LONGBLOB" };
-        const session_column = std.mem.eql(u8, column.name, "session_ref") or std.mem.eql(u8, column.name, "sender_session_ref");
-        if (session_column and carriesSessions(table.name)) {
+        if (octets) |bounds| return .{ .type = if (keyed) .{
+            .name = std.fmt.comptimePrint("{s}({d})", .{ if (text) "VARCHAR" else "VARBINARY", bounds.max }),
+            .key_bytes = if (text) 4 * bounds.max else bounds.max,
+        } else .{
+            .name = if (bounds.max <= 65_535) (if (text) "TEXT" else "BLOB") else if (text) "LONGTEXT" else "LONGBLOB",
+            .key_bytes = 0,
+        } };
+        if (contains(&session_column_names, column.name) and tableCarriesSessions(table)) {
             const session = all[tablePosition(all, "session")];
             return mysqlColumnType(all, all_indexes, session, columnNamed(session, "session_ref"));
         }
         if (keyed) return .{ .refused = "schema: " ++ table.name ++ "." ++ column.name ++ " is in a key with no bound; MySQL keys only bounded values: give its type a .max" };
-        return .{ .name = if (text) "LONGTEXT" else "LONGBLOB" };
+        return .{ .type = .{ .name = if (text) "LONGTEXT" else "LONGBLOB", .key_bytes = 0 } };
     }
 }
 
@@ -920,14 +963,14 @@ pub fn mysqlIndexForm(comptime index: Index) ?MysqlIndexForm {
     return .unique_when;
 }
 
-fn createMysqlIndex(comptime index: Index) []const u8 {
+fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const u8 {
     checkIdentifier(index.name);
     var parts: []const u8 = list(index.columns);
     if (mysqlIndexForm(index) == .unique_when) {
         parts = "";
         for (index.columns, 0..) |column, position| {
             const part = indexColumn(column);
-            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ rsql.render(.mysql, index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
+            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
         }
     }
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";
@@ -937,6 +980,19 @@ fn createMysqlIndex(comptime index: Index) []const u8 {
 fn indexColumn(comptime column: []const u8) struct { name: []const u8, order: []const u8 } {
     const space = std.mem.indexOfScalar(u8, column, ' ') orelse return .{ .name = column, .order = "" };
     return .{ .name = column[0..space], .order = column[space..] };
+}
+
+/// `text`, a CHECK or index predicate on `table`, in `dialect`'s spelling,
+/// once it meets a typed statement's expression rules
+/// (`rsql.expressionError`), which let `length` count `table`'s `.bytes`
+/// columns only.
+fn expression(comptime dialect: rsql.Dialect, comptime table: Table, comptime text: []const u8) []const u8 {
+    var bytes: []const []const u8 = &.{};
+    for (table.columns) |column| if (column.type == .bytes) {
+        bytes = bytes ++ .{column.name};
+    };
+    if (rsql.expressionError(text, bytes)) |message| @compileError(message ++ ": " ++ text);
+    return rsql.render(dialect, text);
 }
 
 fn tablePosition(comptime all: []const Table, comptime name: []const u8) usize {
@@ -979,7 +1035,7 @@ const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_ve
 const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
 /// a wire bump is no schema change.
-const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++ format_text ++ "')";
+const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('" ++ meta_keys[0] ++ "',?1),('" ++ meta_keys[1] ++ "',?2),('" ++ meta_keys[2] ++ "','" ++ format_text ++ "')";
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
 fn createTable(comptime table: Table) []const u8 {
@@ -992,7 +1048,7 @@ fn createTable(comptime table: Table) []const u8 {
     for (table.foreign_keys) |key| {
         if (key.columns.len > 1) lines = lines ++ .{" FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key)};
     }
-    for (table.checks) |check| lines = lines ++ .{" CHECK(" ++ rsql.render(.sqlite, check) ++ ")"};
+    for (table.checks) |check| lines = lines ++ .{" CHECK(" ++ expression(.sqlite, table, check) ++ ")"};
     const body = joinLines(lines);
     checkIdentifier(table.name);
     return "CREATE TABLE " ++ table.name ++ "(\n" ++ body ++ "\n) STRICT" ++ (if (table.without_rowid) ", WITHOUT ROWID" else "");
@@ -1018,7 +1074,7 @@ fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
     for (table.foreign_keys) |key| {
         if (eqlList(key.columns, only)) text = text ++ " " ++ referenceClause(key);
     }
-    if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ rsql.render(.sqlite, check) ++ ")";
+    if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ expression(.sqlite, table, check) ++ ")";
     return text;
 }
 
@@ -1051,7 +1107,7 @@ fn referenceClause(comptime key: ForeignKey) []const u8 {
 fn createIndex(comptime index: Index) []const u8 {
     checkIdentifier(index.name);
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ list(index.columns) ++ ")" ++
-        (if (index.where) |where| " WHERE " ++ rsql.render(.sqlite, where) else "");
+        (if (index.where) |where| " WHERE " ++ expression(.sqlite, tables[tablePosition(&tables, index.table)], where) else "");
 }
 
 fn checkIdentifier(comptime name: []const u8) void {
@@ -1207,18 +1263,18 @@ test "MySQL types come from foreign keys, bounds and keys, and a key cycle close
 }
 
 test "each partial index takes its MySQL form" {
-    try std.testing.expectEqualStrings("CREATE INDEX open ON turn(session_ref)", comptime createMysqlIndex(.{ .name = "open", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_code IS NULL" }));
+    try std.testing.expectEqualStrings("CREATE INDEX open ON turn(session_ref)", comptime createMysqlIndex(&tables, .{ .name = "open", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_code IS NULL" }));
     try std.testing.expectEqualStrings(
         "CREATE UNIQUE INDEX handle ON action_operation(sender_handle,action_id)",
-        comptime createMysqlIndex(.{ .name = "handle", .table = "action_operation", .columns = &.{ "sender_handle", "action_id" }, .unique = true, .where = "sender_handle IS NOT NULL" }),
+        comptime createMysqlIndex(&tables, .{ .name = "handle", .table = "action_operation", .columns = &.{ "sender_handle", "action_id" }, .unique = true, .where = "sender_handle IS NOT NULL" }),
     );
     try std.testing.expectEqualStrings(
         "CREATE UNIQUE INDEX active ON turn((CASE WHEN outcome_code IS NULL THEN session_ref END),(CASE WHEN outcome_code IS NULL THEN turn_id END) DESC)",
-        comptime createMysqlIndex(.{ .name = "active", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" }, .unique = true, .where = "outcome_code IS NULL" }),
+        comptime createMysqlIndex(&tables, .{ .name = "active", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" }, .unique = true, .where = "outcome_code IS NULL" }),
     );
     try std.testing.expectEqualStrings(
         "CREATE UNIQUE INDEX other ON turn((CASE WHEN outcome_code IS NOT NULL THEN session_ref END))",
-        comptime createMysqlIndex(.{ .name = "other", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NOT NULL" }),
+        comptime createMysqlIndex(&tables, .{ .name = "other", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NOT NULL" }),
     );
 }
 
@@ -1248,4 +1304,26 @@ test "the schema's MySQL DDL keeps each foreign key once and no SQLite spelling"
         if (std.mem.eql(u8, object.name, "model_output_item")) break object.sql;
     } else unreachable;
     try std.testing.expect(std.mem.indexOf(u8, output_items, " session_ref VARCHAR(6) NOT NULL,") != null);
+}
+
+test "a MySQL key wider than InnoDB keeps is refused" {
+    const wide = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = .{ .max = 769 } } }}, .primary_key = &.{"label"} }};
+    try std.testing.expectEqualStrings("schema: the key content(label) is 3076 bytes on MySQL, past InnoDB's 3072", comptime mysqlObjects(&wide, &.{}).refused);
+    const fits = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = .{ .max = 768 } } }}, .primary_key = &.{"label"} }};
+    try std.testing.expectEqual(1, comptime mysqlObjects(&fits, &.{}).objects.len);
+}
+
+test "MySQL sessions read literals as rsql copies them, and strictly" {
+    const prefix = "SET SESSION sql_mode='";
+    const mode = for (mysql_session) |statement| {
+        if (std.mem.startsWith(u8, statement, prefix)) break statement[prefix.len .. statement.len - 1];
+    } else return error.NoSqlMode;
+    // Literals: mysqlRendering copies them unchanged. Strict: DIV by zero and overflow in a write fail as the docs say.
+    for ([_][]const u8{ "NO_BACKSLASH_ESCAPES", "STRICT_ALL_TABLES", "ERROR_FOR_DIVISION_BY_ZERO", "ONLY_FULL_GROUP_BY" }) |wanted| {
+        var names = std.mem.tokenizeScalar(u8, mode, ',');
+        const found = while (names.next()) |name| {
+            if (std.mem.eql(u8, name, wanted)) break true;
+        } else false;
+        try std.testing.expect(found);
+    }
 }
