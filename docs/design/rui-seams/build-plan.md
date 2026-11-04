@@ -10,8 +10,7 @@ Every unit cites the ledger decisions it builds; a builder reads those, not this
 - The work is 32 PRs in four new lanes, beside the DB thread's own series. Eight of them depend on nothing and can start today.
 - The real limit is not the amount of work. It is a handful of large shared files (`protocol.zig`, `configuration.zig`, `schema.zig`, `model_settlement.zig`, `command.zig`). PRs that edit the same file must land one after another (rule A), so the plan gives each shared file one owning lane and keeps every other PR in new files.
 - Critical path for the whole design: tool records in memory, then tool records stored, then the core-tool runner, then `start_agent`, then the stop cascade, then child answers delivered. Six PRs.
-- Critical path for Drift's first conversation, on a SQLite Store: four PRs deep on two lanes at once (tool records then MCP tools; OpenAPI emit then the TS client). Drift can start porting against SQLite before MySQL lands, because switching to MySQL is one setting (D83).
-- Critical path for Drift in production adds the DB thread's PRs 7, 8 and 9 (Store thread, MySQL, Host wiring). That series is likely the longest single chain, so nothing else should wait for it.
+- Critical path for Drift is the DB thread's series: the open PRs 5e-2b to 6b, then PR 7 Store thread, PR 8 MySQL, PR 9 Host wiring. Drift runs only on MySQL (Divyansh, 06:46Z). Everything else Drift needs (tool records, MCP tools, launch frame, spec, presets, TS client) is two chains of four PRs in other lanes and must land before PR 9 so it never becomes the wait.
 - One step needs Divyansh: a live probe against OpenAI with a real key (P1). It is needed only before the codec PRs T2 and T3 merge, not before they start.
 
 ## Design corrections found while mapping
@@ -22,7 +21,7 @@ D173. Replaces D119 and D164's "one format bump". Every merge to main ships a re
 
 D174. The Session's "one append-only change list" (D53, D138) is today's `session_revision` table plus the settings each Operation freezes. It is not a new table. The codec works out each change by comparing Operation k's frozen settings with Operation k-1's, as D75 already says. What is new is that a revision can come from the core (a `find_tools` load, an MCP rewording) as well as from a client's `configure`, so `session_revision.command_key` must allow a core-made key.
 
-D175. Moves the launch frame out of the DB thread's PR 9 (changes D108). The frame (D112, D130) is built early in its own PR with `store` taking today's SQLite Store directory. PR 9 then only adds the MySQL URL form of `store` and the MySQL rules for `runtimeDir` and the Store id (D114, D158). This takes MySQL off the critical path for Drift's development.
+D175. Moves the launch frame out of the DB thread's PR 9 (changes D108). The frame (D112, D130) is built early in its own PR with `store` taking today's SQLite Store directory. PR 9 then only adds the MySQL URL form of `store` and the MySQL rules for `runtimeDir` and the Store id (D114, D158). Drift itself runs only on MySQL; the early frame lets the TS client and MCP work be built and tested in CI before MySQL lands, and keeps PR 9 small.
 
 D176. Wording fix to D169: the Bash environment a child inherits is the parent's environment held in Host memory (`SessionEnvironments.zig`), not a saved one; Rui never stores it. Also, D76's test line numbers are stale: the cache proof tests are at `src/model_adapter.zig:3566`, `:3594` and `:3630`.
 
@@ -147,8 +146,7 @@ DB: 6b ─► 7 ─► 8 ─► 9 (extends A2)
 ### Critical paths
 
 1. Whole design: T1a, T1b, K0, K1, K2, K3. Six PRs: two in lane T, then four in lane K, so lane K is the lane to keep moving once T1b lands.
-2. Drift's first conversation on SQLite needs A2, A3a to A3c, T1b, S1, S2, F1, M3a and M3b. Two chains of four run side by side: T1a, T1b, M3a, M3b and A1, A3a, A3b, A3c. Agents (K1 to K4), `find_tools` and catalog refresh are not on it.
-3. Drift in production adds DB PRs 7, 8 and 9. Starting Drift's port on SQLite (D83, D175) means only the final cut-over waits for them.
+2. Drift (MySQL only): the DB series 5e-2b to 6b, 7, 8, 9 is the critical path. Beside it, Drift also needs A2, A3a to A3c, T1b, S1, S2, F1, M3a and M3b, as two chains of four (T1a, T1b, M3a, M3b and A1, A3a, A3b, A3c), which must land before PR 9. Agents (K1 to K4), `find_tools` and catalog refresh are not needed for Drift's first conversation.
 
 ### Pace rules for this run
 

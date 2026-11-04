@@ -254,7 +254,7 @@ D172. Rui's Zig request and reply types are the one source of truth. The build e
 
 D173. Replaces D119 and D164's "one format bump". Every merge to main ships a release, so each PR that changes the Store format bumps `schema_version` itself, and format-changing PRs land one at a time in build-plan.md's format queue.
 D174. The change list (D53, D138) is `session_revision` plus each Operation's frozen settings, not a new table. A revision may also be made by the core (`find_tools`, MCP rewording), so `command_key` allows a core-made key.
-D175. Replaces D108's owner. The launch frame is built early in its own PR with `store` as a SQLite directory; the DB thread's PR 9 adds the MySQL URL form, `runtimeDir` rules and the Store id.
+D175. Replaces D108's owner. The launch frame is built early in its own PR with `store` as a SQLite directory; the DB thread's PR 9 adds the MySQL URL form, `runtimeDir` rules and the Store id. Drift runs only on MySQL (Divyansh 06:46Z), so the DB series is Drift's critical path; the early frame only lets the TS client and MCP work be tested before it lands.
 D176. D169's inherited environment is the parent's environment held in Host memory (SessionEnvironments.zig), never stored. D76's cache proof tests are at src/model_adapter.zig:3566, :3594 and :3630.
 
 ## Replaced
