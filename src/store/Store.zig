@@ -92,7 +92,15 @@ pub const Store = struct {
     /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
     // Source-level proof only: no counters/storage in the production Store.
-    testing_content_work: if (@import("builtin").is_test) struct { read: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0), blob: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
+    // Content bytes read through readers and blob handles, reader closes,
+    // and every Access round on this Store (`Access.run`, `commit` and
+    // `readRaw`), for the round budgets.
+    testing_work: if (@import("builtin").is_test) struct {
+        read: std.atomic.Value(u64) = .init(0),
+        blob: std.atomic.Value(u64) = .init(0),
+        closes: std.atomic.Value(u32) = .init(0),
+        rounds: u32 = 0,
+    } else void = if (@import("builtin").is_test) .{} else {},
 
     /// Whether nothing changed since `since` on this opening: atomics only,
     /// no lock. Never while fenced, so a read reports the failure.

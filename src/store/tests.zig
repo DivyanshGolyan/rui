@@ -6417,21 +6417,25 @@ test "controls remove scheduled retries and replay without cancelling newer work
 }
 
 test "accepted stop remains discoverable without a control hint" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSession(&storage, "hintless-config");
-    try submitTestMessage(&storage, &tmp, "hintless-file", "hintless-message", session.slice(), "work");
-    var admitted = (try storage.admitNextModelAttempt(.{})).?;
-    const binding = try admitted.permit.consume();
-    try std.testing.expect((try storage.operationSupersededByControl(binding)) == null);
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "hintless-config");
+            try submitTestMessage(&storage, &tmp, "hintless-file", "hintless-message", session.slice(), "work");
+            var admitted = (try storage.admitNextModelAttempt(.{})).?;
+            const binding = try admitted.permit.consume();
+            try std.testing.expect((try storage.operationSupersededByControl(binding)) == null);
 
-    var stop = try completeSessionStop("hintless-stop", session.slice());
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    const control = (try storage.operationSupersededByControl(binding)).?;
-    try std.testing.expectEqualStrings("hintless-stop", control.command_key.slice());
+            var stop = try completeSessionStop("hintless-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            const control = (try storage.operationSupersededByControl(binding)).?;
+            try std.testing.expectEqualStrings("hintless-stop", control.command_key.slice());
+        }
+    }.run);
 }
 
 test "dispatch handoff refuses a stopped Attempt without invoking the launch callback" {
@@ -9793,7 +9797,7 @@ test "a large message's parts read only their own ranges" {
     while (try cursor.next(&view)) |entry| {
         if (entry.kind != .provider_output) continue;
         _ = try view.openOutput(entry.position);
-        const before = storage.testing_content_work.blob.load(.monotonic);
+        const before = storage.testing_work.blob.load(.monotonic);
         var window: [4096]u8 = undefined;
         var text_bytes: u64 = 0;
         while (try view.nextOutputPart()) |part| {
@@ -9810,7 +9814,7 @@ test "a large message's parts read only their own ranges" {
             text_bytes += offset;
         }
         try std.testing.expectEqual(@as(u64, 64 + large.len), text_bytes);
-        try std.testing.expectEqual(text_bytes, storage.testing_content_work.blob.load(.monotonic) - before);
+        try std.testing.expectEqual(text_bytes, storage.testing_work.blob.load(.monotonic) - before);
         break;
     } else return error.MissingMessage;
     try std.testing.expect(!storage.isFenced());
@@ -11884,32 +11888,36 @@ test "every activity row is dated by the fact that owns it" {
 }
 
 test "a Tool Result is dated by its group's last acceptance, even when the clock stepped back" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSessionAsk(&storage, "stepped-config");
-    try submitTestMessage(&storage, &tmp, "stepped-input", "stepped-input", session.slice(), "propose");
-    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try settleTwoActionsForTesting(&storage, &tmp, binding, "stepped-calls");
-    var stop = try completeSessionStop("stepped-stop", session.slice());
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    // The clock stepped back between the two acceptances: the later one,
-    // at the greater position, carries the earlier time.
-    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(DISTINCT acceptance_position) FROM action_operation"));
-    try sqlite.exec(storage.database, "UPDATE action_operation SET resolved_at=" ++
-        "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 100 ELSE 200 END");
-    var request: protocol.ActivityPage = .{};
-    try request.session.set(session.slice());
-    const page = try store_core.activityPageForTesting(&storage, request);
-    var results: usize = 0;
-    for (page.items[0..page.count]) |item| if (item.value == .tool_result) {
-        try std.testing.expectEqual(@as(u64, 100), item.at);
-        results += 1;
-    };
-    try std.testing.expectEqual(@as(usize, 2), results);
-    try std.testing.expect(!storage.isFenced());
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "stepped-config");
+            try submitTestMessage(&storage, &tmp, "stepped-input", "stepped-input", session.slice(), "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "stepped-calls");
+            var stop = try completeSessionStop("stepped-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            // The clock stepped back between the two acceptances: the later one,
+            // at the greater position, carries the earlier time.
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT acceptance_position) FROM action_operation", .{}));
+            try store_testing.exec(&storage, "UPDATE action_operation SET resolved_at=" ++
+                "CASE WHEN acceptance_position=(SELECT max(acceptance_position) FROM action_operation) THEN 100 ELSE 200 END", .{});
+            var request: protocol.ActivityPage = .{};
+            try request.session.set(session.slice());
+            const page = try store_core.activityPageForTesting(&storage, request);
+            var results: usize = 0;
+            for (page.items[0..page.count]) |item| if (item.value == .tool_result) {
+                try std.testing.expectEqual(@as(u64, 100), item.at);
+                results += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 2), results);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
 }
 
 fn denyForTesting(storage: *Store, session: []const u8, key: []const u8, action_id: u64) !void {
@@ -14858,10 +14866,10 @@ test "Full history takes a round per chunk" {
     // content, then one per run of `renderFull`: Messages; Conversation,
     // Turns and Operations; calls; Actions; decisions, stops,
     // interruptions and results. A run's lists share a round because
-    // every list but its last renders all its rows in the pass; the
-    // Message's and the answer's content windows are `readRaw` rounds,
-    // which `rounds` does not count.
-    try std.testing.expectEqual(@as(u32, 1 + 5), rounds);
+    // every list but its last renders all its rows in the pass. The
+    // Message's and the answer's content windows are a `readRaw` round
+    // each.
+    try std.testing.expectEqual(@as(u32, 1 + 5 + 2), rounds);
 }
 
 test "Full revisions show each content whole where it first occurs" {
@@ -15147,13 +15155,452 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
 }
 
 test "a content lookup's failed step answers CorruptStore, as on main" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const attempt = try TestingAttempt.admit(&storage, &tmp);
-    try failAtStepForTesting(storage.database, "content");
-    try std.testing.expectError(error.CorruptStore, storage.openContent(attempt.content));
-    try std.testing.expect(storage.isFenced());
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const attempt = try TestingAttempt.admit(&storage, &tmp);
+            try store_testing.failReadsOf(&storage, "content");
+            try std.testing.expectError(error.CorruptStore, storage.openContent(attempt.content));
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
+test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
+    const Name = store_testing.EngineName;
+    try std.testing.expectEqual(0, (try store_testing.parseRequiredEngines("")).count());
+    const listed = try store_testing.parseRequiredEngines("postgres,mysql");
+    try std.testing.expect(listed.contains(Name.mysql) and listed.contains(Name.postgres) and !listed.contains(Name.sqlite));
+    try std.testing.expect((try store_testing.parseRequiredEngines("sqlite")).contains(Name.sqlite));
+    for ([_][]const u8{ "mysqlx", "my", " mysql", "mysql,", ",sqlite", "postgres,,mysql", "MySQL", "oracle" }) |list| {
+        try std.testing.expectError(error.UnknownRequiredEngine, store_testing.parseRequiredEngines(list));
+    }
+}
+
+test "a fixture's SQL is portable Rui SQL and sets no PRAGMA" {
+    try std.testing.expectEqual(null, comptime store_testing.fixtureTextError("UPDATE session SET created_at=1 WHERE session_ref=?1"));
+    try std.testing.expectEqualStrings("fixture: PRAGMA is a SQLite setting; write the test in sqlite_tests.zig", comptime store_testing.fixtureTextError("PRAGMA foreign_keys=OFF").?);
+    try std.testing.expectEqualStrings("fixture: PRAGMA is a SQLite setting; write the test in sqlite_tests.zig", comptime store_testing.fixtureTextError("DELETE FROM turn; pragma ignore_check_constraints=ON").?);
+    try std.testing.expectEqualStrings("rsql: '||' is OR on MySQL; compute the text in Zig", comptime store_testing.fixtureTextError("UPDATE session SET model=model||'x'").?);
+    try std.testing.expectEqualStrings("rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write", comptime store_testing.fixtureTextError("INSERT OR IGNORE INTO turn VALUES(1)").?);
+}
+
+/// The functions that enter the Store (`enter(self, ...)`), each a
+/// separate locked transition, by the name the source gives it.
+const EntryPoint = enum {
+    configure,
+    submitMessageWithModel,
+    stopSession,
+    interruptModel,
+    decidePermission,
+    observeCommand,
+    commandResult,
+    inspectSession,
+    publicConversationPage,
+    openPublicConversationContent,
+    activityPage,
+    openActivityContent,
+    captureFailedResponse,
+    captureSessionReport,
+    captureSessionList,
+    actionContent,
+    admitModelAttempt,
+    admitNextActionAttempt,
+    readBashExecutionInput,
+    revokeActionSender,
+    actionSupersededByStop,
+    withActionDispatchHandoff,
+    settleActionAttempt,
+    recoverOneUncertainAction,
+    tryAdmitNextModelRetry,
+    operationSupersededByControl,
+    withDispatchHandoff,
+    claimModelAuthRefresh,
+    settleModelAttemptFailure,
+    recoverOneExhaustedModelAttempt,
+    settleModelSuccess,
+    openContentIdentity,
+    readOwnedContent,
+    readHistoricalSettings,
+    readHistoricalEntry,
+    validateHistoricalOutputsStep,
+    readPrefixSeal,
+    recordPrefixSeal,
+    readCompactionAnchor,
+    readHistoricalOutput,
+    readHistoricalPart,
+    readHistoricalToolResult,
+    checkAttempt,
+};
+
+/// Each entry point's rounds (`Store.testing_work.rounds`) on the path the
+/// round budget test drives it, measured on SQLite at 5e-3's head.
+const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
+    .configure = 3,
+    .submitMessageWithModel = 2,
+    .stopSession = 2,
+    .interruptModel = 2,
+    .decidePermission = 2,
+    .observeCommand = 5,
+    .commandResult = 1,
+    .inspectSession = 3,
+    .publicConversationPage = 4,
+    .openPublicConversationContent = 2,
+    .activityPage = 7,
+    .openActivityContent = 4,
+    .captureFailedResponse = 1,
+    .captureSessionReport = 5,
+    .captureSessionList = 6,
+    .actionContent = 2,
+    .admitModelAttempt = 3,
+    .admitNextActionAttempt = 2,
+    .readBashExecutionInput = 2,
+    .revokeActionSender = 2,
+    .actionSupersededByStop = 1,
+    .withActionDispatchHandoff = 1,
+    .settleActionAttempt = 3,
+    .recoverOneUncertainAction = 1,
+    .tryAdmitNextModelRetry = 1,
+    .operationSupersededByControl = 1,
+    .withDispatchHandoff = 1,
+    .claimModelAuthRefresh = 2,
+    .settleModelAttemptFailure = 2,
+    .recoverOneExhaustedModelAttempt = 1,
+    .settleModelSuccess = 2,
+    .openContentIdentity = 1,
+    .readOwnedContent = 1,
+    .readHistoricalSettings = 2,
+    .readHistoricalEntry = 10,
+    .validateHistoricalOutputsStep = 1,
+    .readPrefixSeal = 1,
+    .recordPrefixSeal = 2,
+    .readCompactionAnchor = 2,
+    .readHistoricalOutput = 2,
+    .readHistoricalPart = 1,
+    .readHistoricalToolResult = 2,
+    .checkAttempt = 1,
+});
+
+test "every function that enters the Store has a round budget" {
+    const sources = .{
+        @embedFile("Store.zig"),
+        @embedFile("access.zig"),
+        @embedFile("domain/action.zig"),
+        @embedFile("domain/command.zig"),
+        @embedFile("domain/configuration.zig"),
+        @embedFile("domain/content.zig"),
+        @embedFile("domain/historical.zig"),
+        @embedFile("domain/model_admission.zig"),
+        @embedFile("domain/model_settlement.zig"),
+        @embedFile("domain/reads.zig"),
+        @embedFile("domain/report.zig"),
+        @embedFile("domain/turn.zig"),
+    };
+    var found: std.EnumSet(EntryPoint) = .empty;
+    inline for (sources) |source| {
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, source, at, "enter" ++ "(self, ")) |index| : (at = index + 1) {
+            const before = source[0..index];
+            const fn_at = @max(std.mem.lastIndexOf(u8, before, " fn ") orelse 0, std.mem.lastIndexOf(u8, before, "\nfn ") orelse 0) + " fn ".len;
+            var end = fn_at;
+            while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
+            const name = source[fn_at..end];
+            if (std.mem.endsWith(u8, name, "ForTesting")) continue;
+            const point = std.meta.stringToEnum(EntryPoint, name) orelse {
+                std.debug.print("{s} enters the Store but has no round budget\n", .{name});
+                return error.EntryPointWithoutBudget;
+            };
+            try std.testing.expect(!found.contains(point));
+            found.insert(point);
+        }
+    }
+    try std.testing.expectEqual(std.enums.values(EntryPoint).len, found.count());
+}
+
+const RoundMeter = struct {
+    storage: *Store,
+    before: u32 = 0,
+    measured: std.EnumArray(EntryPoint, ?u32) = .initFill(null),
+
+    fn start(meter: *RoundMeter) void {
+        meter.before = meter.storage.testing_work.rounds;
+    }
+
+    fn stop(meter: *RoundMeter, point: EntryPoint) void {
+        std.debug.assert(meter.measured.get(point) == null);
+        meter.measured.set(point, meter.storage.testing_work.rounds - meter.before);
+    }
+};
+
+test "each Store entry point takes its round budget on its common path" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var meter: RoundMeter = .{ .storage = &storage };
+            try plainTurn(&storage, &tmp, &meter);
+            try toolTurn(&storage, &tmp, &meter);
+            try compactedTurn(&storage, &tmp, &meter);
+            var failed = false;
+            for (std.enums.values(EntryPoint)) |point| {
+                const measured = meter.measured.get(point) orelse {
+                    std.debug.print("{s}: not driven\n", .{@tagName(point)});
+                    failed = true;
+                    continue;
+                };
+                if (measured != round_budgets.get(point)) failed = true;
+            }
+            if (failed) {
+                for (std.enums.values(EntryPoint)) |point| std.debug.print(".{s} = {?d}, budget {d}\n", .{ @tagName(point), meter.measured.get(point), round_budgets.get(point) });
+                return error.RoundBudgetChanged;
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+
+        const Launch = struct {
+            fn run(_: void) !void {}
+        };
+
+        /// A Message answered with text, its result read back, a second
+        /// Message interrupted, and a stop.
+        fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            meter.start();
+            const session = try configureTestSession(storage, "budget-plain");
+            meter.stop(.configure);
+            meter.start();
+            try submitTestMessage(storage, tmp, "budget-plain-input", "budget-plain-key", session.slice(), "hello");
+            meter.stop(.submitMessageWithModel);
+            meter.start();
+            _ = try storage.observeCommand("budget-plain-key");
+            meter.stop(.observeCommand);
+            meter.start();
+            const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            meter.stop(.admitModelAttempt);
+            meter.start();
+            _ = try storage.modelOperationKind(binding);
+            meter.stop(.checkAttempt);
+            meter.start();
+            try std.testing.expect(try storage.operationSupersededByControl(binding) == null);
+            meter.stop(.operationSupersededByControl);
+            meter.start();
+            try storage.withDispatchHandoff(binding, {}, Launch.run);
+            meter.stop(.withDispatchHandoff);
+            meter.start();
+            _ = try storage.claimModelAuthRefresh(binding);
+            meter.stop(.claimModelAuthRefresh);
+            const item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}";
+            meter.start();
+            try settleItemsForTesting(storage, tmp, binding, &.{item}, "hi");
+            meter.stop(.settleModelSuccess);
+            meter.start();
+            const result = try storage.commandResult("budget-plain-key");
+            meter.stop(.commandResult);
+            meter.start();
+            const location = try storage.openContent(result);
+            meter.stop(.openContentIdentity);
+            var reader: ContentReader = undefined;
+            reader.open(location);
+            defer reader.close();
+            var bytes: [64]u8 = undefined;
+            meter.start();
+            try std.testing.expectEqual(2, try reader.read(0, &bytes));
+            meter.stop(.readOwnedContent);
+            var request: protocol.ConversationPage = .{};
+            try request.session.set(session.slice());
+            var page: reads_domain.PublicConversationPage = undefined;
+            meter.start();
+            try storage.publicConversationPage(&request, &page);
+            meter.stop(.publicConversationPage);
+            const answer = for (page.items[0..page.count]) |entry| {
+                if (entry.kind == .assistant) break entry.position;
+            } else return error.NoAnswer;
+            meter.start();
+            _ = try storage.openPublicConversationContent(&.{ .session = session, .position = answer });
+            meter.stop(.openPublicConversationContent);
+
+            try submitTestMessage(storage, tmp, "budget-again-input", "budget-again-key", session.slice(), "again");
+            const running = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var interrupt: protocol.ModelInterruptionCommand = .{ .turn_id = running.turn_id, .operation_id = running.operation_id };
+            try interrupt.key.set("budget-interrupt");
+            try interrupt.session.set(session.slice());
+            meter.start();
+            try std.testing.expect(storage.interruptModel(&interrupt, .{}) == .accepted);
+            meter.stop(.interruptModel);
+            var stop = try completeSessionStop("budget-stop", session.slice());
+            meter.start();
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            meter.stop(.stopSession);
+        }
+
+        /// Two Bash calls under ask: one allowed, run and settled, one
+        /// denied; then the continuation's history, its failure, and the
+        /// Session's reads.
+        fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            const session = try configureTestSessionAsk(storage, "budget-tools");
+            try submitTestMessage(storage, tmp, "budget-tools-input", "budget-tools-key", session.slice(), "run");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const arguments = "{\\\"description\\\":\\\"Disk usage\\\",\\\"cmd\\\":\\\"df -h\\\",\\\"timeout_ms\\\":null}";
+            const decoded = "{\"description\":\"Disk usage\",\"cmd\":\"df -h\",\"timeout_ms\":null}";
+            const calls = [_]TestingCall{
+                .{ .item_id = "item-a", .name = "bash", .encoded_call_id = "call-a", .decoded_call_id = "call-a", .encoded_arguments = arguments, .decoded_arguments = decoded },
+                .{ .item_id = "item-b", .name = "bash", .encoded_call_id = "call-b", .decoded_call_id = "call-b", .encoded_arguments = arguments, .decoded_arguments = decoded },
+            };
+            try settleCallsForTesting(storage, tmp, first, "budget-calls", &calls);
+            const allowed = try store_testing.queryU64(storage, "SELECT min(action_id) FROM action_operation", .{});
+            const denied = try store_testing.queryU64(storage, "SELECT max(action_id) FROM action_operation", .{});
+            meter.start();
+            _ = try storage.actionArguments(session.slice(), allowed);
+            meter.stop(.actionContent);
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = allowed, .decision = .allow_once };
+            try allow.key.set("budget-allow");
+            try allow.session.set(session.slice());
+            meter.start();
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+            meter.stop(.decidePermission);
+            meter.start();
+            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            meter.stop(.admitNextActionAttempt);
+            var input: BashExecutionInput = undefined;
+            meter.start();
+            try storage.readBashExecutionInput(action, &input);
+            meter.stop(.readBashExecutionInput);
+            meter.start();
+            try storage.withActionDispatchHandoff(action, {}, Launch.run);
+            meter.stop(.withActionDispatchHandoff);
+            meter.start();
+            try std.testing.expect(try storage.actionSupersededByStop(action) == null);
+            meter.stop(.actionSupersededByStop);
+            meter.start();
+            try storage.revokeActionSender(action);
+            meter.stop(.revokeActionSender);
+            meter.start();
+            _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+            meter.stop(.settleActionAttempt);
+            var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };
+            try deny.key.set("budget-deny");
+            try deny.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+            meter.start();
+            try std.testing.expect(!try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
+            meter.stop(.recoverOneUncertainAction);
+
+            const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            {
+                var view: HistoricalView = undefined;
+                try storage.openHistoricalView(continuation, &view);
+                defer view.close();
+                meter.start();
+                _ = try view.validateOutputsStep();
+                meter.stop(.validateHistoricalOutputsStep);
+                while (!try view.validateOutputsStep()) {}
+                var settings: HistoricalSettings = undefined;
+                meter.start();
+                try view.settings(&settings);
+                meter.stop(.readHistoricalSettings);
+                meter.start();
+                var entry = (try view.nextEntry(0)).?;
+                meter.stop(.readHistoricalEntry);
+                entry = (try view.nextEntry(entry.position)).?;
+                try std.testing.expectEqual(HistoricalEntryKind.provider_output, entry.kind);
+                meter.start();
+                _ = try view.openOutput(entry.position);
+                meter.stop(.readHistoricalOutput);
+                meter.start();
+                _ = try view.nextOutputPart();
+                meter.stop(.readHistoricalPart);
+                while (entry.kind != .tool_results) entry = (try view.nextEntry(entry.position)).?;
+                meter.start();
+                _ = (try view.nextToolResult()).?;
+                meter.stop(.readHistoricalToolResult);
+                meter.start();
+                try std.testing.expect(try view.prefixSeal() == null);
+                meter.stop(.readPrefixSeal);
+                const seal: historical_domain.PrefixSeal = .{ .anchor = null, .admission_position = 1, .span_length = 0, .digest = @splat(0) };
+                meter.start();
+                try view.recordPrefixSeal(&seal);
+                meter.stop(.recordPrefixSeal);
+            }
+            meter.start();
+            try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
+            meter.stop(.settleModelAttemptFailure);
+            meter.start();
+            try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}) == null);
+            meter.stop(.tryAdmitNextModelRetry);
+            meter.start();
+            try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
+            meter.stop(.recoverOneExhaustedModelAttempt);
+
+            meter.start();
+            _ = try storage.inspectSessionForTesting(session.slice());
+            meter.stop(.inspectSession);
+            var activity: protocol.ActivityPage = .{};
+            try activity.session.set(session.slice());
+            meter.start();
+            const rows = try store_core.activityPageForTesting(storage, activity);
+            meter.stop(.activityPage);
+            meter.start();
+            _ = try storage.openActivityContent(&.{ .session = session, .position = rows.items[0].position });
+            meter.stop(.openActivityContent);
+            meter.start();
+            std.testing.allocator.free(try testingSessionReport(storage, tmp, session.slice(), 1024 * 1024));
+            meter.stop(.captureSessionReport);
+            var used = std.atomic.Value(u64).init(0);
+            meter.start();
+            std.testing.allocator.free(try testingSessionList(storage, tmp, .{}, &used, 2));
+            meter.stop(.captureSessionList);
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const root_length = try tmp.dir.realPath(std.testing.io, &root);
+            var inspect: protocol.InspectSession = .{ .failed_response = .{ .operation = continuation.operation_id, .attempt = continuation.attempt_ordinal, .part = .body } };
+            try inspect.session.set(session.slice());
+            meter.start();
+            if (storage.captureFailedResponse(&inspect, tmp.dir, .{
+                .scratch_path = root[0..root_length],
+                .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
+                .request_number = 3,
+            })) |report| {
+                var kept = report;
+                kept.deinit();
+            } else |_| {}
+            meter.stop(.captureFailedResponse);
+        }
+
+        /// A Turn over the compaction trigger, compacted, so its
+        /// successor's history starts at an anchor.
+        fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            const session = try configureTestSession(storage, "budget-compacted");
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("budget-heuristics");
+            try patch.session.set(session.slice());
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1000");
+            patch.configuration.output_reservation.state = .value;
+            try patch.configuration.output_reservation.value.set("1");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try submitTestMessage(storage, tmp, "budget-one", "budget-one", session.slice(), "original");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "item-a", .name = "unknown", .encoded_call_id = "call-a", .decoded_call_id = "call-a", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            };
+            try settleCallsForTestingWithFaults(storage, tmp, first, "budget-usage", &calls, .{}, "{\"input_tokens\":99999,\"output_tokens\":1,\"details\":{\"input_tokens\":0}}");
+            try submitTestMessage(storage, tmp, "budget-two", "budget-two", session.slice(), "later");
+            const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compaction));
+            try settleCompactionForTesting(storage, tmp, compaction, &.{.compaction});
+            const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(successor, &view);
+            defer view.close();
+            while (!try view.validateOutputsStep()) {}
+            meter.start();
+            try std.testing.expect((try view.coverage()).anchor != null);
+            meter.stop(.readCompactionAnchor);
+        }
+    }.run);
 }

@@ -1,12 +1,17 @@
 //! Store fixtures that tests outside src/store/ use too: a configured Session,
-//! a submitted message, a settled answer and a settled compaction.
+//! a submitted message, a settled answer and a settled compaction. Also the
+//! engine seam of the Store's conformance tests (`forEachEngine`), and the
+//! fixtures they arrange and read rows through.
 
 const std = @import("std");
+const platform = @import("../platform.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
 const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
 const store_core = @import("Store.zig");
+const rsql = @import("rsql.zig");
+const sqlite = @import("sqlite.zig");
 const Store = store_core.Store;
 const historical_domain = @import("domain/historical.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
@@ -15,6 +20,146 @@ const OutputItemKind = historical_domain.OutputItemKind;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
+
+/// The engines a conformance test runs on, each in this one process.
+pub const Engine = enum { sqlite };
+
+/// One run of a conformance test's body, on one engine.
+pub const Case = struct {
+    engine: Engine,
+};
+
+/// The names `RUI_TEST_REQUIRE_ENGINES` may list. `mysql` and `postgres`
+/// have no `Engine` here; pg_tests.zig reads the variable itself.
+pub const EngineName = enum { sqlite, mysql, postgres };
+
+/// `list`, comma-separated, as a set of names. Each token must equal one
+/// name of `EngineName` exactly, so "mysqlx", " mysql" and an empty token
+/// are `UnknownRequiredEngine`. An empty `list` names none.
+pub fn parseRequiredEngines(list: []const u8) error{UnknownRequiredEngine}!std.EnumSet(EngineName) {
+    var names: std.EnumSet(EngineName) = .empty;
+    if (list.len == 0) return names;
+    var tokens = std.mem.splitScalar(u8, list, ',');
+    while (tokens.next()) |token| names.insert(std.meta.stringToEnum(EngineName, token) orelse return error.UnknownRequiredEngine);
+    return names;
+}
+
+/// The names `RUI_TEST_REQUIRE_ENGINES` lists, parsed once per process;
+/// none when it is unset.
+pub fn requiredEngines() !std.EnumSet(EngineName) {
+    const Parsed = struct {
+        var names: ?std.EnumSet(EngineName) = null;
+    };
+    if (Parsed.names) |names| return names;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const names = try parseRequiredEngines(environ.get("RUI_TEST_REQUIRE_ENGINES") orelse "");
+    Parsed.names = names;
+    return names;
+}
+
+/// Runs `run(case)` once for each `Engine`, in order, and on a failure
+/// prints the engine's name and returns the error. It first checks
+/// `requiredEngines`, so an unknown name fails every conformance test.
+/// SQLite, the only engine here, always runs.
+pub fn forEachEngine(comptime run: anytype) !void {
+    _ = try requiredEngines();
+    inline for (comptime std.enums.values(Engine)) |engine| {
+        var case: Case = .{ .engine = engine };
+        run(&case) catch |err| {
+            std.debug.print("conformance test failed on engine {s}\n", .{@tagName(engine)});
+            return err;
+        };
+    }
+}
+
+/// Opens `storage` on `case`'s engine for the directory `tmp`, so opening
+/// the same `tmp` again reopens the same Store. On SQLite the database is
+/// the file store.sqlite3 in `tmp`.
+pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
+    switch (case.engine) {
+        .sqlite => {
+            var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+            const root_length = try tmp.dir.realPath(io, &root_buffer);
+            const root = root_buffer[0..root_length];
+            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+            return storage.open(io, database, root) catch |err| {
+                std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
+                return err;
+            };
+        },
+    }
+}
+
+/// Why `text` cannot be a fixture's SQL, or null: it fails
+/// `rsql.portabilityError`, or it contains the word PRAGMA, a SQLite
+/// setting. It does not check that `text` parses.
+pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(10 * text.len + 1000);
+        if (rsql.portabilityError(text, rsql.reserved_names_checked)) |message| return message;
+        var words = std.mem.tokenizeAny(u8, text, " \t\n;(),=");
+        while (words.next()) |word| {
+            if (std.ascii.eqlIgnoreCase(word, "PRAGMA")) return "fixture: PRAGMA is a SQLite setting; write the test in sqlite_tests.zig";
+        }
+        return null;
+    }
+}
+
+fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
+    if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
+    return text;
+}
+
+/// Runs `sql` on `storage`'s engine outside any entry point, so no entry
+/// point touches what it changes. With empty `args`, `sql` may hold several
+/// statements; otherwise it is one statement whose `?1`, `?2`... take
+/// `args` in order: integers, and byte slices as text.
+pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
+    if (args.len == 0) return sqlite.exec(storage.database, fixtureText(sql));
+    const statement = try sqlite.prepare(storage.database, fixtureText(sql));
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    try bindFixtureArgs(statement, args);
+    try sqlite.expectDone(statement);
+}
+
+/// The first column of `sql`'s first row: `QueryFailed` with no row, and
+/// `CorruptStore` when it is negative. `args` binds as in `exec`.
+pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
+    const statement = try sqlite.prepare(storage.database, fixtureText(sql));
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    try bindFixtureArgs(statement, args);
+    if (sqlite.c.sqlite3_step(statement) != sqlite.c.SQLITE_ROW) return error.QueryFailed;
+    const value = sqlite.c.sqlite3_column_int64(statement, 0);
+    if (value < 0) return error.CorruptStore;
+    return @intCast(value);
+}
+
+/// `exec` with foreign keys unchecked for `sql` alone. On SQLite,
+/// PRAGMA foreign_keys is OFF around it and ON after it, also when it fails.
+pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
+    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    defer sqlite.exec(storage.database, "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
+    try exec(storage, sql, args);
+}
+
+/// Leaves `table` preparing normally but failing at the first step of a
+/// statement that reads it, the shape of an I/O or corruption fault after
+/// a statement compiled. On SQLite, `table` is renamed and a view whose
+/// filter overflows `abs` takes its name.
+pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
+    try sqlite.exec(storage.database, "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");
+    try sqlite.exec(storage.database, "CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable " ++
+        "WHERE abs(-9223372036854775808) IS NOT NULL");
+}
+
+fn bindFixtureArgs(statement: *sqlite.c.sqlite3_stmt, args: anytype) !void {
+    inline for (args, 1..) |value, index| switch (@typeInfo(@TypeOf(value))) {
+        .int, .comptime_int => try sqlite.bindI64(statement, index, value),
+        else => try sqlite.bindText(statement, index, value),
+    };
+}
 
 pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !protocol.ConfigureCommand {
     var command: protocol.ConfigureCommand = .{};
