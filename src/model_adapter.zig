@@ -3491,7 +3491,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     defer memos.deinit(std.testing.io);
     const full = try prepareMemoForTesting(&setup, fourth_binding, &memos, .{});
     defer std.testing.allocator.free(full.bytes);
-    try expectInputTexts(full.bytes, &.{ "do work", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output", "answer one", "second message", "new rules", "answer two", "third message" });
+    try expectInputTexts(full.bytes, &.{ "do work", "additional_tools", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output", "answer one", "second message", "new rules", "answer two", "third message" });
     const kept = memo_entries[0].memo.?;
     try setup.storage.settleModelAttemptFailure(fourth_binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
     var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -3502,7 +3502,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     try store.setHistoryFloorForTesting(&setup.storage, compact_binding.operation_id, "new rules", 1);
     const compaction = try prepareMemoForTesting(&setup, compact_binding, &memos, .{});
     defer std.testing.allocator.free(compaction.bytes);
-    try expectInputTexts(compaction.bytes, &.{ "do work", "new rules", "answer two", "third message", "compaction_trigger" });
+    try expectInputTexts(compaction.bytes, &.{ "do work", "new rules", "additional_tools", "answer two", "third message", "compaction_trigger" });
     // The base's memo spans dropped history: the compaction rebuilds and
     // keeps no memo of its own floor.
     try std.testing.expectEqual(@as(usize, 0), compaction.copied);
@@ -3513,7 +3513,7 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     const successor_binding = try successor.permit.consume();
     const after = try prepareMemoForTesting(&setup, successor_binding, &memos, .{});
     defer std.testing.allocator.free(after.bytes);
-    try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message" });
+    try expectInputTexts(after.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "additional_tools" });
     // Requests on the base share its floor, so their memo serves again.
     try std.testing.expect(try expectMemoRebuildEqual(&setup, successor_binding, &memos, .{}) > 0);
     // A later compaction that makes no room keeps the floor, and so does
@@ -3523,14 +3523,14 @@ test "a compaction's floor drops whole exchanges and every request on its base r
     const again_binding = try again.permit.consume();
     const again_request = try prepareMemoForTesting(&setup, again_binding, &memos, .{});
     defer std.testing.allocator.free(again_request.bytes);
-    try expectInputTexts(again_request.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "compaction_trigger" });
+    try expectInputTexts(again_request.bytes, &.{ "do work", "new rules", "third message", "compaction", "", "later message", "additional_tools", "compaction_trigger" });
     try store.settleCompactionForTesting(&setup.storage, &setup.tmp, again_binding, &.{.compaction});
     try setup.submit("floor-last", "floor-last-key", session.slice(), "last message");
     var last = (try setup.storage.admitNextModelAttempt(.{})).?;
     const last_binding = try last.permit.consume();
     const last_request = try prepareMemoForTesting(&setup, last_binding, &memos, .{});
     defer std.testing.allocator.free(last_request.bytes);
-    try expectInputTexts(last_request.bytes, &.{ "do work", "new rules", "third message", "later message", "compaction", "last message" });
+    try expectInputTexts(last_request.bytes, &.{ "do work", "new rules", "third message", "later message", "compaction", "last message", "additional_tools" });
 }
 
 test "a compaction that overflows makes room a level at a time, then the Turn ends context_full" {
@@ -3559,10 +3559,10 @@ test "a compaction that overflows makes room a level at a time, then the Turn en
     // The full compaction, then levels 1 to 3, each dropping one more
     // Message; the first Message always stays.
     const expected = [_][]const []const u8{
-        &.{ texts[0], texts[1], texts[2], texts[3], texts[4], "compaction_trigger" },
-        &.{ texts[0], texts[2], texts[3], texts[4], "compaction_trigger" },
-        &.{ texts[0], texts[3], texts[4], "compaction_trigger" },
-        &.{ texts[0], texts[4], "compaction_trigger" },
+        &.{ texts[0], texts[1], texts[2], texts[3], texts[4], "additional_tools", "compaction_trigger" },
+        &.{ texts[0], texts[2], texts[3], texts[4], "additional_tools", "compaction_trigger" },
+        &.{ texts[0], texts[3], texts[4], "additional_tools", "compaction_trigger" },
+        &.{ texts[0], texts[4], "additional_tools", "compaction_trigger" },
     };
     for (expected) |inputs| {
         var compact = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedCompaction;
