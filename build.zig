@@ -1086,11 +1086,6 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_DEFAULT_WORKER_THREADS", "0");
     module.addCMacro("SQLITE_MAX_WORKER_THREADS", "0");
     module.addCMacro("SQLITE_TEMP_STORE", "1");
-    // A Store write batched behind another runs in a savepoint, whose
-    // statement journal holds the pages it changes until RELEASE. On disk,
-    // SQLite keeps that file open for the life of an EXCLUSIVE connection;
-    // in memory it is freed at each RELEASE.
-    module.addCMacro("SQLITE_STMTJRNL_SPILL", "-1");
     // Every page cache, each ephemeral table's (IN lists, RETURNING) included,
     // otherwise bulk-allocates 20 pages on first fetch: they fault in, then
     // free returns them to the kernel. Per-page allocation skips that churn.

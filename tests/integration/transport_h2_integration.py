@@ -212,6 +212,24 @@ def open_descriptors(pid):
     return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) for row in rows[1:])
 
 
+# SQLite names its temp files etilqs_*. A Store write's statement journal
+# that spilled to one stays open for the life of the EXCLUSIVE connection;
+# descriptor_capacity budgets it among SQLite's four.
+def idle_store_independent_descriptors(pid):
+    if os.path.isdir(f"/proc/{pid}/fd"):
+        names = []
+        for fd in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                names.append(os.readlink(f"/proc/{pid}/fd/{fd}"))
+            except FileNotFoundError:
+                pass
+        return sum("etilqs_" not in name for name in names)
+    rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)],
+                                   text=True).splitlines()
+    return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) and "etilqs_" not in row
+               for row in rows[1:])
+
+
 class StreamHandler(socketserver.BaseRequestHandler):
     def handle(self):
         sock = self.request
@@ -511,7 +529,7 @@ class HostRequests:
     def idle_descriptors(self, deadline):
         self.diagnostics.borrower_census(deadline, self.routes)
         assert time.monotonic() < deadline, "exchange retirement exceeded original deadline"
-        return open_descriptors(self.host.pid)
+        return idle_store_independent_descriptors(self.host.pid)
 
 
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
