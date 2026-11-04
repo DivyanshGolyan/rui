@@ -297,6 +297,9 @@ D203. Replaces D155's "all privileges". On MySQL, Rui never creates or changes t
 
 D204. (Divyansh 08:23Z) Replaces D94's "no backward compatibility" for the Store format, on every engine. Each Store format change ships a forward migration (one from-to file per engine, SQLite and MySQL), and CI applies it to a Store at the old format and checks the result matches the new schema digest and the fixtures still read. It starts with the PR that adds the migration runner; Stores older than that still reset once. On MySQL the DB team applies the file (D203); on SQLite, Rui applies it at open.
 
+D205. (lane M question, my call) D177/D195's `_meta` keys are `dev.rui/sessionId`, `dev.rui/parentSessionId` (absent for a root Session), `dev.rui/rootSessionId` and `dev.rui/turnId`, with the same id strings the client API shows.
+D206. (lane M question, my call) Rui's MCP client supports `x-mcp-header` as MCP 2026-07-28 requires (primitive argument values copied into `Mcp-Param-{Name}` headers, base64 when not safe ASCII) and leaves out a tool whose `x-mcp-header` is invalid when it lists tools. `ttlMs`/`cacheScope` on `tools/list` are parsed and ignored (D110).
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
