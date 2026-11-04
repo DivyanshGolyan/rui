@@ -17,12 +17,10 @@ const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
-const sqlite = @import("../sqlite.zig");
 const turn_domain = @import("turn.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const ContentLocation = content_domain.ContentLocation;
 const ContentMetadata = content_domain.ContentMetadata;
-const ContentReader = content_domain.ContentReader;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const TurnOutcome = turn_domain.TurnOutcome;
@@ -193,11 +191,12 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
             "WHERE session_ref=?1 AND item_kind=3 AND " ++ on(4) ++ " AND " ++ range("session_position", "0") ++ order,
         // A tool group's results sit at its last acceptance, one per call,
-        // ordered by call.
-        "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last " ++
+        // ordered by call. Each `last` names its acceptance index, as
+        // `call_candidates_sql`.
+        "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last @index(model_tool_call_acceptance) " ++
             "JOIN model_tool_call tool_call ON tool_call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id") ++
-            " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last " ++
+            " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last @index(action_operation_acceptance) " ++
             "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
             range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
             " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn @index(turn_outcome_position) WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ on(6) ++ " AND " ++ range("outcome_position", "0") ++
@@ -694,44 +693,44 @@ pub const missing_assistant_entry = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Checks the positions `lower` through `upper` in a round of its own. A
-/// failed step is `ConversationReadFailed`, main's name for it.
-fn checkAssistantEntries(a: *ReadAccess, session: []const u8, lower: u64, upper: u64) !void {
-    if (lower > upper) return;
-    var missing: missing_assistant_entry.Result = undefined;
-    a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
-    try store_access.runAs(a, error.ConversationReadFailed);
-    if (missing != null) return error.CorruptStore;
+/// A read of Conversation entries `e`: `SELECT columns`, then a
+/// `consistent` column (`publicEntryColumns`), `FROM conversation_entry e`
+/// with the rows that make an entry public (`public_entry_joins`), then
+/// `rest` (its WHERE and order).
+pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, comptime rest: []const u8) []const u8 {
+    return "SELECT " ++ columns ++ "," ++ publicEntryColumns(also) ++ " FROM conversation_entry e " ++ public_entry_joins ++ " " ++ rest;
 }
 
-/// `checkAssistantEntries` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn validateAssistantEntries(self: *Store, session: []const u8, lower: u64, upper: u64) !void {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    return checkAssistantEntries(&a, session, lower, upper);
-}
-
-/// An ordinary entry at a position, with the provenance that makes it
-/// public. One indexed ordinary identity owns provenance for pages,
-/// cursors and bytes. LEFT JOIN retains damage instead of hiding
-/// dependencies.
-const public_entry = rsql.Read(.{
-    .sql = "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+/// The `consistent` column of an entry `e` joined by `public_entry_joins`.
+/// An entry is consistent when `also` holds (an SQL condition and `OR`, or
+/// empty), or when it is public: its content is, and its message or
+/// assistant provenance agrees with it.
+pub fn publicEntryColumns(comptime also: []const u8) []const u8 {
+    return "CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
         "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
         "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
         "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
         "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
-        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ ")) THEN 1 ELSE 0 END AS consistent," ++
-        "CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at " ++
-        "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
-        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
-        "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
-        "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
-        "LEFT JOIN content c ON c.content_id=e.content_id " ++
-        "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)",
+        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent";
+}
+
+/// The rows that make an entry `e` public. LEFT JOINs, which keep damage
+/// instead of hiding a missing row, under the aliases t, m, o, item and c,
+/// which a read's columns and WHERE may also read.
+pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+    "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+    "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+    "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
+    "LEFT JOIN content c ON c.content_id=e.content_id";
+
+/// An ordinary entry at a position, with the provenance that makes it
+/// public. One indexed ordinary identity owns provenance for pages,
+/// cursors and bytes.
+const public_entry = rsql.Read(.{
+    .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { content_id: rsql.Positive, consistent: bool, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive },
+    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
 
@@ -739,9 +738,9 @@ const public_entry = rsql.Read(.{
 /// its group has public provenance and when the group completed.
 const public_tool_result = rsql.Read(.{
     // Only an Operation with an acceptance at the position can complete
-    // there.
-    .sql = "WITH last AS (SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position=?2 " ++
-        "UNION ALL SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position=?2) " ++
+    // there. Each arm names its acceptance index, as `call_candidates_sql`.
+    .sql = "WITH last AS (SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position=?2 " ++
+        "UNION ALL SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position=?2) " ++
         "SELECT coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id,NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
         "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
         "LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
@@ -849,97 +848,6 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     try read.takeMetadata();
     return read.content;
 }
-
-/// `publicConversationContent` for unconverted code (`report.zig`). Not inlined, so its
-/// Access takes no slot in the report's frame.
-pub noinline fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !PublicContent {
-    var a = ReadAccess.within(self);
-    defer a.deinit();
-    return publicConversationContent(&a, session, position, ordinal);
-}
-
-/// One content value read in order under the Store lock, a window at a
-/// time. Declared with a literal of its Store and length, which leaves
-/// the reader and this window unwritten, then `reader.open`ed;
-/// `= undefined` would fill the window with 0xAA.
-pub const ContentSource = struct {
-    store: *Store,
-    reader: ContentReader = undefined,
-    position: u64 = 0,
-    end: u64,
-    window: [2048]u8 = undefined,
-    used: usize = 0,
-    count: usize = 0,
-
-    /// Reads under the held lock, checking the digest at the end as
-    /// every content reader does; the caller's Entry fences on error.
-    fn read(source: *ContentSource, start: u64, destination: []u8) !void {
-        try content_domain.readOwnedContentLocked(source.store, &source.reader, start, destination);
-        if (!source.reader.absorb(start, destination)) return error.CorruptStore;
-    }
-
-    /// The next window of bytes, consumed whole; null at the end.
-    pub fn nextWindow(source: *ContentSource) !?[]const u8 {
-        std.debug.assert(source.used == source.count);
-        const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
-        if (wanted == 0) return null;
-        try source.read(source.position, source.window[0..wanted]);
-        source.position += wanted;
-        return source.window[0..wanted];
-    }
-
-    pub fn peek(source: *@This()) !?u8 {
-        if (source.used == source.count) {
-            const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
-            try source.read(source.position, source.window[0..wanted]);
-            source.count = wanted;
-            source.used = 0;
-            if (source.count == 0) return null;
-        }
-        return source.window[source.used];
-    }
-
-    pub fn take(source: *@This()) !u8 {
-        const byte = try source.peek() orelse return error.UnexpectedEof;
-        source.used += 1;
-        source.position += 1;
-        return byte;
-    }
-
-    pub fn next(source: *@This()) !?u8 {
-        return if (try source.peek() != null) try source.take() else null;
-    }
-
-    pub fn offset(source: *@This()) u64 {
-        return source.position;
-    }
-
-    pub fn setRange(source: *@This(), start: u64, length: u64) !void {
-        const end = try std.math.add(u64, start, length);
-        if (end > source.reader.reference.length) return error.CorruptStore;
-        source.position = start;
-        source.end = end;
-        source.used = 0;
-        source.count = 0;
-    }
-
-    pub fn space(source: *@This()) !void {
-        while (try source.peek()) |byte| switch (byte) {
-            ' ', '\t', '\r', '\n' => _ = try source.take(),
-            else => return,
-        };
-    }
-
-    pub fn expect(source: *@This(), expected: u8) !void {
-        try source.space();
-        if (try source.take() != expected) return error.CorruptStore;
-    }
-
-    pub fn expectEnd(source: *@This()) !void {
-        try source.space();
-        if (try source.peek() != null) return error.CorruptStore;
-    }
-};
 
 /// A call's line and outcome, with the item that proposed it.
 const tool_presentation = rsql.Read(.{
@@ -1211,10 +1119,13 @@ const ItemAt = struct { position: u64, ordinal: u64 };
 /// (?2, ?3), with each group's position, and their calls after it, as the
 /// CTE `candidates`. A group still waiting has an Action without its
 /// result; one that completes after the page has an acceptance after it.
-/// Only those Operations are grouped, not the Session's history.
+/// Only those Operations are grouped, not the Session's history. Each
+/// acceptance read names its acceptance index: the Full results' indexes
+/// hold the same rows, keyed by Operation first, and SQLite would walk
+/// the Session's whole range of one of them.
 const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
-    "UNION SELECT operation_id FROM model_tool_call WHERE session_ref=?1 AND acceptance_position>=?2 " ++
-    "UNION SELECT parent_operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position>=?2), " ++
+    "UNION SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2 " ++
+    "UNION SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2), " ++
     "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
     "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++

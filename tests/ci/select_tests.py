@@ -82,6 +82,11 @@ RULES = (
     (("src/server*.zig", "tests/integration/admission_integration.sh"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
+    (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
+     "The wire contract: openapi.json must equal what the wire types emit"),
+    (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
+    (("src/launch_frame.zig", "tests/integration/launch_frame*"), ("test", "launch-frame-integration", "ts-client"),
+     ("test", "launch-frame-integration", "ts-client"), "The launch frame a program uses to start its own Host"),
     (("src/protocol.zig", "src/provider_name.zig", "src/platform.zig",
       "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
       "src/named_scratch.zig", "src/output_retention.zig", "src/HostDiagnostics.zig"),
@@ -99,15 +104,11 @@ RULES = (
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      "Bash execution, direct custody and process-crash recovery"),
     (("src/h2/*",), ("test-h2",), ("test-h2",), "The HTTP/2 client module's own tests"),
-    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig"),
-     ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux"),
-    (("src/store/wire/mysql.zig", "tests/integration/mysql_wire*", "build.zig"),
-     ("test-logic", "mysql-wire-integration"), ("test-logic",),
-     "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)"),
     (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
     (("src/http1/*",), ("test-logic", "test"), ("test-logic", "test"),
      "The loopback HTTP/1.1 client: its value cores and its socket exchange"),
-    (("src/mcp/*",), ("test-logic",), ("test-logic",), "The MCP protocol core: requests, replies and tool lists as values"),
+    (("src/mcp/*",), ("test-logic", "test"), ("test-logic", "test"),
+     "The MCP client: its value cores and the request that drives one exchange"),
     (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
      "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
     (("src/history_memo.zig",), ("test-logic",), ("test-logic",), "History memo decisions and table"),
@@ -193,6 +194,39 @@ RULES = (
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
 
+# check.yml's LIVE_MYSQL: the Linux targets whose shards start MySQL for the
+# unit binary's live dialect check (src/store/mysql_dialect_check.zig).
+LIVE_MYSQL_TARGETS = frozenset({"test", "check", "check-full"})
+# check.yml's Postgres step condition: the Linux targets whose shards start
+# postgres:15 for test-pg's live rounds.
+LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
+
+# Rules whose reason names a live server, each with the targets that start
+# it in CI. A matched rule must leave one of those targets selected, in
+# development too, or its green would say nothing about that server.
+# Development keeps the rule's own targets among them.
+LIVE_RULES = (
+    (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig",
+      "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
+     ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
+     LIVE_POSTGRES_TARGETS),
+    (("src/store/wire/mysql.zig", "src/store/wire/mysql_driver.zig", "tests/integration/mysql_wire*",
+      "tests/integration/mysql_server.py", "build.zig"),
+     ("test-logic", "mysql-wire-integration"), ("test-logic",),
+     "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)",
+     frozenset({"mysql-wire-integration"})),
+    # Every Store statement, the schema, the fixtures and the wire client
+    # can change what MySQL refuses.
+    (("src/store.zig", "src/store/*", "!src/store/wire/pg*.zig", "!src/store/wire/scram.zig",
+      "!src/store/wire/tls.zig", "tests/integration/mysql_server.py",
+      "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
+     ("test",), (),
+     "The Store's live MySQL dialect check drives MySQL 8.4 through the wire client; macOS skips it",
+     LIVE_MYSQL_TARGETS),
+)
+RULES += tuple(rule[:4] for rule in LIVE_RULES)
+
+
 # Inputs to the Host's ReleaseSafe frames or to their gate. Frontend owners are
 # client-only. check runs stack-frames; check-full does not.
 STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py", "tests/ci/stack_frames.json")
@@ -221,7 +255,7 @@ CACHE_POLICY = {
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": "measurement-check" in targets, "python": bool(targets)}
+    return {"go": "measurement-check" in targets, "node": "ts-client" in targets, "python": bool(targets)}
 
 
 def execution_batches(targets, check_part="all"):
@@ -251,27 +285,37 @@ def matches(path, patterns):
 
 def select(paths, phase, available):
     targets, native_targets, reasons = set(), set(), set()
+    live_targets, live_reasons = set(), set()
     manual_checks = set()
     linux_memory_checks = False
     for path in paths:
+        # A shortcut only adds its reason, and stops the fallbacks below; every
+        # rule, LIVE_RULES included, still matches the path.
+        shortcut = False
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
-            continue
-        if (any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)
+            shortcut = True
+        elif (any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)
                 and not any(fnmatch.fnmatchcase(path, pattern) for pattern in FRONTEND)):
             targets.add("stack-frames")
             reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
         if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
                 or path == "tests/integration/previous_release_upgrade.py"):
             reasons.add("CI policy: the policy job runs selector and workflow checks")
-            continue
-        matched = False
+            shortcut = True
+        matched = shortcut
         for patterns, checks, native_checks, reason in RULES:
             if matches(path, patterns):
                 targets.update(checks)
                 native_targets.update(native_checks)
                 reasons.add(reason)
                 matched = True
+        for patterns, checks, _, reason, served_by in LIVE_RULES:
+            if matches(path, patterns):
+                live_targets.update(set(checks) & served_by)
+                live_reasons.add((reason, served_by))
+        if shortcut:
+            continue
         if path.startswith("tests/qualification/"):
             if path.endswith((".go", "go.mod", "go.sum")):
                 targets.add("measurement-check")
@@ -317,9 +361,13 @@ def select(paths, phase, available):
     if mac_required:
         reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
     if phase == "development":
-        # Development does not replace final boundary/native acceptance.
-        targets = {"test-logic"} if targets else set()
+        # Development does not replace final boundary/native acceptance, but
+        # keeps each matched live rule's own targets (`LIVE_RULES`).
+        targets = {"test-logic"} | live_targets if targets else set()
         native_targets = set()
+    for reason, served_by in live_reasons:
+        if not targets & served_by:
+            raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
     if "check-full" in native_targets:
         # The daily macOS workflow owns Mac check-full; the covered owners above
         # are not selected separately.
@@ -330,6 +378,8 @@ def select(paths, phase, available):
     if missing:
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
+            # The selected targets that start a live server in CI (`LIVE_RULES`).
+            "server_targets": sorted(targets & live_targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.

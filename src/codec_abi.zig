@@ -474,14 +474,6 @@ pub const Member = union(enum) {
     terminal_failed: Reason,
 };
 
-/// A tool as the model is told about it; each codec writes its own envelope.
-pub const ToolDefinition = struct {
-    name: []const u8,
-    description: []const u8,
-    /// A JSON Schema object, as JSON text.
-    parameters_json: []const u8,
-};
-
 /// What a codec declares about itself, read without running it.
 pub const Manifest = struct {
     observe: ObservedHeaders,

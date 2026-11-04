@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 50;
+pub const schema_version: u32 = 52;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -29,6 +29,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
+    .{ .schema_version = 51, .digest = 0x48066d4b9a27fab9 },
+    .{ .schema_version = 52, .digest = 0xe547a78709fae704 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -43,6 +45,130 @@ comptime {
         "the Store's bootstrap changed: set the last row's digest to 0x{x:0>16} if schema_version is unreleased, else bump it and append a row",
         .{digest()},
     ));
+}
+
+/// The oldest format a Store moves forward from (D204). An older Store, or
+/// a newer one, is refused with WrongStoreVersion, as before migrations.
+pub const migration_baseline: u32 = 51;
+
+/// One forward step of the Store format, from `from` to `from + 1`, as
+/// statements per engine. SQLite runs `sqlite` when a Store opens
+/// (`openExisting`). Rui runs no DDL on MySQL (D203): the DB team runs
+/// `mysql`, which `mysqlMigration` joins. Every statement is one string
+/// literal, so the source is the text that runs: a CHECK or predicate is
+/// copied from the schema's rendered text (`ddl`), whose source passed
+/// `rsql.expressionError`, and the migration tests hold the migrated Store
+/// to that text. tests/ci/test_store_schema_version.py refuses an entry
+/// that is anything but literals, and compares every step whose `from` is
+/// below the released schema_version with its text at the release.
+///
+/// SQLite keeps each CREATE text as run, and a Store opens only when every
+/// object's text equals a fresh bootstrap's. ALTER TABLE ADD COLUMN splices
+/// the new column into the stored text, and RENAME quotes the new name, so
+/// a step that changes a table rebuilds it: it renames the table aside,
+/// creates it with the new text, copies its rows, drops the old table and
+/// creates its indexes again. `migrate` runs the steps with foreign keys
+/// off and legacy_alter_table on, so other tables' references keep the
+/// table's name, and checks every foreign key before it commits.
+pub const Migration = struct {
+    from: u32,
+    sqlite: []const [:0]const u8,
+    mysql: []const [:0]const u8,
+};
+
+/// Every step from `migration_baseline` to `schema_version`, oldest first.
+/// The baseline snapshots (migration_baseline.*.sql) never change; the
+/// chain grows. Only a step past the released schema_version may change.
+pub const migrations = [_]Migration{
+    // 51 to 52 (T1b-1): tool records and tool sets (D48, D49) replace each
+    // Session's tools_mask, and every Operation is indexed by admission.
+    // The tools a 51 Store names are the two built-ins, as their records
+    // read at 52: their texts, set digests and content digests are
+    // literals here, since SQL cannot hash. Each distinct tools_mask becomes
+    // the set whose id is the mask plus one, with only the records and
+    // content it uses.
+    .{
+        .from = 51,
+        .sqlite = &.{
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n owner TEXT NOT NULL CHECK(owner IN ('rui','provider')),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,owner,description_content_id,input_schema_content_id)\n) STRICT",
+            "CREATE TABLE tool_set(\n tool_set_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_set_id>0),\n digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),\n member_count INTEGER NOT NULL CHECK(member_count BETWEEN 0 AND 128)\n) STRICT",
+            "CREATE TABLE tool_set_member(\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n tool_record_id INTEGER NOT NULL REFERENCES tool_record(tool_record_id),\n PRIMARY KEY(tool_set_id,ordinal)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845',633,0,X'52756e2042617368206f6e20746865206c6f63616c206d616368696e652e20456163682063616c6c2073746172747320696e207468652053657373696f6e20576f726b73706163653b2072656c6174697665207061746873207265736f6c76652074686572652c207768696c65206162736f6c7574652070617468732063616e20616363657373206f7574736964652069742e2053746172742066696c6573797374656d206578706c6f726174696f6e20746865726520616e642062726f6164656e207365617263686573206f6e6c79206173206e65656465642e205075742074657874207061796c6f61647320696e20737464696e2c206e6576657220696e7369646520636d642e204261736820686173206e6f207465726d696e616c3a206e6f206f6e652063616e207479706520696e746f20612072756e6e696e672063616c6c2c20736f2070617373776f72642070726f6d70747320287375646f2c20696e636c7564696e6720696e7374616c6c65727320746861742072756e2069742920616e6420696e7465726163746976652070726f6772616d73206661696c2e205768656e20666c616773206f7220737464696e2063616e6e6f7420616e7377657220612070726f6d70742c20676976652074686520636f6d6d616e6420746f20746865207573657220746f2072756e20696e207468656972206f776e207465726d696e616c3a206265666f72652072756e6e696e67206974207768656e20796f752063616e2074656c6c2069742077696c6c2070726f6d70742c206f7468657277697365206166746572206974732066697273742073756368206661696c7572652e20446f206e6f7420726574727920697420686572652e' WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845' AND byte_length=633 AND private=0)",
+            "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9',1147,0,X'7b2274797065223a226f626a656374222c2270726f70657274696573223a7b22636d64223a7b2274797065223a22737472696e67227d2c22737464696e223a7b2274797065223a22737472696e67222c226465736372697074696f6e223a224f7074696f6e616c2e204c69746572616c205554462d3820746578742c206174206d6f737420313232383830206465636f6465642062797465732c20726561642065786163746c79207468656e20454f462e204f6d69747465642c20737464696e206973202f6465762f6e756c6c2e227d2c226465736372697074696f6e223a7b2274797065223a22737472696e67222c226465736372697074696f6e223a22412073686f72742068756d616e2d666163696e67206163746976697479206c6162656c3a20626173652076657262202b20636f6e637265746520746172676574202b2075736566756c2073636f70652c20696e2073656e74656e636520636173652077697468206e6f20747261696c696e672070756e6374756174696f6e2e2044657363726962652074686520696e74656e64656420776f726b2c206e6f7420697473207374617475732c2073756363657373206f72207361666574792e2052657175697265642c206e6f6e626c616e6b2c2073696e676c652d6c696e652076616c6964205554462d382c206174206d6f737420313030206465636f646564205554462d382062797465732e2041696d20666f72203430e28093363020636861726163746572733b20757365206d6f7265206f6e6c7920666f722075736566756c2073636f70652e204578616d706c653a2052756e207061727365722072656772657373696f6e207465737473227d2c2274696d656f75745f6d73223a7b2274797065223a22696e7465676572222c226465736372697074696f6e223a224f7074696f6e616c2e204f6d697420697420666f722074686520486f73742064656661756c7420756e6c6573732074686520776f726b206e65656473206120646966666572656e74206275646765742e204120706f73697469766520696e7465676572207265706c616365732069742077697468206120746f74616c20656c617073656420657865637574696f6e2062756467657420696e206d696c6c697365636f6e64732066726f6d2070726f636573732073746172743b206f757470757420646f6573206e6f742072657365742069742e20416c6c6f7720656e6f7567682074696d6520666f722073656172636865732c206275696c647320616e642074657374732e2045787069727920656e6473207468652063616c6c207468726f7567682070726f636573732d67726f7570207465726d696e6174696f6e2c206e6f742061206261636b67726f756e642068616e646c653b207061727469616c2065666665637473206d61792072656d61696e2e222c226d696e696d756d223a312c226d6178696d756d223a393232333337323033363835343737353830377d7d2c227265717569726564223a5b22636d64222c226465736372697074696f6e225d2c226164646974696f6e616c50726f70657274696573223a66616c73657d' WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9' AND byte_length=1147 AND private=0)",
+            "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528',0,0,X'' WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0)",
+            "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 1,'bash','rui',(SELECT content_id FROM content WHERE digest=X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845' AND byte_length=633 AND private=0),(SELECT content_id FROM content WHERE digest=X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9' AND byte_length=1147 AND private=0) WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3)))",
+            "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 2,'web_search','provider',(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0),(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0) WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3)))",
+            "INSERT INTO tool_set(tool_set_id,digest,member_count) SELECT used.tools_mask+1,CASE used.tools_mask WHEN 0 THEN X'fe748044351540765e2284e8b22eee2921470a1314d382303cdc7075a2ae4848' WHEN 1 THEN X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2' WHEN 2 THEN X'd9cfc45bb675c92d875c57d0206db60df3cdf46d271687b6a6d34ceecde1e968' WHEN 3 THEN X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da' END,CASE used.tools_mask WHEN 0 THEN 0 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 2 END FROM (SELECT tools_mask FROM session UNION SELECT tools_mask FROM session_revision) used",
+            "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,0,CASE WHEN tool_set_id=3 THEN 2 ELSE 1 END FROM tool_set WHERE tool_set_id>1",
+            "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,1,2 FROM tool_set WHERE tool_set_id=4",
+            "ALTER TABLE session RENAME TO session_old",
+            "CREATE TABLE session(\n session_ref TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(session_ref AS BLOB))=6 AND (session_ref NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*' AND length(session_ref)=length(CAST(session_ref AS BLOB)))),\n workspace TEXT NOT NULL CHECK(length(CAST(workspace AS BLOB)) BETWEEN 1 AND 4096),\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),\n codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),\n prefix_seal BLOB CHECK(prefix_seal IS NULL OR length(prefix_seal)=56),\n model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n revision INTEGER NOT NULL CHECK(revision>0),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n created_at INTEGER NOT NULL CHECK(created_at>0),\n next_position INTEGER NOT NULL CHECK(next_position>0),\n created_seq INTEGER NOT NULL UNIQUE CHECK(created_seq>0),\n workspace_digest BLOB NOT NULL CHECK(length(workspace_digest)=32),\n workspace_key INTEGER NOT NULL,\n CHECK(workspace_key>0 AND workspace_key<=created_seq)\n) STRICT",
+            "INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key) SELECT session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tools_mask+1,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key FROM session_old",
+            "DROP TABLE session_old",
+            "CREATE INDEX session_workspace_list ON session(workspace_digest,created_seq)",
+            "ALTER TABLE session_revision RENAME TO session_revision_old",
+            "CREATE TABLE session_revision(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n revision INTEGER NOT NULL CHECK(revision>0),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n workspace TEXT NOT NULL,\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n model TEXT NOT NULL,\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n PRIMARY KEY(session_ref,revision)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) SELECT session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tools_mask+1,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label FROM session_revision_old",
+            "DROP TABLE session_revision_old",
+            "CREATE INDEX session_revision_instructions ON session_revision(session_ref,instructions_content_id)",
+            "CREATE INDEX session_revision_output_schema ON session_revision(session_ref,output_schema_content_id)",
+            "CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position)",
+        },
+        .mysql = &.{
+            "CREATE TABLE tool_record(\n tool_record_id BIGINT NOT NULL,\n name VARCHAR(64) NOT NULL,\n owner VARCHAR(8) NOT NULL,\n description_content_id BIGINT NOT NULL,\n input_schema_content_id BIGINT NOT NULL,\n PRIMARY KEY(tool_record_id),\n UNIQUE(name,owner,description_content_id,input_schema_content_id),\n FOREIGN KEY(description_content_id) REFERENCES content(content_id),\n FOREIGN KEY(input_schema_content_id) REFERENCES content(content_id),\n CHECK(tool_record_id>0),\n CHECK(OCTET_LENGTH(name) BETWEEN 1 AND 64 AND (NOT REGEXP_LIKE(name,'[^A-Za-z0-9_-]','c'))),\n CHECK(owner IN ('rui','provider'))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE tool_set(\n tool_set_id BIGINT NOT NULL,\n digest VARBINARY(32) NOT NULL,\n member_count BIGINT NOT NULL,\n PRIMARY KEY(tool_set_id),\n UNIQUE(digest),\n CHECK(tool_set_id>0),\n CHECK(length(digest)=32),\n CHECK(member_count BETWEEN 0 AND 128)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE tool_set_member(\n tool_set_id BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n tool_record_id BIGINT NOT NULL,\n PRIMARY KEY(tool_set_id,ordinal),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n FOREIGN KEY(tool_record_id) REFERENCES tool_record(tool_record_id),\n CHECK(ordinal>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845',633,0,X'52756e2042617368206f6e20746865206c6f63616c206d616368696e652e20456163682063616c6c2073746172747320696e207468652053657373696f6e20576f726b73706163653b2072656c6174697665207061746873207265736f6c76652074686572652c207768696c65206162736f6c7574652070617468732063616e20616363657373206f7574736964652069742e2053746172742066696c6573797374656d206578706c6f726174696f6e20746865726520616e642062726f6164656e207365617263686573206f6e6c79206173206e65656465642e205075742074657874207061796c6f61647320696e20737464696e2c206e6576657220696e7369646520636d642e204261736820686173206e6f207465726d696e616c3a206e6f206f6e652063616e207479706520696e746f20612072756e6e696e672063616c6c2c20736f2070617373776f72642070726f6d70747320287375646f2c20696e636c7564696e6720696e7374616c6c65727320746861742072756e2069742920616e6420696e7465726163746976652070726f6772616d73206661696c2e205768656e20666c616773206f7220737464696e2063616e6e6f7420616e7377657220612070726f6d70742c20676976652074686520636f6d6d616e6420746f20746865207573657220746f2072756e20696e207468656972206f776e207465726d696e616c3a206265666f72652072756e6e696e67206974207768656e20796f752063616e2074656c6c2069742077696c6c2070726f6d70742c206f7468657277697365206166746572206974732066697273742073756368206661696c7572652e20446f206e6f7420726574727920697420686572652e' FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845' AND byte_length=633 AND private=0)",
+            "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9',1147,0,X'7b2274797065223a226f626a656374222c2270726f70657274696573223a7b22636d64223a7b2274797065223a22737472696e67227d2c22737464696e223a7b2274797065223a22737472696e67222c226465736372697074696f6e223a224f7074696f6e616c2e204c69746572616c205554462d3820746578742c206174206d6f737420313232383830206465636f6465642062797465732c20726561642065786163746c79207468656e20454f462e204f6d69747465642c20737464696e206973202f6465762f6e756c6c2e227d2c226465736372697074696f6e223a7b2274797065223a22737472696e67222c226465736372697074696f6e223a22412073686f72742068756d616e2d666163696e67206163746976697479206c6162656c3a20626173652076657262202b20636f6e637265746520746172676574202b2075736566756c2073636f70652c20696e2073656e74656e636520636173652077697468206e6f20747261696c696e672070756e6374756174696f6e2e2044657363726962652074686520696e74656e64656420776f726b2c206e6f7420697473207374617475732c2073756363657373206f72207361666574792e2052657175697265642c206e6f6e626c616e6b2c2073696e676c652d6c696e652076616c6964205554462d382c206174206d6f737420313030206465636f646564205554462d382062797465732e2041696d20666f72203430e28093363020636861726163746572733b20757365206d6f7265206f6e6c7920666f722075736566756c2073636f70652e204578616d706c653a2052756e207061727365722072656772657373696f6e207465737473227d2c2274696d656f75745f6d73223a7b2274797065223a22696e7465676572222c226465736372697074696f6e223a224f7074696f6e616c2e204f6d697420697420666f722074686520486f73742064656661756c7420756e6c6573732074686520776f726b206e65656473206120646966666572656e74206275646765742e204120706f73697469766520696e7465676572207265706c616365732069742077697468206120746f74616c20656c617073656420657865637574696f6e2062756467657420696e206d696c6c697365636f6e64732066726f6d2070726f636573732073746172743b206f757470757420646f6573206e6f742072657365742069742e20416c6c6f7720656e6f7567682074696d6520666f722073656172636865732c206275696c647320616e642074657374732e2045787069727920656e6473207468652063616c6c207468726f7567682070726f636573732d67726f7570207465726d696e6174696f6e2c206e6f742061206261636b67726f756e642068616e646c653b207061727469616c2065666665637473206d61792072656d61696e2e222c226d696e696d756d223a312c226d6178696d756d223a393232333337323033363835343737353830377d7d2c227265717569726564223a5b22636d64222c226465736372697074696f6e225d2c226164646974696f6e616c50726f70657274696573223a66616c73657d' FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9' AND byte_length=1147 AND private=0)",
+            "INSERT INTO content(content_id,digest,byte_length,private,payload) SELECT (SELECT coalesce(max(content_id),0)+1 FROM content),X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528',0,0,X'' FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3))) AND NOT EXISTS(SELECT 1 FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0)",
+            "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 1,'bash','rui',(SELECT content_id FROM content WHERE digest=X'4f66196d0cd7f65cfedb1f6351c95fa0f2d11d29418a366b3121e62bdac14845' AND byte_length=633 AND private=0),(SELECT content_id FROM content WHERE digest=X'7a478a1b836850fe5d32bc5580440b303691e7efee40b5c5f4b65fd2877fe1b9' AND byte_length=1147 AND private=0) FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (1,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (1,3)))",
+            "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) SELECT 2,'web_search','provider',(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0),(SELECT content_id FROM content WHERE digest=X'11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528' AND byte_length=0 AND private=0) FROM DUAL WHERE (EXISTS(SELECT 1 FROM session WHERE tools_mask IN (2,3)) OR EXISTS(SELECT 1 FROM session_revision WHERE tools_mask IN (2,3)))",
+            "INSERT INTO tool_set(tool_set_id,digest,member_count) SELECT used.tools_mask+1,CASE used.tools_mask WHEN 0 THEN X'fe748044351540765e2284e8b22eee2921470a1314d382303cdc7075a2ae4848' WHEN 1 THEN X'0925160f7c7b0c47c90f761fe1302c8ee88e8e7393a05916ed42a1ee2993b6d2' WHEN 2 THEN X'd9cfc45bb675c92d875c57d0206db60df3cdf46d271687b6a6d34ceecde1e968' WHEN 3 THEN X'1e1125a25d2df26dec099adfa35d375282a5318a4f72178d5b641d219f76f9da' END,CASE used.tools_mask WHEN 0 THEN 0 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 2 END FROM (SELECT tools_mask FROM session UNION SELECT tools_mask FROM session_revision) used",
+            "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,0,CASE WHEN tool_set_id=3 THEN 2 ELSE 1 END FROM tool_set WHERE tool_set_id>1",
+            "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT tool_set_id,1,2 FROM tool_set WHERE tool_set_id=4",
+            "ALTER TABLE session ADD COLUMN tool_set_id BIGINT AFTER instructions_content_id",
+            "UPDATE session SET tool_set_id=tools_mask+1",
+            "ALTER TABLE session MODIFY tool_set_id BIGINT NOT NULL, ADD CHECK(tool_set_id>0), ADD FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id), DROP COLUMN tools_mask",
+            "ALTER TABLE session_revision ADD COLUMN tool_set_id BIGINT AFTER instructions_updated",
+            "UPDATE session_revision SET tool_set_id=tools_mask+1",
+            "ALTER TABLE session_revision MODIFY tool_set_id BIGINT NOT NULL, ADD CHECK(tool_set_id>0), ADD FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id), DROP COLUMN tools_mask",
+            "CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position)",
+        },
+    },
+};
+comptime {
+    if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
+    for (migrations, 0..) |step, position| {
+        const expected = migration_baseline + position;
+        if (step.from != expected) @compileError(std.fmt.comptimePrint(
+            "migrations: step {d} moves from {d}; the step after {d} must move from {d}",
+            .{ position, step.from, expected -| 1, expected },
+        ));
+        if (step.from >= schema_version) @compileError(std.fmt.comptimePrint(
+            "migrations: the step from {d} moves past schema_version {d}: set schema_version to {d} and append its bootstrap_digests row, or drop the step",
+            .{ step.from, schema_version, step.from + 1 },
+        ));
+    }
+    if (migrations.len < schema_version - migration_baseline) @compileError(std.fmt.comptimePrint(
+        "migrations: schema_version is {d}, and no step moves a Store from {d}: append .{{ .from = {d}, .sqlite = ..., .mysql = ... }}",
+        .{ schema_version, migration_baseline + migrations.len, migration_baseline + migrations.len },
+    ));
+}
+
+/// The statements of the step from `from`, as one text for the DB team to
+/// run on a MySQL Store at `from`; `ddl(.mysql)` is a new MySQL Store's.
+/// PR 8's `rui store schema --engine mysql [--from N]` prints them. Rui takes
+/// no backup of a MySQL Store: backing it up before applying the text is the
+/// DB team's job.
+pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
+    return comptime blk: {
+        if (from < migration_baseline or from - migration_baseline >= migrations.len)
+            @compileError(std.fmt.comptimePrint("migrations: no step moves a Store from {d}", .{from}));
+        var text: []const u8 = "";
+        for (migrations[from - migration_baseline].mysql) |statement| text = text ++ statement ++ ";\n";
+        const terminated = text ++ "\x00";
+        break :blk terminated[0..text.len :0];
+    };
 }
 
 /// SQL membership of `column` in a closed set of enum tags or text literals:
@@ -156,17 +282,22 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
 
 // A label's syntax, not a provider list, so a new provider is no format change.
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
-const tools_mask_column: Column = .{ .name = "tools_mask", .type = .int, .check = std.fmt.comptimePrint("tools_mask BETWEEN 0 AND {d}", .{tool_catalog.all_tools_mask}) };
+// The tool records a Session's settings offer (D48), saved once by content.
+const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
 const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true };
 
+/// store_meta's keys, as bootstrap writes them: a closed set, so a key is
+/// a tag, which MySQL can key.
+const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format" };
+
 pub const tables = [_]Table{
     .{
         .name = "store_meta",
         .columns = &.{
-            .{ .name = "meta_key", .type = .{ .text = null } },
+            .{ .name = "meta_key", .type = .{ .tag = &meta_keys } },
             .{ .name = "meta_value", .type = .{ .text = null } },
         },
         .primary_key = &.{"meta_key"},
@@ -183,10 +314,55 @@ pub const tables = [_]Table{
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
     },
+    // One tool as the model is told about it (D48): its name, who owns it
+    // (`rui`, or `provider` for a tool the provider runs, whose text the
+    // codec writes), and its description and input schema as content.
+    .{
+        .name = "tool_record",
+        .columns = &.{
+            .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
+            .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_catalog.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
+            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider" } } },
+            .{ .name = "description_content_id", .type = .int },
+            .{ .name = "input_schema_content_id", .type = .int },
+        },
+        .primary_key = &.{"tool_record_id"},
+        .uniques = &.{&.{ "name", "owner", "description_content_id", "input_schema_content_id" }},
+        .foreign_keys = &.{
+            references("description_content_id", "content", content_reference),
+            references("input_schema_content_id", "content", content_reference),
+        },
+    },
+    // An ordered set of tool records, saved once: `digest` names its
+    // members' content (tools.zig `setDigest`).
+    .{
+        .name = "tool_set",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
+            .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
+            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_tools}) },
+        },
+        .primary_key = &.{"tool_set_id"},
+        .uniques = &.{&.{"digest"}},
+    },
+    .{
+        .name = "tool_set_member",
+        .columns = &.{
+            .{ .name = "tool_set_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "tool_record_id", .type = .int },
+        },
+        .primary_key = &.{ "tool_set_id", "ordinal" },
+        .foreign_keys = &.{
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
+            references("tool_record_id", "tool_record", &.{"tool_record_id"}),
+        },
+        .without_rowid = true,
+    },
     .{
         .name = "session",
         .columns = &.{
-            .{ .name = "session_ref", .type = .{ .text = null }, .check = "@octets(session_ref)=6 AND @charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
+            .{ .name = "session_ref", .type = .{ .text = .{ .min = 6, .max = 6 } }, .check = "@charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
             // The Session's immutable binding: grammar version and its options.
@@ -196,7 +372,7 @@ pub const tables = [_]Table{
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
             .{ .name = "model", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "instructions_content_id", .type = .int },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             .{ .name = "revision", .type = .int, .check = "revision>0" },
@@ -220,6 +396,7 @@ pub const tables = [_]Table{
         .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
     },
@@ -236,11 +413,12 @@ pub const tables = [_]Table{
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
-            // Command order, allocated by the Host in the recording transaction.
+            // Command order, allocated by the Host in the recording
+            // transaction: the rowid, so command order costs no index.
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
         },
-        .primary_key = &.{"command_key"},
-        .uniques = &.{&.{"command_seq"}},
+        .primary_key = &.{"command_seq"},
+        .uniques = &.{&.{"command_key"}},
         .foreign_keys = &.{
             references("primary_content_id", "content", content_reference),
             references("secondary_content_id", "content", content_reference),
@@ -257,7 +435,7 @@ pub const tables = [_]Table{
             .{ .name = "model", .type = .{ .text = null } },
             .{ .name = "instructions_content_id", .type = .int },
             .{ .name = "instructions_updated", .type = .flag },
-            tools_mask_column,
+            tool_set_column,
             permission_mode_column,
             .{ .name = "output_schema_content_id", .type = .int, .nullable = true },
             compaction_trigger_column,
@@ -271,6 +449,7 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
             references("instructions_content_id", "content", content_reference),
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
         },
         .without_rowid = true,
@@ -626,6 +805,11 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
+    .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
+    // A content's owner in a Full report (`report.full_revisions`): its
+    // first revision, since each key ends in the primary key's revision.
+    .{ .name = "session_revision_instructions", .table = "session_revision", .columns = &.{ "session_ref", "instructions_content_id" } },
+    .{ .name = "session_revision_output_schema", .table = "session_revision", .columns = &.{ "session_ref", "output_schema_content_id" } },
     .{ .name = "session_stop_exclusion", .table = "session_stop", .columns = &.{ "session_ref", "admission_cutoff", "position" } },
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
@@ -633,14 +817,24 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
+    // Results walk it (`report.full_results`): the predicate holds exactly
+    // for a resolved Action (action_operation's CHECK).
+    .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
-    .{ .name = "model_tool_call_rejections", .table = "model_tool_call", .columns = &.{ "operation_id", "call_ordinal" }, .where = "rejection_code IS NOT NULL" },
+    // Calls walk it (`report.full_calls`).
+    .{ .name = "model_tool_call_session_order", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "call_ordinal" } },
+    // Results walk it: the predicate holds exactly for a rejected call
+    // (model_tool_call's CHECK).
+    .{ .name = "model_tool_call_session_results", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
     .{ .name = "model_tool_call_acceptance", .table = "model_tool_call", .columns = &.{ "session_ref", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
     .{ .name = "model_operation_retry_due", .table = "model_operation", .columns = &.{ "retry_due_at_ms", "operation_id" }, .where = "resolution_code IS NULL AND " ++ retry_allowance_open_sql },
     .{ .name = "model_operation_retry_exhausted", .table = "model_operation", .columns = &.{"operation_id"}, .where = retry_exhausted_sql },
     .{ .name = "model_operation_session_history", .table = "model_operation", .columns = &.{ "session_ref", "operation_id" } },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
+    // Every Operation by admission, whatever its outcome: request history
+    // places each earlier Operation's effort boundary (codec /2).
+    .{ .name = "model_operation_admission", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "model_operation_context_history", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = oneOf("resolution_code", &accepted_resolutions) },
     .{ .name = "model_operation_compaction_bases", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = "purpose=1 AND " ++ resolutionIs("resolution_code", .compacted) },
     .{ .name = "conversation_entry_history", .table = "conversation_entry", .columns = &.{ "session_ref", "session_position" } },
@@ -659,8 +853,17 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
-    if (std.mem.eql(u8, table, "model_interruption_command")) return false;
-    return hasColumn(table, "session_ref") or hasColumn(table, "sender_session_ref");
+    @setEvalBranchQuota(2000);
+    return tableCarriesSessions(tables[tablePosition(&tables, table)]);
+}
+
+/// The columns that name a Session, in the order `sessionColumns` lists them.
+pub const session_column_names = [_][]const u8{ "session_ref", "sender_session_ref" };
+
+fn tableCarriesSessions(comptime table: Table) bool {
+    if (std.mem.eql(u8, table.name, "model_interruption_command")) return false;
+    for (table.columns) |column| if (contains(&session_column_names, column.name)) return true;
+    return false;
 }
 
 /// Whether `table` has a column named `column`.
@@ -680,7 +883,7 @@ pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
 pub fn sessionColumns(comptime table: []const u8) []const []const u8 {
     comptime {
         var columns: []const []const u8 = &.{};
-        for ([_][]const u8{ "session_ref", "sender_session_ref" }) |column| {
+        for (session_column_names) |column| {
             if (hasColumn(table, column)) columns = columns ++ .{column};
         }
         return columns;
@@ -735,11 +938,12 @@ pub fn keys(comptime table: []const u8) []const []const []const u8 {
 }
 
 /// The branches rendering every object takes, which whichever statement
-/// first asks `hasIndex` spends. The test build needed between 5_000 and
-/// 6_250 per object (measured); this is twice the passing bound. A quota
+/// first asks `hasIndex` spends, now that each CHECK and predicate is also
+/// parsed (`expression`). The unit test binary's build failed at
+/// 30,000 per object (measured); this is four times that. A quota
 /// only raises the evaluation's limit, so a statement whose own quota is
 /// larger adds this to it (`rsql.renderStatement`).
-pub const objects_quota = 12_500 * (tables.len + indexes.len);
+pub const objects_quota = 120_000 * (tables.len + indexes.len);
 
 /// Whether the schema has an index named `name`.
 pub fn hasIndex(comptime name: []const u8) bool {
@@ -753,7 +957,7 @@ pub fn hasIndex(comptime name: []const u8) bool {
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
-        @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
+        @setEvalBranchQuota(objects_quota);
         var text: []const u8 = "";
         for (objects(dialect)) |object| text = text ++ object.sql ++ ";\n";
         const terminated = text ++ "\x00";
@@ -761,18 +965,245 @@ pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     };
 }
 
-pub const Object = struct { kind: enum { table, index }, name: []const u8, sql: []const u8 };
+/// `foreign_key`: only on MySQL (`mysqlObjects`).
+pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
-/// Every table and named index, each with the statement that creates it.
+/// Every table and named index, each with the statement that creates it,
+/// and on MySQL the foreign keys `mysqlObjects` adds after them.
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
-        // Format 47's 51 tables and indexes take about 129,000 branches (measured).
-        @setEvalBranchQuota(5_000 * (tables.len + indexes.len));
+        @setEvalBranchQuota(objects_quota);
+        if (dialect == .mysql) break :blk switch (mysqlObjects(&tables, &indexes)) {
+            .refused => |message| @compileError(message),
+            .objects => |result| result,
+        };
         var result: []const Object = &.{};
-        for (tables) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(dialect, table) }};
-        for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(dialect, index) }};
+        for (tables) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table) }};
+        for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(index) }};
         break :blk result;
     };
+}
+
+/// What MySQL sessions on a Store set before their first statement: the
+/// collation the DDL's keys compare in, and a strict `sql_mode` with
+/// ONLY_FULL_GROUP_BY and NO_BACKSLASH_ESCAPES. Nothing in this PR runs
+/// it; the live dialect check and PR 8's engine do.
+pub const mysql_session = [_][:0]const u8{
+    "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
+    "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
+};
+
+const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };
+
+/// The MySQL 8.4 DDL of `all` and `all_indexes`, or why it has none.
+/// Each table is InnoDB in utf8mb4_0900_bin, with each column typed by
+/// `mysqlColumnType` and every key, CHECK and foreign key at table level:
+/// MySQL ignores a column's inline REFERENCES, and refuses a column CHECK
+/// that names another column. A foreign key to a table created later
+/// (the turn and admission cycle) is an ALTER TABLE after every table and
+/// index. Each index takes its `mysqlIndexForm`.
+fn mysqlObjects(comptime all: []const Table, comptime all_indexes: []const Index) MysqlObjects {
+    comptime {
+        @setEvalBranchQuota(50_000 * (all.len + all_indexes.len));
+        var result: []const Object = &.{};
+        var later: []const Object = &.{};
+        for (all, 0..) |table, position| {
+            var lines: []const []const u8 = &.{};
+            var checks: []const []const u8 = &.{};
+            for (table.columns) |column| {
+                const column_type = switch (mysqlColumnType(all, all_indexes, table, column)) {
+                    .refused => |message| return .{ .refused = message },
+                    .type => |found| found,
+                };
+                lines = lines ++ .{" " ++ column.name ++ " " ++ column_type.name ++ (if (column.nullable) "" else " NOT NULL") ++
+                    (if (column.default) |value| " DEFAULT " ++ value else "")};
+                if (columnCheck(column)) |check| checks = checks ++ .{check};
+            }
+            var keys_of: []const []const []const u8 = &.{table.primary_key};
+            keys_of = keys_of ++ table.uniques;
+            for (table.foreign_keys) |key| keys_of = keys_of ++ .{key.columns};
+            for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
+                var names: []const []const u8 = &.{};
+                for (index.columns) |column| names = names ++ .{indexColumn(column).name};
+                keys_of = keys_of ++ .{names};
+            };
+            for (keys_of) |key| if (mysqlKeyError(all, all_indexes, table, key)) |message| return .{ .refused = message };
+            lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
+            for (table.uniques) |unique| lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
+            for (table.foreign_keys) |key| {
+                const clause = "FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key);
+                if (tablePosition(all, key.references) <= position) {
+                    lines = lines ++ .{" " ++ clause};
+                } else later = later ++ .{Object{ .kind = .foreign_key, .name = table.name ++ "(" ++ list(key.columns) ++ ")", .sql = "ALTER TABLE " ++ table.name ++ " ADD " ++ clause }};
+            }
+            for (checks ++ table.checks) |check| lines = lines ++ .{" CHECK(" ++ expression(.mysql, table, check) ++ ")"};
+            result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = "CREATE TABLE " ++ table.name ++ "(\n" ++ joinLines(lines) ++
+                "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin" }};
+        }
+        for (all_indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createMysqlIndex(all, index) }};
+        return .{ .objects = result ++ later };
+    }
+}
+
+/// The most bytes InnoDB keys in one index, under the DYNAMIC row format
+/// MySQL 8.4 defaults to.
+const innodb_key_bytes = 3072;
+
+/// Why `key`, columns of `table` that MySQL indexes together, is wider
+/// than `innodb_key_bytes`, or null. Each column counts its type's
+/// `key_bytes`; a `unique_when` part keys the same value as its column.
+fn mysqlKeyError(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime key: []const []const u8) ?[]const u8 {
+    var bytes: usize = 0;
+    for (key) |name| bytes += switch (mysqlColumnType(all, all_indexes, table, columnNamed(table, name))) {
+        .refused => 0,
+        .type => |found| found.key_bytes,
+    };
+    if (bytes <= innodb_key_bytes) return null;
+    return std.fmt.comptimePrint("schema: the key {s}({s}) is {d} bytes on MySQL, past InnoDB's {d}", .{ table.name, list(key), bytes, innodb_key_bytes });
+}
+
+/// A MySQL column type, and the bytes a key on it takes at most: 8 for
+/// BIGINT, 1 for TINYINT, 4 per character for utf8mb4 VARCHAR, n for
+/// VARBINARY(n), and 0 for TEXT and BLOB types, which no key holds.
+const MysqlType = struct { name: []const u8, key_bytes: usize };
+const MysqlColumnType = union(enum) { refused: []const u8, type: MysqlType };
+
+/// `column`'s MySQL type. A column of a foreign key takes the type of the
+/// column it references. Otherwise `.int` is BIGINT, `.flag` TINYINT and
+/// `.tag` VARCHAR of its longest tag; bounded `.text` and `.bytes` are
+/// VARCHAR and VARBINARY of their bound when `mysqlKeyed`, else TEXT and
+/// BLOB up to 65,535 bytes and LONGTEXT and LONGBLOB past it. An unbounded
+/// Session column (one of `session_column_names` in a table that carries
+/// Sessions) takes session.session_ref's type, because rsql's write rules
+/// give it only a SessionHead's reference or a copy of one
+/// (`rsql.sessionError`). Other unbounded text and bytes are LONGTEXT and
+/// LONGBLOB, and refused when keyed: MySQL keys only bounded values.
+fn mysqlColumnType(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime column: Column) MysqlColumnType {
+    comptime {
+        for (table.foreign_keys) |key| for (key.columns, key.referenced) |name, referenced| if (std.mem.eql(u8, name, column.name)) {
+            const parent = all[tablePosition(all, key.references)];
+            return mysqlColumnType(all, all_indexes, parent, columnNamed(parent, referenced));
+        };
+        const keyed = mysqlKeyed(all, all_indexes, table, column.name);
+        const octets, const text = switch (column.type) {
+            .int => return .{ .type = .{ .name = "BIGINT", .key_bytes = 8 } },
+            .flag => return .{ .type = .{ .name = "TINYINT", .key_bytes = 1 } },
+            .tag => |values| {
+                var longest: usize = 0;
+                for (values) |value| longest = @max(longest, value.len);
+                return .{ .type = .{ .name = std.fmt.comptimePrint("VARCHAR({d})", .{longest}), .key_bytes = 4 * longest } };
+            },
+            .text => |bound| .{ bound, true },
+            .bytes => |bound| .{ bound, false },
+        };
+        if (octets) |bounds| return .{ .type = if (keyed) .{
+            .name = std.fmt.comptimePrint("{s}({d})", .{ if (text) "VARCHAR" else "VARBINARY", bounds.max }),
+            .key_bytes = if (text) 4 * bounds.max else bounds.max,
+        } else .{
+            .name = if (bounds.max <= 65_535) (if (text) "TEXT" else "BLOB") else if (text) "LONGTEXT" else "LONGBLOB",
+            .key_bytes = 0,
+        } };
+        if (contains(&session_column_names, column.name) and tableCarriesSessions(table)) {
+            const session = all[tablePosition(all, "session")];
+            return mysqlColumnType(all, all_indexes, session, columnNamed(session, "session_ref"));
+        }
+        if (keyed) return .{ .refused = "schema: " ++ table.name ++ "." ++ column.name ++ " is in a key with no bound; MySQL keys only bounded values: give its type a .max" };
+        return .{ .type = .{ .name = if (text) "LONGTEXT" else "LONGBLOB", .key_bytes = 0 } };
+    }
+}
+
+/// Whether MySQL indexes `table`'s column `name` by its value: it is in
+/// the table's primary key, a unique, an index's columns, or the columns
+/// another table's foreign key references.
+fn mysqlKeyed(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime name: []const u8) bool {
+    comptime {
+        if (contains(table.primary_key, name)) return true;
+        for (table.uniques) |unique| if (contains(unique, name)) return true;
+        for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
+            for (index.columns) |column| if (std.mem.eql(u8, indexColumn(column).name, name)) return true;
+        };
+        for (all) |other| for (other.foreign_keys) |key| {
+            if (std.mem.eql(u8, key.references, table.name) and contains(key.referenced, name)) return true;
+        };
+        return false;
+    }
+}
+
+/// How MySQL, which has no partial index, holds a partial one. Each is
+/// derived from the index alone.
+pub const MysqlIndexForm = enum {
+    /// Not unique: the plain index on its columns. Its predicate only
+    /// narrowed what SQLite stores, never what it allows.
+    leading,
+    /// Unique, and its predicate is exactly the text `c IS NOT NULL` for
+    /// one of its columns c: a plain unique index, since MySQL never finds
+    /// two NULLs equal, so rows the predicate excludes never collide.
+    plain_unique,
+    /// Any other unique partial index: a unique index on
+    /// `(CASE WHEN predicate THEN c END)` for each column c, NULL, and so
+    /// never colliding, where the predicate fails.
+    unique_when,
+};
+
+/// `index`'s MySQL form, or null when it has no predicate.
+pub fn mysqlIndexForm(comptime index: Index) ?MysqlIndexForm {
+    const where = index.where orelse return null;
+    if (!index.unique) return .leading;
+    for (index.columns) |column| if (std.mem.eql(u8, where, column ++ " IS NOT NULL")) return .plain_unique;
+    return .unique_when;
+}
+
+fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const u8 {
+    checkIdentifier(index.name);
+    var parts: []const u8 = list(index.columns);
+    if (mysqlIndexForm(index) == .unique_when) {
+        parts = "";
+        for (index.columns, 0..) |column, position| {
+            const part = indexColumn(column);
+            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
+        }
+    }
+    return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";
+}
+
+/// An index column's name, and its order as written after it (" DESC" or "").
+fn indexColumn(comptime column: []const u8) struct { name: []const u8, order: []const u8 } {
+    const space = std.mem.indexOfScalar(u8, column, ' ') orelse return .{ .name = column, .order = "" };
+    return .{ .name = column[0..space], .order = column[space..] };
+}
+
+/// `text`, a CHECK or index predicate on `table`, in `dialect`'s spelling,
+/// once it meets a typed statement's expression rules
+/// (`rsql.expressionError`), which let `length` count `table`'s `.bytes`
+/// columns only.
+fn expression(comptime dialect: rsql.Dialect, comptime table: Table, comptime text: []const u8) []const u8 {
+    var bytes: []const []const u8 = &.{};
+    for (table.columns) |column| if (column.type == .bytes) {
+        bytes = bytes ++ .{column.name};
+    };
+    if (rsql.expressionError(text, bytes)) |message| @compileError(message ++ ": " ++ text);
+    return rsql.render(dialect, text);
+}
+
+fn tablePosition(comptime all: []const Table, comptime name: []const u8) usize {
+    for (all, 0..) |table, position| if (std.mem.eql(u8, table.name, name)) return position;
+    @compileError("schema: no table named " ++ name);
+}
+
+fn columnNamed(comptime table: Table, comptime name: []const u8) Column {
+    for (table.columns) |column| if (std.mem.eql(u8, column.name, name)) return column;
+    @compileError("schema: no column " ++ name ++ " in " ++ table.name);
+}
+
+fn contains(comptime names: []const []const u8, comptime name: []const u8) bool {
+    for (names) |each| if (std.mem.eql(u8, each, name)) return true;
+    return false;
+}
+
+fn joinLines(comptime lines: []const []const u8) []const u8 {
+    var body: []const u8 = "";
+    for (lines, 0..) |line, position| body = body ++ (if (position == 0) "" else ",\n") ++ line;
+    return body;
 }
 
 /// FNV-1a over every statement `bootstrap` executes, in order, so changing
@@ -794,12 +1225,12 @@ const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_ve
 const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
 /// a wire bump is no schema change.
-const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++ format_text ++ "')";
+const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('" ++ meta_keys[0] ++ "',?1),('" ++ meta_keys[1] ++ "',?2),('" ++ meta_keys[2] ++ "','" ++ format_text ++ "')";
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
-fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8 {
+fn createTable(comptime table: Table) []const u8 {
     var lines: []const []const u8 = &.{};
-    for (table.columns) |column| lines = lines ++ .{columnDefinition(dialect, table, column)};
+    for (table.columns) |column| lines = lines ++ .{columnDefinition(table, column)};
     if (table.primary_key.len > 1) lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
     for (table.uniques) |unique| {
         if (unique.len > 1) lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
@@ -807,14 +1238,13 @@ fn createTable(comptime dialect: rsql.Dialect, comptime table: Table) []const u8
     for (table.foreign_keys) |key| {
         if (key.columns.len > 1) lines = lines ++ .{" FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key)};
     }
-    for (table.checks) |check| lines = lines ++ .{" CHECK(" ++ rsql.render(dialect, check) ++ ")"};
-    var body: []const u8 = "";
-    for (lines, 0..) |line, position| body = body ++ (if (position == 0) "" else ",\n") ++ line;
+    for (table.checks) |check| lines = lines ++ .{" CHECK(" ++ expression(.sqlite, table, check) ++ ")"};
+    const body = joinLines(lines);
     checkIdentifier(table.name);
     return "CREATE TABLE " ++ table.name ++ "(\n" ++ body ++ "\n) STRICT" ++ (if (table.without_rowid) ", WITHOUT ROWID" else "");
 }
 
-fn columnDefinition(comptime dialect: rsql.Dialect, comptime table: Table, comptime column: Column) []const u8 {
+fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
     checkIdentifier(column.name);
     const only = &[_][]const u8{column.name};
     const primary = eqlList(table.primary_key, only);
@@ -834,7 +1264,7 @@ fn columnDefinition(comptime dialect: rsql.Dialect, comptime table: Table, compt
     for (table.foreign_keys) |key| {
         if (eqlList(key.columns, only)) text = text ++ " " ++ referenceClause(key);
     }
-    if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ rsql.render(dialect, check) ++ ")";
+    if (columnCheck(column)) |check| text = text ++ " CHECK(" ++ expression(.sqlite, table, check) ++ ")";
     return text;
 }
 
@@ -864,10 +1294,10 @@ fn referenceClause(comptime key: ForeignKey) []const u8 {
     return "REFERENCES " ++ key.references ++ "(" ++ list(key.referenced) ++ ")";
 }
 
-fn createIndex(comptime dialect: rsql.Dialect, comptime index: Index) []const u8 {
+fn createIndex(comptime index: Index) []const u8 {
     checkIdentifier(index.name);
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ list(index.columns) ++ ")" ++
-        (if (index.where) |where| " WHERE " ++ rsql.render(dialect, where) else "");
+        (if (index.where) |where| " WHERE " ++ expression(.sqlite, tables[tablePosition(&tables, index.table)], where) else "");
 }
 
 fn checkIdentifier(comptime name: []const u8) void {
@@ -902,15 +1332,115 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "COMMIT");
 }
 
+/// Opens a Store of this application at schema_version, or moves one at a
+/// format from migration_baseline on to it first (`migrate`).
+pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !void {
+    if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
+    const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
+    if (found == schema_version) return validateCurrent(database, selector);
+    if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
+    return migrate(io, database, selector, found, migrations[found - migration_baseline ..]);
+}
+
+/// First writes `migrationBackup`; a Store whose backup fails is refused
+/// with nothing migrated. Then, in one transaction: runs `steps`' SQLite statements on a Store at
+/// format `from`, sets its format to schema_version, and commits only if
+/// the Store then validates as a fresh bootstrap's would
+/// (`validateCurrent`) and every foreign key holds. A Store whose
+/// store_meta format is not `from` is a WrongStoreVersion, and any failure
+/// leaves the Store as it was.
+pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+    try migrationBackup(io, database);
+    // Both outside the transaction, where PRAGMA foreign_keys takes effect.
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    defer sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch {};
+    try sqlite.exec(database, "BEGIN EXCLUSIVE");
+    errdefer sqlite.rollback(database);
+    var from_text: [10]u8 = undefined;
+    if (!try metaEquals(database, "format", std.fmt.bufPrint(&from_text, "{d}", .{from}) catch unreachable)) return error.WrongStoreVersion;
+    for (steps) |step| for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    {
+        const violations = try sqlite.prepare(database, "PRAGMA foreign_key_check");
+        defer _ = c.sqlite3_finalize(violations);
+        switch (c.sqlite3_step(violations)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => return error.MigrationBrokeForeignKey,
+            else => return error.StatementFailed,
+        }
+    }
+    try sqlite.exec(database, version_sql);
+    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
+    try validateCurrent(database, selector);
+    try sqlite.exec(database, "COMMIT");
+}
+
+/// Before a migration, a copy of the Store at `from` beside its file: for
+/// `<name>.sqlite3`, `<name>.backup`, written page by page through SQLite's
+/// online backup API, so it holds the last committed state and is as large
+/// as the Store. Its path is a byte shorter than the Store's, so it and its
+/// journal fit wherever the Store's do. The one name per file means an
+/// earlier copy is replaced and nothing else beside the Store is touched;
+/// the copy's own user_version says which format it holds. The copy and
+/// its directory entry are synced before the migration starts. Every
+/// failure is a MigrationBackupFailed.
+fn migrationBackup(io: std.Io, database: *c.sqlite3) !void {
+    return writeMigrationBackup(io, database) catch |err| switch (err) {
+        error.MigrationBackupFailed => err,
+        else => {
+            std.log.warn("Store migration backup failed: {s}", .{@errorName(err)});
+            return error.MigrationBackupFailed;
+        },
+    };
+}
+
+const store_extension = ".sqlite3";
+const backup_extension = ".backup";
+comptime {
+    if (backup_extension.len >= store_extension.len) @compileError("a backup's path must be shorter than its Store's");
+}
+
+fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
+    const path = std.mem.span(c.sqlite3_db_filename(database, "main") orelse return error.MigrationBackupFailed);
+    if (!std.mem.endsWith(u8, path, store_extension)) return error.MigrationBackupFailed;
+    const directory_path = std.fs.path.dirname(path) orelse return error.MigrationBackupFailed;
+    // Iterable, so the handle is a real descriptor (not O_PATH) that fsync takes.
+    var directory = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
+    defer directory.close(io);
+    // SQLite's allocator, not a path-sized stack buffer: the Host's stack frame budget.
+    const backup_text = c.sqlite3_mprintf("%.*s" ++ backup_extension, @as(c_int, @intCast(path.len - store_extension.len)), path.ptr) orelse return error.MigrationBackupFailed;
+    defer c.sqlite3_free(backup_text);
+    const backup = std.mem.span(backup_text);
+    const backup_name = backup[directory_path.len + 1 ..];
+    directory.deleteFile(io, backup_name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    // The online backup API, not VACUUM INTO: the build sets
+    // SQLITE_MAX_ATTACHED=0, and VACUUM INTO attaches its target.
+    {
+        var target: ?*c.sqlite3 = null;
+        defer _ = c.sqlite3_close(target);
+        if (c.sqlite3_open_v2(backup, &target, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX, null) != c.SQLITE_OK)
+            return error.MigrationBackupFailed;
+        const copying = c.sqlite3_backup_init(target, "main", database, "main") orelse return error.MigrationBackupFailed;
+        const stepped = c.sqlite3_backup_step(copying, -1);
+        if (c.sqlite3_backup_finish(copying) != c.SQLITE_OK or stepped != c.SQLITE_DONE) return error.MigrationBackupFailed;
+    }
+    var copy = try directory.openFile(io, backup_name, .{});
+    defer copy.close(io);
+    try copy.sync(io);
+    if (std.c.fsync(directory.handle) != 0) return error.MigrationBackupFailed;
+}
+
 /// Refuses a Store unless its tables and indexes are exactly the ones
 /// bootstrap creates, each with the same CREATE text. SQLite keeps that text
-/// as run and bootstrap is its only writer, so a dropped CHECK, a changed
-/// column or a missing or extra index or trigger is a WrongStoreSchema. A
+/// as run, and only bootstrap and `migrate` write it, so a dropped CHECK, a
+/// changed column, a migration that leaves other text than bootstrap's, or a
+/// missing or extra index or trigger is a WrongStoreSchema. A
 /// network engine keeps no such text: PR 8/9 compare its catalog's tables,
 /// columns and indexes by name and type instead, which cannot see a CHECK.
-pub fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
-    if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
-    if (try sqlite.pragmaInt(database, "PRAGMA user_version") != schema_version) return error.WrongStoreVersion;
+/// Its caller has read user_version as schema_version, or set it.
+fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
     {
         const expected = comptime objects(.sqlite);
         const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");
@@ -975,4 +1505,115 @@ fn metaEquals(database: *c.sqlite3, comptime key: []const u8, expected: []const 
     if (c.sqlite3_column_type(statement, 0) != c.SQLITE_TEXT) return false;
     const text = c.sqlite3_column_text(statement, 0) orelse return error.OutOfMemory;
     return std.mem.eql(u8, text[0..@intCast(c.sqlite3_column_bytes(statement, 0))], expected);
+}
+
+// Two tables whose keys reference each other, for the MySQL DDL test.
+const mysql_test_order: Table = .{
+    .name = "turn",
+    .columns = &.{
+        .{ .name = "turn_id", .type = .int },
+        .{ .name = "code", .type = .{ .text = null } },
+        .{ .name = "live", .type = .flag, .default = "0" },
+    },
+    .primary_key = &.{"turn_id"},
+    .foreign_keys = &.{references("code", "content", &.{"label"})},
+};
+const mysql_test_label: Table = .{
+    .name = "content",
+    .columns = &.{
+        .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 8 } } },
+        .{ .name = "note", .type = .{ .text = .{ .max = 100 } }, .nullable = true },
+        .{ .name = "body", .type = .{ .bytes = null }, .check = "length(body)<10" },
+        .{ .name = "first_turn", .type = .int },
+    },
+    .primary_key = &.{"label"},
+    .foreign_keys = &.{references("first_turn", "turn", &.{"turn_id"})},
+};
+
+test "MySQL types come from foreign keys, bounds and keys, and a key cycle closes after its tables" {
+    const rendered = comptime mysqlObjects(&[_]Table{ mysql_test_order, mysql_test_label }, &.{}).objects;
+    try std.testing.expectEqual(3, rendered.len);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE turn(\n turn_id BIGINT NOT NULL,\n code VARCHAR(8) NOT NULL,\n live TINYINT NOT NULL DEFAULT 0,\n PRIMARY KEY(turn_id),\n" ++
+            " CHECK(live IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        rendered[0].sql,
+    );
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE content(\n label VARCHAR(8) NOT NULL,\n note TEXT,\n body LONGBLOB NOT NULL,\n first_turn BIGINT NOT NULL,\n PRIMARY KEY(label),\n" ++
+            " FOREIGN KEY(first_turn) REFERENCES turn(turn_id),\n CHECK(OCTET_LENGTH(label) BETWEEN 1 AND 8),\n" ++
+            " CHECK(note IS NULL OR OCTET_LENGTH(note)<=100),\n CHECK(length(body)<10)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        rendered[1].sql,
+    );
+    try std.testing.expectEqualStrings("ALTER TABLE turn ADD FOREIGN KEY(code) REFERENCES content(label)", rendered[2].sql);
+    const unbounded = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = null } }}, .primary_key = &.{"label"} }};
+    try std.testing.expectEqualStrings(
+        "schema: content.label is in a key with no bound; MySQL keys only bounded values: give its type a .max",
+        comptime mysqlObjects(&unbounded, &.{}).refused,
+    );
+}
+
+test "each partial index takes its MySQL form" {
+    try std.testing.expectEqualStrings("CREATE INDEX open ON turn(session_ref)", comptime createMysqlIndex(&tables, .{ .name = "open", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_code IS NULL" }));
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX handle ON action_operation(sender_handle,action_id)",
+        comptime createMysqlIndex(&tables, .{ .name = "handle", .table = "action_operation", .columns = &.{ "sender_handle", "action_id" }, .unique = true, .where = "sender_handle IS NOT NULL" }),
+    );
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX active ON turn((CASE WHEN outcome_code IS NULL THEN session_ref END),(CASE WHEN outcome_code IS NULL THEN turn_id END) DESC)",
+        comptime createMysqlIndex(&tables, .{ .name = "active", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" }, .unique = true, .where = "outcome_code IS NULL" }),
+    );
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX other ON turn((CASE WHEN outcome_code IS NOT NULL THEN session_ref END))",
+        comptime createMysqlIndex(&tables, .{ .name = "other", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NOT NULL" }),
+    );
+}
+
+test "the schema's MySQL DDL keeps each foreign key once and no SQLite spelling" {
+    const rendered = comptime objects(.mysql);
+    for (rendered) |object| {
+        for ([_][]const u8{ "STRICT", "ROWID", "GLOB", "FILTER", "rui_served", "INDEXED", "WHERE" }) |sqlite_only| {
+            try std.testing.expect(std.mem.indexOf(u8, object.sql, sqlite_only) == null);
+        }
+    }
+    inline for (tables) |table| {
+        inline for (table.foreign_keys) |key| {
+            const clause = comptime "FOREIGN KEY(" ++ list(key.columns) ++ ") " ++ referenceClause(key);
+            var found: usize = 0;
+            for (rendered) |object| {
+                const owner = switch (object.kind) {
+                    .table => std.mem.eql(u8, object.name, table.name),
+                    .foreign_key => std.mem.startsWith(u8, object.sql, "ALTER TABLE " ++ table.name ++ " "),
+                    .index => false,
+                };
+                if (owner) found += std.mem.count(u8, object.sql, clause);
+            }
+            try std.testing.expectEqual(@as(usize, 1), found);
+        }
+    }
+    const output_items = for (rendered) |object| {
+        if (std.mem.eql(u8, object.name, "model_output_item")) break object.sql;
+    } else unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, output_items, " session_ref VARCHAR(6) NOT NULL,") != null);
+}
+
+test "a MySQL key wider than InnoDB keeps is refused" {
+    const wide = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = .{ .max = 769 } } }}, .primary_key = &.{"label"} }};
+    try std.testing.expectEqualStrings("schema: the key content(label) is 3076 bytes on MySQL, past InnoDB's 3072", comptime mysqlObjects(&wide, &.{}).refused);
+    const fits = [_]Table{.{ .name = "content", .columns = &.{.{ .name = "label", .type = .{ .text = .{ .max = 768 } } }}, .primary_key = &.{"label"} }};
+    try std.testing.expectEqual(1, comptime mysqlObjects(&fits, &.{}).objects.len);
+}
+
+test "MySQL sessions read literals as rsql copies them, and strictly" {
+    const prefix = "SET SESSION sql_mode='";
+    const mode = for (mysql_session) |statement| {
+        if (std.mem.startsWith(u8, statement, prefix)) break statement[prefix.len .. statement.len - 1];
+    } else return error.NoSqlMode;
+    // Literals: mysqlRendering copies them unchanged. Strict: DIV by zero and overflow in a write fail as the docs say.
+    for ([_][]const u8{ "NO_BACKSLASH_ESCAPES", "STRICT_ALL_TABLES", "ERROR_FOR_DIVISION_BY_ZERO", "ONLY_FULL_GROUP_BY" }) |wanted| {
+        var names = std.mem.tokenizeScalar(u8, mode, ',');
+        const found = while (names.next()) |name| {
+            if (std.mem.eql(u8, name, wanted)) break true;
+        } else false;
+        try std.testing.expect(found);
+    }
 }

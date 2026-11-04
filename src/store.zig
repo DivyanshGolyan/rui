@@ -35,6 +35,7 @@ pub const Faults = store_core.Faults;
 pub const HistoricalContent = historical_domain.HistoricalContent;
 pub const HistoricalReader = historical_domain.HistoricalReader;
 pub const HistoricalSettings = historical_domain.HistoricalSettings;
+pub const HistoricalTool = historical_domain.HistoricalTool;
 pub const HistoricalView = historical_domain.HistoricalView;
 pub const MessageReply = command_domain.MessageReply;
 pub const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
@@ -58,4 +59,6 @@ pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 test {
     _ = @import("store/tests.zig");
+    _ = @import("store/sqlite_tests.zig");
+    _ = @import("store/mysql_dialect_check.zig");
 }

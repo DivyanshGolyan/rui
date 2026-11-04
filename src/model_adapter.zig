@@ -588,6 +588,8 @@ pub const Preparation = struct {
     output_bag: ?store.HistoricalContent = undefined,
     /// The current Message's peer sender.
     sender: protocol.Bounded(protocol.max_session_bytes) = undefined,
+    /// The offered tool the tools stage renders, as the Store saved it.
+    tool: store.HistoricalTool = undefined,
     state: State,
 
     /// What one preparation starts from, reset by `init` in one assignment.
@@ -612,7 +614,6 @@ pub const Preparation = struct {
         content: ?ContentPiece = null,
         emission: Emission = .none,
         /// The next tool the tools stage considers.
-        next_tool: u8 = 0,
         continuation_unavailable: bool = false,
         history_position: u64 = 0,
         last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
@@ -953,19 +954,20 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.tools_start, 0);
             },
             .tool => {
-                const all = comptime std.enums.values(tools.Tool);
-                while (self.state.next_tool < all.len) {
-                    const tool = all[self.state.next_tool];
-                    self.state.next_tool += 1;
-                    if (self.settings.tools_mask & tools.toolBit(tool) == 0) continue;
-                    switch (tools.offer(tool)) {
-                        .function => |definition| {
-                            self.handles[0] = .{ .text = definition.name };
-                            self.handles[1] = .{ .text = definition.description };
-                            self.handles[2] = .{ .text = definition.parameters_json };
+                if (try self.view.nextTool(&self.tool)) {
+                    switch (self.tool.owner) {
+                        .rui => {
+                            self.handles[0] = .{ .text = self.tool.name.slice() };
+                            self.handles[1] = .{ .content = self.tool.description };
+                            self.handles[2] = .{ .content = self.tool.input_schema };
                             return self.loadItemHeader(.tool, 0b111);
                         },
-                        .web_search => return self.loadItemHeader(.web_search, 0),
+                        // Web search is the one provider-run tool until
+                        // each Provider Adapter lists its own (T1c).
+                        .provider => {
+                            if (!self.tool.name.eql(tools.web_search_record.name)) return error.CorruptStore;
+                            return self.loadItemHeader(.web_search, 0);
+                        },
                     }
                 }
                 self.state.stage = .text_format;
@@ -1790,8 +1792,8 @@ test "a prepared request carries the Responses codec's headers with its Session'
 const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
 // Share the tool's prose and schema, not the request's tool envelope.
-const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_definition.description ++
-    "\",\"strict\":false,\"parameters\":" ++ tools.bash_definition.parameters_json ++ "}";
+const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_record.description ++
+    "\",\"strict\":false,\"parameters\":" ++ tools.bash_record.input_schema ++ "}";
 // A Session created with the product's default tools.
 const default_tools_json = bash_tool_json ++ ",{\"type\":\"web_search\",\"external_web_access\":true}";
 

@@ -4,10 +4,10 @@
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const tool_catalog = @import("../../tools.zig");
+const tool_set = @import("tool_set.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
-const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const rsql = @import("../rsql.zig");
@@ -127,63 +127,58 @@ pub const ValidatedOutput = struct {
     request_id: protocol.Bounded(256),
 };
 
-pub fn checkAttempt(self: *Store, binding: AttemptBinding) !void {
+/// The purpose of the Attempt `binding` names, in an Entry of its own,
+/// while the binding is current (`attemptKind`).
+pub fn checkAttempt(self: *Store, binding: AttemptBinding) !ModelOperationKind {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    _ = try entry.finish(Ordinary.attempt_binding, validateCurrentAttempt(self, binding));
+    return entry.finish(Ordinary.attempt_binding, readAttemptKind(&entry, binding));
 }
 
-pub fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKind {
-    const statement = try store_core.cached(self, "SELECT purpose FROM model_operation WHERE operation_id=?1");
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, operation_id);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    return switch (c.sqlite3_column_int(statement, 0)) {
-        0 => .assistant_response,
-        1 => .compaction,
-        else => error.CorruptStore,
-    };
+/// `attemptKind` in a read Access of its own under `entry`. Noinline, so
+/// the Access is not on the frame of what runs after the check under the
+/// same Entry: a dispatch handoff.
+pub noinline fn readAttemptKind(entry: *const store_core.Entry, binding: AttemptBinding) !ModelOperationKind {
+    var a: store_access.Access(.read, error{}) = .open(entry);
+    defer a.deinit();
+    return attemptKind(&a, binding);
 }
 
-/// Checks that `binding` names its Operation's current Attempt, touching
-/// and returning the Operation's Session.
-pub fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !change_ring.Id {
-    const statement = try store_core.cached(
-        self,
-        "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key,session_ref " ++
-            "FROM model_operation WHERE operation_id=?1",
-    );
-    defer sqlite.resetCached(statement);
-    try sqlite.bindU64(statement, 1, binding.operation_id);
-    const step = c.sqlite3_step(statement);
-    if (step == c.SQLITE_DONE) return error.StaleAttemptBinding;
-    if (step != c.SQLITE_ROW) return error.OperationReadFailed;
-    // Every write that settles this Attempt changes its Session.
-    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try sqlite.readText(statement, 4, &session);
-    try store_core.touch(self, session.slice());
-    if (session.len != change_ring.id_bytes) return error.CorruptStore;
-    try attemptStanding(.{
-        .turn_id = c.sqlite3_column_int64(statement, 0),
-        .attempt_ordinal = c.sqlite3_column_int64(statement, 1),
-        .resolved = c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL,
-        .interrupted = c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL,
-    }, binding);
-    return session.slice()[0..change_ring.id_bytes].*;
-}
+/// The columns of an Operation `o` that decide whether a binding is
+/// current (`attemptStanding`).
+const standing_columns = "o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved,o.interrupted_by_command_key IS NOT NULL AS interrupted";
 
-/// The stored facts that decide whether a binding is still current.
-const AttemptFacts = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool };
+/// What decides whether a binding is current, and the Operation's purpose.
+const attempt_standing = rsql.Read(.{
+    .sql = "SELECT " ++ standing_columns ++ ",o.purpose AS compaction FROM model_operation o WHERE o.operation_id=?1",
+    .Args = struct { operation_id: u64 },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool, compaction: bool },
+    .cardinality = .optional,
+});
+
+/// The purpose of the Operation `binding` names, in one round, while
+/// `attemptStanding` finds the binding current; a missing Operation is
+/// `StaleAttemptBinding`. A failed step is `OperationReadFailed`, main's
+/// name for its Attempt read. Public so a test counts its rounds.
+pub fn attemptKind(a: anytype, binding: AttemptBinding) !ModelOperationKind {
+    var found: attempt_standing.Result = undefined;
+    a.read(attempt_standing, .{ .operation_id = binding.operation_id }, &found);
+    try runOperationRead(a);
+    const row = found orelse return error.StaleAttemptBinding;
+    try attemptStanding(row, binding);
+    return if (row.compaction) .compaction else .assistant_response;
+}
 
 /// Whether `binding` names the Attempt whose Turn and ordinal these are.
 fn namesAttempt(turn_id: i64, attempt_ordinal: i64, binding: AttemptBinding) bool {
     return turn_id == binding.turn_id and attempt_ordinal == binding.attempt_ordinal;
 }
 
-/// The one rule for a binding: current while it names its Operation's
-/// unresolved Attempt; otherwise `SupersededByControl` when a control
-/// interrupted that Attempt, else `StaleAttemptBinding`.
-fn attemptStanding(facts: AttemptFacts, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!void {
+/// The one rule for a binding, over a row of `standing_columns`: current
+/// while it names its Operation's unresolved Attempt; otherwise
+/// `SupersededByControl` when a control interrupted that Attempt, else
+/// `StaleAttemptBinding`.
+fn attemptStanding(facts: anytype, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!void {
     if (!namesAttempt(facts.turn_id, facts.attempt_ordinal, binding)) return error.StaleAttemptBinding;
     if (!facts.resolved) return;
     if (facts.interrupted) return error.SupersededByControl;
@@ -196,8 +191,7 @@ fn attemptStanding(facts: AttemptFacts, binding: AttemptBinding) error{ StaleAtt
 /// Operation; otherwise `turn_open` is false and unread. A missing Session
 /// row fails to decode, `CorruptStore`, as main's session facts read was.
 const attempt_facts = rsql.Read(.{
-    .sql = "SELECT o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved," ++
-        "o.interrupted_by_command_key IS NOT NULL AS interrupted,o.purpose AS compaction,o.admission_position," ++
+    .sql = "SELECT " ++ standing_columns ++ ",o.purpose AS compaction,o.admission_position," ++
         "coalesce(o.retry_due_at_ms,0)<>0 AS retry_waiting,o.auth_refresh_claimed AS refresh_claimed," ++
         rsql.session_head_columns ++ "," ++
         "CASE WHEN ?2 THEN EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
@@ -223,8 +217,31 @@ const attempt_facts = rsql.Read(.{
 /// `binding` current; a missing Operation is `StaleAttemptBinding`.
 fn currentAttempt(facts: *const attempt_facts.Result, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!*const attempt_facts.Row {
     const row = &(facts.* orelse return error.StaleAttemptBinding);
-    try attemptStanding(.{ .turn_id = row.turn_id, .attempt_ordinal = row.attempt_ordinal, .resolved = row.resolved, .interrupted = row.interrupted }, binding);
+    try attemptStanding(row, binding);
     return row;
+}
+
+/// What decides whether a binding is current, and the Operation's Session.
+/// A missing Session row fails to decode, `CorruptStore`.
+const attempt_session = rsql.Read(.{
+    .sql = "SELECT " ++ standing_columns ++ "," ++ rsql.session_head_columns ++ " " ++
+        "FROM model_operation o LEFT JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
+    .Args = struct { operation_id: u64 },
+    .Row = struct { turn_id: i64, attempt_ordinal: i64, resolved: bool, interrupted: bool, session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+
+/// The Session of the Attempt `binding` names, read in one round, while
+/// the binding is current: what a write for the Attempt ties to with
+/// `@session`. A missing Operation is `StaleAttemptBinding`, and a failed
+/// step `OperationReadFailed`.
+pub fn currentAttemptSession(a: anytype, binding: AttemptBinding) !rsql.SessionHead {
+    var found: attempt_session.Result = undefined;
+    a.read(attempt_session, .{ .operation_id = binding.operation_id }, &found);
+    try runOperationRead(a);
+    const row = found orelse return error.StaleAttemptBinding;
+    try attemptStanding(row, binding);
+    return row.session;
 }
 
 const superseding_control = rsql.Read(.{
@@ -510,7 +527,7 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
 /// `StaleAttemptBinding`), the Session's permission mode and revision,
 /// and the last Conversation ordinal.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT r.tools_mask,s.permission_mode,s.revision," ++
+    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("r.tool_set_id") ++ " END AS tools_mask,s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
@@ -1040,7 +1057,7 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// each call's name, call_id and arguments, and, when the catalog rejects
 /// it, its rejection text. A call imports at most four identities, so
 /// `batch_items` calls always fit `batch_identities`.
-fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, frozen_tools: tool_catalog.ToolSet) void {
+fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_catalog.Offered) void {
     comptime std.debug.assert(batch_identities >= 4 * batch_items);
     batch.reset(.calls, start);
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
@@ -1068,8 +1085,8 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                 // The write walk inspects the call again and returns a
                 // failure here, or of its rejection text, where main does;
                 // collecting only needs the text's identity.
-                if (inspectOutputCall(io, output.source, name_record, record)) |facts| {
-                    if (tool_catalog.classifyCall(&facts, frozen_tools)) |code| {
+                if (inspectOutputCall(io, output.source, name_record, record, offered)) |facts| {
+                    if (tool_catalog.classifyCall(&facts)) |code| {
                         var buffer: [192]u8 = undefined;
                         if (rejectionText(io, output, code, &facts, name_record, &buffer)) |text| {
                             const fits = batch.add(.ofBytes(text, false));
@@ -1164,7 +1181,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .positions = positions,
         .first_item_position = try positions.take(output.item_count),
         .purpose = purpose,
-        .tools = try configuration_domain.toolSet(tools_mask),
+        .tools = .of(try configuration_domain.toolSet(tools_mask)),
         .settling = settling,
         .call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count),
     };
@@ -1217,7 +1234,7 @@ fn Settlement(comptime A: type) type {
         positions: *store_access.Positions,
         first_item_position: u64,
         purpose: ModelOperationKind,
-        tools: tool_catalog.ToolSet,
+        tools: tool_catalog.Offered,
         settling: success_facts.Row,
         imported_items: u64 = 0,
         imported_calls: u64 = 0,
@@ -1240,13 +1257,13 @@ fn Settlement(comptime A: type) type {
                         try s.writeItems(batch);
                         if (batch.last) {
                             try s.itemsDone();
-                            collectCalls(batch, s.output, s.io, 0, s.tools);
+                            collectCalls(batch, s.output, s.io, 0, &s.tools);
                         } else collectItems(batch, s.output, s.io, batch.end);
                     },
                     .calls => {
                         try s.writeCalls(batch);
                         if (batch.last) break;
-                        collectCalls(batch, s.output, s.io, batch.end, s.tools);
+                        collectCalls(batch, s.output, s.io, batch.end, &s.tools);
                     },
                 }
                 // A batch with nothing to read has nothing to write.
@@ -1546,8 +1563,8 @@ fn Settlement(comptime A: type) type {
             const call_id_content_id = try s.importDecoded(batch, call_id);
             const arguments_content_id = try s.importDecoded(batch, record);
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-            const call_facts = try inspectOutputCall(s.io, s.output.source, name, record);
-            const rejection_code = tool_catalog.classifyCall(&call_facts, s.tools);
+            const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
+            const rejection_code = tool_catalog.classifyCall(&call_facts);
             const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
                 var buffer: [192]u8 = undefined;
                 const text = try rejectionText(s.io, s.output, code, &call_facts, name, &buffer);
@@ -1567,7 +1584,8 @@ fn Settlement(comptime A: type) type {
                 std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
                 @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
-            // A call the catalog did not accept has no description.
+            // A Bash call has its description whether or not it was offered;
+            // one whose arguments the parser rejected has none.
             const description: ?tool_catalog.Description = if (call_facts.bashArguments()) |arguments| tool_catalog.describe(.{ .bash = arguments }) else null;
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
@@ -1722,12 +1740,12 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
 /// One function call's catalog facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
-noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord) !tool_catalog.CallFacts {
+noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_catalog.Offered) !tool_catalog.CallFacts {
     var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
     var encoded: output_format.JsonStringSource = .{
         .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },
     };
-    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded);
+    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded, offered.slice());
 }
 
 /// noinline: its read buffer serves the rare schema check, not every

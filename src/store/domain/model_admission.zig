@@ -97,7 +97,7 @@ fn RunnableSelection(comptime eligibility: []const u8) type {
     return rsql.Read(.{
         .sql = "WITH candidate AS (" ++
             "SELECT m.session_ref FROM message_admission m @index(message_admission_pending) WHERE " ++
-            configuration_domain.servedProviderSql("(SELECT provider FROM session WHERE session_ref=m.session_ref)") ++ " AND " ++ eligibility ++
+            "@served((SELECT provider FROM session WHERE session_ref=m.session_ref))" ++ " AND " ++ eligibility ++
             " ORDER BY m.admission_id LIMIT 1) " ++
             "SELECT " ++ rsql.session_head_columns ++ ",min(m.admission_id) AS first_admission,max(m.admission_id) AS cutoff,count(*) AS selected," ++
             "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
@@ -123,10 +123,10 @@ pub const runnable_selection_sql = runnable_selection.sql;
 // continuation predicates share complete_tool_results_sql and turn_policy keeps
 // continues_without_input inside continues_with_input. It also trusts the stored
 // column, which `disagreeing_continuation` fences.
-const tool_continuation_selection = rsql.Read(.{
+pub const tool_continuation_selection = rsql.Read(.{
     .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,active.turn_id " ++
         "FROM turn active @index(turn_tool_continuation) JOIN session s ON s.session_ref=active.session_ref " ++
-        "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ configuration_domain.servedProviderSql("s.provider") ++
+        "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ "@served(s.provider)" ++
         " AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
         "WHERE m.session_ref=active.session_ref AND " ++ queued_input_sql ++
         ") ORDER BY active.operation_id LIMIT 1",
@@ -134,8 +134,6 @@ const tool_continuation_selection = rsql.Read(.{
     .Row = Selection,
     .cardinality = .optional,
 });
-/// `tool_continuation_selection` as SQLite runs it.
-pub const tool_continuation_selection_sql = tool_continuation_selection.sql;
 
 /// Matches the partial retry indexes' text, which the schema fixes.
 pub const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});
@@ -151,7 +149,7 @@ const retry_admission_select_text = std.fmt.comptimePrint(
     "SELECT o.turn_id,o.operation_id,o.attempt_ordinal,o.retry_due_at_ms," ++ rsql.session_head_columns ++ " " ++
         "FROM model_operation o @index(model_operation_retry_due) JOIN session s ON s.session_ref=o.session_ref " ++
         "WHERE o.resolution_code IS NULL AND o." ++ retry_allowance_open_sql ++ " " ++
-        "AND o.retry_due_at_ms<=?1 AND o.operation_id>?2 AND " ++ configuration_domain.servedProviderSql("s.provider") ++
+        "AND o.retry_due_at_ms<=?1 AND o.operation_id>?2 AND " ++ "@served(s.provider)" ++
         " ORDER BY o.operation_id LIMIT {d}",
     .{retry_admission_page_rows},
 );
@@ -445,22 +443,22 @@ const admission_facts = rsql.Read(.{
 /// (`uncoveredBytesSql`). Otherwise the usage is NULL and the bytes 0.
 /// Admission and the Current report (`CompactionRead`) read it only when
 /// `turn_policy.forcedPurpose` leaves the purpose open. `since`
-/// and `usage` are each named once, so SQLite need not materialize them.
+/// and `latest_usage` are each named once, so SQLite need not materialize them.
 /// `base` is `context_changed`'s and named twice: a one-row `base` named
 /// once measured 5 steps cheaper here and 11 dearer in `context_changed`.
 /// The newest usage at or after the base is the newest
 /// usage, when that one is at or after the base, and none otherwise; so
-/// `usage` reads the newest, and the join holds it to the base. `provider`
+/// `latest_usage` reads the newest, and the join holds it to the base. `provider`
 /// and `model` are the Session's settings, as `admission_facts` read them.
 const admission_context = rsql.Read(.{
     .sql = "WITH " ++ compaction_base_sql ++ "," ++
         "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,coalesce((SELECT admission_position FROM base),0) AS frontier)," ++
-        "usage AS (" ++ latestUsageSql("0", "?3", "?4") ++ ")," ++
-        "measured AS (SELECT since.changed,since.frontier,usage.uncached,usage.cache_read,usage.cache_write,usage.output," ++
-        "usage.usage_position,usage.result_admission," ++
-        "CASE WHEN usage.uncached IS NULL THEN 0 ELSE usage.usage_position END AS covered," ++
-        "CASE WHEN usage.uncached IS NULL THEN since.frontier ELSE usage.result_admission END AS results " ++
-        "FROM since LEFT JOIN usage ON since.changed AND usage.result_admission>=since.frontier) " ++
+        "latest_usage AS (" ++ latestUsageSql("0", "?3", "?4") ++ ")," ++
+        "measured AS (SELECT since.changed,since.frontier,latest_usage.uncached,latest_usage.cache_read,latest_usage.cache_write,latest_usage.output," ++
+        "latest_usage.usage_position,latest_usage.result_admission," ++
+        "CASE WHEN latest_usage.uncached IS NULL THEN 0 ELSE latest_usage.usage_position END AS covered," ++
+        "CASE WHEN latest_usage.uncached IS NULL THEN since.frontier ELSE latest_usage.result_admission END AS results " ++
+        "FROM since LEFT JOIN latest_usage ON since.changed AND latest_usage.result_admission>=since.frontier) " ++
         "SELECT measured.changed,measured.uncached,measured.cache_read,measured.cache_write,measured.output,measured.usage_position,measured.result_admission," ++
         "CASE WHEN measured.changed THEN " ++ uncoveredBytesSql("measured.covered", "measured.frontier", "measured.results") ++ " ELSE 0 END AS uncovered_bytes " ++
         "FROM measured",

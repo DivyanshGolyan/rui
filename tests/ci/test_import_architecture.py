@@ -211,15 +211,21 @@ const y = @import("after.zig");
                 with self.assertRaisesRegex(ValueError, error):
                     store_boundary(root)
 
-    def test_lock_and_fence_sources_follow_the_store_directory(self):
-        access = 'test "Store entry points lock and fence only through canonical access" {{\n{}\n}}\n'
+    def test_source_scan_tests_follow_the_store_directory(self):
+        scan = 'test "{}" {{\n{}\n}}\n'
         listing = '    const sources = .{ @embedFile("Store.zig"), @embedFile("domain/a.zig") };'
+        names = ("Store entry points lock and fence only through canonical access",
+                 "every function that enters the Store has a round budget")
+
+        def tests(*listings):
+            return "".join(scan.format(name, text) for name, text in zip(names, listings))
+
         with tempfile.TemporaryDirectory() as directory:
             root = self.store_tree(directory, {
                 "src/store.zig": 'pub const Store = @import("store/Store.zig").Store; // fn',
                 "src/store/Store.zig": "pub fn enter() void {}",
                 "src/store/domain/a.zig": "pub fn f() void {}",
-                "src/store/tests.zig": access.format(listing),
+                "src/store/tests.zig": tests(listing, listing),
                 "src/store/wire/mysql.zig": "pub fn decode() void {}",
             })
             store_access_sources(root)
@@ -227,10 +233,16 @@ const y = @import("after.zig");
             with self.assertRaisesRegex(ValueError, "the Store's files are"):
                 store_access_sources(root)
             (root / "src/store/domain/b.zig").unlink()
-            (root / "src/store/tests.zig").write_text(access.format(listing.replace('@embedFile("domain/a.zig")', "")))
-            with self.assertRaisesRegex(ValueError, "the Store's files are"):
+            short = listing.replace('@embedFile("domain/a.zig")', "")
+            for listings, which in (((short, listing), "lock and fence"), ((listing, short), "round budget")):
+                with self.subTest(which=which):
+                    (root / "src/store/tests.zig").write_text(tests(*listings))
+                    with self.assertRaisesRegex(ValueError, f"{which}.*the Store's files are"):
+                        store_access_sources(root)
+            (root / "src/store/tests.zig").write_text(tests(listing))
+            with self.assertRaisesRegex(ValueError, "has no test"):
                 store_access_sources(root)
-            (root / "src/store/tests.zig").write_text(access.format(listing))
+            (root / "src/store/tests.zig").write_text(tests(listing, listing))
             (root / "src/store.zig").write_text("pub fn helper() void {}")
             with self.assertRaisesRegex(ValueError, "declares a function"):
                 store_access_sources(root)

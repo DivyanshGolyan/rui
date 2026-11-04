@@ -8,8 +8,6 @@ const Store = store_core.Store;
 const store_access = @import("../access.zig");
 const Access = store_access.Access;
 const rsql = @import("../rsql.zig");
-const sqlite = @import("../sqlite.zig");
-const c = sqlite.c;
 const Faults = store_core.Faults;
 const Ordinary = store_core.Ordinary;
 
@@ -25,6 +23,57 @@ pub const ContentLocation = struct {
     content_id: i64,
     reference: ContentReference,
 };
+
+/// The digest check of one content value's bytes as they are read from
+/// its start: every reader of content uses it (`ContentReader`,
+/// `streamVerified`).
+pub const DigestCheck = struct {
+    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+    /// The bytes hashed so far, in order from the value's start.
+    position: u64 = 0,
+    /// Whether the check is over: the digest was compared at the end, or
+    /// the caller ended it.
+    verified: bool = false,
+
+    /// Hashes the part of `bytes`, read at `start`, that extends the
+    /// in-order prefix; bytes that start past it are not hashed. False
+    /// only when the bytes reach `reference.length` and the digest does
+    /// not match `reference.digest`. Empty content reaches its end with no
+    /// bytes, so its digest is never compared.
+    pub fn absorb(check: *DigestCheck, reference: ContentReference, start: u64, bytes: []const u8) bool {
+        if (check.verified or start > check.position or start + bytes.len < check.position) return true;
+        check.hash.update(bytes[@intCast(check.position - start)..]);
+        check.position = start + bytes.len;
+        if (check.position != reference.length) return true;
+        check.verified = true;
+        return std.mem.eql(u8, &check.hash.finalResult(), &reference.digest);
+    }
+};
+
+/// The bytes `streamVerified` reads a value in at once: main's report
+/// window.
+pub const verified_window_bytes = 2048;
+
+/// Streams content `content_id`, whose metadata is `reference`, to
+/// `sink.write(bytes)` in windows of `verified_window_bytes`, each a
+/// round of `a` of its own (`readRaw`), hashed in order by `DigestCheck`,
+/// which compares the digest once the last window is hashed. So a wrong
+/// payload's earlier windows reach `sink` before the call is
+/// `CorruptStore`: the caller must not seal what `sink` wrote. Empty
+/// content reads nothing and is not compared. Not inlined, so its window
+/// sits only on the chains that stream.
+pub noinline fn streamVerified(a: anytype, content_id: u64, reference: ContentReference, sink: anytype) !void {
+    var check: DigestCheck = .{};
+    var window: [verified_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < reference.length) {
+        const bytes = window[0..@intCast(@min(window.len, reference.length - offset))];
+        try a.readRaw(content_id, offset, bytes);
+        if (!check.absorb(reference, offset, bytes)) return error.CorruptStore;
+        try sink.write(bytes);
+        offset += bytes.len;
+    }
+}
 
 /// Readers allow ranged reads and retain copied bytes and identities, never
 /// SQLite handles.
@@ -43,9 +92,7 @@ pub const ContentReader = struct {
     /// Bytes read in order from the start are hashed; reaching the end
     /// checks the digest before the last window is returned. Reads that
     /// skip ahead stop this check.
-    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
-    verified_position: u64 = 0,
-    verified: bool = false,
+    check: DigestCheck = .{},
     /// Where its reads begin: a message part's reader reads only its range,
     /// so read-ahead is sized to that range, not the whole row.
     first: u64 = 0,
@@ -74,15 +121,9 @@ pub const ContentReader = struct {
         return count;
     }
 
-    /// Hashes bytes read at `start` that extend the in-order prefix; false
-    /// when they reach the end and the digest does not match.
+    /// `DigestCheck.absorb` against this reader's reference.
     pub fn absorb(self: *ContentReader, start: u64, bytes: []const u8) bool {
-        if (self.verified or start > self.verified_position or start + bytes.len < self.verified_position) return true;
-        self.hash.update(bytes[@intCast(self.verified_position - start)..]);
-        self.verified_position = start + bytes.len;
-        if (self.verified_position != self.reference.length) return true;
-        self.verified = true;
-        return std.mem.eql(u8, &self.hash.finalResult(), &self.reference.digest);
+        return self.check.absorb(self.reference, start, bytes);
     }
 
     /// Read at any public byte offset.
@@ -229,12 +270,27 @@ pub fn importBytes(a: anytype, value: *Import, bytes: []const u8) !u64 {
 pub fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    return entry.finish(Ordinary.none, openContentIdentityLocked(self, reference, private));
+    const id = try entry.finish(Ordinary.none, readContentId(&entry, reference, private));
+    return .{ .store = self, .reference = reference, .content_id = id };
 }
 
-fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
-    const id = try resolveContentReference(self, reference, private);
-    return .{ .store = self, .reference = reference, .content_id = id };
+/// `contentIdOf` in its own read Access. Noinline keeps the Access off
+/// every caller's frame, as `model_settlement.readAttemptKind` does.
+noinline fn readContentId(entry: *const store_core.Entry, reference: ContentReference, private: bool) !i64 {
+    var a: Access(.read, error{}) = .open(entry);
+    defer a.deinit();
+    return contentIdOf(&a, reference, private);
+}
+
+/// The id of the row `reference` and `private` name, in one round. A
+/// reference names a row, so a missing one is `CorruptStore`, and so is a
+/// failed step, main's name for both. Public so a test counts its rounds.
+pub fn contentIdOf(a: anytype, reference: ContentReference, private: bool) !i64 {
+    var found: lookup_content.Result = undefined;
+    a.read(lookup_content, .{ .digest = reference.digest, .length = reference.length, .private = private }, &found);
+    try store_access.runAs(a, error.CorruptStore);
+    const row = found orelse return error.CorruptStore;
+    return @intCast(row.content_id.get());
 }
 
 fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
@@ -249,13 +305,6 @@ fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destinatio
     try entry.finish(Ordinary.none, readWindow(&a, reader, start, destination[0..wanted]));
     if (@import("builtin").is_test) _ = self.testing_content_work.read.fetchAdd(wanted, .monotonic);
     return wanted;
-}
-
-/// `readWindow` for unconverted code, under the Entry it holds.
-pub fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
-    var a = Access(.read, error{}).within(self);
-    defer a.deinit();
-    return readWindow(&a, reader, start, destination);
 }
 
 /// Fills all of `destination` from `reader`'s content at `start`, or
@@ -336,36 +385,6 @@ pub fn metadataOf(row: *const content_metadata.Row) ContentMetadata {
 pub fn publicMetadata(row: *const content_metadata.Row) error{CorruptStore}!ContentMetadata {
     if (row.private) return error.CorruptStore;
     return metadataOf(row);
-}
-
-/// `content_metadata` for unconverted code, in a round of its own
-/// (`readContentRow`).
-pub fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-    return metadataOf(&try readContentRow(self, content_id));
-}
-
-/// A failed step is `CorruptStore`, main's answer for it. An id below 1
-/// is `CorruptStore` without a read, where main read it and found no row
-/// unless one had that id. Not inlined, so its Access takes no slot in its
-/// callers' frames.
-noinline fn readContentRow(self: *Store, content_id: i64) !content_metadata.Row {
-    if (content_id <= 0) return error.CorruptStore;
-    var a = Access(.read, error{}).within(self);
-    defer a.deinit();
-    var row: content_metadata.Row = undefined;
-    a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &row);
-    try store_access.runAs(&a, error.CorruptStore);
-    return row;
-}
-
-fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
-    const statement = try store_core.cachedTyped(self, lookup_content);
-    defer sqlite.resetCached(statement);
-    try sqlite.bindArgs(statement, lookup_content, &.{ .digest = reference.digest, .length = reference.length, .private = private }, 0);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-    var row: lookup_content.Row = undefined;
-    try sqlite.decodeRow(lookup_content.Row, statement, &row);
-    return @intCast(row.content_id.get());
 }
 
 /// A content hash and one window of the bytes it hashes. Declared as

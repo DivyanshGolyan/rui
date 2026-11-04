@@ -172,34 +172,68 @@ pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
     try setLimit(database, c.SQLITE_LIMIT_TRIGGER_DEPTH, 1);
     try exec(database, "CREATE TEMP TABLE touched_oracle(session_ref TEXT)");
-    inline for (touch_oracle_tables) |table| {
-        const sessions = comptime store_schema.sessionColumns(table);
-        inline for (.{ "INSERT", "UPDATE", "DELETE" }) |event| {
-            const columns = comptime if (std.mem.eql(u8, event, "UPDATE")) sessions[0..1] else sessions;
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ table, event, event, table, comptime oracleBody(event, columns) }));
+    inline for (comptime touchOracleTriggers(.sqlite, "touched_oracle")) |text| try exec(database, text);
+}
+
+/// The touch oracle's triggers in `dialect`, one statement each, writing
+/// each Session they note into the table `oracle`. On each table of
+/// `touch_oracle_tables`: INSERT and DELETE note every Session column,
+/// UPDATE notes the first, and where the table has columns both Sessions
+/// read (`readByBoth`), a further UPDATE trigger notes the other Session
+/// columns when one of those columns changes. SQLite fires that one on
+/// any assignment to those columns (`UPDATE OF`); MySQL has no `UPDATE OF`,
+/// so its trigger compares OLD and NEW with `<=>` and notes only a change.
+/// SQLite's are TEMP triggers on `main`.
+pub fn touchOracleTriggers(comptime dialect: rsql.Dialect, comptime oracle: []const u8) []const [:0]const u8 {
+    comptime {
+        var result: []const [:0]const u8 = &.{};
+        for (touch_oracle_tables) |table| {
+            const sessions = store_schema.sessionColumns(table);
+            for ([_][]const u8{ "INSERT", "UPDATE", "DELETE" }) |event| {
+                const columns = if (std.mem.eql(u8, event, "UPDATE")) sessions[0..1] else sessions;
+                const body = oracleBody(event, columns, oracle);
+                result = result ++ .{switch (dialect) {
+                    .sqlite => std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_{s} AFTER {s} ON main.{s} BEGIN {s} END", .{ table, event, event, table, body }),
+                    .mysql => std.fmt.comptimePrint("CREATE TRIGGER touched_{s}_{s} AFTER {s} ON {s} FOR EACH ROW BEGIN {s} END", .{ table, event, event, table, body }),
+                }};
+            }
+            const both = store_schema.readByBoth(table);
+            if (both.len != 0) {
+                const body = oracleBody("UPDATE", sessions[1..], oracle);
+                result = result ++ .{switch (dialect) {
+                    .sqlite => std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, joined(both, ","), table, body }),
+                    .mysql => std.fmt.comptimePrint("CREATE TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE ON {s} FOR EACH ROW BEGIN IF {s} THEN {s} END IF; END", .{ table, table, changed(both), body }),
+                }};
+            }
         }
-        const both = comptime store_schema.readByBoth(table);
-        if (both.len != 0) {
-            try exec(database, std.fmt.comptimePrint("CREATE TEMP TRIGGER touched_{s}_UPDATE_sender AFTER UPDATE OF {s} ON main.{s} BEGIN {s} END", .{ table, comptime joined(both), table, comptime oracleBody("UPDATE", sessions[1..]) }));
-        }
+        return result;
     }
 }
 
-/// `columns` joined by commas: an `UPDATE OF` list.
-fn joined(comptime columns: []const []const u8) []const u8 {
+/// `columns` joined by `separator`.
+fn joined(comptime columns: []const []const u8, comptime separator: []const u8) []const u8 {
     comptime {
         var text: []const u8 = "";
-        for (columns) |column| text = text ++ (if (text.len == 0) "" else ",") ++ column;
+        for (columns) |column| text = text ++ (if (text.len == 0) "" else separator) ++ column;
         return text;
     }
 }
 
+/// A MySQL trigger condition: some column of `columns` changed.
+fn changed(comptime columns: []const []const u8) []const u8 {
+    comptime {
+        var tests: []const []const u8 = &.{};
+        for (columns) |column| tests = tests ++ .{"NOT (OLD." ++ column ++ " <=> NEW." ++ column ++ ")"};
+        return joined(tests, " OR ");
+    }
+}
+
 /// A trigger body that notes each of `columns`' Sessions, new and old.
-fn oracleBody(comptime event: []const u8, comptime columns: []const []const u8) []const u8 {
+fn oracleBody(comptime event: []const u8, comptime columns: []const []const u8, comptime oracle: []const u8) []const u8 {
     var text: []const u8 = "";
     for (columns) |column| {
-        if (!std.mem.eql(u8, event, "DELETE")) text = text ++ "INSERT INTO touched_oracle VALUES(NEW." ++ column ++ ");";
-        if (!std.mem.eql(u8, event, "INSERT")) text = text ++ "INSERT INTO touched_oracle VALUES(OLD." ++ column ++ ");";
+        if (!std.mem.eql(u8, event, "DELETE")) text = text ++ "INSERT INTO " ++ oracle ++ " VALUES(NEW." ++ column ++ ");";
+        if (!std.mem.eql(u8, event, "INSERT")) text = text ++ "INSERT INTO " ++ oracle ++ " VALUES(OLD." ++ column ++ ");";
     }
     return text;
 }
@@ -326,13 +360,6 @@ pub fn columnBytes(statement: *c.sqlite3_stmt, index: c_int) []const u8 {
     const length: usize = @intCast(c.sqlite3_column_bytes(statement, index));
     const pointer = c.sqlite3_column_blob(statement, index) orelse return "";
     return @as([*]const u8, @ptrCast(pointer))[0..length];
-}
-
-pub fn readNullablePositiveI64(statement: *c.sqlite3_stmt, index: c_int) !?i64 {
-    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
-    const value = c.sqlite3_column_int64(statement, index);
-    if (value <= 0) return error.InvalidIdentity;
-    return value;
 }
 
 /// The persisted closed grammar is the corruption boundary; a saved effort is

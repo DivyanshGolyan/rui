@@ -10,29 +10,123 @@ pub const bash_max_command_bytes: usize = 120 * 1024;
 /// Reuse the command ceiling for optional decoded stdin in charged scratch.
 pub const bash_max_stdin_bytes: usize = bash_max_command_bytes;
 
-pub const bash_definition: codec_abi.ToolDefinition = .{
+/// Who supplied a tool: D48's "owning server". Who runs it is derived
+/// from this (D46): Rui runs its own tools, the provider runs its own.
+pub const Owner = enum { rui, provider };
+
+/// One tool, as the model is told about it (D48). Request rendering and
+/// call checking work from a list of these. A provider-run tool's
+/// description and schema are the provider's own, so each codec names it
+/// and its record carries neither.
+pub const Record = struct {
+    name: []const u8,
+    description: []const u8 = "",
+    /// A JSON Schema object, as JSON text.
+    input_schema: []const u8 = "",
+    owner: Owner,
+};
+
+/// The longest function name a provider accepts (OpenAI: 64 characters);
+/// a longer call name cannot match any record.
+pub const max_name_bytes = 64;
+
+/// The most tools one set offers.
+pub const max_tools = 128;
+
+/// The identity of an ordered set of records, which the Store saves once:
+/// each member's name, owner and the content digests of its description
+/// and input schema, in order.
+pub fn setDigest(records: []const *const Record) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hash, "rui/tool-set/v1");
+    for (records) |member| {
+        hashField(&hash, member.name);
+        hashField(&hash, @tagName(member.owner));
+        hash.update(&protocol.contentDigest(member.description));
+        hash.update(&protocol.contentDigest(member.input_schema));
+    }
+    return hash.finalResult();
+}
+
+fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, value.len, .big);
+    hash.update(&length);
+    hash.update(value);
+}
+
+pub const bash_record: Record = .{
     .name = "bash",
+    .owner = .rui,
     .description = "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd. Bash has no terminal: no one can type into a running call, so password prompts (sudo, including installers that run it) and interactive programs fail. When flags or stdin cannot answer a prompt, give the command to the user to run in their own terminal: before running it when you can tell it will prompt, otherwise after its first such failure. Do not retry it here.",
-    .parameters_json = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
         std.fmt.comptimePrint("\"stdin\":{{\"type\":\"string\",\"description\":\"Optional. Literal UTF-8 text, at most {d} decoded bytes, read exactly then EOF. Omitted, stdin is /dev/null.\"}},", .{bash_max_stdin_bytes}) ++
         "\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"}," ++
         "\"timeout_ms\":{\"type\":\"integer\",\"description\":\"Optional. Omit it for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
         "\"required\":[\"cmd\",\"description\"],\"additionalProperties\":false}",
 };
 
-/// How the model is told about a tool: a function Rui runs, described in
-/// full, or a tool the provider hosts, which each codec names itself.
-pub const Offer = union(enum) {
-    function: *const codec_abi.ToolDefinition,
-    web_search,
-};
+pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
-pub fn offer(tool: Tool) Offer {
+/// The record of each tool `Tool` names: the text a new tool set saves.
+/// Until the wire names tools by name, a Session's tools are a `ToolSet`
+/// and this maps it.
+pub fn record(tool: Tool) *const Record {
     return switch (tool) {
-        .bash => .{ .function = &bash_definition },
-        .web_search => .web_search,
+        .bash => &bash_record,
+        .web_search => &web_search_record,
     };
 }
+
+comptime {
+    for (std.enums.values(Tool)) |tool| {
+        const r = record(tool);
+        if (!std.mem.eql(u8, r.name, @tagName(tool)) or r.name.len > max_name_bytes) @compileError("tool record name");
+    }
+}
+
+/// The most content rows a new tool set of built-ins adds to a
+/// transaction: its records' distinct nonempty texts. Empty text is the
+/// configuration's empty default, already counted by the Store.
+pub const max_new_texts = blk: {
+    var texts: []const []const u8 = &.{};
+    for (std.enums.values(Tool)) |tool| {
+        const r = record(tool);
+        for ([_][]const u8{ r.description, r.input_schema }) |text| {
+            if (text.len == 0) continue;
+            for (texts) |seen| {
+                if (std.mem.eql(u8, seen, text)) break;
+            } else texts = texts ++ .{text};
+        }
+    }
+    break :blk texts.len;
+};
+
+/// The records a request offers, in a fixed order.
+pub const Offered = struct {
+    records: [std.enums.values(Tool).len]*const Record = undefined,
+    len: usize = 0,
+
+    pub fn of(set: ToolSet) Offered {
+        var out: Offered = .{};
+        for (std.enums.values(Tool)) |tool| if (set.contains(tool)) {
+            out.records[out.len] = record(tool);
+            out.len += 1;
+        };
+        return out;
+    }
+
+    /// From a tools_mask the Store already checked.
+    pub fn ofMask(mask: u8) Offered {
+        var set: ToolSet = .empty;
+        for (std.enums.values(Tool)) |tool| if (mask & toolBit(tool) != 0) set.insert(tool);
+        return of(set);
+    }
+
+    pub fn slice(self: *const Offered) []const *const Record {
+        return self.records[0..self.len];
+    }
+};
 
 /// Every tool call is shown as one line, its description: what the call
 /// set out to do, in the base-verb form of "Run parser tests". `describe`
@@ -242,7 +336,6 @@ pub const BashArguments = struct {
 
 pub const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
 pub const ToolSet = std.EnumSet(Tool);
-pub const CallName = enum { bash, unknown };
 
 /// Persisted tools_mask bit shared by Store encoding and model preparation.
 pub fn toolBit(tool: Tool) u8 {
@@ -260,13 +353,18 @@ pub const all_tools_mask: u8 = blk: {
 };
 
 pub const CallFacts = struct {
-    name: CallName,
-    /// A bash call's checked arguments; null for any other name.
+    /// The offered record the call names; null when it names none that
+    /// Rui runs, so it is an unknown tool.
+    tool: ?*const Record,
+    /// A call named bash's checked arguments, offered or not; null for any
+    /// other name.
     bash: ?BashCheck,
 
     /// The arguments of a bash call the parser accepted.
     pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
-        const check = &(self.bash orelse return null);
+        // Captured by pointer: `&(self.bash orelse ...)` would point at a copy
+        // that ends with this call.
+        const check = if (self.bash) |*bash| bash else return null;
         return switch (check.*) {
             .accepted => |*accepted| accepted,
             .rejected => null,
@@ -303,19 +401,31 @@ pub const BashProblem = enum {
     }
 };
 
-/// Inspect certified decoded sources; the caller retains their storage and
-/// owns admission against the frozen catalog in its publication transaction.
-pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype) !CallFacts {
-    var name: [4]u8 = undefined;
+/// Inspect certified decoded sources against the records the request
+/// offered (D49). The caller retains the sources' storage and calls this
+/// under the transaction that publishes the proposal and Action.
+pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, offered: []const *const Record) !CallFacts {
+    var name: [max_name_bytes]u8 = undefined;
     var length: usize = 0;
-    if (name_length == name.len) {
-        while (length < name.len) : (length += 1) name[length] = (try name_source.next()) orelse break;
+    if (name_length <= name.len) {
+        while (length < name_length) : (length += 1) name[length] = (try name_source.next()) orelse break;
     }
-    const kind: CallName = if (length == name.len and try name_source.next() == null)
-        if (std.mem.eql(u8, &name, "bash")) .bash else .unknown
-    else
-        .unknown;
-    return .{ .name = kind, .bash = if (kind == .bash) try checkBashArguments(arguments) else null };
+    const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
+    const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
+    const tool = if (complete) offeredFunction(offered, name[0..length]) else null;
+    // A Bash call's arguments are read whether or not it was offered, so a
+    // rejected call keeps its description for presentation.
+    return .{ .tool = tool, .bash = if (named) try checkBashArguments(arguments) else null };
+}
+
+/// The offered record a function call named `name` resolves to. A
+/// provider-run tool comes back finished inside the reply, never as a
+/// function call, so a call naming one is unknown.
+fn offeredFunction(offered: []const *const Record, name: []const u8) ?*const Record {
+    for (offered) |candidate| {
+        if (candidate.owner == .rui and std.mem.eql(u8, candidate.name, name)) return candidate;
+    }
+    return null;
 }
 
 /// A rejected call's result text, from `classifyCall`'s code for `facts`.
@@ -339,27 +449,47 @@ pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts
     }
 }
 
-/// Admission policy over adapter-certified descriptor facts and frozen tools.
-/// Call this under the transaction that publishes the proposal and Action.
-pub fn classifyCall(facts: *const CallFacts, frozen: ToolSet) ?protocol.ProposalRejection {
-    return classifyName(facts.name, facts.bashArguments() != null, frozen);
+/// Admission policy over adapter-certified call facts: a call to a tool
+/// the request did not offer gets the rejected-call result and never runs
+/// (D49), before its arguments are judged.
+pub fn classifyCall(facts: *const CallFacts) ?protocol.ProposalRejection {
+    if (facts.tool == null) return .unknown_tool;
+    if (facts.bash) |check| if (check == .rejected) return .invalid_arguments;
+    return null;
 }
 
-fn classifyName(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {
-    return switch (name) {
-        .bash => if (!frozen.contains(.bash)) .unknown_tool else if (!valid_arguments) .invalid_arguments else null,
-        .unknown => .unknown_tool,
+test "a call is checked against the offered records before its arguments" {
+    const Source = struct {
+        bytes: []const u8,
+        index: usize = 0,
+        fn next(self: *@This()) !?u8 {
+            if (self.index == self.bytes.len) return null;
+            defer self.index += 1;
+            return self.bytes[self.index];
+        }
     };
-}
-
-test "tool classification uses frozen availability before argument validity" {
-    const none: ToolSet = .empty;
+    const Case = struct { name: []const u8, arguments: []const u8, offered: ToolSet, expected: ?protocol.ProposalRejection, described: bool = false };
+    const valid = "{\"cmd\":\"true\",\"description\":\"Run true\"}";
     const bash_only = ToolSet.initOne(.bash);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.bash, false, none).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.bash, true, none).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.invalid_arguments, classifyName(.bash, false, bash_only).?);
-    try std.testing.expect(classifyName(.bash, true, bash_only) == null);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyName(.unknown, true, .full).?);
+    for ([_]Case{
+        .{ .name = "bash", .arguments = valid, .offered = bash_only, .expected = null, .described = true },
+        .{ .name = "bash", .arguments = "{}", .offered = bash_only, .expected = .invalid_arguments },
+        // A Bash call that was not offered keeps its description.
+        .{ .name = "bash", .arguments = valid, .offered = .empty, .expected = .unknown_tool, .described = true },
+        .{ .name = "bash", .arguments = "{}", .offered = ToolSet.initOne(.web_search), .expected = .unknown_tool },
+        // A provider-run tool never runs as a function call.
+        .{ .name = "web_search", .arguments = "{}", .offered = .full, .expected = .unknown_tool },
+        .{ .name = "bas", .arguments = valid, .offered = .full, .expected = .unknown_tool },
+        .{ .name = "bashx", .arguments = valid, .offered = .full, .expected = .unknown_tool },
+        .{ .name = &(@as([max_name_bytes + 1]u8, @splat('b'))), .arguments = valid, .offered = .full, .expected = .unknown_tool },
+    }) |case| {
+        var name: Source = .{ .bytes = case.name };
+        var arguments: TestSource = .{ .bytes = case.arguments };
+        const offered = Offered.of(case.offered);
+        const facts = try inspectCall(&name, case.name.len, &arguments, offered.slice());
+        try std.testing.expectEqual(case.expected, classifyCall(&facts));
+        try std.testing.expectEqual(case.described, facts.bashArguments() != null);
+    }
 }
 
 pub fn validBashArguments(source: anytype) !bool {
@@ -901,7 +1031,7 @@ test "an invalid-arguments result tells the model what was wrong" {
     };
     comptime std.debug.assert(cases.len == std.enums.values(BashProblem).len);
     for (cases) |case| {
-        const facts: CallFacts = .{ .name = .bash, .bash = .{ .rejected = case[0] } };
+        const facts: CallFacts = .{ .tool = &bash_record, .bash = .{ .rejected = case[0] } };
         try std.testing.expectEqualStrings(case[1], try rejectionResult(.invalid_arguments, &facts, &name, 4, @splat(0), &buffer));
     }
 }

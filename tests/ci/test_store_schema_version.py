@@ -1,5 +1,7 @@
-"""The Store schema version moves only past a release, and a released row of
-bootstrap_digests is never edited.
+"""The Store schema version moves only past a release, a released row of
+bootstrap_digests is never edited, and neither is a shipped migration step:
+one whose `from` is below the released schema_version. Every step is string
+literals only, so the source compared is the text that runs.
 
 Concurrent PRs that change the schema share main's unreleased number and
 update its row's digest in place, instead of each appending the next number:
@@ -8,6 +10,7 @@ landed first.
 """
 from pathlib import Path
 import re
+import textwrap
 import unittest
 
 from release_numbers import bump_error, digest_rows, drifted_row_fix, git, main_base, released_tag
@@ -16,6 +19,11 @@ ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "src/store/schema.zig"
 VERSION = re.compile(r"^pub const schema_version: u32 = (\d+);$", re.MULTILINE)
 TAG = re.compile(r"v0\.(\d+)\.\d+")
+MIGRATIONS = re.compile(r"^pub const migrations = \[_\]Migration\{", re.MULTILINE)
+FROM = re.compile(r"\.from\s*=\s*(\d+)")
+STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+LITERALS = r'(?:"(?:,")*,?)?'
+LITERAL_STEP = re.compile(r"\{\.from=\d+,\.sqlite=&\.\{" + LITERALS + r"\},\.mysql=&\.\{" + LITERALS + r"\},?\}")
 
 
 def schema_version(source):
@@ -23,6 +31,58 @@ def schema_version(source):
     if match is None:
         raise AssertionError(f"{SCHEMA} declares no schema_version")
     return int(match[1])
+
+
+def migration_steps(source):
+    """Each step of `migrations` as its `from` and its entry's source text.
+
+    Splits the array literal at its top-level `.{` entries, skipping string
+    literals and comments, and drops whitespace outside strings so that a
+    reformat is no edit. A revision without the array has no steps.
+    """
+    match = MIGRATIONS.search(source)
+    if match is None:
+        return {}
+    steps, depth, entry, position = {}, 0, [], match.end()
+    while True:
+        char = source[position]
+        if char == '"':
+            end = position + 1
+            while source[end] != '"':
+                end += 2 if source[end] == "\\" else 1
+            entry.append(source[position:end + 1])
+            position = end + 1
+            continue
+        if source.startswith("//", position):
+            position = source.index("\n", position)
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            if depth == 0:
+                return steps
+            depth -= 1
+        if depth > 0 or char == "}":
+            if not char.isspace():
+                entry.append(char)
+        if char == "}" and depth == 0:
+            text = "".join(entry).removesuffix(",")
+            steps[int(FROM.search(text)[1])] = text
+            entry = []
+        position += 1
+
+
+def non_literal_steps(steps):
+    """The `from` of each step whose statements are not all string literals:
+    a helper call or a `++` would let shared code change a step's text."""
+    return sorted(start for start, text in steps.items() if not LITERAL_STEP.fullmatch(STRING.sub('"', text)))
+
+
+def edited_shipped_steps(candidate, shipped, released):
+    """The `from` of each shipped step (from below `released`) that the
+    candidate dropped, added or changed against the release's text."""
+    return sorted(start for start in set(candidate) | set(shipped)
+                  if start < released and candidate.get(start) != shipped.get(start))
 
 
 def edited_released_rows(candidate, released_rows, released):
@@ -50,6 +110,48 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(edited_released_rows({45: "0xa", 46: "0xd"}, released, 45), [],
                          "an unreleased row is updated in place")
 
+    def test_shipped_steps_rule(self):
+        released_source = textwrap.dedent("""\
+            pub const schema_version: u32 = 53;
+            pub const migrations = [_]Migration{
+                .{ .from = 51, .sqlite = &.{"CREATE TABLE a(x INTEGER) STRICT"}, .mysql = &.{"CREATE TABLE a(x BIGINT)"} },
+                .{ .from = 52, .sqlite = &.{ "CREATE INDEX a_x ON a(x)", "SELECT '}'" }, .mysql = &.{} }, // ends 53
+            };
+            """)
+        released = migration_steps(released_source)
+        self.assertEqual(sorted(released), [51, 52])
+        reformatted = released_source.replace(".{ .from = 52, .sqlite = &.{ ", ".{\n    .from = 52,\n    .sqlite = &.{\n        ")
+        self.assertEqual(migration_steps(reformatted), released, "a reformat is no edit")
+        # A shipped step's text edited, with its neighbours and the version moved too.
+        candidate = migration_steps(released_source
+                                    .replace("a(x INTEGER)", "a(x INTEGER, y INTEGER)")
+                                    .replace("SELECT '}'", "SELECT 1")
+                                    .replace("= 53;", "= 54;")
+                                    .replace("};\n", '    .{ .from = 53, .sqlite = &.{"DROP INDEX a_x"}, .mysql = &.{} },\n};\n'))
+        self.assertEqual(edited_shipped_steps(candidate, released, 53), [51, 52])
+        self.assertEqual(edited_shipped_steps(candidate, released, 52), [51], "the step from 52 is unreleased at 52")
+        self.assertEqual(edited_shipped_steps({51: released[51]}, released, 53), [52], "a dropped shipped step")
+        self.assertEqual(edited_shipped_steps(released, {}, 52), [51], "a step added below the release")
+        self.assertEqual(migration_steps("pub const schema_version: u32 = 50;\n"), {})
+
+    def test_steps_are_literals_only(self):
+        steps = migration_steps(textwrap.dedent("""\
+            pub const migrations = [_]Migration{
+                .{ .from = 51, .sqlite = &.{ "A", "B \\"q\\" ++", }, .mysql = &.{} },
+                .{ .from = 52, .sqlite = &.{"CREATE TABLE t(x INTEGER CHECK(" ++ migrationExpression(.sqlite, "t", "x>0") ++ "))"}, .mysql = &.{} },
+                .{ .from = 53, .sqlite = &.{"A"}, .mysql = &.{ "B" ++ "C" } },
+                .{ .from = 54, .sqlite = rebuild, .mysql = &.{} },
+            };
+            """))
+        self.assertEqual(non_literal_steps(steps), [52, 53, 54])
+
+    def test_reads_the_steps_owner(self):
+        source = (ROOT / SCHEMA).read_text()
+        self.assertIsNotNone(MIGRATIONS.search(source), "schema.zig declares `migrations` as this test reads it")
+        self.assertEqual(len(migration_steps(source)), schema_version(source) - 51)
+        self.assertEqual(non_literal_steps(migration_steps(source)), [],
+                         "each statement of a migration step is one string literal: write out the text that runs")
+
     def test_schema_version_moves_once_per_release(self):
         tag = released_tag(ROOT)
         if tag is None or not TAG.fullmatch(tag):
@@ -70,6 +172,9 @@ class StoreSchemaVersionTest(unittest.TestCase):
             fixes = [drifted_row_fix(version, shipped[version], rows[version]) for version in edited if version in rows]
             self.assertEqual(edited, [], f"bootstrap_digests rows {edited} shipped by {tag} must stay as released. "
                              + " ".join(fixes))
+            steps = edited_shipped_steps(migration_steps(source), migration_steps(git(ROOT, "show", f"{tag}:{SCHEMA}")), released)
+            self.assertEqual(steps, [], f"migration steps from {steps} shipped by {tag} must keep their released text: "
+                             "restore them, and put the change in a new step")
 
 
 if __name__ == "__main__":

@@ -62,6 +62,11 @@ const Intake = struct {
     workers: [2]Worker = undefined,
     threads: [2]std.Thread = undefined,
     started: usize = 0,
+    /// A launched Host's stdin, watched for its close (D5, D118).
+    stdin: ?std.posix.fd_t = null,
+    /// Set for a Host started from a launch frame; its shutdown is bounded.
+    launched: bool = false,
+    deadline_armed: bool = false,
 
     const Worker = struct {
         owner: *Intake,
@@ -588,6 +593,31 @@ const Intake = struct {
         }
     }
 
+    /// stdin carries nothing after the launch frame; its close, or any
+    /// failure to read it, stops the Host. Shutdown then has 10 seconds
+    /// before the alarm's default action ends the process (D118).
+    fn readStdin(self: *Intake) void {
+        var bytes: [256]u8 = undefined;
+        const count = std.c.read(self.stdin.?, &bytes, bytes.len);
+        if (count > 0) return;
+        if (count < 0 and std.posix.errno(count) == .INTR) return;
+        self.stdin = null;
+        traceSubject(self.host, "launch_stdin_closed", "host", "launch");
+        self.armShutdownDeadline();
+        _ = self.host.advance(.stopping);
+    }
+
+    /// A launched Host's shutdown, however it began (stdin close or
+    /// `host-stop`), ends the process 10 seconds later if cleanup is still
+    /// running; the alarm survives the drains after intake returns.
+    fn armShutdownDeadline(self: *Intake) void {
+        if (!self.launched or self.deadline_armed) return;
+        self.deadline_armed = true;
+        const default: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
+        std.posix.sigaction(.ALRM, &default, null);
+        _ = std.c.alarm(launch_shutdown_seconds);
+    }
+
     fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
         try setNonblocking(listener.socket.handle);
         var failure: ?anyerror = null;
@@ -598,6 +628,7 @@ const Intake = struct {
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
             if (self.host.stopping()) {
+                self.armShutdownDeadline();
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
             }
             self.serviceWorkers();
@@ -665,6 +696,7 @@ const Intake = struct {
                 }
                 try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
             }
+            try self.polls.append(self.host.allocator, .{ .fd = self.stdin orelse -1, .events = std.posix.POLL.IN, .revents = 0 });
             self.serviceWorkers();
             // Worker results applied above can leave closures to destroy or
             // cleanup to retry. A worker owns its exchange's fields meanwhile.
@@ -677,7 +709,8 @@ const Intake = struct {
             const wait_ms: c_int = @intCast(@divFloor(@max(wake_at - now, 0) + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), wait_ms);
             if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
-            for (self.exchanges.items, self.polls.items[2..]) |exchange, poll| {
+            if (self.polls.items[self.polls.items.len - 1].revents != 0) self.readStdin();
+            for (self.exchanges.items, self.polls.items[2..][0..self.exchanges.items.len]) |exchange, poll| {
                 if (poll.revents == 0) continue;
                 switch (exchange.state) {
                     .header, .body => exchange.read() catch |err| exchange.fail(err),
@@ -809,6 +842,17 @@ fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.T
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
+/// A Host started with a launch frame: its socket path, in the caller's
+/// runtime directory, and the stdin whose close stops it.
+pub const Launch = struct {
+    runtime_dir: []const u8,
+    socket_path: []const u8,
+    stdin: std.posix.fd_t,
+};
+
+/// How long a launched Host's shutdown may take after stdin closes.
+pub const launch_shutdown_seconds = 10;
+
 pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -820,6 +864,7 @@ pub fn serve(
     bash_path: []const u8,
     bash_timeout_ms: u64,
     home: ?[]const u8,
+    launch: ?Launch,
 ) !void {
     // The Host owns child waits. Automatic reaping or an inherited handler
     // would release process identities before their signal owners retire.
@@ -884,6 +929,7 @@ pub fn serve(
         "unlimited";
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
+    if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
     // startup diagnostic, through readiness delivery and failed unwind.
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
@@ -1005,6 +1051,10 @@ pub fn serve(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
+    if (launch) |value| {
+        intake.stdin = value.stdin;
+        intake.launched = true;
+    }
     host.intake_wake = intake.wake[1];
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {

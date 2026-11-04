@@ -15,7 +15,8 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import CACHE_POLICY, RENDERER_HARNESSES, execution_batches, matches, select, setup_requirements
+from select_tests import (CACHE_POLICY, CHECK_COVERS, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES, RENDERER_HARNESSES,
+                          RULES, execution_batches, matches, select, setup_requirements)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -25,11 +26,85 @@ from host_process import dispose_all, wait_for
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
 
 
+def named_paths(patterns):
+    """Each path a rule's patterns name: a literal pattern itself, and every
+    tracked file a glob matches, less the rule's "!" exclusions."""
+    tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split()
+    included = [pattern for pattern in patterns if not pattern.startswith("!")]
+    named = {pattern for pattern in included if not any(char in pattern for char in "*?[")}
+    named |= {path for path in tracked if matches(path, patterns)}
+    return sorted(path for path in named if matches(path, patterns))
+
+
+def covered(target, targets):
+    """`target` runs when `targets` are selected, directly or inside check or check-full."""
+    return (target in targets or target in CHECK_COVERS and bool(targets & {"check", "check-full"})
+            or target in {"check", "stack-frames"} and "check-full" in targets
+            or target == "stack-frames" and "check" in targets)
+
+
+class RuleMatchTest(unittest.TestCase):
+    def test_a_lone_change_to_any_path_a_rule_names_selects_that_rule(self):
+        # A shortcut in select() may add to a path's selection but never skip
+        # its rules: the tests/ci shortcut once dropped live_engine_step.py's
+        # live rules (Codex P2 on #873), as the draft cut once dropped `test`.
+        failures = []
+        rules = [(rule, None) for rule in RULES[:len(RULES) - len(LIVE_RULES)]] + [(rule[:4], rule[4]) for rule in LIVE_RULES]
+        for (patterns, checks, _, reason), served_by in rules:
+            for path in named_paths(patterns):
+                for phase in ("development", "review"):
+                    targets = set(select([path], phase, AVAILABLE)["targets"])
+                    wanted = set(checks) if phase == "review" else set()
+                    if checks and not targets:
+                        failures.append((phase, path, reason, "selected nothing"))
+                    missing = {target for target in wanted if not covered(target, targets)}
+                    if missing:
+                        failures.append((phase, path, reason, sorted(missing)))
+                    if served_by and not targets & served_by:
+                        failures.append((phase, path, reason, "starts no server"))
+        self.assertEqual(failures, [])
+
+
 class SelectionTest(unittest.TestCase):
     def test_development_does_not_claim_native_acceptance(self):
+        # The Store keeps `test` for the live MySQL check (LIVE_RULES); nothing else widens.
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
-        self.assertEqual(result["targets"], ["test-logic"])
+        self.assertEqual(result["targets"], ["test", "test-logic"])
         self.assertFalse(result["native_required"])
+        self.assertEqual(select(["src/bash_platform.c"], "development", AVAILABLE)["targets"], ["test-logic"])
+
+    def test_a_store_change_starts_mysql_for_the_live_dialect_check_in_every_phase(self):
+        for phase in ("development", "review"):
+            with self.subTest(phase=phase):
+                result = select(["src/store/rsql.zig"], phase, AVAILABLE)
+                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS, result["targets"])
+
+    def test_every_live_rule_selects_a_target_that_starts_its_server(self):
+        for patterns, _, _, reason, served_by in LIVE_RULES:
+            path = next(pattern.replace("*", "x") for pattern in patterns if not pattern.startswith("!"))
+            for phase in ("development", "review"):
+                with self.subTest(reason=reason, phase=phase):
+                    self.assertIn(reason, select([path], phase, AVAILABLE)["reasons"])
+                    self.assertTrue(set(select([path], phase, AVAILABLE)["targets"]) & served_by)
+
+    def test_prepush_leaves_server_targets_to_ci(self):
+        import prepush
+        for path in ("src/store/rsql.zig", "src/store/wire/mysql_driver.zig", "src/store/wire/pg.zig"):
+            with self.subTest(path=path):
+                builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
+                self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
+
+    def test_live_server_targets_match_the_workflow_conditions_that_start_the_servers(self):
+        workflow = Path(".github/workflows/check.yml").read_text()
+
+        def named(line):
+            return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
+
+        live_mysql = next(line for line in workflow.splitlines() if line.strip().startswith("LIVE_MYSQL:"))
+        self.assertEqual(named(live_mysql), LIVE_MYSQL_TARGETS)
+        postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
+        self.assertTrue(postgres.strip().startswith("if:"), postgres)
+        self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
@@ -547,9 +622,10 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
 
     def test_setup_installs_fixture_packages_for_any_target(self):
-        self.assertEqual(setup_requirements([]), {"go": False, "python": False})
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "python": True})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "python": True})
+        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True})
+        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True})
         imported = set()
         for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
             imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))
@@ -1166,7 +1242,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "descriptor_capacity_integration.py release", "host_status_integration.py release",
             "host_launch_integration.py release", "host_stop_integration.py release",
             "admission_integration.sh debug", "host_process_test.py ",
-            "host_allocator_test.py release",
+            "host_allocator_test.py release", "launch_frame_integration.py release",
         }
         outputs = {}
         for part in ("all", "execution", "callers", "parallel"):
