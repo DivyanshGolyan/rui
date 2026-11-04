@@ -26,7 +26,7 @@ own `testingStore` is the exception: conformance tests call the fixture's.
 `check` is the rule: tests.zig's code names nothing `SQLITE_CODE` matches,
 and does not import sqlite.zig.
 
-    python3 tests/ci/store_conformance.py rewrite [pre-split tests.zig]
+    python3 tests/ci/store_conformance.py rewrite <pre-split tests.zig>
     python3 tests/ci/store_conformance.py table <pre-split tests.zig>
     python3 tests/ci/store_conformance.py check
 
@@ -521,8 +521,16 @@ def check(text):
 
 def main(argv):
     if argv[1:2] == ["rewrite"]:
-        source = Path(argv[2]) if len(argv) > 2 else ROOT / TESTS
-        tests, moved, stats = rewrite(source.read_text())
+        # Only a pre-split file: rewriting split tests.zig moves nothing,
+        # and writing that would empty sqlite_tests.zig.
+        if len(argv) < 3:
+            print("rewrite needs the pre-split tests.zig", file=sys.stderr)
+            return 2
+        text = Path(argv[2]).read_text()
+        if check(text) is None:
+            print(f"{argv[2]} is already split; rewrite takes the pre-split tests.zig", file=sys.stderr)
+            return 1
+        tests, moved, stats = rewrite(text)
         (ROOT / TESTS).write_text(tests)
         (ROOT / SQLITE_TESTS).write_text(moved)
         print(stats)

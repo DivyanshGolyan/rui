@@ -13,7 +13,7 @@
   "scripts": {
     "generate": "openapi-typescript ../../openapi.json --output src/wire.ts",
     "check": "node scripts/check.mjs",
-    "test": "node --experimental-strip-types --test \"test/*.test.ts\""
+    "test": "node --experimental-strip-types --test --test-concurrency=1 \"test/*.test.ts\""
   },
   "devDependencies": {
     "@types/node": "22.20.5",

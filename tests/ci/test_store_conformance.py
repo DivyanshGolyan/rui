@@ -3,7 +3,7 @@ import unittest
 
 import re
 
-from store_conformance import ROOT, TESTS, check, fixture_verdict, not_portable, rewrite, table
+from store_conformance import ROOT, SQLITE_TESTS, TESTS, check, fixture_verdict, main, not_portable, rewrite, table
 
 PRE_SPLIT = '''//! The Store's tests.
 
@@ -138,6 +138,12 @@ class StoreConformanceTest(unittest.TestCase):
         again, moved, stats = rewrite(tests)
         self.assertEqual(again.rstrip("\n"), tests.rstrip("\n"))
         self.assertEqual(stats["moved_tests"], 0)
+
+    def test_rewrite_refuses_split_input_and_writes_nothing(self):
+        before = [(ROOT / name).read_bytes() for name in (TESTS, SQLITE_TESTS)]
+        self.assertEqual(main(["store_conformance.py", "rewrite"]), 2)
+        self.assertEqual(main(["store_conformance.py", "rewrite", str(ROOT / TESTS)]), 1)
+        self.assertEqual([(ROOT / name).read_bytes() for name in (TESTS, SQLITE_TESTS)], before)
 
 
 if __name__ == "__main__":
