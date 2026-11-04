@@ -2753,9 +2753,10 @@ const InterruptionRow = struct {
 const InterruptionArgs = struct { session: []const u8, after: u64 = 0 };
 
 /// The Session's interruption commands, by command order: the first
-/// chunk (?2 is 0), by main's plan. CROSS JOIN keeps the Session's
-/// interruptions outer, sorted by `command_seq`, so a Session with few
-/// reads only its own, whatever the command log holds.
+/// chunk (?2 is 0), by main's plan. CROSS JOIN keeps the interruption
+/// table outer: it scans the Store's interruptions, as main did, and
+/// sorts the Session's by `command_seq`, so a Session with at most
+/// `chunk_rows` never walks the command log.
 pub const full_interruptions = rsql.Read(.{
     .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id " ++
         "FROM model_interruption_command interruption CROSS JOIN core_command command ON command.command_key=interruption.command_key " ++
@@ -2767,9 +2768,9 @@ pub const full_interruptions = rsql.Read(.{
 
 /// The chunks after the first: the command log by `command_seq` from ?2,
 /// so no chunk sorts or reads again what an earlier one listed. No index
-/// finds a Session's interruptions, so this walks every later command of
-/// the Store, to the log's end; only a Session with more than
-/// `chunk_rows` interruptions reads it.
+/// finds a Session's interruptions, so a chunk walks every command of
+/// the Store after ?2 until its `LIMIT`, and the last one to the log's
+/// end; only a Session with more than `chunk_rows` interruptions reads it.
 pub const full_interruptions_later = rsql.Read(.{
     .sql = "SELECT command.command_seq,command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id " ++
         "FROM core_command command CROSS JOIN model_interruption_command interruption ON interruption.command_key=command.command_key " ++
