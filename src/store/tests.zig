@@ -3977,6 +3977,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     var position: u64 = 0;
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
     position = (try view.nextEntry(position)).?.position;
+    // The Operation that proposed the calls, at its admission position.
+    const proposing = (try view.nextEntry(position)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.operation, proposing.kind);
+    position = proposing.position;
     for (0..calls.len) |_| {
         const item = (try view.nextEntry(position)).?;
         try std.testing.expectEqual(HistoricalEntryKind.provider_output, item.kind);
