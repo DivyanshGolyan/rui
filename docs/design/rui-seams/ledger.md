@@ -250,6 +250,13 @@ D171. `session.interrupt()` when no model call is current is a no-op that resolv
 
 D172. Rui's Zig request and reply types are the one source of truth. The build emits `openapi.json` from them, the file is checked in, and CI fails when it differs from what the code emits. Clients in every language are generated from that file (Stainless, or openapi-generator as the free fallback), TypeScript first and then Python and Go. A thin hand-written layer per language adds the child launch and stdin frame, `listActivity` follow polling, request-key building and a Unix-socket transport. Basis: Divyansh 06:16Z "Sure".
 
+## Decided while cutting the build plan (11-04, my technical calls; build-plan.md)
+
+D173. Replaces D119 and D164's "one format bump". Every merge to main ships a release, so each PR that changes the Store format bumps `schema_version` itself, and format-changing PRs land one at a time in build-plan.md's format queue.
+D174. The change list (D53, D138) is `session_revision` plus each Operation's frozen settings, not a new table. A revision may also be made by the core (`find_tools`, MCP rewording), so `command_key` allows a core-made key.
+D175. Replaces D108's owner. The launch frame is built early in its own PR with `store` as a SQLite directory; the DB thread's PR 9 adds the MySQL URL form, `runtimeDir` rules and the Store id.
+D176. D169's inherited environment is the parent's environment held in Host memory (SessionEnvironments.zig), never stored. D76's cache proof tests are at src/model_adapter.zig:3566, :3594 and :3630.
+
 ## Replaced
 
 R-D19. TS types generated from Rui's wire definitions directly (#849) -> replaced by D172.
