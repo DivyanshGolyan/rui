@@ -17,7 +17,7 @@ Every unit cites the ledger decisions it builds; a builder reads those, not this
 
 These are technical calls, logged as new ledger lines.
 
-D173. Replaces D119 and D164's "one format bump". Every merge to main ships a release, so one bump shared by many PRs would force one giant PR. Instead, each PR that changes the Store format bumps `schema_version` itself and adds its `bootstrap_digests` row. Format-changing PRs land one at a time in the order below. Resets cost nothing before Drift's port (no backward compatibility, D94).
+D173. Replaces D119 and D164's "one format bump". Every merge to main ships a release, so one bump shared by many PRs would force one giant PR. Instead, each PR that changes the Store format bumps `schema_version` itself and adds its `bootstrap_digests` row. Format-changing PRs land one at a time in the order below. From the migration runner on, each such PR also ships its forward migration for SQLite and MySQL, checked in CI (D204).
 
 D174. The Session's "one append-only change list" (D53, D138) is today's `session_revision` table plus the settings each Operation freezes. It is not a new table. The codec works out each change by comparing Operation k's frozen settings with Operation k-1's, as D75 already says. What is new is that a revision can come from the core (a `find_tools` load, an MCP rewording) as well as from a client's `configure`, so `session_revision.command_key` must allow a core-made key.
 
@@ -52,7 +52,7 @@ A lane owns its shared files: another lane's PR that must touch one of them land
 ### Format queue
 
 Store format changes land in this order, each bumping the schema version once (D173):
-1. DB thread 5e-2b (schema 51), then 5e-3, 6a, 6b as already planned.
+1. DB thread 5e-2b (schema 51), then 5e-3, 6a, 6b as already planned, then the migration runner (D204), owned by the DB thread, before any other format change.
 2. T1b tool records.
 3. F1 ending names, if the PR keeps stored names (otherwise no bump).
 4. K1 `parent` column.
