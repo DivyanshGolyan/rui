@@ -94,3 +94,18 @@ test("a reply that stops partway ends the call after the idle budget", async () 
 		host.close();
 	}
 });
+
+test("a followed feed resumes from the end of an exhausted page", async () => {
+	const bodies: string[] = [];
+	const controller = new AbortController();
+	const link: Link = {
+		exchange: async (_path, build) => {
+			bodies.push(build("/s"));
+			if (bodies.length === 2) controller.abort();
+			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9" }));
+		},
+	};
+	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
+	assert.equal(bodies.length, 2);
+	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
+});

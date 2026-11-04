@@ -171,6 +171,10 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 		}
 		if (!options.follow) return;
 		pinnedEnd = null;
+		// Exhausted: everything the filter matches up to the end has been read, so the next poll starts at the end
+		// rather than rescanning the rows between the last match and it.
+		position = page.end;
+		ordinal = null;
 		if (page.items.length > 0) wait = FIRST_POLL_MS;
 		else await pause(wait, signal);
 		if (page.items.length === 0) wait = Math.min(wait * 2, MAX_POLL_MS);
