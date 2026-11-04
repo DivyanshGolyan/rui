@@ -78,7 +78,7 @@ pub fn readMessage(bytes: []const u8, id: u64) (document.Error || Invalid)!Messa
     try document.check(bytes);
     const object = std.mem.trim(u8, bytes, " \t\r\n");
     const version = document.member(object, "jsonrpc") orelse return error.NotJsonRpc;
-    if (!std.mem.eql(u8, version, "\"2.0\"")) return error.NotJsonRpc;
+    if (document.kind(version) != .string or !document.keyIs(document.contents(version), "2.0")) return error.NotJsonRpc;
     const method = document.member(object, "method");
     const found_id = document.member(object, "id");
     if (method) |name| {
@@ -246,12 +246,15 @@ test "a message answers this request, or is a notification" {
     try std.testing.expectEqual(@as(i64, -32602), failure.rpc_error.code);
     try std.testing.expectEqualStrings("Unknown tool: x", failure.rpc_error.message);
     try std.testing.expectEqualStrings("{\"a\":1}", failure.rpc_error.data.?);
+    const escaped = try readMessage("{\"jsonrpc\":\"2\\u002e0\",\"id\":4,\"result\":{}}", 4);
+    try std.testing.expectEqualStrings("{}", escaped.result);
     const unread = try readMessage("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}", 4);
     try std.testing.expectEqual(null, unread.rpc_error.data);
 
     const refused = [_]struct { []const u8, anyerror }{
         .{ "{\"id\":4,\"result\":{}}", error.NotJsonRpc },
         .{ "{\"jsonrpc\":\"1.0\",\"id\":4,\"result\":{}}", error.NotJsonRpc },
+        .{ "{\"jsonrpc\":2.0,\"id\":4,\"result\":{}}", error.NotJsonRpc },
         .{ "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}", error.WrongId },
         .{ "{\"jsonrpc\":\"2.0\",\"id\":\"4\",\"result\":{}}", error.WrongId },
         .{ "{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{}}", error.WrongId },
