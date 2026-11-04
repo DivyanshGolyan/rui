@@ -549,6 +549,10 @@ const historical_declared_tool = rsql.Read(.{
 });
 
 fn readDeclaredTool(self: *Store, view: *HistoricalView, declaration: *Declaration, out: *HistoricalTool) !bool {
+    return self.queue().run(readDeclaredToolHeld, .{ self, view, declaration, out });
+}
+
+fn readDeclaredToolHeld(self: *Store, view: *HistoricalView, declaration: *Declaration, out: *HistoricalTool) !bool {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
@@ -590,6 +594,10 @@ const historical_provider_tool = rsql.Read(.{
 });
 
 fn readProviderTool(self: *Store, view: *HistoricalView, out: *HistoricalTool) !void {
+    return self.queue().run(readProviderToolHeld, .{ self, view, out });
+}
+
+fn readProviderToolHeld(self: *Store, view: *HistoricalView, out: *HistoricalTool) !void {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
     var access: ReadAccess = .open(&entry);
