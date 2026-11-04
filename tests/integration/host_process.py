@@ -469,7 +469,7 @@ WIRE_VERSION = _wire_version()
 # The Store format fixtures expect, stated independently of src/store.zig so a
 # format change must update its fixtures deliberately;
 # tests/ci/test_store_schema_fixtures.py fails until it does.
-STORE_SCHEMA = 51
+STORE_SCHEMA = 52
 
 
 # Job-wide totals: sixteen roots, each with an equal share of 128 files and
