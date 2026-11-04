@@ -34,9 +34,14 @@ pub fn target(window: u64, reservation: u64, level: u8) u64 {
 /// The deeper floor a compaction goes to next, and its level.
 pub const Choice = struct { floor: u64, level: u8 };
 
-/// The units walked newest first, and the floor each level reaches: the
-/// begin of the first unit past the newest whose bytes, with every newer
-/// unit's, exceed that level's target.
+/// A deeper floor, with what `droppedEntries` counts from.
+pub const Room = struct { choice: Choice, previous: u64, first_message: u64 };
+
+/// The units walked newest first, and the floor each level reaches: just
+/// below the oldest unit it keeps, the newer neighbour of the first unit
+/// past the newest whose bytes, with every newer unit's, exceed that
+/// level's target. No unit begins between them, so every entry at or below
+/// the floor belongs to a dropped unit or is kept by kind.
 pub const Walk = struct {
     targets: [levels]u64,
     floors: [levels]u64 = @splat(0),
@@ -56,12 +61,13 @@ pub const Walk = struct {
     /// which every deeper level's precedes.
     pub fn take(walk: *Walk, begin: u64, size: u64) bool {
         std.debug.assert(begin < walk.cursor);
+        const newer = walk.cursor;
         walk.cursor = begin;
         walk.total +|= size;
         walk.units += 1;
         if (walk.units == 1) return true;
         for (walk.targets, &walk.floors) |limit, *floor| {
-            if (floor.* == 0 and walk.total > limit) floor.* = begin;
+            if (floor.* == 0 and walk.total > limit) floor.* = newer - 1;
         }
         return walk.floors[0] == 0;
     }
@@ -145,7 +151,7 @@ const units = rsql.Read(.{
 /// Each page is a round; the walk stops at level 1's floor, so it reads
 /// about as many units as fit that target, however long the history.
 /// A failed step is `CorruptStore`.
-pub fn deeperFloor(a: anytype, operation: u64) !?Choice {
+pub fn deeperFloor(a: anytype, operation: u64) !?Room {
     var facts: floor_facts.Row = undefined;
     a.read(floor_facts, .{ .operation = operation }, &facts);
     try store_access.runAs(a, error.CorruptStore);
@@ -165,7 +171,31 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Choice {
         try store_access.runAs(a, error.CorruptStore);
         if (walk.page_rows < page_rows) break;
     }
-    return walk.deeper(from, previous);
+    const choice = walk.deeper(from, previous) orelse return null;
+    return .{ .choice = choice, .previous = previous, .first_message = facts.first_message };
+}
+
+/// The conversation entries of Operation ?1's Session above ?2 and at or
+/// below ?3, but instructions and the first Message (?4): what a floor
+/// drops beyond the one before it.
+const dropped_entries = rsql.Read(.{
+    .sql = "SELECT count(*) AS dropped FROM model_operation current " ++
+        "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
+        "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<=?3 AND e.entry_kind!=2 AND e.session_position!=?4",
+    .Args = struct { operation: u64, above: u64, floor: u64, first_message: u64 },
+    .Row = struct { dropped: u64 },
+    .cardinality = .one,
+});
+
+/// How many conversation entries `room`'s floor drops beyond the one
+/// before it (D217's `dropped`): a range of the entry index as long as
+/// what it drops, read once per compaction that makes room. A failed
+/// step is `CorruptStore`.
+pub fn droppedEntries(a: anytype, operation: u64, room: Room) !u64 {
+    var row: dropped_entries.Row = undefined;
+    a.read(dropped_entries, .{ .operation = operation, .above = room.previous, .floor = room.choice.floor, .first_message = room.first_message }, &row);
+    try store_access.runAs(a, error.CorruptStore);
+    return row.dropped;
 }
 
 test "each level aims at a quarter of the room the one before it did" {
@@ -181,18 +211,18 @@ test "the walk keeps the newest unit and finds each level's floor below it" {
     // The newest unit alone is past every target, and is kept.
     try std.testing.expect(walk.take(90, 500));
     try std.testing.expect(!walk.take(80, 0));
-    try std.testing.expectEqual([levels]u64{ 80, 80, 80 }, walk.floors);
+    try std.testing.expectEqual([levels]u64{ 89, 89, 89 }, walk.floors);
     // Running totals 10 (kept), 20, 30, 120 and 420.
     var spread: Walk = .init(100, 0, 100);
     for ([_]u64{ 10, 10, 10, 90, 300 }, 0..) |size, index| _ = spread.take(90 - 10 * index, size);
     try std.testing.expect(spread.done());
-    try std.testing.expectEqual([levels]u64{ 50, 60, 70 }, spread.floors);
-    try std.testing.expectEqual(Choice{ .floor = 50, .level = 1 }, spread.deeper(0, 0).?);
-    try std.testing.expectEqual(Choice{ .floor = 60, .level = 2 }, spread.deeper(1, 50).?);
+    try std.testing.expectEqual([levels]u64{ 59, 69, 79 }, spread.floors);
+    try std.testing.expectEqual(Choice{ .floor = 59, .level = 1 }, spread.deeper(0, 0).?);
+    try std.testing.expectEqual(Choice{ .floor = 69, .level = 2 }, spread.deeper(1, 59).?);
     // A level whose floor drops no more than the last is passed over.
-    try std.testing.expectEqual(Choice{ .floor = 70, .level = 3 }, spread.deeper(0, 60).?);
+    try std.testing.expectEqual(Choice{ .floor = 79, .level = 3 }, spread.deeper(0, 69).?);
     try std.testing.expectEqual(@as(?Choice, null), spread.deeper(3, 0));
-    try std.testing.expectEqual(@as(?Choice, null), spread.deeper(0, 70));
+    try std.testing.expectEqual(@as(?Choice, null), spread.deeper(0, 79));
 }
 
 test "a catalog window four times the served one recovers within the levels" {

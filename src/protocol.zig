@@ -652,7 +652,7 @@ pub const ActivityItem = struct {
     value: Value,
     /// `admission` is a Message a person or script sent; `received` one
     /// another Session sent, which always names it as `sender`.
-    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged };
+    pub const Value = union(enum) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct {
         length: u64,
@@ -684,6 +684,9 @@ pub const ActivityItem = struct {
     /// One setting a revision changed, at the position the revision was
     /// accepted; a revision's changes share it, one ordinal each.
     pub const SessionChanged = struct { revision: u64, field: SessionField };
+    /// A compaction that succeeded, at its admission: `dropped` is how many
+    /// conversation entries it left out to make room, zero for none (D217).
+    pub const Compacted = struct { operation: u64, dropped: u64 };
 
     /// Holes: position, ordinal, at; then the value's shape, then `tail`.
     pub fn head(comptime kind: std.meta.Tag(Value)) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
@@ -717,6 +720,8 @@ pub const ActivityItem = struct {
         pub const approval_requested = .{ "{\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
         /// Holes: revision, field.
         pub const session_changed = .{ "{\"revision\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = SessionField }, "\"}" };
+        /// Holes: operation, dropped.
+        pub const compacted = .{ "{\"operation\":\"", Hole.decimal, "\",\"dropped\":\"", Hole.decimal, "\"}" };
     };
     pub const max_json_bytes = blk: {
         @setEvalBranchQuota(10_000);
@@ -738,6 +743,7 @@ pub const ActivityItem = struct {
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.action, request.operation, request.call_ordinal }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
+            .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ result.content, result.presentation }),
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{presentation}),

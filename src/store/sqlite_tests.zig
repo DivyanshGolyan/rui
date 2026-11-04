@@ -8440,7 +8440,7 @@ test "a compaction's floor read costs the same however long its Session's histor
             try std.testing.expect(try deeper(store, operation) != null);
             return counter.steps;
         }
-        fn deeper(store: *Store, operation: u64) !?history_floor_domain.Choice {
+        fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
             const entry = try store_core.enter(store, .none);
             defer entry.release();
             var a: historical_domain.ReadAccess = .open(&entry);

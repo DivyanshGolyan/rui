@@ -29,7 +29,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 48, .digest = 0xc82dff5ecb5926eb },
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
-    .{ .schema_version = 51, .digest = 0xecd596d78939345e },
+    .{ .schema_version = 51, .digest = 0x7255b7bce06e5826 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -560,6 +560,10 @@ pub const tables = [_]Table{
             // room it aimed for.
             .{ .name = "history_floor", .type = .int, .nullable = true, .check = "history_floor IS NULL OR history_floor>0" },
             .{ .name = "history_level", .type = .int, .nullable = true, .check = "history_level IS NULL OR history_level BETWEEN 1 AND 3" },
+            // The conversation entries the floor dropped beyond its base's
+            // or the compaction before it; the feed's `compacted` row shows
+            // it, and zero for a compaction without a floor.
+            .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
@@ -582,7 +586,7 @@ pub const tables = [_]Table{
                 "(resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)",
             "(@same(resolution_code,'interrupted') AND interrupted_by_command_key IS NOT NULL) OR " ++
                 "(coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)",
-            "(history_floor IS NULL AND history_level IS NULL) OR (history_floor IS NOT NULL AND history_level IS NOT NULL AND purpose=1)",
+            "(history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND history_level IS NOT NULL AND history_dropped IS NOT NULL AND purpose=1)",
         },
     },
     .{

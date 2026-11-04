@@ -126,6 +126,7 @@ pub const read_failures = .{
     .{ answer_entry, error.ActivityReadFailed },
     .{ approval_request, error.ActivityReadFailed },
     .{ session_change, error.ActivityReadFailed },
+    .{ compaction_row, error.ActivityReadFailed },
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
@@ -212,12 +213,15 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             " UNION ALL SELECT approval_position,1,12,action_id FROM action_operation @index(action_operation_approval) " ++
             "WHERE session_ref=?1 AND approval_position IS NOT NULL AND " ++ on(12) ++ " AND " ++ range("approval_position", "1") ++ order,
         // Each setting a revision changed, at the position it was accepted.
-        "SELECT position,ordinal,13 AS kind,revision AS id FROM session_change WHERE session_ref=?1 AND " ++ on(13) ++ " AND " ++ range("position", "ordinal") ++ order,
+        "SELECT position,ordinal,13 AS kind,revision AS id FROM session_change WHERE session_ref=?1 AND " ++ on(13) ++ " AND " ++ range("position", "ordinal") ++
+            // Each compaction that succeeded, at its admission (D217).
+            " UNION ALL SELECT admission_position,0,14,operation_id FROM model_operation @index(model_operation_compaction_bases) " ++
+            "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND " ++ on(14) ++ " AND " ++ range("admission_position", "0") ++ order,
     };
 }
 
 /// Every kind, for a read of one known row.
-const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 14) - 2});
+const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 15) - 2});
 
 /// The kind codes the sources number, for each Activity kind.
 fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
@@ -235,6 +239,7 @@ fn activityKindCode(kind: protocol.ActivityItem.Kind) u5 {
         .received => 11,
         .approval_requested => 12,
         .session_changed => 13,
+        .compacted => 14,
     };
 }
 
@@ -1319,6 +1324,15 @@ const session_change = rsql.Read(.{
     .cardinality = .one,
 });
 
+/// Compaction Operation ?1 of Session ?2: what its floor dropped, and when
+/// it was settled.
+const compaction_row = rsql.Read(.{
+    .sql = "SELECT coalesce(history_dropped,0) AS dropped,resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
+    .Args = struct { operation: u64, session: []const u8 },
+    .Row = struct { dropped: u64, resolved_at: rsql.Positive },
+    .cardinality = .one,
+});
+
 const call_resolved = rsql.Read(.{
     .sql = "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
     .Args = struct { operation: u64, session: []const u8 },
@@ -1578,6 +1592,7 @@ const ItemRead = struct {
         stop: StopRead,
         approval: approval_request.Result,
         change: session_change.Row,
+        compaction: compaction_row.Row,
     } = undefined,
 
     fn queue(read: *ItemRead, a: *ReadAccess, session: []const u8, end: u64) void {
@@ -1647,6 +1662,7 @@ const ItemRead = struct {
             7 => read.state.stop.queue(a, session),
             12 => a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &read.state.approval),
             13 => a.read(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &read.state.change),
+            14 => a.read(compaction_row, .{ .operation = item.value.compacted.operation, .session = session }, &read.state.compaction),
             else => unreachable,
         }
     }
@@ -1759,6 +1775,10 @@ const ItemRead = struct {
                 item.value.session_changed.field = row.field;
                 item.at = row.changed_at.get();
             },
+            14 => {
+                item.value.compacted.dropped = read.state.compaction.dropped;
+                item.at = read.state.compaction.resolved_at.get();
+            },
             else => unreachable,
         }
         read.done = true;
@@ -1821,6 +1841,10 @@ const ItemRead = struct {
             13 => {
                 item.value = .{ .session_changed = .{ .revision = (row.id orelse return error.CorruptStore).get(), .field = undefined } };
                 read.state = .{ .change = undefined };
+            },
+            14 => {
+                item.value = .{ .compacted = .{ .operation = (row.id orelse return error.CorruptStore).get(), .dropped = undefined } };
+                read.state = .{ .compaction = undefined };
             },
             else => return error.CorruptStore,
         }
