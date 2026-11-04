@@ -137,6 +137,11 @@ const forbidden_words = [_]struct { word: []const u8, fix: []const u8 }{
     .{ .word = "BEGIN", .fix = "the Access opens the transaction" },
     .{ .word = "COMMIT", .fix = "call Access.commit" },
     .{ .word = "ROLLBACK", .fix = "return the error; the entry point rolls back" },
+    .{ .word = "printf", .fix = "format the text in Zig" },
+    .{ .word = "randomblob", .fix = "draw the bytes in Zig" },
+    .{ .word = "strftime", .fix = "write @now, the Host's second" },
+    .{ .word = "julianday", .fix = "write @now, the Host's second" },
+    .{ .word = "iif", .fix = "write CASE WHEN ... THEN ... ELSE ... END" },
 };
 
 /// Why `text` is not portable Rui SQL, or null; reserved names and
@@ -156,6 +161,9 @@ pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]c
         var window_depth: ?usize = null;
         // The depth of the open `CAST(` group, if any.
         var cast_depth: ?usize = null;
+        // Whether a leading WITH has not yet reached its statement.
+        var leading_with = false;
+        var first_word = true;
         while (index < text.len) {
             const byte = text[index];
             const pair: []const u8 = text[index..@min(index + 2, text.len)];
@@ -174,6 +182,14 @@ pub fn portabilityError(comptime text: []const u8, comptime reserved: bool) ?[]c
             } else if (isWordStart(byte)) {
                 const word = text[index..wordEnd(text, index)];
                 index += word.len;
+                if (first_word) leading_with = std.ascii.eqlIgnoreCase(word, "WITH");
+                first_word = false;
+                if (leading_with and depth == 0) {
+                    if (std.ascii.eqlIgnoreCase(word, "INSERT") or std.ascii.eqlIgnoreCase(word, "REPLACE"))
+                        return "rsql: MySQL takes WITH only after INSERT INTO t(columns); write INSERT INTO t(columns) WITH ... SELECT";
+                    if (std.ascii.eqlIgnoreCase(word, "SELECT") or std.ascii.eqlIgnoreCase(word, "UPDATE") or std.ascii.eqlIgnoreCase(word, "DELETE"))
+                        leading_with = false;
+                }
                 for (forbidden_words) |forbidden| {
                     if (std.ascii.eqlIgnoreCase(word, forbidden.word)) return "rsql: '" ++ word ++ "' is not portable; " ++ forbidden.fix;
                 }
@@ -2816,7 +2832,7 @@ test "a statement calls only the functions every engine spells, by argument coun
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, "SELECT created_seq FROM session WHERE created_seq BETWEEN 1 AND 2", struct {}, Seq));
     try std.testing.expectEqualStrings("payload=REPEAT(X'00',byte_length)", comptime render(.mysql, "payload=zeroblob(byte_length)"));
     // Neither a WITH name's column list nor an INSERT's table is a call.
-    const text = "WITH recent(turn_id) AS (SELECT count(*) AS n FROM turn) INSERT INTO turn(turn_id) SELECT turn_id FROM recent";
+    const text = "INSERT INTO turn(turn_id) WITH recent(turn_id) AS (SELECT count(*) AS n FROM turn) SELECT turn_id FROM recent";
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
 }
 
@@ -3622,4 +3638,16 @@ test "a copy's other refusals come from the rule that owns each" {
         "rsql: message_admission.admitted_at is read by its sender too; an UPDATE of it has the conjunct sender_session_ref=@session(?j) or sender_session_ref IS NULL",
         comptime writeError("UPDATE message_admission SET turn_id=?1,admitted_at=@now WHERE session_ref=@session(?2) AND turn_id IS NULL", Bind, counted_bind).?,
     );
+}
+
+test "SQLite-only spellings MySQL would refuse at PREPARE are refused at build time" {
+    const with_insert = "rsql: MySQL takes WITH only after INSERT INTO t(columns); write INSERT INTO t(columns) WITH ... SELECT";
+    try std.testing.expectEqualStrings(with_insert, comptime portabilityError("WITH n(v) AS (SELECT 1) INSERT INTO turn(turn_id) SELECT v FROM n", false).?);
+    try std.testing.expectEqualStrings(with_insert, comptime portabilityError("with a AS (SELECT (1)), b AS (SELECT 2) insert INTO turn(turn_id) SELECT 1", false).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("INSERT INTO turn(turn_id) WITH n(v) AS (SELECT 1) SELECT v FROM n", false));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("WITH n(v) AS (SELECT 1) UPDATE turn SET turn_id=(SELECT v FROM n)", false));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime portabilityError("WITH n(v) AS (SELECT 1) SELECT v FROM n", false));
+    inline for (.{ "printf('%d',1)", "randomblob(8)", "strftime('%s','now')", "julianday('now')", "iif(1,2,3)" }) |call| {
+        try std.testing.expect(comptime std.mem.indexOf(u8, portabilityError("SELECT " ++ call, false).?, "is not portable") != null);
+    }
 }
