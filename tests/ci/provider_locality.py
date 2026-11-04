@@ -34,8 +34,6 @@ PROVIDER_OWNED = (
     # The test roots import every module, the sign-in ones included.
     "tests.zig",
     "logic_tests.zig",
-    # The Store's SQLite-only tests, split from store/tests.zig.
-    "store/sqlite_tests.zig",
     "testing/*",
 )
 
@@ -65,6 +63,10 @@ ALLOWED = {
     # The Host's own request fields, which h2 and every codec must never
     # write: the transport sits below providers.zig, so it lists them itself.
     ("provider.zig", "names a ChatGPT or Codex header"),
+    # expectBindingPreserved, a test helper outside a test block, checks a
+    # Session keeps the provider it was configured with: codex, the one
+    # the Store's fixtures configure.
+    ("store/sqlite_tests.zig", "switches on a provider"),
 }
 
 TEST_BLOCK = re.compile(r'^([ \t]*)test\b[^{\n]*\{', re.MULTILINE)

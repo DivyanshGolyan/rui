@@ -15,7 +15,8 @@ engine fixtures of src/store/testing.zig:
   `store_testing.withoutForeignKeys(S, T)` per line;
 - `failAtStepForTesting(S.database, table)` becomes `store_testing.failReadsOf(S, table)`.
 T must be string literals joined by `++`, and must not name a SQLite
-mechanism (`SQLITE_TEXT`). Any other form is left alone, so the item keeps
+mechanism (`store_testing.fixtureTextError`, whose word lists this
+reads). Any other form is left alone, so the item keeps
 its SQLite name and moves.
 
 An item is SQLite-only when, after those rewrites, its code outside strings
@@ -25,7 +26,7 @@ own `testingStore` is the exception: conformance tests call the fixture's.
 `check` is the rule: tests.zig's code names nothing `SQLITE_CODE` matches,
 and does not import sqlite.zig.
 
-    python3 tests/ci/store_conformance.py rewrite [pre-split tests.zig]
+    python3 tests/ci/store_conformance.py rewrite <pre-split tests.zig>
     python3 tests/ci/store_conformance.py table <pre-split tests.zig>
     python3 tests/ci/store_conformance.py check
 
@@ -33,6 +34,10 @@ and does not import sqlite.zig.
 It is a fixpoint on tests already split, so after merging a base that
 changed the pre-split tests.zig, rerun it on that file with the change
 merged in: the harness commit's tests.zig, three-way merged with the base.
+Some tests were edited by hand after the split. Before rerunning, take
+those edits as a patch: rewrite the unmerged harness commit's tests.zig,
+`zig fmt` both files, and `git diff` them against the branch's own. After
+rerunning on the merged file, `git apply -3` that patch.
 """
 
 import re
@@ -48,12 +53,8 @@ SQLITE_TESTS = "src/store/sqlite_tests.zig"
 # and a Store opened by its database path.
 SQLITE_CODE = re.compile(
     r"\bsqlite\.|\bc\.(?:sqlite3|SQLITE)|\.database\b|\bStatementCache\b|\bsqlite_heap_bytes\b|"
-    r"\.passes\b|\.statements\b|\btesting_work\.(?:read|blob|closes)\b|\.read_blob\b|"
+    r"\.passes\b|\.statements\b|\btesting_content_work\.(?:read|blob|closes)\b|\.read_blob\b|"
     r"\.open\(\s*(?:std\.testing\.)?io\s*,|\bopenWithOptions\b|\bsqlite_only\b")
-# Fixture text that names a SQLite mechanism stays raw SQL.
-SQLITE_TEXT = re.compile(
-    r"\b(?:PRAGMA|sqlite_\w*|temp|CREATE|ALTER|DROP|TRIGGER|VIEW|ATTACH|SAVEPOINT|BEGIN|COMMIT|ROLLBACK|VACUUM)\b",
-    re.I)
 SQLITE_IMPORT = '@import("sqlite.zig")'
 # Store helpers of tests.zig that conformance code reaches through the fixtures.
 NEUTRAL_HELPERS = {"testingStore"}
@@ -143,7 +144,14 @@ PLACEHOLDER = re.compile(r"(?<!\w)'\{s\}'|\{d\}|\{\}")
 FK = re.compile(r'^(\s*)try sqlite\.exec\((\w+)\.database, "PRAGMA foreign_keys=(OFF|ON)"\);$')
 
 
-def forbidden_words():
+def zig_strings(path, name):
+    """The string literals of the Zig array `name` in `path`."""
+    source = (ROOT / path).read_text()
+    table = source[source.index(f"const {name} = "):]
+    return re.findall(r'"((?:\\.|[^"\\])*)"', table[:table.index("};")])
+
+
+def rsql_words():
     """The words `rsql.portabilityError` refuses, read from rsql.zig."""
     source = (ROOT / "src/store/rsql.zig").read_text()
     table = source[source.index("const forbidden_words"):]
@@ -151,17 +159,27 @@ def forbidden_words():
     return re.findall(r'\.word = "(\w+)"', table)
 
 
-FORBIDDEN = re.compile(r"\b(?:" + "|".join(forbidden_words()) + r")\b", re.I)
+# What `store_testing.fixtureTextError` refuses by word, from its own
+# lists: rsql's forbidden words, the SQLite words, and the SQLite prefixes.
+REFUSED_WORD = re.compile(
+    r"\b(?:" + "|".join(rsql_words() + zig_strings("src/store/testing.zig", "fixture_sqlite_words")) + r")\b|"
+    r"\b(?:" + "|".join(zig_strings("src/store/testing.zig", "fixture_sqlite_prefixes")) + r")\w*|"
+    r"\bAS\s+TEXT\b", re.I)
+
+
+def fixture_verdict(sql):
+    """Whether `store_testing.fixtureTextError` refuses `sql` by what this
+    scan sees: a refused word outside string literals, `||`, `INSERT OR`,
+    a comment or a double quote. It does not apply rsql's reserved-name
+    and `IS` rules; the compile does, so a text this scan takes but Zig
+    refuses fails the build rather than staying raw."""
+    sql = re.sub(r"'(?:[^']|'')*'", "''", sql)
+    return bool(REFUSED_WORD.search(sql) or re.search(r'\|\||--|/\*|"|\bINSERT\s+OR\b', sql, re.I))
 
 
 def not_portable(literal):
-    """Whether `literal`, Zig string literals joined by `++`, holds what
-    `rsql.portabilityError` refuses outside SQL strings: a forbidden word,
-    `||`, `INSERT OR`, a comment or a double quote. It does not apply the
-    reserved-name and `IS` rules; the compile does."""
-    sql = "".join(re.findall(STRING, literal)).replace('"', "")
-    sql = re.sub(r"'(?:[^']|'')*'", "''", sql.replace('\\"', ""))
-    return bool(FORBIDDEN.search(sql) or re.search(r"\|\||--|/\*|\bINSERT\s+OR\b", sql, re.I))
+    """`fixture_verdict` of `literal`, Zig string literals joined by `++`."""
+    return fixture_verdict("".join(text[1:-1].replace('\\"', '"') for text in re.findall(STRING, literal)))
 
 
 def call_end(text, open_index):
@@ -205,7 +223,7 @@ def fixture_text(item_text, expression):
         text, values, buffer = expression, [], None
     elif re.fullmatch(r"\w+", expression):
         bound = re.search(r"\bconst " + expression + r"(?:: \[:0\]const u8)? = ((?:" + STRING + r"|\s|\+\+)+);", item_text)
-        if not bound or not STRINGS.match(bound.group(1)) or SQLITE_TEXT.search(bound.group(1)):
+        if not bound or not STRINGS.match(bound.group(1)) or not_portable(bound.group(1)):
             return None
         text, values, buffer = expression, [], None
     else:
@@ -219,7 +237,7 @@ def fixture_text(item_text, expression):
         if next(slots) != len(values) + 1 or re.search(r"\{[^}]*\}", text) or re.search(r"'[^']*\?\d[^']*'", text):
             return None
         buffer = formatted.group(1)
-    if SQLITE_TEXT.search(text) or not_portable(text):
+    if not_portable(text):
         return None
     return text, values, buffer
 
@@ -459,7 +477,7 @@ REASONS = (
     ("a SQLite mechanism", re.compile(
         r"PRAGMA|pragmaInt|blob|wal_checkpoint|sqlite3_limit|heap|sqlite3_open|sqlite3_close|\.open\(\s*(?:std\.testing\.)?io\s*,|"
         r"openWithOptions|get_autocommit|txn_state|sqlite3_changes|sqlite_schema|TEMP TRIGGER|ALTER TABLE|CREATE |"
-        r"probeConstraint|touch_oracle_tables|sqliteDiagnostic|db_status|testing_work\\.(?:read|blob|closes)|read_blob|rawContentCount")),
+        r"probeConstraint|touch_oracle_tables|sqliteDiagnostic|db_status|testing_content_work\.(?:read|blob|closes)|read_blob|rawContentCount")),
     ("raw SQL the fixtures do not cover", re.compile(r".")),
 )
 
@@ -503,8 +521,16 @@ def check(text):
 
 def main(argv):
     if argv[1:2] == ["rewrite"]:
-        source = Path(argv[2]) if len(argv) > 2 else ROOT / TESTS
-        tests, moved, stats = rewrite(source.read_text())
+        # Only a pre-split file: rewriting split tests.zig moves nothing,
+        # and writing that would empty sqlite_tests.zig.
+        if len(argv) < 3:
+            print("rewrite needs the pre-split tests.zig", file=sys.stderr)
+            return 2
+        text = Path(argv[2]).read_text()
+        if check(text) is None:
+            print(f"{argv[2]} is already split; rewrite takes the pre-split tests.zig", file=sys.stderr)
+            return 1
+        tests, moved, stats = rewrite(text)
         (ROOT / TESTS).write_text(tests)
         (ROOT / SQLITE_TESTS).write_text(moved)
         print(stats)

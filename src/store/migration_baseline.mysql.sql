@@ -66,7 +66,7 @@ CREATE TABLE session(
 CREATE TABLE core_command(
  command_key VARCHAR(128) NOT NULL,
  kind BIGINT NOT NULL,
- target TEXT NOT NULL,
+ target VARCHAR(128) NOT NULL,
  input_digest BLOB NOT NULL,
  primary_content_id BIGINT,
  secondary_content_id BIGINT,
@@ -75,8 +75,8 @@ CREATE TABLE core_command(
  revision BIGINT NOT NULL,
  created TINYINT NOT NULL,
  command_seq BIGINT NOT NULL,
- PRIMARY KEY(command_key),
- UNIQUE(command_seq),
+ PRIMARY KEY(command_seq),
+ UNIQUE(command_key),
  FOREIGN KEY(primary_content_id) REFERENCES content(content_id),
  FOREIGN KEY(secondary_content_id) REFERENCES content(content_id),
  CHECK(OCTET_LENGTH(command_key)<=128),
@@ -449,6 +449,9 @@ CREATE INDEX message_admission_session_pending ON message_admission(session_ref,
 CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position);
 CREATE INDEX message_admission_unpositioned ON message_admission(session_ref);
 CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position);
+CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq);
+CREATE INDEX session_revision_instructions ON session_revision(session_ref,instructions_content_id);
+CREATE INDEX session_revision_output_schema ON session_revision(session_ref,output_schema_content_id);
 CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position);
 CREATE INDEX session_stop_unpositioned ON session_stop(session_ref);
 CREATE INDEX session_stop_position ON session_stop(session_ref,position);
@@ -456,9 +459,11 @@ CREATE INDEX session_stop_turn ON session_stop(selected_turn_id);
 CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
 CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle);
 CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
+CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position);
 CREATE INDEX action_operation_executable ON action_operation(action_id);
 CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id);
-CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal);
+CREATE INDEX model_tool_call_session_order ON model_tool_call(session_ref,operation_id,call_ordinal);
+CREATE INDEX model_tool_call_session_results ON model_tool_call(session_ref,operation_id,acceptance_position);
 CREATE INDEX model_tool_call_acceptance ON model_tool_call(session_ref,acceptance_position);
 CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id);
 CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id);

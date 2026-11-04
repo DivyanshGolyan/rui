@@ -91,7 +91,7 @@ class SelectionTest(unittest.TestCase):
         import prepush
         for path in ("src/store/rsql.zig", "src/store/wire/mysql_driver.zig", "src/store/wire/pg.zig"):
             with self.subTest(path=path):
-                builds = [command for name, command in prepush.checks([path], AVAILABLE) if name == "development selection"]
+                builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
                 self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
 
     def test_live_server_targets_match_the_workflow_conditions_that_start_the_servers(self):
@@ -622,9 +622,10 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
 
     def test_setup_installs_fixture_packages_for_any_target(self):
-        self.assertEqual(setup_requirements([]), {"go": False, "python": False})
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "python": True})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "python": True})
+        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True})
+        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True})
         imported = set()
         for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
             imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))
@@ -1241,7 +1242,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "descriptor_capacity_integration.py release", "host_status_integration.py release",
             "host_launch_integration.py release", "host_stop_integration.py release",
             "admission_integration.sh debug", "host_process_test.py ",
-            "host_allocator_test.py release",
+            "host_allocator_test.py release", "launch_frame_integration.py release",
         }
         outputs = {}
         for part in ("all", "execution", "callers", "parallel"):

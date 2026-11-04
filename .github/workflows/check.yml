@@ -115,6 +115,15 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check ruff==0.17.0
           python3 -m ruff check --select F821 tests
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Check the TypeScript client's generated wire types and type-check it
+        working-directory: clients/ts
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          npm test
       - name: Install the pinned workflow linter
         run: |
           set -euo pipefail

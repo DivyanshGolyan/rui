@@ -316,14 +316,15 @@ pub fn completeModelInterruption(
     return command;
 }
 
-pub fn expectActivityOutcome(storage: *Store, session: []const u8, binding: AttemptBinding, code: []const u8) !void {
+pub fn expectActivityOutcome(storage: *Store, session: []const u8, binding: AttemptBinding, ending: protocol.TurnEnding, code: []const u8) !void {
     var request: protocol.ActivityPage = .{ .direction = .backward };
     try request.session.set(session);
     const page = try store_core.activityPageForTesting(storage, request);
-    try std.testing.expect(page.count != 0 and page.items[0].value == .outcome);
-    const outcome = page.items[0].value.outcome;
+    try std.testing.expect(page.count != 0 and page.items[0].value == .turn_ended);
+    const outcome = page.items[0].value.turn_ended;
     try std.testing.expectEqual(binding.turn_id, outcome.turn);
     try std.testing.expectEqual(binding.operation_id, outcome.operation);
+    try std.testing.expectEqual(ending, outcome.ending);
     try std.testing.expectEqualStrings(code, outcome.code.slice());
     try std.testing.expectEqual(page.end, page.items[0].position);
 }
@@ -1201,7 +1202,7 @@ test "an Access commits its writes, positions and identities together, or none o
             try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
             const after = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
             try std.testing.expectEqual(position + 2, try store_testing.queryU64(&storage, next_sql, .{}));
-            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND payload=X'" ++ comptime &std.fmt.bytesToHex("round committed", .upper) ++ "'", .{}));
+            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest("round committed") }}));
             const dated: i64 = @intCast(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}));
             try std.testing.expect(before <= dated and dated <= after);
         }
@@ -2443,6 +2444,35 @@ test "canonical step faults fence rather than reading as ordinary misses" {
     }.run);
 }
 
+test "a Bash call the Operation did not offer is rejected and keeps its description" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
+            command.configuration.tools.state = .value;
+            command.configuration.tools.count = 0;
+            const reply = storage.configure(&command, .{});
+            try std.testing.expect(reply == .accepted);
+            const session = reply.accepted.session;
+            try submitTestMessage(&storage, &tmp, "unoffered-message", "unoffered-message", session.slice(), "classify");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, binding, "unoffered-metadata", &calls);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+        }
+    }.run);
+}
+
 test "kind-specific admission selects a tool continuation despite fresh input and rolls back atomically" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -2689,8 +2719,11 @@ test "production turn preserves skipped continuation preference through actual S
                     self.model = admission.permit.consume() catch unreachable;
                     return .admitted;
                 }
-                pub fn admitNewModel(self: *@This()) turn.Admission {
-                    return self.admit(.message);
+                pub fn turnsPaused(_: *@This()) bool {
+                    return false;
+                }
+                pub fn admitNewModel(self: *@This(), paused: bool) turn.Admission {
+                    return self.admit(if (paused) .open_turn_message else .message);
                 }
                 pub fn admitToolContinuation(self: *@This()) turn.Admission {
                     return self.admit(.tool_continuation);
@@ -3180,6 +3213,138 @@ test "duplicate trustworthy call identity rolls back every imported consequence"
     }.run);
 }
 
+/// `count` message items, each its own id and text unless `same_text`,
+/// whose item `repeat_at` (if any) repeats item 0's id; the last answers.
+pub fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, comptime count: usize, same_text: bool, repeat_at: ?usize) !void {
+    var buffers: [count][128]u8 = undefined;
+    var items: [count][]const u8 = undefined;
+    var answer_buffer: [32]u8 = undefined;
+    var answer: []const u8 = "";
+    for (&buffers, &items, 0..) |*buffer, *item, index| {
+        const id = if (repeat_at == index) 0 else index;
+        const text = if (same_text) 0 else index;
+        item.* = try std.fmt.bufPrint(buffer, "{{\"type\":\"message\",\"id\":\"m{d}\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"t{d}\"}}]}}", .{ id, text });
+        answer = try std.fmt.bufPrint(&answer_buffer, "t{d}", .{text});
+    }
+    try settleItemsForTesting(storage, tmp, binding, &items, answer);
+}
+
+test "each saved outcome names one feed ending" {
+    const cases = .{
+        .{ turn_domain.TurnOutcome{ .completed = 1 }, false, protocol.TurnEnding.done },
+        .{ turn_domain.TurnOutcome{ .cancelled = {} }, true, protocol.TurnEnding.stopped },
+        .{ turn_domain.TurnOutcome{ .cancelled = {} }, false, protocol.TurnEnding.interrupted },
+        .{ turn_domain.TurnOutcome{ .retry_exhausted = null }, false, protocol.TurnEnding.provider_unavailable },
+        .{ turn_domain.TurnOutcome{ .resource_exceeded = 2 }, false, protocol.TurnEnding.context_full },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_policy", .report = 3 } }, false, protocol.TurnEnding.provider_refused },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_http_400", .report = null } }, false, protocol.TurnEnding.provider_refused },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_api_key_rejected", .report = null } }, false, protocol.TurnEnding.provider_refused },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_tls_verification_failed", .report = null } }, false, protocol.TurnEnding.provider_unavailable },
+        // A stop that selected a Turn a failure ended first leaves its ending.
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "malformed_provider_output", .report = null } }, true, protocol.TurnEnding.failed },
+    };
+    inline for (cases) |case| try std.testing.expectEqual(case[2], case[0].ending(case[1]));
+}
+
+test "while new Turns are held, waiting input joins only an open Turn" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const open = try configureTestSession(&storage, "held-open-config");
+            try submitTestMessage(&storage, &tmp, "held-first", "held-first-key", open.slice(), "first");
+            const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            // A Message that arrives while the answer is being made keeps its Turn open.
+            try submitTestMessage(&storage, &tmp, "held-second", "held-second-key", open.slice(), "second");
+            try settleMessagesForTesting(&storage, &tmp, first, 1, false, null);
+            const idle = try configureTestSession(&storage, "held-idle-config");
+            try submitTestMessage(&storage, &tmp, "held-new", "held-new-key", idle.slice(), "new");
+            // Held: the open Turn takes its input; the idle Session starts nothing.
+            const joined = (try storage.admitModelAttempt(.open_turn_message, .{})).?.permit.binding;
+            try std.testing.expectEqual(first.turn_id, joined.turn_id);
+            try settleMessagesForTesting(&storage, &tmp, joined, 1, false, null);
+            try std.testing.expect((try storage.admitModelAttempt(.open_turn_message, .{})) == null);
+            // Resumed: the held Message starts its Turn.
+            const started = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try std.testing.expect(started.turn_id != first.turn_id);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "the final row is the answer phase selection picked, even when later text repeats it or it is blank" {
+    try store_testing.forEachEngine(struct {
+        fn run(store_case: *store_testing.Case) !void {
+            const final_then_commentary = [_][]const u8{
+                "{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"same\"}]}",
+                "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"same\"}]}",
+            };
+            const blank = [_][]const u8{
+                "{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"working\"}]}",
+                "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"  \"}]}",
+            };
+            const Case = struct { items: []const []const u8, selected: u64, answer: []const u8 };
+            for ([_]Case{
+                .{ .items = &final_then_commentary, .selected = 0, .answer = "same" },
+                // A blank answer saves as empty content; its row keeps the blank text.
+                .{ .items = &blank, .selected = 1, .answer = "" },
+            }) |case| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(store_case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "selected-config");
+                try submitTestMessage(&storage, &tmp, "selected-input", "selected-key", session.slice(), "answer");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try store_testing.settleSelectedItemsForTesting(&storage, &tmp, binding, case.items, case.selected, case.answer);
+                var request: protocol.ActivityPage = .{};
+                try request.session.set(session.slice());
+                request.kinds = .initMany(&.{ .assistant, .turn_ended });
+                const page = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(@as(usize, 3), page.count);
+                try std.testing.expectEqual(protocol.TurnEnding.done, page.items[2].value.turn_ended.ending);
+                for (page.items[0..2], 0..) |item, index| try std.testing.expectEqual(index == case.selected, item.value.assistant.final);
+            }
+        }
+    }.run);
+}
+
+test "a done Turn marks its answer final once its ending is within the page" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // Three messages, the last the answer; with one text repeated, only
+            // the answer itself, the last, is final.
+            for ([_]bool{ false, true }) |same_text| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "final-config");
+                try submitTestMessage(&storage, &tmp, "final-input", "final-key", session.slice(), "answer");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleMessagesForTesting(&storage, &tmp, binding, 3, same_text, null);
+                var request: protocol.ActivityPage = .{};
+                try request.session.set(session.slice());
+                request.kinds = .initMany(&.{ .assistant, .turn_ended });
+                const page = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(@as(usize, 4), page.count);
+                for (page.items[0..3], 0..) |item, index| try std.testing.expectEqual(index == 2, item.value.assistant.final);
+                try std.testing.expectEqual(protocol.TurnEnding.done, page.items[3].value.turn_ended.ending);
+                // A page that ends before the ending marks nothing final yet.
+                request.end = page.items[2].position;
+                const earlier = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(@as(usize, 3), earlier.count);
+                for (earlier.items[0..3]) |item| try std.testing.expect(!item.value.assistant.final);
+            }
+        }
+    }.run);
+}
+
 test "a call id repeated in a later call batch fails the settlement" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -3577,7 +3742,7 @@ test "controls remove scheduled retries and replay without cancelling newer work
                     try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
                 }
                 try std.testing.expect((try admitRetryForTesting(&storage)) == null);
-                try expectActivityOutcome(&storage, session.slice(), binding, "cancelled");
+                try expectActivityOutcome(&storage, session.slice(), binding, if (is_stop) .stopped else .interrupted, "cancelled");
 
                 try submitTestMessage(&storage, &tmp, "retry-newer", "retry-newer-message", session.slice(), "newer");
                 const newer_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -5540,7 +5705,7 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
                     try std.testing.expect(full.get("turns").?.array.items[0].object.get("outcome").?.object.get("content").? == .null);
                     try std.testing.expectEqual(@as(u64, if (request_id.len == 0) 0 else 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE request_id IS NOT NULL", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
-                    try expectActivityOutcome(&storage, session.slice(), binding, "unsupported_provider_output");
+                    try expectActivityOutcome(&storage, session.slice(), binding, .failed, "unsupported_provider_output");
                 }
             }
         }
@@ -5613,10 +5778,10 @@ test "a failed Turn's activity outcome references the provider's report" {
                 try submitTestMessage(&storage, &tmp, message, message, session.slice(), "work");
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_policy", .request_id = .{}, .report = words } }, .ordinary, .{});
-                try expectActivityOutcome(&storage, session.slice(), binding, "provider_policy");
+                try expectActivityOutcome(&storage, session.slice(), binding, .provider_refused, "provider_policy");
                 var request: protocol.ActivityPage = .{ .direction = .backward };
                 try request.session.set(session.slice());
-                const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.outcome;
+                const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.turn_ended;
                 if (words.len == 0) {
                     // No words, no report: never an empty one.
                     try std.testing.expect(outcome.content == null);
@@ -5768,7 +5933,7 @@ test "activity fixed admission prefix survives later application and stop" {
             _ = try admitted.permit.consume();
             var stop = try completeSessionStop("activity-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            try expectActivityOutcome(&storage, session.slice(), admitted.permit.binding, "cancelled");
+            try expectActivityOutcome(&storage, session.slice(), admitted.permit.binding, .stopped, "cancelled");
             request.end = queued.end;
             const frozen = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), frozen.count);
@@ -5830,16 +5995,18 @@ fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, a
         defer entry.release();
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
+        const before = storage.testing_content_work.rounds;
         try reads_domain.publicConversationPage(&a, conversation, &public_page);
-        result.rounds[0] = a.rounds;
+        result.rounds[0] = storage.testing_content_work.rounds - before;
     }
     {
         const entry = try store_core.enter(storage, .none);
         defer entry.release();
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
+        const before = storage.testing_content_work.rounds;
         try reads_domain.activityPage(&a, activity, &activity_page);
-        result.rounds[1] = a.rounds;
+        result.rounds[1] = storage.testing_content_work.rounds - before;
     }
     result.conversation = public_page.count;
     result.activity = activity_page.count;
@@ -5931,7 +6098,7 @@ test "every activity row is dated by the fact that owns it" {
                     .assistant => 103,
                     .call => 104,
                     .tool_result => 106,
-                    .outcome => 107,
+                    .turn_ended => 107,
                     .stop => 108,
                     .hosted_call, .sent, .send_failed, .received => unreachable,
                 };
@@ -6527,7 +6694,7 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
                 // authorize another compaction.
                 try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
-                try expectActivityOutcome(&storage, created_session_0.slice(), successor, "ResourceExceeded");
+                try expectActivityOutcome(&storage, created_session_0.slice(), successor, .context_full, "ResourceExceeded");
             }
         }
     }.run);
@@ -7188,14 +7355,16 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
     defer entry.release();
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
+    const before = storage.testing_content_work.rounds;
     try report_domain.renderSessionList(&a, &.{}, &capture);
+    const rounds = storage.testing_content_work.rounds - before;
     var report = try capture.seal();
     defer report.deinit();
     var bytes: [8192]u8 = undefined;
     const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
     // Every shown row's work went through its stop.
     try std.testing.expectEqual(count, std.mem.count(u8, bytes[0..read], "\"kind\":\"stopped\""));
-    return a.rounds;
+    return rounds;
 }
 
 test "a list page's rows share their rounds, so eight rows take as many as one" {
@@ -7308,8 +7477,9 @@ fn reportRoundsForTesting(case: *store_testing.Case, shape: TestingWorkShape) !u
     defer entry.release();
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
+    const before = storage.testing_content_work.rounds;
     try std.testing.expect(try report_domain.renderHead(&a, session.slice(), .current, &capture));
-    return a.rounds;
+    return storage.testing_content_work.rounds - before;
 }
 
 /// One tool cycle of the cost fixture: a Message whose Operation proposes
@@ -7360,7 +7530,8 @@ test "a Current report takes its reads' dependency depth in rounds, not its rows
 
 /// `session`'s Full history rendered alone, on an Access of its own, as
 /// `renderFull` follows the Current facts, inside `{"head":0...}` so it
-/// parses. The bytes are the caller's; `rounds` gets the Access's rounds.
+/// parses. The bytes are the caller's; `rounds` gets the rounds
+/// `renderFull` ran, not its `readRaw` windows.
 pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, rounds: ?*u32) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
@@ -7374,9 +7545,10 @@ pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         try capture.append("{\"head\":0");
+        const before = storage.testing_content_work.rounds;
         try report_domain.renderFull(&a, session, &capture);
         try capture.append("}");
-        if (rounds) |out| out.* = a.rounds;
+        if (rounds) |out| out.* = storage.testing_content_work.rounds - before;
     }
     var report = try capture.seal();
     defer report.deinit();
@@ -7389,28 +7561,63 @@ pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []
 
 /// A list whose statement fails at its first row's step.
 const FailingList = struct {
-    pub const S = rsql.Read(.{
-        .sql = "SELECT t.turn_id FROM turn t WHERE t.session_ref=?1 AND t.turn_id>?2 AND abs(-9223372036854775808+0*t.turn_id)>=0 ORDER BY t.turn_id LIMIT 257",
-        .Args = struct { session: []const u8, after: u64 = 0 },
-        .Row = struct { turn_id: rsql.Positive },
-        .cardinality = .each,
+    pub const S = rsql.Page(.{
+        .arms = &.{.{ .on = .{ .index = "turn_session_latest" }, .alias = "t", .columns = "abs(-9223372036854775808+0*t.turn_id) AS failing" }},
+        .Row = struct { turn_id: rsql.Positive, failing: u64 },
+        .take = 256,
     });
     pub const failed = error.TurnReadFailed;
     pub const header = "],\"failing\":[";
-    pub const State = report_domain.NoState;
-    pub const check = report_domain.noCheck;
-    pub const First = report_domain.NoFirst;
-    pub const queueFirst = report_domain.noQueueFirst;
-    pub const checkFirst = report_domain.noCheckFirst;
-    pub const streams = report_domain.streamsNever;
     pub const kept_rows = 0;
-
-    pub fn after(session: []const u8, row: *const S.Row) S.Args {
-        return .{ .session = session, .after = row.turn_id.get() };
-    }
 
     pub fn render(_: *reads_domain.ReadAccess, _: *report_domain.SessionReportCapture, _: *const S.Row) error{}!void {}
 };
+
+fn expectListError(comptime L: type, comptime prefix: []const u8) !void {
+    const message = comptime report_domain.listError(L).?;
+    try std.testing.expectEqualStrings(prefix, message[0..@min(prefix.len, message.len)]);
+}
+
+test "a Full list declares its statement, header and render, and each group of hooks whole, and nothing else" {
+    const Stray = struct {
+        pub const S = FailingList.S;
+        pub const failed = FailingList.failed;
+        pub const header = FailingList.header;
+        pub const kept_rows = 0;
+        pub const render = FailingList.render;
+        pub const chunk_limit = 4;
+    };
+    const Half = struct {
+        pub const S = FailingList.S;
+        pub const failed = FailingList.failed;
+        pub const header = FailingList.header;
+        pub const kept_rows = 0;
+        pub const render = FailingList.render;
+        pub const State = struct {};
+    };
+    const Hidden = struct {
+        pub const S = FailingList.S;
+        pub const failed = FailingList.failed;
+        pub const header = FailingList.header;
+        pub const kept_rows = 0;
+        pub const render = FailingList.render;
+        pub const State = struct {};
+        fn check(_: *State, _: *const S.Row) error{}!void {}
+    };
+    const Missing = struct {
+        pub const S = FailingList.S;
+        pub const failed = FailingList.failed;
+        pub const kept_rows = 0;
+        pub const render = FailingList.render;
+    };
+    try std.testing.expect(comptime report_domain.listError(FailingList) == null);
+    try expectListError(Stray, "a Full list declares only its statement, failed, header, kept_rows, render and its hooks, not chunk_limit: ");
+    try expectListError(Half, "a Full list declares all of a group of hooks or none: check in ");
+    // `@hasDecl` sees a private `check` only from its own file, so here
+    // the group is incomplete; report.zig's own test covers a private hook.
+    try expectListError(Hidden, "a Full list declares all of a group of hooks or none: check in ");
+    try expectListError(Missing, "a Full list declares pub header: ");
+}
 
 test "Full history answers a list's first check before a later list's failed step in its round" {
     try store_testing.forEachEngine(struct {
@@ -7502,16 +7709,21 @@ test "Full history takes a round per chunk" {
             const answer = [_]TestingAnswerPart{.{ .encoded = "hello", .decoded = "hello" }};
             try answerTestTurn(&storage, &tmp, session.slice(), "history-rounds", &answer);
             var rounds: u32 = 0;
+            const content_before = storage.testing_content_work.content_rounds;
             std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), &rounds));
             // Every list fits one chunk, so the rounds are the reads' depth: one
             // for the revisions, whose one revision's empty instructions read no
             // content, then one per run of `renderFull`: Messages; Conversation,
             // Turns and Operations; calls; Actions; decisions, stops,
             // interruptions and results. A run's lists share a round because
-            // every list but its last renders all its rows in the pass. The
-            // Message's and the answer's content windows are a `readRaw` round
-            // each.
-            try std.testing.expectEqual(@as(u32, 1 + 5 + 2), rounds);
+            // every list but its last renders all its rows in the pass.
+            try std.testing.expectEqual(@as(u32, 1 + 5), rounds);
+            // The Message's and the answer's content are content rounds,
+            // which differ by engine: on SQLite a `readRaw` window each.
+            const content_rounds: u16 = switch (case.engine) {
+                .sqlite => 2,
+            };
+            try std.testing.expectEqual(content_rounds, storage.testing_content_work.content_rounds - content_before);
         }
     }.run);
 }
@@ -7521,10 +7733,9 @@ test "Full revisions show each content whole where it first occurs" {
         fn run(case: *store_testing.Case) !void {
             // `mixed`: new, older and repeated content, an output schema that is
             // none, the instructions or other content. `same`: one older content
-            // throughout. `grown`: `mixed` past half of
-            // `ContentOwners.initial_capacity` values, so the table doubles.
+            // throughout. `grown`: `mixed` with more than 512 distinct values.
             const Shape = enum { mixed, same, grown };
-            const capacity = report_domain.ContentOwners.initial_capacity;
+            const capacity = 1024;
             for ([_]Shape{ .mixed, .same, .grown }, [_]usize{ 70, 130, capacity * 2 }) |shape, revisions| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -7629,9 +7840,8 @@ test "Full revisions show each content whole where it first occurs" {
                         }
                     }
                 }
-                // The next report starts its owners afresh: the other Session's
-                // revisions each own their instructions, which this one's map
-                // placed elsewhere.
+                // Owners are the Session's own: the other Session's revisions each
+                // own their instructions, which this one's revisions also hold.
                 const again = try testingSessionReportWithProfile(&storage, &tmp, other.slice(), 64 * 1024 * 1024, .full);
                 defer std.testing.allocator.free(again);
                 var reparsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, again, .{});
@@ -7729,6 +7939,237 @@ test "a content lookup's failed step answers CorruptStore, as on main" {
     }.run);
 }
 
+test "Bash proposals retain exact order permission provenance denial and stop terminality" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var storage_open = true;
+            defer if (storage_open) storage.close() catch unreachable;
+
+            const session = try configureTestSessionAsk(&storage, "action-config");
+            try submitTestMessage(&storage, &tmp, "action-message", "action-message", session.slice(), "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
+
+            var public_request = protocol.ConversationPage{};
+            try public_request.session.set(session.slice());
+            const proposed = try store_core.publicConversationPageForTesting(&storage, public_request);
+            try std.testing.expectEqual(@as(usize, 1), proposed.count);
+            try std.testing.expect(proposed.items[0].kind == .user);
+            // The provider's complete proposal, including its call arguments, is not
+            // addressable as a public content position.
+            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{
+                .session = public_request.session,
+                .position = proposed.end,
+            }));
+
+            const first_action_id = first: {
+                const report_bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+                defer std.testing.allocator.free(report_bytes);
+                try std.testing.expect(std.mem.indexOf(u8, report_bytes, "\"work\":{\"state\":{\"kind\":\"approval\"") != null);
+                const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
+                defer parsed.deinit();
+                try std.testing.expectEqualStrings("2", parsed.value.actions.count);
+                try std.testing.expectEqual(@as(usize, 2), parsed.value.actions.unresolved.len);
+                const wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+                defer wire.deinit();
+                const presentation = wire.value.object.get("actions").?.object.get("unresolved").?.array.items[0].object.get("presentation").?.object;
+                try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+                try std.testing.expectEqualStrings("pending_permission", presentation.get("code").?.string);
+                try std.testing.expect(presentation.get("publication_position").? == .null);
+                const first = parsed.value.actions.unresolved[0];
+                try std.testing.expectEqualStrings("0", first.call_ordinal);
+                try std.testing.expectEqualStrings("1", first.permission_revision);
+                break :first try std.fmt.parseInt(u64, first.action, 10);
+            };
+            try std.testing.expectError(error.ActionNotFound, storage.actionCallId(session.slice(), std.math.maxInt(u64)));
+            try std.testing.expectError(error.ActionNotFound, storage.actionArguments(session.slice(), std.math.maxInt(u64)));
+            try std.testing.expect(!storage.isFenced());
+            try expectContent(&storage, try storage.actionCallId(session.slice(), first_action_id), "call\nA");
+            try expectContent(&storage, try storage.actionArguments(session.slice(), first_action_id), "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}");
+
+            var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
+            try deny.key.set("deny-first");
+            try deny.session.set(session.slice());
+            const accepted = storage.decidePermission(&deny, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+            try std.testing.expectEqual(@as(usize, 1), (try store_core.publicConversationPageForTesting(&storage, public_request)).count);
+            try std.testing.expect(storage.decidePermission(&deny, .{}).accepted.replayed);
+            deny.action_id += 1;
+            try std.testing.expect(storage.decidePermission(&deny, .{}) == .conflict);
+
+            var permission_update: protocol.ConfigureCommand = .{};
+            try permission_update.key.set("action-bypass");
+            try permission_update.session.set(session.slice());
+            permission_update.configuration.permission_mode.state = .value;
+            try permission_update.configuration.permission_mode.value.set("bypass");
+            try std.testing.expect(storage.configure(&permission_update, .{}) == .accepted);
+            const second_action_id = second: {
+                const report_bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+                defer std.testing.allocator.free(report_bytes);
+                const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
+                defer parsed.deinit();
+                try std.testing.expectEqual(@as(usize, 1), parsed.value.actions.unresolved.len);
+                const wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+                defer wire.deinit();
+                const resolved = wire.value.object.get("actions").?.object.get("resolved").?.array.items[0].object;
+                try std.testing.expectEqualStrings("0", resolved.get("call_ordinal").?.string);
+                const presentation = resolved.get("presentation").?.object;
+                try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+                try std.testing.expectEqualStrings("denied", presentation.get("code").?.string);
+                // A terminal sibling is not a published complete group.
+                try std.testing.expectEqual(std.json.Value.null, std.meta.activeTag(presentation.get("publication_position").?));
+                const second = parsed.value.actions.unresolved[0];
+                try std.testing.expectEqualStrings("1", second.call_ordinal);
+                try std.testing.expectEqualStrings("1", second.permission_revision);
+                break :second try std.fmt.parseInt(u64, second.action, 10);
+            };
+            try expectContent(&storage, try storage.actionCallId(session.slice(), second_action_id), "call-B");
+            try expectContent(&storage, try storage.actionArguments(session.slice(), second_action_id), "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}");
+
+            var stop = try completeSessionStop("action-stop", session.slice());
+            const action_stop = storage.stopSession(&stop, .{});
+            try std.testing.expect(action_stop == .accepted);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, action_stop.accepted.completion);
+            const settled_page = try store_core.publicConversationPageForTesting(&storage, public_request);
+            try std.testing.expectEqual(@as(usize, 3), settled_page.count);
+            try std.testing.expect(settled_page.items[0].kind == .tool_result);
+            try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
+            try std.testing.expectEqual(@as(u64, 2), settled_page.items[0].ordinal);
+            try std.testing.expectEqual(@as(u64, 1), settled_page.items[1].ordinal);
+            try std.testing.expectEqualStrings("Run second command", settled_page.items[0].presentation.?.description.?.slice());
+            try std.testing.expectEqualStrings("Run first command", settled_page.items[1].presentation.?.description.?.slice());
+            try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, settled_page.items[1].presentation.?.code);
+            for (settled_page.items[0..2]) |item| try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
+            const activity = try store_core.activityPageForTesting(&storage, .{ .session = public_request.session, .direction = .backward });
+            var results: usize = 0;
+            for (activity.items[0..activity.count]) |item| if (item.value == .tool_result) {
+                const p = item.value.tool_result.presentation;
+                try std.testing.expectEqual(item.position, p.publication_position.?);
+                try std.testing.expectEqualStrings(if (item.ordinal == 1) "Run first command" else "Run second command", p.description.?.slice());
+                results += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 2), results);
+            var result_reader: ContentReader = undefined;
+            result_reader.open(try storage.openPublicConversationContent(&.{
+                .session = public_request.session,
+                .position = settled_page.items[0].position,
+                .ordinal = 2,
+            }));
+            result_reader.close();
+            var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
+            try stale.key.set("stale-denial");
+            try stale.session.set(session.slice());
+            stale.decision = .allow_once;
+            const rejected = storage.decidePermission(&stale, .{});
+            try std.testing.expect(rejected == .rejected);
+            try std.testing.expectEqual(protocol.PermissionDecisionRejection.action_not_pending, rejected.rejected.code);
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL", .{}));
+
+            const full_bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
+            defer std.testing.allocator.free(full_bytes);
+            var full = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full_bytes, .{});
+            defer full.deinit();
+            const decisions = full.value.object.get("full").?.object.get("permission_decisions").?.array.items;
+            try std.testing.expectEqual(@as(usize, 2), decisions.len);
+            try std.testing.expectEqualStrings("deny", decisions[0].object.get("decision").?.string);
+            try std.testing.expectEqualStrings("accepted", decisions[0].object.get("status").?.string);
+            try std.testing.expectEqualStrings("allow_once", decisions[1].object.get("decision").?.string);
+            try std.testing.expectEqualStrings("rejected", decisions[1].object.get("status").?.string);
+
+            try submitTestMessage(&storage, &tmp, "bypass-message", "bypass-message", session.slice(), "bypass proposal");
+            const bypass_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, bypass_binding, "bypass-metadata");
+            // The ask-mode pair was never authorized: one denied, one stopped.
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=1", .{}));
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=2 AND resolution_code IS NULL", .{}));
+
+            try storage.close();
+            storage_open = false;
+            var reopened: Store = undefined;
+            try store_testing.testingStore(case, &reopened, &tmp, std.testing.io);
+            defer reopened.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&reopened, "SELECT count(*) FROM action_operation WHERE authorized=1 AND permission_revision=2 AND resolution_code IS NULL", .{}));
+            const recovered_bytes = try testingSessionReport(&reopened, &tmp, session.slice(), 1024 * 1024);
+            defer std.testing.allocator.free(recovered_bytes);
+            const recovered = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
+            defer recovered.deinit();
+            try std.testing.expectEqual(@as(usize, 2), recovered.value.actions.unresolved.len);
+            for (recovered.value.actions.unresolved) |action| {
+                try std.testing.expectEqualStrings("bypass", action.authorization);
+                try std.testing.expectEqualStrings("2", action.permission_revision);
+            }
+        }
+    }.run);
+}
+
+test "failed control commit saves no answer after reopening" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            const session = try configureTestSession(&storage, "configure-control-rollback");
+            var stop = try completeSessionStop("rollback-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{ .before_commit = true }) == .infrastructure_failure);
+            try std.testing.expect(storage.isFenced());
+            try storage.close();
+
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try std.testing.expect((try storage.observeCommand("rollback-stop")).status == .absent);
+        }
+    }.run);
+}
+
+test "model admission skips Sessions of a provider the Host does not serve" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const settings = try completeConfiguration("unserved", "", workspace, "model-a");
+            var message: protocol.MessageCommand = .{ .configuration = settings.configuration };
+            try message.key.set("unserved");
+            message.text = try testingBytesContent(&tmp, "unserved-message", "wait for a Host that serves me");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.routesAll(.unserved) });
+                defer storage.close() catch unreachable;
+                try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+                try std.testing.expect(try storage.admitNextModelAttempt(.{}) == null);
+            }
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.routesAll(.endpoint) });
+            defer storage.close() catch unreachable;
+            try std.testing.expect(try storage.admitNextModelAttempt(.{}) != null);
+        }
+    }.run);
+}
+
+test "existing Store rejects a different canonical identity" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try storage.close();
+            var refused: Store = undefined;
+            try std.testing.expectError(
+                error.WrongStoreIdentity,
+                store_testing.testingStoreWith(case, &refused, &tmp, std.testing.io, .{ .identity = "/different/canonical/store" }),
+            );
+        }
+    }.run);
+}
+
 test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
     const Name = store_testing.EngineName;
     try std.testing.expectEqual(0, (try store_testing.parseRequiredEngines("")).count());
@@ -7740,11 +8181,22 @@ test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
     }
 }
 
-test "a fixture's SQL is portable Rui SQL and sets no PRAGMA" {
-    try std.testing.expectEqual(null, comptime store_testing.fixtureTextError("UPDATE session SET created_at=1 WHERE session_ref=?1"));
-    try std.testing.expectEqualStrings("fixture: PRAGMA is a SQLite setting; write the test in sqlite_tests.zig", comptime store_testing.fixtureTextError("PRAGMA foreign_keys=OFF").?);
-    try std.testing.expectEqualStrings("fixture: PRAGMA is a SQLite setting; write the test in sqlite_tests.zig", comptime store_testing.fixtureTextError("DELETE FROM turn; pragma ignore_check_constraints=ON").?);
-    try std.testing.expectEqualStrings("rsql: '||' is OR on MySQL; compute the text in Zig", comptime store_testing.fixtureTextError("UPDATE session SET model=model||'x'").?);
+test "a required engine these tests do not build fails them" {
+    const Name = store_testing.EngineName;
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty));
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres })));
+    try std.testing.expectEqual(Name.mysql, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql })));
+}
+
+test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
+    inline for (store_testing.fixture_text_cases) |case| {
+        const message = comptime store_testing.fixtureTextError(case.text);
+        if ((message != null) != case.refused) {
+            std.debug.print("fixtureTextError({s}) = {?s}\n", .{ case.text, message });
+            return error.FixtureVerdictChanged;
+        }
+    }
+    try std.testing.expectEqualStrings("fixture: 'pragma' is a SQLite mechanism; write the test in sqlite_tests.zig", comptime store_testing.fixtureTextError("DELETE FROM turn; pragma ignore_check_constraints=ON").?);
     try std.testing.expectEqualStrings("rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write", comptime store_testing.fixtureTextError("INSERT OR IGNORE INTO turn VALUES(1)").?);
 }
 
@@ -7797,8 +8249,10 @@ const EntryPoint = enum {
     checkAttempt,
 };
 
-/// Each entry point's rounds (`Store.testing_work.rounds`) on the path the
-/// round budget test drives it, measured on SQLite at 5e-3's head.
+/// Each entry point's rounds (`Access.run` and `commit`, counted in
+/// `Store.testing_content_work.rounds`) on the path the round budget test
+/// drives it. Content rounds (`readRaw` windows) differ by engine, so
+/// `content_round_budgets` holds them apart.
 const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .configure = 3,
     .submitMessageWithModel = 2,
@@ -7832,7 +8286,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .recoverOneExhaustedModelAttempt = 1,
     .settleModelSuccess = 2,
     .openContentIdentity = 1,
-    .readOwnedContent = 1,
+    .readOwnedContent = 0,
     .readHistoricalSettings = 2,
     .readHistoricalEntry = 10,
     .validateHistoricalOutputsStep = 1,
@@ -7846,7 +8300,28 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .checkAttempt = 1,
 });
 
+/// Each entry point's content rounds (`readRaw` windows, counted in
+/// `Store.testing_content_work.content_rounds`) on the same path, per
+/// engine: how many windows a blob read takes depends on the engine's
+/// blob access, so each engine states its own. An entry point left out
+/// takes none.
+fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
+    return switch (engine) {
+        // One window holds the driven content.
+        .sqlite => switch (point) {
+            .readOwnedContent => 1,
+            else => 0,
+        },
+    };
+}
+
+/// The functions that enter the Store only to serve tests, so they take
+/// no round budget.
+const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting" };
+
 test "every function that enters the Store has a round budget" {
+    // Every Store file but its test files and wire clients;
+    // import_architecture.py checks this list against src/store/.
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
@@ -7861,17 +8336,39 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/report.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("rsql.zig"),
+        @embedFile("schema.zig"),
+        @embedFile("sqlite.zig"),
+        @embedFile("testing.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
+    var fixtures: [entering_fixtures.len]bool = @splat(false);
     inline for (sources) |source| {
         var at: usize = 0;
-        while (std.mem.indexOfPos(u8, source, at, "enter" ++ "(self, ")) |index| : (at = index + 1) {
+        while (std.mem.indexOfPos(u8, source, at, "enter" ++ "(")) |index| : (at = index + 1) {
+            if (index > 0 and (std.ascii.isAlphanumeric(source[index - 1]) or source[index - 1] == '_')) continue;
+            if (std.mem.endsWith(u8, source[0..index], "fn ")) continue;
+            // Every call enters with the Store it is a method of.
+            if (!std.mem.startsWith(u8, source[index..], "enter" ++ "(self, ")) {
+                std.debug.print("an enter call takes another first argument: {s}\n", .{source[index..][0..@min(40, source.len - index)]});
+                return error.EnterWithoutSelf;
+            }
             const before = source[0..index];
             const fn_at = @max(std.mem.lastIndexOf(u8, before, " fn ") orelse 0, std.mem.lastIndexOf(u8, before, "\nfn ") orelse 0) + " fn ".len;
             var end = fn_at;
             while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
             const name = source[fn_at..end];
-            if (std.mem.endsWith(u8, name, "ForTesting")) continue;
+            if (std.mem.endsWith(u8, name, "ForTesting")) {
+                const listed = for (entering_fixtures, 0..) |fixture, position| {
+                    if (std.mem.eql(u8, fixture, name)) break position;
+                } else {
+                    std.debug.print("{s} enters the Store but is not in entering_fixtures\n", .{name});
+                    return error.UnlistedFixture;
+                };
+                try std.testing.expect(!fixtures[listed]);
+                fixtures[listed] = true;
+                continue;
+            }
             const point = std.meta.stringToEnum(EntryPoint, name) orelse {
                 std.debug.print("{s} enters the Store but has no round budget\n", .{name});
                 return error.EntryPointWithoutBudget;
@@ -7881,20 +8378,28 @@ test "every function that enters the Store has a round budget" {
         }
     }
     try std.testing.expectEqual(std.enums.values(EntryPoint).len, found.count());
+    for (fixtures) |seen| try std.testing.expect(seen);
 }
 
 const RoundMeter = struct {
     storage: *Store,
-    before: u32 = 0,
-    measured: std.EnumArray(EntryPoint, ?u32) = .initFill(null),
+    rounds_before: u16 = 0,
+    content_before: u16 = 0,
+    measured: std.EnumArray(EntryPoint, ?Measured) = .initFill(null),
+
+    const Measured = struct { rounds: u16, content_rounds: u16 };
 
     fn start(meter: *RoundMeter) void {
-        meter.before = meter.storage.testing_work.rounds;
+        meter.rounds_before = meter.storage.testing_content_work.rounds;
+        meter.content_before = meter.storage.testing_content_work.content_rounds;
     }
 
     fn stop(meter: *RoundMeter, point: EntryPoint) void {
         std.debug.assert(meter.measured.get(point) == null);
-        meter.measured.set(point, meter.storage.testing_work.rounds - meter.before);
+        meter.measured.set(point, .{
+            .rounds = meter.storage.testing_content_work.rounds - meter.rounds_before,
+            .content_rounds = meter.storage.testing_content_work.content_rounds - meter.content_before,
+        });
     }
 };
 
@@ -7917,10 +8422,20 @@ test "each Store entry point takes its round budget on its common path" {
                     failed = true;
                     continue;
                 };
-                if (measured != round_budgets.get(point)) failed = true;
+                if (measured.rounds != round_budgets.get(point)) failed = true;
+                if (measured.content_rounds != contentRoundBudget(case.engine, point)) failed = true;
             }
             if (failed) {
-                for (std.enums.values(EntryPoint)) |point| std.debug.print(".{s} = {?d}, budget {d}\n", .{ @tagName(point), meter.measured.get(point), round_budgets.get(point) });
+                for (std.enums.values(EntryPoint)) |point| {
+                    const measured = meter.measured.get(point) orelse continue;
+                    std.debug.print(".{s} = {d} (budget {d}), content {d} (budget {d})\n", .{
+                        @tagName(point),
+                        measured.rounds,
+                        round_budgets.get(point),
+                        measured.content_rounds,
+                        contentRoundBudget(case.engine, point),
+                    });
+                }
                 return error.RoundBudgetChanged;
             }
             try std.testing.expect(!storage.isFenced());
@@ -8167,6 +8682,848 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect((try view.coverage()).anchor != null);
             meter.stop(.readCompactionAnchor);
+        }
+    }.run);
+}
+
+// The rounds twins of sqlite_tests.zig's work tests. Each test there
+// holds a population's VM steps or statements still, which only SQLite
+// shows; its twin here holds the rounds of the same work at the same two
+// sizes, which every engine shows.
+
+/// The rounds `store` took since `start`: its Accesses' runs and commits.
+const TwinRounds = struct {
+    store: *Store,
+    before: u16,
+
+    fn start(store: *Store) TwinRounds {
+        return .{ .store = store, .before = store.testing_content_work.rounds };
+    }
+
+    fn taken(self: TwinRounds) u16 {
+        return self.store.testing_content_work.rounds - self.before;
+    }
+};
+
+/// A Session whose active Turn's one Operation proposed `count` calls of
+/// an unknown tool, each rejected, so the report lists every one.
+pub fn rejectedCallsForTesting(storage: *Store, tmp: *std.testing.TmpDir, count: usize) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSession(storage, "one-operation-config");
+    try submitTestMessage(storage, tmp, "one-operation-input", "one-operation-key", session.slice(), "many calls");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var ids: [256][16]u8 = undefined;
+    var calls: [256]TestingCall = undefined;
+    for (calls[0..count], ids[0..count], 0..) |*call, *id_buffer, index| {
+        const id = try std.fmt.bufPrint(id_buffer, "call-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(storage, tmp, binding, "one-operation-calls", calls[0..count]);
+    return session;
+}
+
+test "creating a Session takes the same work however many Sessions exist, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const few = TwinRounds.start(&storage);
+            _ = try configureTestSession(&storage, "creation-rounds-few");
+            const few_rounds = few.taken();
+            try store_testing.withoutForeignKeys(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<2000) " ++
+                "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
+                "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
+                "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1000000,zeroblob(32),value+1000000 FROM sequence", .{});
+            const many = TwinRounds.start(&storage);
+            _ = try configureTestSession(&storage, "creation-rounds-many");
+            try std.testing.expectEqual(few_rounds, many.taken());
+        }
+    }.run);
+}
+
+test "a Workspace's changed page reads only its own Sessions, however many others changed, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+            var nested = try tmp.dir.createDirPathOpen(std.testing.io, "other", .{});
+            defer nested.close(std.testing.io);
+            var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const other = other_buffer[0..try nested.realPath(std.testing.io, &other_buffer)];
+            const watched = try configure(&storage, "scoped-watched", "", workspace);
+            var request: protocol.ListSessions = .{ .workspace = .{}, .since = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) } };
+            try request.workspace.?.set(workspace);
+            _ = try configure(&storage, "scoped-watched-again", &watched, workspace);
+            const alone = try rounds(&storage, &tmp, request, &watched);
+            for (1..change_ring.capacity) |index| {
+                var key: [32]u8 = undefined;
+                _ = try configure(&storage, try std.fmt.bufPrint(&key, "scoped-other-{d}", .{index}), "", other);
+            }
+            try std.testing.expect(storage.changes.covers(request.since.?.generation));
+            try std.testing.expectEqual(alone, try rounds(&storage, &tmp, request, &watched));
+        }
+
+        fn configure(store: *Store, key: []const u8, session: []const u8, place: []const u8) !change_ring.Id {
+            var command = try completeConfiguration(key, session, place, "model");
+            const configured = store.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            return configured.accepted.session.slice()[0..protocol.session_id_bytes].*;
+        }
+
+        fn rounds(store: *Store, dir: *std.testing.TmpDir, request: protocol.ListSessions, watched: *const change_ring.Id) !u16 {
+            const counter = TwinRounds.start(store);
+            const page = try TestingListing.read(store, dir, request);
+            const taken = counter.taken();
+            try std.testing.expectEqual(protocol.ListDelta.changed, page.delta);
+            try page.expectReferences(&.{watched.*});
+            try std.testing.expect(page.next == null);
+            return taken;
+        }
+    }.run);
+}
+
+test "a list row reads the same steps however long its Session's history, in rounds" {
+    try store_testing.forEachEngine(struct {
+        const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "row-rounds");
+            try stopped(&storage, &tmp, session.slice(), "row-rounds-0");
+            try answerTestTurn(&storage, &tmp, session.slice(), "row-rounds-short", &answer);
+            const short = try rowRounds(&storage, &tmp, session.slice());
+            inline for (1..33) |turn| try stopped(&storage, &tmp, session.slice(), std.fmt.comptimePrint("row-rounds-{d}", .{turn}));
+            try answerTestTurn(&storage, &tmp, session.slice(), "row-rounds-long", &answer);
+            try std.testing.expect(short > 0);
+            try std.testing.expectEqual(short, try rowRounds(&storage, &tmp, session.slice()));
+        }
+
+        /// An answered Turn, then a queued Message a stop excluded.
+        fn stopped(store: *Store, dir: *std.testing.TmpDir, session: []const u8, comptime name: []const u8) !void {
+            try answerTestTurn(store, dir, session, name ++ "-answer", &answer);
+            try submitTestMessage(store, dir, name ++ "-queued-file", name ++ "-queued", session, "excluded");
+            var stop = try completeSessionStop(name ++ "-stop", session);
+            try std.testing.expect(store.stopSession(&stop, .{}) == .accepted);
+        }
+
+        /// The Session is the list's only row, so the page's rounds are its row's.
+        fn rowRounds(store: *Store, dir: *std.testing.TmpDir, session: []const u8) !u16 {
+            var used = std.atomic.Value(u64).init(0);
+            const counter = TwinRounds.start(store);
+            std.testing.allocator.free(try testingSessionList(store, dir, .{}, &used, 79));
+            const taken = counter.taken();
+            var listed = try testingListRow(store, dir, session);
+            defer listed.deinit();
+            try std.testing.expectEqualStrings("finished", listed.get(&.{ "work", "state", "kind" }).string);
+            return taken;
+        }
+    }.run);
+}
+
+test "Action admission never visits an Action waiting for permission, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // Each pass adds a Turn with two Actions waiting for permission.
+            var rounds: [2]u16 = undefined;
+            for (&rounds, 0..) |*cost, pass| {
+                var name_buffer: [32]u8 = undefined;
+                const session = try configureTestSessionAsk(&storage, try std.fmt.bufPrint(&name_buffer, "waiting-config-{d}", .{pass}));
+                var message_buffer: [32]u8 = undefined;
+                const message = try std.fmt.bufPrint(&message_buffer, "waiting-message-{d}", .{pass});
+                try submitTestMessage(&storage, &tmp, message, message, session.slice(), "propose");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var metadata_buffer: [32]u8 = undefined;
+                try settleTwoActionsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&metadata_buffer, "waiting-metadata-{d}", .{pass}));
+                const counter = TwinRounds.start(&storage);
+                try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+                cost.* = counter.taken();
+            }
+            try std.testing.expectEqual(@as(u64, 4), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND resolution_code IS NULL", .{}));
+            try std.testing.expectEqual(rounds[0], rounds[1]);
+        }
+    }.run);
+}
+
+test "tool continuation selection never visits a Turn waiting for its tool results, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var rounds: [2]u16 = undefined;
+            for (&rounds, 0..) |*cost, pass| {
+                var name_buffer: [32]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buffer, "waiting-{d}", .{pass});
+                var config_buffer: [40]u8 = undefined;
+                const config = try std.fmt.bufPrint(&config_buffer, "{s}-config", .{name});
+                const session = try configureTestSessionAsk(&storage, config);
+                try submitTestMessage(&storage, &tmp, name, name, session.slice(), "propose");
+                const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, binding, config);
+                const counter = TwinRounds.start(&storage);
+                try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
+                cost.* = counter.taken();
+            }
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_code IS NULL", .{}));
+            try std.testing.expectEqual(rounds[0], rounds[1]);
+        }
+    }.run);
+}
+
+test "complete historical tool-result traversal scales with groups and calls, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const baseline = try measure(case, 4, 1);
+            const more_groups = try measure(case, 16, 1);
+            const call_baseline = try measure(case, 4, 8);
+            const more_calls = try measure(case, 4, 32);
+            std.testing.expect(more_groups > baseline and more_calls >= call_baseline) catch |err| {
+                std.debug.print("rounds: {d} {d} {d} {d}\n", .{ baseline, more_groups, call_baseline, more_calls });
+                return err;
+            };
+        }
+
+        fn measure(engine: *store_testing.Case, group_count: usize, calls_per_group: usize) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "scale-config");
+            try submitTestMessage(&storage, &tmp, "scale-input", "scale-input", session.slice(), "call");
+            var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var calls: [32]TestingCall = undefined;
+            var item_ids: [32][32]u8 = undefined;
+            var call_ids: [32][32]u8 = undefined;
+            for (calls[0..calls_per_group], 0..) |*call, index| {
+                const item_id = try std.fmt.bufPrint(&item_ids[index], "scale-item-{d}", .{index});
+                const call_id = try std.fmt.bufPrint(&call_ids[index], "scale-call-{d}", .{index});
+                call.* = .{ .item_id = item_id, .name = "unknown", .encoded_call_id = call_id, .decoded_call_id = call_id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            }
+            for (0..group_count) |index| {
+                var prefix_buffer: [64]u8 = undefined;
+                try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix_buffer, "scale-metadata-{d}", .{index}), calls[0..calls_per_group]);
+                binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            const counter = TwinRounds.start(&storage);
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var position: u64 = 0;
+            var groups_seen: usize = 0;
+            var results_seen: usize = 0;
+            while (try view.nextEntry(position)) |entry| {
+                position = entry.position;
+                if (entry.kind != .tool_results) continue;
+                groups_seen += 1;
+                while (try view.nextToolResult()) |_| results_seen += 1;
+            }
+            try std.testing.expectEqual(group_count, groups_seen);
+            try std.testing.expectEqual(group_count * calls_per_group, results_seen);
+            return counter.taken();
+        }
+    }.run);
+}
+
+/// A bound fixture statement that adds `?1` failed Operations after
+/// Operation `?2`, in its Turn.
+const failed_operations_sql = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+    "SELECT value+1 FROM sequence WHERE value<?1) " ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
+    "attempt_ordinal,output_reservation,resolution_code,resolved_at) " ++
+    "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
+    "1,0,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+
+/// `failed_operations_sql`, the Operations alternating in purpose.
+const failed_purpose_operations_sql = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+    "SELECT value+1 FROM sequence WHERE value<?1) " ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
+    "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+    "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
+    "0,1,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+
+test "historical accepted output selection work excludes failed Operation population, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try std.testing.expectEqual(try measure(case, 8), try measure(case, 1024));
+        }
+
+        fn measure(engine: *store_testing.Case, population: usize) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "selection-config");
+            try submitTestMessage(&storage, &tmp, "selection-input", "selection-input", session.slice(), "retain");
+            const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
+            try store_testing.exec(&storage, failed_operations_sql, .{ population, current.operation_id });
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(current, &view);
+            defer view.close();
+            const counter = TwinRounds.start(&storage);
+            while (!try view.validateOutputsStep()) {}
+            return counter.taken();
+        }
+    }.run);
+}
+
+test "historical context selection work excludes nonmatching Operation population, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |with_base| {
+                try std.testing.expectEqual(try measure(case, 8, with_base), try measure(case, 1024, with_base));
+            }
+        }
+
+        fn measure(engine: *store_testing.Case, population: usize, with_base: bool) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "config");
+            try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
+            var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (with_base) {
+                try storage.settleModelAttemptFailure(current, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
+                current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCompactionForTesting(&storage, &tmp, current, &.{ .reasoning, .compaction, .message });
+                current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
+            try store_testing.exec(&storage, failed_purpose_operations_sql, .{ population, current.operation_id });
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(current, &view);
+            defer view.close();
+            const counter = TwinRounds.start(&storage);
+            while (!try view.validateOutputsStep()) {}
+            const taken = counter.taken();
+            try std.testing.expectEqual(with_base, (try view.coverage()).anchor != null);
+            return taken;
+        }
+    }.run);
+}
+
+test "Current report work is independent of terminal tool history, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try std.testing.expectEqual(try measure(case, 16), try measure(case, 64));
+        }
+
+        fn measure(engine: *store_testing.Case, group_count: usize) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "current-cost-config");
+            const calls = [_]TestingCall{.{ .item_id = "current-cost-item", .name = "unknown", .encoded_call_id = "current-cost-call", .decoded_call_id = "current-cost-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            for (0..group_count) |index| {
+                var file_buffer: [64]u8 = undefined;
+                var key_buffer: [64]u8 = undefined;
+                var metadata_buffer: [64]u8 = undefined;
+                try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file_buffer, "current-cost-file-{d}", .{index}), try std.fmt.bufPrint(&key_buffer, "current-cost-message-{d}", .{index}), session.slice(), "call");
+                const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, source, try std.fmt.bufPrint(&metadata_buffer, "current-cost-metadata-{d}", .{index}), &calls);
+                const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
+            }
+            try submitTestMessage(&storage, &tmp, "current-cost-active-file", "current-cost-active-message", session.slice(), "active");
+            const active = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTestingWithFaults(&storage, &tmp, active, "current-cost-active-metadata", &calls, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const root_length = try tmp.dir.realPath(std.testing.io, &root);
+            var used = std.atomic.Value(u64).init(0);
+            const counter = TwinRounds.start(&storage);
+            var report = try storage.captureSessionReport(session.slice(), .{
+                .scratch_path = root[0..root_length],
+                .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
+                .request_number = 1,
+                .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
+            });
+            const taken = counter.taken();
+            report.deinit();
+            return taken;
+        }
+    }.run);
+}
+
+test "Full Message projection work does not multiply Messages by stops, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const baseline = try measure(case, 32, 32);
+            const more_messages = try measure(case, 128, 32);
+            const more_stops = try measure(case, 32, 128);
+            const both_larger = try measure(case, 128, 128);
+            // The Messages' rounds grow with their chunks; stops add none
+            // at either Message count.
+            std.testing.expect(more_messages > baseline and more_stops == baseline and both_larger == more_messages) catch |err| {
+                std.debug.print("rounds: {d} {d} {d} {d}\n", .{ baseline, more_messages, more_stops, both_larger });
+                return err;
+            };
+        }
+
+        fn measure(engine: *store_testing.Case, message_count: usize, stop_count: usize) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "full-scale-config");
+            for (1..message_count + 1) |index| {
+                var key: [32]u8 = undefined;
+                try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
+                    "VALUES(?1,?2,?3,1,NULL,1,?4)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
+            }
+            for (1..stop_count + 1) |index| {
+                var key: [32]u8 = undefined;
+                const command = try std.fmt.bufPrint(&key, "stop-{d}", .{index});
+                try store_testing.withoutForeignKeys(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+                    "VALUES(?1,3,?2,zeroblob(32),NULL,NULL,1,'accepted',0,0,(SELECT coalesce(max(command_seq),0)+1 FROM core_command))", .{ command, session.slice() });
+                try store_testing.withoutForeignKeys(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) " ++
+                    "VALUES(?1,?2,NULL,?3,?4,1)", .{ command, session.slice(), message_count, index });
+            }
+            const counter = TwinRounds.start(&storage);
+            const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
+            const taken = counter.taken();
+            std.testing.allocator.free(full);
+            return taken;
+        }
+    }.run);
+}
+
+/// The head of a fixture statement over `value` 1 through `?1`.
+const sequence_to_first_argument = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
+
+test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var rounds: [2][2]u16 = undefined;
+            for ([_]usize{ 10, 10_000 }, &rounds) |history, *cost| cost.* = try measure(case, history);
+            try std.testing.expectEqual(rounds[0], rounds[1]);
+        }
+
+        /// `history` earlier units, a Message, its call item, the call's
+        /// rejection and its Turn's outcome, then the same tail: a Message,
+        /// twenty rejected calls and a stop. The rounds of the opening's
+        /// page and of a forward page from the tail's first row.
+        fn measure(engine: *store_testing.Case, history: usize) ![2]u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "cost-config");
+            const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{});
+            const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session", .{});
+            // Foreign keys are off: each history Message names its Turn
+            // before the Turn row exists.
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                "SELECT value,?2,printf('history-%d',value),?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1 FROM sequence", .{ history, session.slice(), start });
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT value,0,?2,?3+4*(value-1)+1,3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                "SELECT value,?2,0,0,?4,?4,?4,zeroblob(120),'unknown_tool',?4,?3+4*(value-1)+2 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT value,?2,value,value,value,'completed',?3+4*(value-1)+3,1 FROM sequence", .{ history, session.slice(), start });
+            try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+4*?1", .{history});
+            // The history rows bypass the Host's ids.
+            try store_core.reloadIdentitiesForTesting(&storage);
+            const tail = (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position;
+            try submitTestMessage(&storage, &tmp, "cost-input", "input", session.slice(), "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var identities: [20][24]u8 = undefined;
+            var calls: [20]TestingCall = undefined;
+            for (&calls, &identities, 0..) |*call, *identity, index| {
+                const id = try std.fmt.bufPrint(identity, "cost-{d}", .{index});
+                call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" };
+            }
+            try settleCallsForTesting(&storage, &tmp, binding, "cost-calls", &calls);
+            var stop = try completeSessionStop("cost-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+
+            var cost: [2]u16 = undefined;
+            var opening: protocol.ActivityPage = .{ .direction = .backward };
+            try opening.session.set(session.slice());
+            const opened = TwinRounds.start(&storage);
+            const page = try store_core.activityPageForTesting(&storage, opening);
+            cost[0] = opened.taken();
+            try std.testing.expect(page.more);
+            var forward: protocol.ActivityPage = .{ .end = page.end, .position = tail - 1 };
+            try forward.session.set(session.slice());
+            const forwarded = TwinRounds.start(&storage);
+            const later = try store_core.activityPageForTesting(&storage, forward);
+            cost[1] = forwarded.taken();
+            try std.testing.expect(later.more);
+            try std.testing.expectEqual(tail, later.items[0].position);
+            return cost;
+        }
+    }.run);
+}
+
+test "a one-row page of a person's Messages costs the same steps after 10 or 10,000 received ones, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try std.testing.expectEqual(try measure(case, 10), try measure(case, 10_000));
+        }
+
+        fn measure(engine: *store_testing.Case, history: usize) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "recall-config");
+            const peer = try configureTestSession(&storage, "recall-peer");
+            try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
+            const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
+            const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
+                "SELECT 1000+value,?2,printf('received-%d',value),?4,?3+value-1,1,?5,value FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
+            try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
+            try store_core.reloadIdentitiesForTesting(&storage);
+            var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+            try request.session.set(session.slice());
+            const counter = TwinRounds.start(&storage);
+            const page = try store_core.activityPageForTesting(&storage, request);
+            const taken = counter.taken();
+            try std.testing.expect(page.count == 1 and page.items[0].value == .admission and !page.more);
+            return taken;
+        }
+    }.run);
+}
+
+test "a forward one-row page of a person's Messages costs the same steps past 10 or 10,000 tool groups, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try std.testing.expectEqual(try measure(case, 10), try measure(case, 10_000));
+        }
+
+        fn measure(engine: *store_testing.Case, history: usize) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "forward-config");
+            try submitTestMessage(&storage, &tmp, "forward-first", "first", session.slice(), "first");
+            try submitTestMessage(&storage, &tmp, "forward-second", "second", session.slice(), "second");
+            const first = try store_testing.queryU64(&storage, "SELECT min(admission_position) FROM message_admission", .{});
+            const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
+            const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
+            // Each tool group names its Turn before the Turn row exists. A
+            // cancelled Turn needs no answer content.
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1 FROM sequence", .{ history, session.slice(), start });
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT 1000+value,0,?2,?3+3*(value-1),3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
+                "SELECT 1000+value,?2,0,0,?4,?4,?4,zeroblob(120),'unknown_tool',?4,?3+3*(value-1)+1 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
+                "SELECT 1000+value,?2,1000+value,1000+value,1000+value,'cancelled',?3+3*(value-1)+2,1 FROM sequence", .{ history, session.slice(), start });
+            try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+3*?1 WHERE session_ref=?2", .{ history, session.slice() });
+            try store_core.reloadIdentitiesForTesting(&storage);
+            try submitTestMessage(&storage, &tmp, "forward-third", "third", session.slice(), "third");
+            var request: protocol.ActivityPage = .{ .position = first, .kinds = .initOne(.admission), .limit = 1 };
+            try request.session.set(session.slice());
+            const counter = TwinRounds.start(&storage);
+            const page = try store_core.activityPageForTesting(&storage, request);
+            const taken = counter.taken();
+            try std.testing.expect(page.count == 1 and page.items[0].position > first and page.more);
+            try std.testing.expectEqual(@as(u64, 0), page.call_activity.total);
+            return taken;
+        }
+    }.run);
+}
+
+test "a one-row page of a person's Messages costs the same steps past 100 or 10,000 waiting ones, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try std.testing.expectEqual(try measure(case, 100), try measure(case, 10_000));
+        }
+
+        fn measure(engine: *store_testing.Case, history: usize) !u16 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "waiting-config");
+            const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
+            const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
+            // The waiting Messages have no commands.
+            try store_testing.withoutForeignKeys(&storage, sequence_to_first_argument ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                "SELECT 1000+value,?2,printf('waiting-%d',value),?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
+            try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
+            try store_core.reloadIdentitiesForTesting(&storage);
+            try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");
+            var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
+            try request.session.set(session.slice());
+            const counter = TwinRounds.start(&storage);
+            const page = try store_core.activityPageForTesting(&storage, request);
+            const taken = counter.taken();
+            try std.testing.expect(page.count == 1 and page.items[0].value.admission.state == .queued and page.more);
+            try std.testing.expectEqual(@as(u64, 0), page.queued.count);
+            return taken;
+        }
+    }.run);
+}
+
+test "model admission work excludes failed historical Operation population, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |overflow| {
+                const small = try Measure.run(case, 8, overflow);
+                const large = try Measure.run(case, 1024, overflow);
+                try std.testing.expectEqual(small, large);
+            }
+        }
+
+        const Measure = struct {
+            fn run(engine: *store_testing.Case, population: usize, overflow: bool) !u16 {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "config");
+                try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
+                const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                // Keep the actual current Operation newer than all injected history.
+                try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001", .{});
+                try store_testing.exec(&storage, failed_purpose_operations_sql, .{ population, current.operation_id });
+                try storage.settleModelAttemptFailure(current, .{ .uncorrelated = if (overflow) "overflow" else "provider_http_422" }, if (overflow) .context_overflow else .ordinary, .{});
+                try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "pending input");
+
+                const counter = TwinRounds.start(&storage);
+                const admitted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const taken = counter.taken();
+                try std.testing.expectEqual(if (overflow) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+                try std.testing.expectEqual(@as(u64, if (overflow) 1 else 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
+                return taken;
+            }
+        };
+    }.run);
+}
+
+test "model admission work excludes accepted compaction base history, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var bounded = true;
+            for ([_]Measure.Suffix{ .unchanged, .low, .high, .missing }) |suffix| {
+                const small = try Measure.run(case, 8, suffix);
+                const large = try Measure.run(case, 128, suffix);
+                bounded = bounded and large == small;
+            }
+            try std.testing.expect(bounded);
+        }
+
+        const Measure = struct {
+            const Suffix = enum { unchanged, low, high, missing };
+
+            fn run(engine: *store_testing.Case, population: usize, suffix: Suffix) !u16 {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "config");
+                try submitTestMessage(&storage, &tmp, "input", "input", session.slice(), "retain");
+                var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                for (0..population) |index| {
+                    try storage.settleModelAttemptFailure(current, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
+                    const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
+                    try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+                    current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    if (index + 1 != population) {
+                        // Provider-only suffix allows the next overflow recovery
+                        // without accumulating retained host input.
+                        const call = TestingCall{ .item_id = "old-item", .name = "unknown", .encoded_call_id = "old-call", .decoded_call_id = "old-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                        try settleCallsForTestingWithFaults(&storage, &tmp, current, "old-output", &.{call}, .{}, null);
+                        current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    }
+                }
+                if (suffix == .unchanged) {
+                    try storage.settleModelAttemptFailure(current, .{ .uncorrelated = "network" }, .ordinary, .{});
+                } else {
+                    const call = TestingCall{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                    try settleCallsForTestingWithFaults(&storage, &tmp, current, "output", &.{call}, .{}, switch (suffix) {
+                        .low => "{\"input_tokens\":1,\"output_tokens\":0}",
+                        .high => "{\"input_tokens\":1000,\"output_tokens\":0}",
+                        .missing => null,
+                        .unchanged => unreachable,
+                    });
+                }
+                var patch: protocol.ConfigureCommand = .{};
+                try patch.key.set("policy");
+                try patch.session.set(session.slice());
+                patch.configuration.compaction_trigger.state = .value;
+                try patch.configuration.compaction_trigger.value.set("1000");
+                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
+                const counter = TwinRounds.start(&storage);
+                const admitted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const taken = counter.taken();
+                try std.testing.expectEqual(if (suffix == .high) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+                try std.testing.expectEqual(@as(u64, if (suffix == .high) 1 else 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
+                return taken;
+            }
+        };
+    }.run);
+}
+
+test "model admission work excludes usage-covered accepted tool and instruction history, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var bounded = true;
+            for ([_]Measure.Population{ .rejection, .action, .instruction }) |kind| {
+                for ([_]bool{ false, true }) |compact| {
+                    const small = try Measure.run(case, 8, kind, compact);
+                    const large = try Measure.run(case, 128, kind, compact);
+                    bounded = bounded and large == small;
+                }
+            }
+            try std.testing.expect(bounded);
+        }
+
+        const Measure = struct {
+            const Population = enum { rejection, action, instruction };
+
+            fn run(engine: *store_testing.Case, population: usize, kind: Population, compact: bool) !u16 {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "config");
+                if (kind == .action) {
+                    var tools: protocol.ConfigureCommand = .{};
+                    try tools.key.set("tools");
+                    try tools.session.set(session.slice());
+                    tools.configuration.tools.state = .value;
+                    tools.configuration.tools.count = 1;
+                    tools.configuration.tools.values[0] = .bash;
+                    tools.configuration.permission_mode.state = .value;
+                    try tools.configuration.permission_mode.value.set("bypass");
+                    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+                }
+                const call = TestingCall{ .item_id = "item", .name = if (kind == .action) "bash" else "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = if (kind == .action) "{\\\"description\\\":\\\"Run no-op\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}" else "{}", .decoded_arguments = if (kind == .action) "{\"description\":\"Run no-op\",\"cmd\":\"true\",\"timeout_ms\":null}" else "{}" };
+                const instructions: [400]u8 = @splat('x');
+                for (0..population + 1) |index| {
+                    var key: [64]u8 = undefined;
+                    if (kind == .instruction) {
+                        var patch: protocol.ConfigureCommand = .{};
+                        try patch.key.set(try std.fmt.bufPrint(&key, "instructions-{d}", .{index}));
+                        try patch.session.set(session.slice());
+                        patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", &instructions);
+                        defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
+                        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                    }
+                    const message_key = try std.fmt.bufPrint(&key, "message-{d}", .{index});
+                    try submitTestMessage(&storage, &tmp, "input", message_key, session.slice(), "old input");
+                    const binding = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureInput).permit.binding;
+                    if (kind == .instruction and index != population) {
+                        // Isolate revision history from accepted-output population.
+                        try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
+                    } else {
+                        try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"input_tokens\":99900,\"output_tokens\":0}" else "{\"input_tokens\":99999,\"output_tokens\":0}") else "{\"input_tokens\":1,\"output_tokens\":0}") else null);
+                    }
+                    if (kind == .action) {
+                        const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;
+                        _ = try storage.settleActionAttempt(action, .succeeded, "result", .{});
+                        // Measure the actual tool successor: the producer's result
+                        // is after its usage/output and must remain in pressure.
+                        if (index != population) {
+                            const continuation = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureContinuation).permit.binding;
+                            try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
+                        }
+                    }
+                }
+                var patch: protocol.ConfigureCommand = .{};
+                try patch.key.set("policy");
+                try patch.session.set(session.slice());
+                patch.configuration.compaction_trigger.state = .value;
+                try patch.configuration.compaction_trigger.value.set("100000");
+                if (kind == .instruction) {
+                    // Same-text updates are new input, not content deduplication.
+                    patch.configuration.instructions = try testingBytesContent(&tmp, "pending-instruction", &instructions);
+                }
+                defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
+                try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                if (kind == .instruction) {
+                    var clear: protocol.ConfigureCommand = .{};
+                    try clear.key.set("clear");
+                    try clear.session.set(session.slice());
+                    clear.configuration.instructions = try testingBytesContent(&tmp, "clear-instruction", "");
+                    defer clear.removeTemporaryContent(std.testing.io) catch unreachable;
+                    try std.testing.expect(storage.configure(&clear, .{}) == .accepted);
+                }
+                try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
+                const counter = TwinRounds.start(&storage);
+                const admitted = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureAdmission).permit.binding;
+                const taken = counter.taken();
+                try std.testing.expectEqual(if (compact) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+                try std.testing.expectEqual(@as(u64, if (compact) 1 else 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
+                if (kind == .instruction) try std.testing.expectEqual(@as(u64, @intCast(population + 1 + @as(usize, if (compact) 0 else 2))), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_revision IS NOT NULL", .{}));
+                return taken;
+            }
+        };
+    }.run);
+}
+
+test "a Current report's work grows linearly in one Operation's calls, as main's did, in rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var rounds: [3]u16 = undefined;
+            inline for (.{ 16, 64, 256 }, &rounds) |calls, *cost| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try rejectedCallsForTesting(&storage, &tmp, calls);
+                const counter = TwinRounds.start(&storage);
+                std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 64 * 1024 * 1024, .current));
+                cost.* = counter.taken();
+            }
+            std.testing.expect(rounds[0] == rounds[1] and rounds[1] == rounds[2]) catch |err| {
+                std.debug.print("rounds: {any}\n", .{rounds});
+                return err;
+            };
         }
     }.run);
 }

@@ -260,9 +260,18 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///   @max_where(x,c)      the greatest x of those rows: `max(x) FILTER (WHERE c)`
 ///   @served(x)           the opening serves provider x: `rui_served(x)`,
 ///                        the function each opening registers
+///   @after(c1,..,ck,?a1,..,?ak)  the key (c1..ck) after (?a1..?ak), in
+///                        key order: `c1>?a1` for one column, else
+///                        `(c1,..,ck)>(?a1,..,?ak)`. A Page writes it on
+///                        its walked index's key, and only a Page's gates
+///                        hold it to an index (`Page`)
 ///
 /// MySQL's are `mysqlTemplate`'s. Text rendered here binds nothing, so
-/// MySQL text with a slot fails the build too.
+/// MySQL text with a slot fails the build too. MySQL seeks only the
+/// equality prefix of a row value (8.4 manual, Row Constructor Expression
+/// Optimization), so its `@after` is the expanded
+/// `(c1>?a1 OR (c1=?a1 AND c2>?a2))`, which its range optimizer reads as k
+/// intervals of one range.
 pub fn render(comptime dialect: Dialect, comptime text: []const u8) []const u8 {
     comptime {
         if (portabilityError(text, reserved_names_checked)) |message| @compileError(message ++ ": " ++ text);
@@ -441,7 +450,7 @@ pub fn Write(comptime spec: WriteSpec) type {
 
 pub const StatementKind = enum { read, write };
 
-/// Whether `S` is the type `Read` or `Write` made, so its text passed every
+/// Whether `S` is the type `Read`, `Write` or `Page` made, so its text passed every
 /// check. A struct that copies a statement's declarations, `made_from`
 /// included, is not: `S` must be the very type its spec makes.
 pub fn isStatement(comptime S: type) bool {
@@ -449,7 +458,7 @@ pub fn isStatement(comptime S: type) bool {
         if (@typeInfo(S) != .@"struct" or !@hasDecl(S, "kind") or !@hasDecl(S, "made_from")) return false;
         if (@TypeOf(S.kind) != StatementKind) return false;
         return switch (S.kind) {
-            .read => @TypeOf(S.made_from) == ReadSpec and S == Read(S.made_from),
+            .read => if (@TypeOf(S.made_from) == ReadSpec) S == Read(S.made_from) else @TypeOf(S.made_from) == PageSpec and S == Page(S.made_from),
             .write => @TypeOf(S.made_from) == WriteSpec and S == Write(S.made_from),
         };
     }
@@ -612,15 +621,21 @@ const Core = struct { results: []const Result, sources: []const Source, where: ?
 
 const Result = struct { value: Expr, alias: ?[]const u8 };
 
+/// How a source joins the sources before it: `first` is the FROM table;
+/// `inner` is JOIN or INNER JOIN.
+const Join = enum { first, left, inner, cross };
+
 const Source = struct {
     table: []const u8,
     /// The table's own name when it has no alias.
     alias: []const u8,
     /// A name a WITH defined, never a table's (`Parser.select`).
     defined: bool,
-    /// Joined with LEFT JOIN: its ON chooses only its own rows, and every
+    /// `.left` is a LEFT JOIN: its ON chooses only its own rows, and every
     /// row on its left stays.
-    outer: bool,
+    join: Join,
+    /// The `@index(name)` after the table, an index of that table.
+    index: ?[]const u8 = null,
     on: ?Expr,
 };
 
@@ -642,6 +657,9 @@ const Expr = union(enum) {
     equality: *const [2]Expr,
     /// `column IS NULL`.
     is_null: Column,
+    /// `@after(c1,..,ck,?a1,..,?ak)`: the key (c1..ck) is greater than
+    /// (?a1..?ak), lexicographically.
+    after: struct { columns: []const Column, parameters: []const usize },
     other,
 };
 
@@ -797,7 +815,7 @@ const Parser = struct {
 
     /// The query an UPDATE or DELETE stands in: its own table, unaliased.
     fn writtenTable(table: []const u8) []const Source {
-        return &.{Source{ .table = table, .alias = table, .defined = false, .outer = false, .on = null }};
+        return &.{Source{ .table = table, .alias = table, .defined = false, .join = .first, .on = null }};
     }
 
     fn peek(p: *const Parser) Token {
@@ -994,12 +1012,17 @@ const Parser = struct {
         }
         var sources: []const Source = &.{};
         if (p.accept("FROM")) {
-            sources = sources ++ .{try p.source(false)};
+            sources = sources ++ .{try p.source(.first)};
             while (p.peek().is("JOIN") or p.peek().is("LEFT") or p.peek().is("INNER") or p.peek().is("CROSS")) {
-                const outer = p.accept("LEFT");
-                if (outer) _ = p.accept("OUTER") else if (!p.accept("INNER")) _ = p.accept("CROSS");
+                const join: Join = if (p.accept("LEFT")) left: {
+                    _ = p.accept("OUTER");
+                    break :left .left;
+                } else if (p.accept("CROSS")) .cross else inner: {
+                    _ = p.accept("INNER");
+                    break :inner .inner;
+                };
                 try p.expect("JOIN");
-                sources = sources ++ .{try p.source(outer)};
+                sources = sources ++ .{try p.source(join)};
             }
         }
         const where: ?Expr = if (p.accept("WHERE")) try p.expr() else null;
@@ -1014,22 +1037,24 @@ const Parser = struct {
 
     /// A table or WITH name and its alias. The only marker that may
     /// follow them is `@index(name)`, naming an index of that same table.
-    fn source(p: *Parser, outer: bool) Refused!Source {
+    fn source(p: *Parser, join: Join) Refused!Source {
         const written = try p.name();
         const defined = for (p.defined) |each| {
             if (std.mem.eql(u8, each, written)) break true;
         } else false;
         if (!defined and !isTable(written)) return p.refuseWith("rsql: no table named " ++ written);
         const alias = if (p.accept("AS")) try p.name() else if (p.peek().kind == .word and !isGrammarWord(p.peek().text)) p.next().text else written;
+        var index: ?[]const u8 = null;
         if (p.peek().kind == .marker) {
             if (!std.mem.eql(u8, p.next().text, "@index")) return p.refuseWith("rsql: only @index(name) follows a table");
             try p.expectSymbol("(");
-            const index = try p.name();
+            const named = try p.name();
             try p.expectSymbol(")");
-            if (defined or !isIndexOf(written, index)) return p.refuseWith("rsql: @index names an index of its own table, and " ++ written ++ " has no index " ++ index);
+            if (defined or !isIndexOf(written, named)) return p.refuseWith("rsql: @index names an index of its own table, and " ++ written ++ " has no index " ++ named);
+            index = named;
         }
         const on: ?Expr = if (p.accept("ON")) try p.expr() else null;
-        return .{ .table = written, .alias = alias, .defined = defined, .outer = outer, .on = on };
+        return .{ .table = written, .alias = alias, .defined = defined, .join = join, .index = index, .on = on };
     }
 
     fn expr(p: *Parser) Refused!Expr {
@@ -1144,6 +1169,7 @@ const Parser = struct {
                     return .other;
                 }
                 const inner = try p.expr();
+                if (p.peek().isSymbol(",")) return p.refuseWith(row_value_message);
                 try p.expectSymbol(")");
                 return inner;
             },
@@ -1234,6 +1260,7 @@ const Parser = struct {
             return .other;
         }
         if (std.mem.eql(u8, marker_name, "index")) return p.refuseWith("rsql: @index(name) stands only after its table");
+        if (std.mem.eql(u8, marker_name, "after")) return p.after();
         if (std.mem.eql(u8, marker_name, "session")) {
             try p.expectSymbol("(");
             const token = p.next();
@@ -1250,6 +1277,28 @@ const Parser = struct {
         if (arguments.len != arity) return p.refuseWith(std.fmt.comptimePrint("rsql: {s} takes {d} arguments", .{ written, arity }));
         return .other;
     }
+
+    /// `@after`'s arguments: k qualified columns, then k parameters ?N,
+    /// k at least 1.
+    fn after(p: *Parser) Refused!Expr {
+        const refused = "rsql: @after takes k qualified columns, then k parameters ?N";
+        try p.expectSymbol("(");
+        var columns: []const Column = &.{};
+        var parameters: []const usize = &.{};
+        while (true) {
+            const token = p.next();
+            if (token.kind == .parameter) {
+                parameters = parameters ++ .{try p.parameter(token)};
+            } else {
+                if (token.kind != .word or isGrammarWord(token.text) or parameters.len != 0 or !p.acceptSymbol(".")) return p.refuseWith(refused);
+                columns = columns ++ .{Column{ .table = token.text, .name = try p.name() }};
+            }
+            if (!p.acceptSymbol(",")) break;
+        }
+        try p.expectSymbol(")");
+        if (columns.len == 0 or columns.len != parameters.len) return p.refuseWith(refused);
+        return .{ .after = .{ .columns = columns, .parameters = parameters } };
+    }
 };
 
 /// The first of `read` that an UPDATE of `table` reads after an earlier
@@ -1263,6 +1312,9 @@ fn readsAssigned(comptime read: []const Column, comptime table: []const u8, comp
     }
     return null;
 }
+
+/// The refusal of a row value, which names the portable form.
+const row_value_message = "rsql: a row value is outside the grammar; write a keyset as an rsql.Page, with @after";
 
 fn fieldCount(comptime T: type) usize {
     return @typeInfo(T).@"struct".field_names.len;
@@ -1612,7 +1664,7 @@ fn tiedRefs(comptime queries: []const Query) []const bool {
 /// See `tiedRefs`: whether a conjunct of `ref`'s query ties it.
 fn tiesRef(comptime queries: []const Query, comptime refs: []const Ref, comptime tied: []const bool, comptime ref: Ref) bool {
     const query = queries[ref.query];
-    for (query.sources, 0..) |source, s| if (source.on) |on| if (!source.outer or s == ref.source) {
+    for (query.sources, 0..) |source, s| if (source.on) |on| if (source.join != .left or s == ref.source) {
         for (conjuncts(on)) |term| if (equates(queries, refs, tied, ref, term)) return true;
     };
     if (query.where) |where| for (conjuncts(where)) |term| if (equates(queries, refs, tied, ref, term)) return true;
@@ -1690,7 +1742,7 @@ fn pinsOneRow(comptime core: Core) bool {
         const Term = struct { condition: Expr, only: ?usize };
         var terms: []const Term = &.{};
         for (core.sources, 0..) |source, index| if (source.on) |on| {
-            for (conjuncts(on)) |condition| terms = terms ++ .{Term{ .condition = condition, .only = if (source.outer) index else null }};
+            for (conjuncts(on)) |condition| terms = terms ++ .{Term{ .condition = condition, .only = if (source.join == .left) index else null }};
         };
         if (core.where) |where| for (conjuncts(where)) |condition| {
             terms = terms ++ .{Term{ .condition = condition, .only = null }};
@@ -1854,6 +1906,7 @@ fn expressionMarker(comptime name: []const u8) ?ExpressionMarker {
 }
 
 fn marker(comptime name: []const u8, comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "after")) return renderAfterSqlite(arguments, text);
     const kind = expressionMarker(name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
     if (arguments.len != kind.arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{kind.arity}) ++ " arguments: " ++ text);
     var out: []const u8 = "";
@@ -2097,6 +2150,10 @@ const MysqlRenderer = struct {
             if (std.mem.eql(u8, name, "session")) try r.range(arguments[0][0], arguments[0][1]);
             return end + 1;
         }
+        if (std.mem.eql(u8, name, "after")) {
+            try r.after(arguments);
+            return end + 1;
+        }
         const kind = expressionMarker(name) orelse return r.refuse("rsql: unknown marker @" ++ name);
         if (arguments.len != kind.arity) return r.refuse(std.fmt.comptimePrint("rsql: @{s} takes {d} arguments", .{ name, kind.arity }));
         var from: usize = 0;
@@ -2117,6 +2174,30 @@ const MysqlRenderer = struct {
         }
         r.emit(kind.mysql[from..]);
         return end + 1;
+    }
+
+    /// `@after(c1..ck,?a1..?ak)` expanded, since MySQL seeks only a row
+    /// value's equality prefix: `c1>?a1` for one column, else
+    /// `(c1>?a1 OR (c1=?a1 AND c2>?a2) OR ...)`.
+    fn after(r: *MysqlRenderer, arguments: []const [2]usize) Refused!void {
+        if (arguments.len < 2 or arguments.len % 2 != 0) return r.refuse("rsql: @after takes k columns, then k parameters");
+        const k = arguments.len / 2;
+        if (k > 1) r.emit("(");
+        for (0..k) |last| {
+            if (last != 0) r.emit(" OR ");
+            if (k > 1 and last != 0) r.emit("(");
+            for (0..last) |i| {
+                try r.range(arguments[i][0], arguments[i][1]);
+                r.emit("=");
+                try r.range(arguments[k + i][0], arguments[k + i][1]);
+                r.emit(" AND ");
+            }
+            try r.range(arguments[last][0], arguments[last][1]);
+            r.emit(">");
+            try r.range(arguments[k + last][0], arguments[k + last][1]);
+            if (k > 1 and last != 0) r.emit(")");
+        }
+        if (k > 1) r.emit(")");
     }
 
     /// A character set argument: one literal, held to `characterSet`.
@@ -2168,6 +2249,25 @@ fn argumentRanges(comptime tokens: []const Token, comptime open: usize, comptime
             }
         }
         return ranges ++ .{[2]usize{ start, close }};
+    }
+}
+
+/// SQLite's spelling of `@after`: `c1>?a1` for one column, else the row
+/// value `(c1,..,ck)>(?a1,..,?ak)`, which SQLite seeks on after the
+/// equality prefix (`whereRangeVectorLen`) and also tests on every row it
+/// walks.
+fn renderAfterSqlite(comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
+    comptime {
+        if (arguments.len < 2 or arguments.len % 2 != 0) @compileError("rsql: @after takes k columns, then k parameters: " ++ text);
+        const k = arguments.len / 2;
+        if (k == 1) return arguments[0] ++ ">" ++ arguments[1];
+        var columns: []const u8 = "";
+        var parameters: []const u8 = "";
+        for (0..k) |i| {
+            columns = columns ++ (if (i == 0) "" else ",") ++ arguments[i];
+            parameters = parameters ++ (if (i == 0) "" else ",") ++ arguments[k + i];
+        }
+        return "(" ++ columns ++ ")>(" ++ parameters ++ ")";
     }
 }
 
@@ -2257,6 +2357,381 @@ fn skipSpace(comptime text: []const u8, comptime from: usize) usize {
     var index = from;
     while (index < text.len and std.ascii.isWhitespace(text[index])) index += 1;
     return index;
+}
+
+// Pages. A Full list's rows are a keyset-paged read of one Session: each
+// chunk starts after the last row the one before took. A Page derives that
+// read from the index each of its arms walks, so the key is written once,
+// in the schema's index, and never again by hand: its columns, the WHERE
+// that seeks to it, the ORDER BY, the next chunk's Args, and the check that
+// rows ascend all come from it.
+
+/// Where an arm's rows come from, in key order.
+pub const Ordered = union(enum) {
+    /// A named index in `schema.indexes`; its table is the arm's table.
+    index: []const u8,
+    /// A WITHOUT ROWID table's primary key, the table's own B-tree. No
+    /// `@index` renders: SQLite cannot name it.
+    primary_key: []const u8,
+};
+
+/// An index column after the Session column that an arm fixes to a
+/// constant, e.g. core_command_target_order's `kind`.
+pub const Fixed = struct { column: []const u8, value: []const u8 };
+
+/// One table's rows of a list.
+pub const Arm = struct {
+    on: Ordered,
+    alias: []const u8,
+    /// The index columns after column 0, in index order.
+    fixed: []const Fixed = &.{},
+    /// Rui SQL: the result columns after the key, which the Page selects
+    /// first. Correlated subqueries are allowed; the plan test refuses a
+    /// SCAN or a temporary B-tree in any of them.
+    columns: []const u8,
+    /// Rui SQL: LEFT JOINs only (`pageError`). There is no `where`:
+    /// nothing but the index's prefix, its predicate and `@after`
+    /// constrains the walked table.
+    joins: []const u8 = "",
+};
+
+pub const PageSpec = struct {
+    /// One arm per table; two or more merge by the key (UNION ALL).
+    arms: []const Arm,
+    /// Its first fields are the key, named as arm 0's key columns; the
+    /// first is `Positive`.
+    Row: type,
+    /// The rows a chunk takes; the text reads one more (LIMIT take+1).
+    take: u16,
+};
+
+/// What a Page walks: the data each engine's plan test formats its
+/// expectation from, and what `next` compares.
+pub const Walk = struct {
+    pub const Arm = struct {
+        table: []const u8,
+        alias: []const u8,
+        /// null for a primary key.
+        index: ?[]const u8,
+        /// Column 0 (bound to ?1, the Session), then the fixed columns.
+        prefix: []const []const u8,
+        /// This arm's key columns, in index order, without DESC.
+        key: []const []const u8,
+        /// Every key column DESC: the engine walks the index backward for
+        /// the list's ascending order.
+        backward: bool,
+    };
+    /// The key's names: the Row's first fields, ORDER BY, and Args'
+    /// fields after `session`.
+    names: []const []const u8,
+    arms: []const Walk.Arm,
+};
+
+/// A keyset-paged read of a Session's list, derived from one index per
+/// arm. It is a typed read: it holds every declaration `Read` makes, and
+/// `Access.readEach` runs it. Per arm it renders
+///
+///   SELECT <alias>.<key_i> AS <name_i>,..,<columns>
+///   FROM <table> <alias>[ @index(<index>)] <joins>
+///   WHERE <alias>.<column 0>=?1[ AND <alias>.<fixed>=<value>..]
+///     [ AND <the index's predicate, its columns qualified by alias>]
+///     AND @after(<alias>.<key_1>,..,?2,..)
+///
+/// joined by UNION ALL, then ORDER BY <names> LIMIT <take+1>.
+///
+/// Gates, all comptime unless noted:
+/// - `keysetOf`: the index exists on its table (a primary key, on a
+///   WITHOUT ROWID table); `fixed` names the columns after column 0 in
+///   order; the key is non-empty, of `.int` columns, all ASC or all DESC;
+///   every key column after the first is NOT NULL in the schema, or the
+///   index's predicate has `<col> IS NOT NULL` as a conjunct; every arm's
+///   key has arm 0's length; the Row's key fields are `Positive` or u64,
+///   the first `Positive`, so Args' zero default precedes every row. A row
+///   whose first key column is NULL is outside every range: the list's
+///   first read must account for such rows (Messages' does).
+/// - `Read`'s own checks on the rendered text: portability, ?1..?N, Row
+///   columns in order (so the Row leads with the key), compound.
+/// - `pageError` on the parsed tree: each arm's first source is its walked
+///   table under its walked index, and every later source is a LEFT JOIN.
+///   A missing joined row reads as NULLs, which a text field
+///   (`protocol.Bounded`) reads as empty and every other field that is
+///   not optional refuses (`CorruptStore`; an enum, as no tag), so a list
+///   whose joined fields are all text checks them itself
+///   (`report.Interruptions.check`).
+/// - run time, every row: `next` refuses a row not strictly after the last
+///   one taken, the look-ahead row included.
+pub fn Page(comptime spec: PageSpec) type {
+    const walk = comptime switch (keysetOf(spec)) {
+        .refused => |message| @compileError(message),
+        .walk => |walk| walk,
+    };
+    const text = comptime pageText(spec, walk);
+    comptime if (pageError(text, walk)) |message| @compileError(message ++ ": " ++ text);
+    const R = Read(.{
+        .sql = text,
+        .Args = KeyArgs(walk.names),
+        .Row = spec.Row,
+        .cardinality = .each,
+        .compound = spec.arms.len > 1,
+    });
+    return struct {
+        pub const kind = R.kind;
+        /// What `isStatement` checks this type was made from: its text is
+        /// a `Read`'s, checked as one.
+        pub const made_from = spec;
+        pub const Args = R.Args;
+        pub const Row = R.Row;
+        pub const cardinality = R.cardinality;
+        pub const Result = R.Result;
+        pub const sql = R.sql;
+        pub const mysql = R.mysql;
+        pub const uses_now = R.uses_now;
+        pub const single_row = R.single_row;
+
+        pub const page_walk: Walk = walk;
+        pub const take: u16 = spec.take;
+        /// The visitor limit `Access.readEach` takes: the text's LIMIT.
+        pub const limit: u16 = spec.take + 1;
+
+        /// The Args of the chunk after `row`: its key, with `after`'s
+        /// Session. Null when `row`'s key is not strictly greater than
+        /// `after`'s, which a sound Store never returns: the caller answers
+        /// `CorruptStore`. Called on every row a chunk sees, the look-ahead
+        /// row included, so every adjacent pair of the (merged) stream is
+        /// compared, chunk boundaries too.
+        pub fn next(after: Args, row: *const Row) ?Args {
+            var result: Args = .{ .session = after.session };
+            var order: std.math.Order = .eq;
+            inline for (walk.names) |name| {
+                const value = keyValue(@field(row.*, name));
+                @field(result, name) = value;
+                if (order == .eq) order = std.math.order(value, @field(after, name));
+            }
+            return if (order == .gt) result else null;
+        }
+    };
+}
+
+fn keyValue(value: anytype) u64 {
+    return if (@TypeOf(value) == Positive) value.get() else value;
+}
+
+/// Why `spec` is not a Page, or null: `keysetOf`'s refusal, then
+/// `pageError`'s, then `Read`'s, as `Page` would fail the build.
+pub fn pageSpecError(comptime spec: PageSpec) ?[]const u8 {
+    comptime {
+        const walk = switch (keysetOf(spec)) {
+            .refused => |message| return message,
+            .walk => |walk| walk,
+        };
+        const text = pageText(spec, walk);
+        if (pageError(text, walk)) |message| return message;
+        return switch (check(.read, text, KeyArgs(walk.names), spec.Row, spec.arms.len > 1)) {
+            .refused => |message| message,
+            .accepted => null,
+        };
+    }
+}
+
+const Keyset = union(enum) { refused: []const u8, walk: Walk };
+
+/// An arm's walked rows: its table, the index (null for a primary key),
+/// that index's columns and its predicate.
+const Walked = struct { table: []const u8, index: ?[]const u8, columns: []const []const u8, where: ?[]const u8 };
+
+fn walkedBy(comptime on: Ordered) union(enum) { refused: []const u8, walked: Walked } {
+    switch (on) {
+        .index => |name| {
+            for (schema.indexes) |index| if (std.mem.eql(u8, index.name, name))
+                return .{ .walked = .{ .table = index.table, .index = name, .columns = index.columns, .where = index.where } };
+            return .{ .refused = "rsql: a Page walks an index of the schema, and there is none named " ++ name };
+        },
+        .primary_key => |name| {
+            for (schema.tables) |table| if (std.mem.eql(u8, table.name, name)) {
+                if (!table.without_rowid) return .{ .refused = "rsql: a Page walks the primary key only of a WITHOUT ROWID table, and " ++ name ++ " has rowids" };
+                return .{ .walked = .{ .table = name, .index = null, .columns = table.primary_key, .where = null } };
+            };
+            return .{ .refused = "rsql: no table named " ++ name };
+        },
+    }
+}
+
+fn schemaColumn(comptime table: []const u8, comptime name: []const u8) ?schema.Column {
+    for (schema.tables) |candidate| if (std.mem.eql(u8, candidate.name, table)) {
+        for (candidate.columns) |column| if (std.mem.eql(u8, column.name, name)) return column;
+    };
+    return null;
+}
+
+/// Whether `predicate` has `term` as a top-level conjunct, as written.
+fn states(comptime predicate: ?[]const u8, comptime term: []const u8) bool {
+    var terms = std.mem.splitSequence(u8, predicate orelse return false, " AND ");
+    while (terms.next()) |conjunct| if (std.mem.eql(u8, std.mem.trim(u8, conjunct, " "), term)) return true;
+    return false;
+}
+
+/// Reads each arm's index (or primary key) from `schema` and splits its
+/// columns into prefix and key. Holds the `keysetOf` gates (see `Page`).
+fn keysetOf(comptime spec: PageSpec) Keyset {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        if (spec.arms.len == 0) return .{ .refused = "rsql: a Page has at least one arm" };
+        if (spec.take == 0) return .{ .refused = "rsql: a Page takes at least one row" };
+        var arms: []const Walk.Arm = &.{};
+        for (spec.arms) |arm| {
+            const walked = switch (walkedBy(arm.on)) {
+                .refused => |message| return .{ .refused = message },
+                .walked => |walked| walked,
+            };
+            const after_prefix = 1 + arm.fixed.len;
+            if (walked.columns.len <= after_prefix) return .{ .refused = "rsql: a Page's index has key columns after its Session column and fixed columns: " ++ (walked.index orelse walked.table) };
+            for (arm.fixed, 1..) |fixed, i| if (!std.mem.eql(u8, fixed.column, walked.columns[i]))
+                return .{ .refused = "rsql: a Page's fixed columns are its index's columns after the first, in order, and " ++ fixed.column ++ " is not" };
+            var key: []const []const u8 = &.{};
+            var descending: ?bool = null;
+            for (walked.columns[after_prefix..], 0..) |written, k| {
+                const desc = std.mem.endsWith(u8, written, " DESC");
+                const name = if (desc) written[0 .. written.len - " DESC".len] else written;
+                if (descending) |previous| if (previous != desc) return .{ .refused = "rsql: a Page's key is all ascending or all descending" };
+                descending = desc;
+                const column = schemaColumn(walked.table, name) orelse return .{ .refused = "rsql: no column " ++ name ++ " in " ++ walked.table };
+                if (column.type != .int) return .{ .refused = "rsql: a Page's key columns are integers, and " ++ name ++ " is not" };
+                if (k > 0 and column.nullable and !states(walked.where, name ++ " IS NOT NULL"))
+                    return .{ .refused = "rsql: a Page's key column after the first is NOT NULL, or its index's predicate states it, and " ++ name ++ " is neither" };
+                key = key ++ .{name};
+            }
+            if (arms.len > 0 and key.len != arms[0].key.len) return .{ .refused = "rsql: every arm of a Page has a key of one length" };
+            arms = arms ++ .{Walk.Arm{
+                .table = walked.table,
+                .alias = arm.alias,
+                .index = walked.index,
+                .prefix = walked.columns[0..after_prefix],
+                .key = key,
+                .backward = descending.?,
+            }};
+        }
+        const key_names = arms[0].key;
+        const info = @typeInfo(spec.Row).@"struct";
+        if (info.field_types.len < key_names.len) return .{ .refused = "rsql: a Page's Row starts with its key" };
+        for (info.field_types[0..key_names.len], 0..) |Field, k| {
+            if (k == 0 and Field != Positive) return .{ .refused = "rsql: a Page's Row starts with its first key column, a Positive, so the zero key is before every row" };
+            if (Field != Positive and Field != u64) return .{ .refused = "rsql: a Page's key fields are Positive or u64" };
+        }
+        return .{ .walk = .{ .names = key_names, .arms = arms } };
+    }
+}
+
+/// The Rui SQL of a Page, as `Page` shows it.
+fn pageText(comptime spec: PageSpec, comptime walk: Walk) []const u8 {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var text: []const u8 = "";
+        for (spec.arms, walk.arms, 0..) |arm, path, i| {
+            const a = arm.alias;
+            text = text ++ (if (i == 0) "SELECT " else " UNION ALL SELECT ");
+            for (path.key, walk.names, 0..) |column, name, k| text = text ++ (if (k == 0) "" else ",") ++ a ++ "." ++ column ++ " AS " ++ name;
+            if (arm.columns.len != 0) text = text ++ "," ++ arm.columns;
+            text = text ++ " FROM " ++ path.table ++ " " ++ a;
+            if (path.index) |index| text = text ++ " @index(" ++ index ++ ")";
+            const joins = std.mem.trim(u8, arm.joins, " ");
+            if (joins.len != 0) text = text ++ " " ++ joins;
+            text = text ++ " WHERE " ++ a ++ "." ++ path.prefix[0] ++ "=?1";
+            for (arm.fixed) |fixed| text = text ++ " AND " ++ a ++ "." ++ fixed.column ++ "=" ++ fixed.value;
+            const walked = walkedBy(arm.on).walked;
+            if (walked.where) |where| text = text ++ " AND " ++ qualify(a, path.table, where);
+            text = text ++ " AND @after(";
+            for (path.key) |column| text = text ++ a ++ "." ++ column ++ ",";
+            for (1..path.key.len + 1) |k| text = text ++ std.fmt.comptimePrint("?{d}", .{k + 1}) ++ (if (k == path.key.len) ")" else ",");
+        }
+        text = text ++ " ORDER BY ";
+        for (walk.names, 0..) |name, k| text = text ++ (if (k == 0) "" else ",") ++ name;
+        return text ++ std.fmt.comptimePrint(" LIMIT {d}", .{@as(u32, spec.take) + 1});
+    }
+}
+
+/// `predicate` (an index's Rui SQL `where`) with each bare column of
+/// `table` qualified by `alias`, so a joined table's same-named column
+/// cannot capture it; in parentheses when it holds an OR.
+fn qualify(comptime alias: []const u8, comptime table: []const u8, comptime predicate: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(100 * predicate.len + 10_000);
+        var out: []const u8 = "";
+        var start: usize = 0;
+        var index: usize = 0;
+        var any_or = false;
+        while (index < predicate.len) {
+            const byte = predicate[index];
+            if (byte == '\'') {
+                index = literalEnd(predicate, index);
+                continue;
+            }
+            if (std.ascii.isDigit(byte)) {
+                index = wordEnd(predicate, index);
+                continue;
+            }
+            if (!isWordStart(byte)) {
+                index += 1;
+                continue;
+            }
+            const end = wordEnd(predicate, index);
+            const word = predicate[index..end];
+            if (std.ascii.eqlIgnoreCase(word, "OR")) any_or = true;
+            const after_dot_or_marker = index > 0 and (predicate[index - 1] == '.' or predicate[index - 1] == '@');
+            const called = end < predicate.len and (predicate[end] == '(' or predicate[end] == '.');
+            if (!after_dot_or_marker and !called and schema.hasColumn(table, word)) {
+                out = out ++ predicate[start..index] ++ alias ++ "." ++ word;
+                start = end;
+            }
+            index = end;
+        }
+        const qualified = out ++ predicate[start..];
+        return if (any_or) "(" ++ qualified ++ ")" else qualified;
+    }
+}
+
+/// `struct { session: []const u8, <name>: u64 = 0, ... }`, built with
+/// `@Struct` (as `command.CancelArgs` does), field defaults 0.
+fn KeyArgs(comptime key: []const []const u8) type {
+    var field_names: [key.len + 1][]const u8 = undefined;
+    var types: [key.len + 1]type = undefined;
+    var attrs: [key.len + 1]std.lang.Type.Struct.FieldAttributes = @splat(.{});
+    field_names[0] = "session";
+    types[0] = []const u8;
+    const zero: u64 = 0;
+    for (key, 1..) |name, i| {
+        field_names[i] = name;
+        types[i] = u64;
+        attrs[i] = .{ .default_value_ptr = &zero };
+    }
+    return @Struct(.auto, null, &field_names, &types, &attrs);
+}
+
+/// Why a Page's parsed text breaks its structure, or null: for each
+/// compound core (arm) i, `sources[0]` is `walk.arms[i].table` with
+/// `.index == walk.arms[i].index`, and every `sources[1..]` has `.join ==
+/// .left`. The Page wrote the WHERE, so a list's `joins` holding a WHERE
+/// already failed to parse.
+fn pageError(comptime text: []const u8, comptime walk: Walk) ?[]const u8 {
+    comptime {
+        const parsed = switch (parse(text)) {
+            .refused => |message| return message,
+            .accepted => |parsed| parsed,
+        };
+        var arm: usize = 0;
+        for (parsed.queries) |query| if (query.parent == null) {
+            if (arm == walk.arms.len) return "rsql: a Page's text has a SELECT for each arm, and no more";
+            const path = walk.arms[arm];
+            const first = query.sources[0];
+            const same_index = if (path.index) |index| first.index != null and std.mem.eql(u8, first.index.?, index) else first.index == null;
+            if (!std.mem.eql(u8, first.table, path.table) or !std.mem.eql(u8, first.alias, path.alias) or !same_index)
+                return "rsql: a Page's arm reads its walked table first, under its walked index";
+            for (query.sources[1..]) |source| if (source.join != .left)
+                return "rsql: a Page's joins are LEFT JOINs, so every row of its walked range is a row of the list";
+            arm += 1;
+        };
+        if (arm != walk.arms.len) return "rsql: a Page's text has a SELECT for each arm";
+        return null;
+    }
 }
 
 test "each marker renders its SQLite spelling" {
@@ -2375,6 +2850,24 @@ test "a served slot never binds NULL, so NOT @served(x) agrees with rui_served" 
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 0));
 }
 
+test "MySQL expands @after, since it seeks only a row value's equality prefix" {
+    try std.testing.expectEqualStrings("SELECT 1 WHERE c.a>?", comptime mysqlRendering("SELECT 1 WHERE @after(c.a,?2)").rendered.prepared());
+    try std.testing.expectEqualStrings("SELECT 1 WHERE (c.a>? OR (c.a=? AND c.b>?))", comptime mysqlRendering("SELECT 1 WHERE @after(c.a,c.b,?2,?3)").rendered.prepared());
+    const three = comptime mysqlRendering("SELECT 1 WHERE @after(a,b,c,?1,?2,?3)").rendered;
+    try std.testing.expectEqualStrings("SELECT 1 WHERE (a>? OR (a=? AND b>?) OR (a=? AND b=? AND c>?))", comptime three.prepared());
+    // Each `?` binds its Args field, so ?1 binds three times.
+    var arguments: [6]usize = undefined;
+    var count: usize = 0;
+    for (three.slots) |slot| switch (slot) {
+        .argument => |k| {
+            arguments[count] = k;
+            count += 1;
+        },
+        else => unreachable,
+    };
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 1, 0, 1, 2 }, arguments[0..count]);
+}
+
 test "MySQL rendering divides integers with DIV" {
     try std.testing.expectEqualStrings("(mask DIV 2)%2=1", comptime render(.mysql, "(mask/2)%2=1"));
 }
@@ -2433,11 +2926,12 @@ test "statements are held to reserved names, rowid and comments" {
     try std.testing.expectEqualStrings("rsql: '--' comments hide text from this check; write the note as a Zig comment", comptime portabilityError("SELECT 1 -- call", reserved_names_checked).?);
 }
 
-test "only a type Read or Write made counts as a typed statement" {
+test "only a type Read, Write or Page made counts as a typed statement" {
     const Real = Read(.{ .sql = "SELECT content_id FROM content WHERE content_id=?1", .Args = struct { content_id: u64 }, .Row = struct { content_id: Positive }, .cardinality = .optional });
     const Written = Write(.{ .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2)", .Args = struct { turn_id: u64, session: SessionHead }, .expect = .{ .at_most = 1 } });
     try std.testing.expect(comptime isStatement(Real));
     try std.testing.expect(comptime isStatement(Written));
+    try std.testing.expect(comptime isStatement(TestCalls));
     // Open text in a struct shaped like a statement.
     try std.testing.expect(!comptime isStatement(struct {
         pub const kind: StatementKind = .write;
@@ -2759,6 +3253,121 @@ test "text outside the grammar is refused at the token the parser stopped at" {
     try std.testing.expectEqualStrings("rsql: expected the end at 'turn_id'", comptime statementError(.read, "SELECT turn_id FROM turn t turn_id", struct {}, Turn).?);
     try std.testing.expectEqualStrings("rsql: a WITH name is never a table's: session", comptime statementError(.read, "WITH session AS (SELECT 1 AS turn_id) SELECT turn_id FROM session", struct {}, Turn).?);
     try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, "WITH recent(turn_id) AS (SELECT turn_id FROM turn) SELECT turn_id FROM recent WHERE turn_id=?1", Id, Turn));
+}
+
+test "@after is one comparison for one key column, and a row value for more" {
+    try std.testing.expectEqualStrings("t.turn_id>?2", comptime render(.sqlite, "@after(t.turn_id,?2)"));
+    try std.testing.expectEqualStrings("(c.operation_id,c.call_ordinal)>(?2,?3)", comptime render(.sqlite, "@after(c.operation_id,c.call_ordinal,?2,?3)"));
+    const Turn = struct { turn_id: u64 };
+    const Two = struct { session: []const u8, a: u64, b: u64 };
+    try std.testing.expectEqualStrings(
+        "rsql: @after takes k qualified columns, then k parameters ?N",
+        comptime statementError(.read, "SELECT t.turn_id FROM turn t WHERE t.session_ref=?1 AND @after(t.turn_id,?2,?3)", Two, Turn).?,
+    );
+    try std.testing.expectEqualStrings(
+        "rsql: @after takes k qualified columns, then k parameters ?N",
+        comptime statementError(.read, "SELECT t.turn_id FROM turn t WHERE t.session_ref=?1 AND @after(turn_id,?2)", struct { session: []const u8, a: u64 }, Turn).?,
+    );
+    // A row value is refused, naming the form that seeks on every engine.
+    try std.testing.expectEqualStrings(row_value_message, comptime statementError(.read, "SELECT turn_id FROM turn WHERE session_ref=?1 AND (turn_id,input_cutoff)>(?2,?3)", Two, Turn).?);
+}
+
+/// Calls' Page, as `report.full_calls` declares it, with one column.
+const TestCalls = Page(.{
+    .arms = &.{.{ .on = .{ .index = "model_tool_call_session_order" }, .alias = "tool_call", .columns = "tool_call.item_ordinal" }},
+    .Row = struct { operation_id: Positive, call_ordinal: u64, item_ordinal: u64 },
+    .take = 8,
+});
+
+test "a Page derives its text, Args and next keyset from the index it walks" {
+    try std.testing.expectEqualStrings(
+        "SELECT tool_call.operation_id AS operation_id,tool_call.call_ordinal AS call_ordinal,tool_call.item_ordinal " ++
+            "FROM model_tool_call tool_call INDEXED BY model_tool_call_session_order " ++
+            "WHERE tool_call.session_ref=?1 AND (tool_call.operation_id,tool_call.call_ordinal)>(?2,?3) ORDER BY operation_id,call_ordinal LIMIT 9",
+        TestCalls.sql,
+    );
+    try std.testing.expectEqual(@as(u16, 9), TestCalls.limit);
+    const Results = Page(.{
+        .arms = &.{
+            .{ .on = .{ .index = "model_tool_call_session_results" }, .alias = "tool_call", .columns = "tool_call.call_ordinal" },
+            .{ .on = .{ .index = "action_operation_session_results" }, .alias = "action", .columns = "action.call_ordinal" },
+        },
+        .Row = struct { operation_id: Positive, acceptance_position: Positive, call_ordinal: u64 },
+        .take = 8,
+    });
+    try std.testing.expectEqualStrings(
+        "SELECT tool_call.operation_id AS operation_id,tool_call.acceptance_position AS acceptance_position,tool_call.call_ordinal " ++
+            "FROM model_tool_call tool_call INDEXED BY model_tool_call_session_results " ++
+            "WHERE tool_call.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL AND (tool_call.operation_id,tool_call.acceptance_position)>(?2,?3) " ++
+            "UNION ALL SELECT action.parent_operation_id AS operation_id,action.acceptance_position AS acceptance_position,action.call_ordinal " ++
+            "FROM action_operation action INDEXED BY action_operation_session_results " ++
+            "WHERE action.session_ref=?1 AND action.acceptance_position IS NOT NULL AND (action.parent_operation_id,action.acceptance_position)>(?2,?3) " ++
+            "ORDER BY operation_id,acceptance_position LIMIT 9",
+        Results.sql,
+    );
+    const Interruptions = Page(.{
+        .arms = &.{.{ .on = .{ .index = "core_command_target_order" }, .alias = "command", .fixed = &.{.{ .column = "kind", .value = "4" }}, .columns = "command.accepted" }},
+        .Row = struct { command_seq: Positive, accepted: bool },
+        .take = 256,
+    });
+    try std.testing.expectEqualStrings(
+        "SELECT command.command_seq AS command_seq,command.accepted FROM core_command command INDEXED BY core_command_target_order " ++
+            "WHERE command.target=?1 AND command.kind=4 AND command.command_seq>?2 ORDER BY command_seq LIMIT 257",
+        Interruptions.sql,
+    );
+    try std.testing.expect(Interruptions.page_walk.arms[0].prefix.len == 2);
+}
+
+test "a Page's next keyset is the row's key, and a row not after the last is refused" {
+    const after: TestCalls.Args = .{ .session = "s", .operation_id = 4, .call_ordinal = 2 };
+    const next = TestCalls.next(after, &.{ .operation_id = .of(4), .call_ordinal = 3, .item_ordinal = 0 }).?;
+    try std.testing.expectEqualStrings("s", next.session);
+    try std.testing.expectEqual(@as(u64, 4), next.operation_id);
+    try std.testing.expectEqual(@as(u64, 3), next.call_ordinal);
+    try std.testing.expectEqual(@as(u64, 0), TestCalls.next(.{ .session = "s" }, &.{ .operation_id = .of(5), .call_ordinal = 0, .item_ordinal = 0 }).?.call_ordinal);
+    try std.testing.expect(TestCalls.next(after, &.{ .operation_id = .of(5), .call_ordinal = 0, .item_ordinal = 0 }) != null);
+    try std.testing.expect(TestCalls.next(after, &.{ .operation_id = .of(4), .call_ordinal = 2, .item_ordinal = 0 }) == null);
+    try std.testing.expect(TestCalls.next(after, &.{ .operation_id = .of(3), .call_ordinal = 9, .item_ordinal = 0 }) == null);
+}
+
+test "a Page refuses a key or a join that would let a chunk read rows it does not take" {
+    const CallKey = struct { operation_id: Positive, call_ordinal: u64 };
+    const calls: Ordered = .{ .index = "model_tool_call_session_order" };
+    try std.testing.expectEqualStrings("rsql: a Page's joins are LEFT JOINs, so every row of its walked range is a row of the list", comptime pageSpecError(.{
+        .arms = &.{.{ .on = calls, .alias = "tool_call", .columns = "", .joins = "CROSS JOIN content name_content ON name_content.content_id=tool_call.name_content_id" }},
+        .Row = CallKey,
+        .take = 8,
+    }).?);
+    try std.testing.expectEqualStrings("rsql: expected the end at 'WHERE'", comptime pageSpecError(.{
+        .arms = &.{.{ .on = calls, .alias = "tool_call", .columns = "", .joins = "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id WHERE name_content.private=0" }},
+        .Row = CallKey,
+        .take = 8,
+    }).?);
+    try std.testing.expectEqualStrings("rsql: a Page's Row starts with its first key column, a Positive, so the zero key is before every row", comptime pageSpecError(.{
+        .arms = &.{.{ .on = calls, .alias = "tool_call", .columns = "" }},
+        .Row = struct { operation_id: u64, call_ordinal: u64 },
+        .take = 8,
+    }).?);
+    try std.testing.expectEqualStrings("rsql: a Page's key column after the first is NOT NULL, or its index's predicate states it, and position is neither", comptime pageSpecError(.{
+        .arms = &.{.{ .on = .{ .index = "session_stop_exclusion" }, .alias = "stop", .columns = "" }},
+        .Row = struct { admission_cutoff: Positive, position: u64 },
+        .take = 8,
+    }).?);
+    try std.testing.expectEqualStrings("rsql: a Page's fixed columns are its index's columns after the first, in order, and command_seq is not", comptime pageSpecError(.{
+        .arms = &.{.{ .on = .{ .index = "core_command_target_order" }, .alias = "command", .fixed = &.{.{ .column = "command_seq", .value = "1" }}, .columns = "" }},
+        .Row = struct { kind: Positive },
+        .take = 8,
+    }).?);
+    try std.testing.expectEqualStrings("rsql: every arm of a Page has a key of one length", comptime pageSpecError(.{
+        .arms = &.{ .{ .on = calls, .alias = "tool_call", .columns = "" }, .{ .on = .{ .index = "action_operation_session_order" }, .alias = "action", .columns = "" } },
+        .Row = CallKey,
+        .take = 8,
+    }).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime pageSpecError(.{
+        .arms = &.{.{ .on = calls, .alias = "tool_call", .columns = "", .joins = "LEFT JOIN content name_content ON name_content.content_id=tool_call.name_content_id" }},
+        .Row = CallKey,
+        .take = 8,
+    }));
 }
 
 test "row_number() OVER (ORDER BY ...) is the one window" {
