@@ -475,7 +475,8 @@ def table(pre_split):
         if item.kind != "test" or not item.name:
             continue
         if id(item) not in sqlite_only:
-            rows.append((item.name, "tests.zig", "every engine" if id(item) in opens else "opens no Store"))
+            engines = id(item) in opens or "store_testing.forEachEngine(" in item.text
+            rows.append((item.name, "tests.zig", "every engine" if engines else "opens no Store"))
             continue
         reached, frontier = [item], list(refs[id(item)])
         while frontier:
