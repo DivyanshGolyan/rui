@@ -3,6 +3,7 @@
 runtimeDir, refusals as one `rui_start_error` line, and a clean exit when
 stdin closes (D5, D112, D118, D130, D136)."""
 
+import http.server
 import json
 import pathlib
 import socket
@@ -10,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import host_process
@@ -78,6 +80,32 @@ def refusal(process):
     lines = out.decode().splitlines()
     assert len(lines) == 1, (out, err)
     return json.loads(lines[0])["rui_start_error"]
+
+
+def mcp_server(names):
+    """A loopback MCP server whose tools/list names `names`."""
+    tools = [{"name": name, "inputSchema": {"type": "object"}} for name in names]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def mcp_entry(name, server):
+    return {"name": name, "url": f"http://127.0.0.1:{server.server_port}/mcp", "bearerToken": "t", "callTimeoutMs": 1000}
 
 
 def main():
@@ -165,7 +193,29 @@ def main():
         refused = refusal(process)
         assert refused["code"] == "launch_frame_invalid", refused
         assert message in refused["message"], refused
-    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, four refusals")
+
+    # MCP servers: the Host lists their tools before it serves; a name a
+    # server shares with a built-in refuses the start naming both; a server
+    # that is down does not stop it.
+    docs = mcp_server(["search"])
+    clash = mcp_server(["bash"])
+    mcp_root = root / "mcp"
+    mcp_root.mkdir(mode=0o700)
+    base = dict(good, store=str(root / "store5"), runtimeDir=str(mcp_root))
+    host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
+    wait_for_socket(mcp_root / "rui.sock", host)
+    host.stdin.close()
+    assert host.wait(timeout=30) == 0, output(host)
+    refused = refusal(launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs), mcp_entry("clash", clash)]))))
+    assert refused["code"] == "tool_name_collision", refused
+    assert "bash" in refused["message"] and "clash" in refused["message"], refused
+    docs.shutdown()
+    docs.server_close()
+    host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
+    wait_for_socket(mcp_root / "rui.sock", host)
+    host.stdin.close()
+    assert host.wait(timeout=30) == 0, output(host)
+    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, four refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 
 if __name__ == "__main__":

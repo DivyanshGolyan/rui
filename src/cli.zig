@@ -1570,7 +1570,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         bash_path,
         bash_timeout_ms,
         init.environ_map.get("HOME"),
-        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused } else null,
+        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice() } else null,
     ) catch |err| {
         // A launched Host stops when its stdin closes; that is its clean end.
         if (launched != null and err == error.EffectAwareShutdown) return;
