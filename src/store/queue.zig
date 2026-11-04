@@ -5,6 +5,11 @@
 //! can share a commit; any other request gets the Store handed over, and
 //! runs on its own thread. Bodies run one at a time, in arrival order: the
 //! exclusive access a lock gave, with no thread added for it.
+//!
+//! Writes the holder runs back to back form a batch (`Batch`): one
+//! transaction, each write in a savepoint of its own, one COMMIT. No writer
+//! hears its answer before that COMMIT, and when it fails every writer in
+//! the batch hears the failure.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -19,6 +24,15 @@ pub const Queue = struct {
     /// The thread that holds the Store, zero when none does. Safe builds
     /// check it before the connection, scratch or ids are touched.
     owner: std.atomic.Value(std.Thread.Id) = .init(0),
+    batch: Batch,
+
+    /// How the Store opens and commits a batch of writes. `finish` answers
+    /// whether the batch committed; when it did not, the Store is fenced.
+    pub const Batch = struct {
+        context: *anyopaque,
+        start: *const fn (*anyopaque) void,
+        finish: *const fn (*anyopaque) bool,
+    };
 
     /// One waiting caller's request, on its stack until `done`.
     pub const Job = struct {
@@ -34,6 +48,9 @@ pub const Queue = struct {
         /// Set by a holder that handed over the Store instead of running
         /// the body: the caller now holds it and runs its own.
         handed: bool = false,
+        /// Set by a holder whose batch failed to commit: the body's answer
+        /// never became durable.
+        lost: bool = false,
     };
 
     /// Bodies one holder runs for others before it hands the Store to the
@@ -41,8 +58,8 @@ pub const Queue = struct {
     const drain_limit = 64;
 
     /// The opening thread holds the Store until open returns.
-    pub fn init(io: std.Io) Queue {
-        return .{ .io = io, .held = true, .owner = .init(std.Thread.getCurrentId()) };
+    pub fn init(io: std.Io, batch: Batch) Queue {
+        return .{ .io = io, .held = true, .owner = .init(std.Thread.getCurrentId()), .batch = batch };
     }
 
     /// Ends `init`'s hold once the Store is open.
@@ -61,15 +78,18 @@ pub const Queue = struct {
         return @call(.auto, body, args);
     }
 
-    /// As `run`, for a write: a holder that finds it queued runs it on
-    /// its own thread, and the caller wakes to the answer.
+    /// As `run`, for a write, which joins a batch: a holder that finds it
+    /// queued runs it on its own thread, and the caller wakes to the answer
+    /// once the batch has committed. A batch that failed to commit answers
+    /// `lostAnswer`.
     pub noinline fn write(self: *Queue, comptime body: anytype, args: anytype) Answer(body) {
         var request: Write(body, @TypeOf(args)) = .{ .args = args, .job = .{ .run = Write(body, @TypeOf(args)).run, .own = false } };
         if (self.take(&request.job)) {
-            defer self.release();
-            return @call(.auto, body, args);
+            self.batch.start(self.batch.context);
+            const answer = @call(.auto, body, args);
+            return if (self.drain(true)) answer else lostAnswer(Answer(body), answer);
         }
-        return request.answer;
+        return if (request.job.lost) lostAnswer(Answer(body), request.answer) else request.answer;
     }
 
     /// As `call`, but when the body succeeds the caller keeps the Store
@@ -82,33 +102,87 @@ pub const Queue = struct {
         return answer;
     }
 
-    /// Runs the queued writes, up to `drain_limit`, then lets the Store go
-    /// or hands it to the next waiter.
+    /// Runs the queued writes, up to `drain_limit`, in batches, then lets
+    /// the Store go or hands it to the next waiter.
     pub fn release(self: *Queue) void {
+        _ = self.drain(false);
+    }
+
+    /// `release`, after a write of the holder's own when `open`: then the
+    /// answer is whether the batch that write joined committed.
+    noinline fn drain(self: *Queue, open: bool) bool {
         std.debug.assert(self.owned());
+        var batching = open;
+        var first = true;
+        var committed = true;
         var ran: u32 = 0;
+        // The batch's writers, answered once it commits.
+        var batched: ?*Job = null;
         while (true) {
             self.mutex.lockUncancelable(self.io);
-            const job = self.head orelse {
+            const next = self.head;
+            if (next) |job| if (!job.own and ran < drain_limit) {
+                self.pop();
+                self.mutex.unlock(self.io);
+                if (!batching) self.batch.start(self.batch.context);
+                batching = true;
+                job.run.?(job);
+                ran += 1;
+                job.next = batched;
+                batched = job;
+                continue;
+            };
+            if (batching) {
+                self.mutex.unlock(self.io);
+                const ok = self.batch.finish(self.batch.context);
+                if (first and open) committed = ok;
+                first = false;
+                batching = false;
+                answerBatch(self.io, batched, ok);
+                batched = null;
+                // More writes may have queued meanwhile.
+                continue;
+            }
+            const job = next orelse {
                 self.held = false;
                 self.owner.store(0, .monotonic);
                 self.mutex.unlock(self.io);
-                return;
+                return committed;
             };
-            self.head = job.next;
-            if (self.head == null) self.tail = null;
+            self.pop();
             self.mutex.unlock(self.io);
-            if (job.own or ran == drain_limit) {
-                self.owner.store(0, .monotonic);
-                job.handed = true;
-                job.done.set(self.io);
-                return;
-            }
-            job.run.?(job);
-            ran += 1;
-            // The caller may return once `done` is set: touch nothing after.
+            self.owner.store(0, .monotonic);
+            job.handed = true;
             job.done.set(self.io);
+            return committed;
         }
+    }
+
+    fn pop(self: *Queue) void {
+        const job = self.head.?;
+        self.head = job.next;
+        if (self.head == null) self.tail = null;
+    }
+
+    fn answerBatch(io: std.Io, batched: ?*Job, committed: bool) void {
+        var at = batched;
+        while (at) |job| {
+            // The caller may return once `done` is set: read `next` first.
+            at = job.next;
+            job.lost = !committed;
+            job.done.set(io);
+        }
+    }
+
+    /// What a write whose batch failed to commit answers: the failure its
+    /// entry point reports when it finds the Store fenced. A write that
+    /// already failed keeps its own error, which says more.
+    fn lostAnswer(comptime T: type, answer: T) T {
+        return switch (@typeInfo(T)) {
+            .error_union => if (answer) |_| error.StoreFenced else |err| err,
+            .@"enum", .@"union" => .infrastructure_failure,
+            else => @compileError("a write answers an error union or a reply with infrastructure_failure: " ++ @typeName(T)),
+        };
     }
 
     /// Takes the Store for good, to close it: nothing may be queued.
@@ -181,8 +255,9 @@ const Probe = struct {
     io: std.Io,
     log: [16]u8 = undefined,
     len: std.atomic.Value(usize) = .init(0),
+    lost: bool = false,
 
-    fn note(self: *Probe, mark: u8) error{Refused}!void {
+    fn note(self: *Probe, mark: u8) error{ Refused, StoreFenced }!void {
         self.log[self.len.fetchAdd(1, .monotonic)] = mark;
         if (mark == 'x') return error.Refused;
     }
@@ -196,6 +271,13 @@ const Probe = struct {
                 queue.release();
             },
         }
+    }
+
+    fn lose(self: *Probe, queue: *Queue) void {
+        queue.write(note, .{ self, 'e' }) catch |err| switch (err) {
+            error.StoreFenced => self.lost = true,
+            else => unreachable,
+        };
     }
 
     fn logged(self: *Probe) []const u8 {
@@ -215,7 +297,7 @@ fn waitQueued(queue: *Queue, count: usize) void {
 }
 
 test "a free Store runs the body on its caller, and a refusal lets it go" {
-    var queue: Queue = .init(std.testing.io);
+    var queue: Queue = .init(std.testing.io, Batches.none);
     queue.opened();
     var probe: Probe = .{ .io = std.testing.io };
     try queue.write(Probe.note, .{ &probe, 'a' });
@@ -227,7 +309,7 @@ test "a free Store runs the body on its caller, and a refusal lets it go" {
 
 test "the holder runs queued writes in order, and hands the Store to anything else" {
     const io = std.testing.io;
-    var queue: Queue = .init(io);
+    var queue: Queue = .init(io, Batches.none);
     queue.opened();
     var probe: Probe = .{ .io = io };
     try queue.callHeld(Probe.note, .{ &probe, 'a' });
@@ -249,4 +331,62 @@ test "the holder runs queued writes in order, and hands the Store to anything el
     fourth.join();
     try std.testing.expectEqualStrings("ahbcde", probe.logged());
     try std.testing.expect(!queue.held);
+}
+
+/// A test's batch hooks: counts the batches and their commits, and fails
+/// a commit on request.
+const Batches = struct {
+    started: u32 = 0,
+    finished: u32 = 0,
+    fail: bool = false,
+
+    var ignored: Batches = .{};
+    const none: Queue.Batch = hooks(&ignored);
+
+    fn hooks(self: *Batches) Queue.Batch {
+        return .{ .context = self, .start = start, .finish = finish };
+    }
+
+    fn start(context: *anyopaque) void {
+        const self: *Batches = @ptrCast(@alignCast(context));
+        self.started += 1;
+    }
+
+    fn finish(context: *anyopaque) bool {
+        const self: *Batches = @ptrCast(@alignCast(context));
+        self.finished += 1;
+        return !self.fail;
+    }
+};
+
+test "writes queued behind the holder share one batch and hear it fail together" {
+    const io = std.testing.io;
+    var batches: Batches = .{};
+    var queue: Queue = .init(io, batches.hooks());
+    queue.opened();
+    var probe: Probe = .{ .io = io };
+    // Alone, a write is a batch of one.
+    try queue.write(Probe.note, .{ &probe, 'a' });
+    try std.testing.expectEqual(@as(u32, 1), batches.finished);
+    // Three writes queue behind a held read and commit as one batch.
+    try queue.callHeld(Probe.note, .{ &probe, 'h' });
+    var threads: [3]std.Thread = undefined;
+    for (&threads, "bcd", 1..) |*thread, mark, queued| {
+        thread.* = try std.Thread.spawn(.{}, Probe.other, .{ &probe, &queue, mark, .write });
+        waitQueued(&queue, queued);
+    }
+    queue.release();
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqualStrings("ahbcd", probe.logged());
+    try std.testing.expectEqual(@as(u32, 2), batches.started);
+    try std.testing.expectEqual(@as(u32, 2), batches.finished);
+    // A commit that fails reaches every writer in its batch.
+    batches.fail = true;
+    try queue.callHeld(Probe.note, .{ &probe, 'i' });
+    const lost = try std.Thread.spawn(.{}, Probe.lose, .{ &probe, &queue });
+    waitQueued(&queue, 1);
+    queue.release();
+    lost.join();
+    try std.testing.expect(probe.lost);
+    try std.testing.expectError(error.StoreFenced, queue.write(Probe.note, .{ &probe, 'f' }));
 }
