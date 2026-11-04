@@ -228,6 +228,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 		if (this.#host) return Promise.resolve(this.#host);
 		const failed = this.#dead ?? (this.#closing ? new RuiUnavailableError("the Rui client is closed") : undefined);
 		if (failed) return Promise.reject(failed);
+		this.#restart?.ref();
 		return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
 	}
 
@@ -249,10 +250,13 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#scheduleRestart(): void {
+		// Once close has begun nothing may start again, whoever asked (an exit listener may close).
+		if (this.#closing) return;
 		const delay = this.#backoff;
 		this.#backoff = Math.min(this.#backoff * 2, MAX_RESTART_MS);
 		this.#restart = setTimeout(() => void this.#restartNow(), delay);
-		this.#restart.unref();
+		// An idle client does not keep the process alive; a call waiting for the restart does (see #ready).
+		if (this.#waiters.length === 0) this.#restart.unref();
 	}
 
 	async #restartNow(): Promise<void> {
@@ -399,4 +403,3 @@ function exitOf(child: ChildProcess): Promise<Exit> {
 	}
 	return new Promise((done) => child.once("exit", (code, signal) => done({ code, signal })));
 }
-

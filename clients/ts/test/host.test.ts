@@ -79,6 +79,25 @@ test("a crashed Host restarts and the call in flight is sent again", { skip }, a
 	}
 });
 
+test("an exit listener that closes the client stops the restart", { skip }, async () => {
+	const before = runtimeDirs();
+	const rui = await Rui.connect(options(newStore()));
+	// The client keeps nothing alive by itself (the child is unreferenced), so the test does.
+	const alive = setInterval(() => {}, 100);
+	try {
+		const closed = new Promise<void>((done) => rui.on("exit", () => void rui.close().then(done)));
+		process.kill(rui.pid!, "SIGKILL");
+		await closed;
+		// The first restart would have come 0.5 s after the exit.
+		await new Promise((done) => setTimeout(done, 1_500));
+		assert.equal(rui.pid, undefined);
+		assert.deepEqual([...runtimeDirs()].filter((name) => !before.has(name) && !name.startsWith("rui-ts-")), []);
+		await assert.rejects(hostInfo(rui), RuiUnavailableError);
+	} finally {
+		clearInterval(alive);
+	}
+});
+
 test("connect waits for the Store lock, then gives up with store_locked", { skip }, async () => {
 	const store = newStore();
 	const holder = await Rui.connect(options(store));
