@@ -342,8 +342,9 @@ def main(report_source):
         assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
         start_receipt = json.loads((workspace / "b-start.json").read_text())
         assert allocated(start_receipt) == session_b, start_receipt
+        # C1b's client product default is low, not the removed table's medium.
         assert start_receipt["configuration"] == {"provider": "codex", "model": "gpt-6-sol",
-            "reasoning_effort": "medium", "effort_source": "model_default"}, start_receipt
+            "reasoning_effort": "low", "effort_source": "model_default"}, start_receipt
         announcement = (workspace / "b-send.err").read_text()
         handle = re.fullmatch(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n", announcement)
         assert handle, announcement
@@ -687,7 +688,8 @@ def stdin_start_contract():
             (("--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "xhigh"), "gpt-6.1-sol", "xhigh", "flag"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "default"), "gpt-6.1-sol", "low", "flag"),
-            (("--model", "unlisted-model"), "unlisted-model", None, "model_default"),
+            # D229: an unlisted exact binding still admits the saved effort.
+            (("--model", "unlisted-model"), "unlisted-model", "high", "saved"),
         ):
             started = invoke("session", "start", "--store", store, "--workspace", state, *arguments,
                 input=b"report configuration")
@@ -697,6 +699,8 @@ def stdin_start_contract():
             assert list(start_receipt) == ["context", "configuration", "answer", "input", "queue"], start_receipt
             assert start_receipt["configuration"] == {"provider": "codex", "model": model,
                 "reasoning_effort": effort, "effort_source": source}, start_receipt
+            observed = fixture.command("session", "inspect", "--store", store, "--session", new_session)["session"]
+            assert observed["model"] == model and observed["reasoning_effort"] == effort, observed
             handle = start_receipt["context"]["key"]
             assert f"request: {handle} (inspect: rui request inspect {handle}; if unconfirmed: rui request recover {handle})\n".encode() in started.stderr, started
             replay = json.loads(invoke("request", "recover", handle).stdout)

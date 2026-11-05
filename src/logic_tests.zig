@@ -16,6 +16,7 @@ const cores = .{
     .{ "caller_exit.zig", @import("caller_exit.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
+    .{ "client_defaults.zig", @import("client_defaults.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
     .{ "codecs/json.zig", @import("codecs/json.zig") },

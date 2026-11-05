@@ -69,7 +69,7 @@ pub const Command = enum {
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}. --launch-frame reads the Store, the OpenAI key and the runtime directory from one frame on stdin instead, and the Host stops when stdin closes.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), repeatedChoice("provider", provider_name.Provider), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS"), flag("launch-frame") } ++ serve_test, .conflicts = endpoint_conflicts ++ launch_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
-            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default leaves each model at its own.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
+            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
@@ -79,7 +79,7 @@ pub const Command = enum {
 pub const compaction_policy =
     \\--compaction-trigger TOKENS|default sets a positive estimated context pressure threshold.
     \\--output-reservation TOKENS|default sets nonnegative extra compaction headroom, not a guaranteed output budget.
-    \\Omission preserves an existing Session's setting; default resets it to model policy.
+    \\Omission preserves an existing Session's setting; default resets it to client policy.
     \\Changes apply to new model requests. Requests already accepted keep their original settings, even when retried.
     \\
 ++ std.fmt.comptimePrint("A model Rui does not list is assumed to have a {d}-token context.", .{product_defaults.unlisted_context_window});
@@ -92,12 +92,12 @@ pub const label_help =
 ;
 
 pub const reasoning_help =
-    \\--reasoning-effort VALUE selects a model-supported effort; default clears the Session override.
-    \\Omission preserves an existing choice. New Sessions and resets use the model's catalog default.
+    \\--reasoning-effort VALUE selects a model-supported effort; default selects the client default.
+    \\Omission preserves an existing choice. New Sessions and resets prefer low, else the lowest listed effort.
     \\
-++ "Supported efforts are low, medium, high, xhigh and max" ++
-    (if (model_capability.ids_without_max_effort.len == 0) "" else " (except " ++ model_capability.ids_without_max_effort ++ ")") ++
-    ". No listed model supports none.\n" ++
+++ "Efforts depend on the model: none, low, medium, high, xhigh and max" ++
+    (if (model_capability.ids_without_max_effort.len == 0) "" else ". max is not listed for: " ++ model_capability.ids_without_max_effort) ++
+    ". The catalog lists which each model accepts.\n" ++
     \\The setting applies to new model requests, including compaction; retries keep their frozen effort.
     \\
 ;

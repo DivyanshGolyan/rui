@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_catalog = @import("../../tools.zig");
@@ -153,6 +154,8 @@ pub const CurrentConfiguration = struct {
     workspace_key: u64 = 0,
     /// Read only: the creator of an attached agent; absent for other Sessions.
     parent_ref: ?protocol.Bounded(protocol.session_id_bytes) = null,
+    /// Read only: the latest Operation's frozen effort, for pre-D111 null specs.
+    previous_reasoning_effort: ?protocol.ReasoningEffort = null,
 };
 
 /// The Session columns turn work, settlement and page cursors read, without
@@ -253,16 +256,18 @@ pub fn configurationBeforeWorkspace(
     if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
-    if (compact_at) |tokens| if (model_capability.find(model)) |known| {
-        if (tokens > known.context_window) return .compact_at_too_large;
+    if (compact_at) |tokens| if (model_catalog.find(model_catalog.shipped, model)) |known| {
+        if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // D111/D165: a null effort states "send none" and is accepted only for a
-    // model the catalog does not list; a listed model takes one of its values.
-    // So a saved null on a listed model can only predate D111 (see
-    // effectiveReasoningEffort), and no update creates a boundary from an
-    // effort back to none, which the openai-responses/2 codec cannot encode.
-    if (requested.reasoning_effort.state == .explicit_null and model_capability.find(model) != null) return .unsupported_reasoning_effort;
+    // A listed model with effort levels requires one of them. Models with no
+    // listed efforts can omit reasoning, but v2 cannot clear an assigned effort.
+    if (requested.reasoning_effort.state == .explicit_null) {
+        if (model_catalog.find(model_catalog.shipped, model)) |known| {
+            if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
+        }
+        if (current) |existing| if (effectiveReasoningEffort(existing) != null) return .unsupported_reasoning_effort;
+    }
     if (requested.reasoning_effort.state == .value) {
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
             return .unsupported_reasoning_effort;
@@ -271,12 +276,19 @@ pub fn configurationBeforeWorkspace(
     return null;
 }
 
-/// The effort a new Operation freezes: the Session's own (D111). A Session
-/// saved before D111 may hold null on a listed model, and its Operations
-/// froze the catalog default, so it keeps that default; configuration
-/// refuses null for a listed model, so no newer Session reaches it.
+/// D111/D209: an explicit spec wins. A pre-D111 null spec carries forward
+/// its last Operation's frozen effort, never a catalog or product default.
+/// With no earlier concrete effort, null still means unspecified.
 pub fn effectiveReasoningEffort(current: anytype) ?protocol.ReasoningEffort {
-    return current.reasoning_effort orelse model_capability.defaultReasoningEffort(current.model.slice());
+    return current.reasoning_effort orelse current.previous_reasoning_effort;
+}
+
+/// Both configuration reads and admission use the same durable legacy fact.
+/// The admission index bounds the lookup, including all-null Session histories.
+pub fn previousReasoningEffortSql(comptime session: []const u8) []const u8 {
+    return "CASE WHEN " ++ session ++ ".reasoning_effort IS NULL THEN " ++
+        "(SELECT o.reasoning_effort FROM model_operation o @index(model_operation_admission) WHERE o.session_ref=" ++
+        session ++ ".session_ref ORDER BY o.admission_position DESC LIMIT 1) END";
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -517,7 +529,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        "reasoning_effort,label,created_at,workspace_key,parent_ref FROM session WHERE session_ref=?1",
+        "reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,
