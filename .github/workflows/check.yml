@@ -292,6 +292,7 @@ jobs:
           password=$(openssl rand -hex 16)
           RUI_TEST_MYSQL_ROOT_PASSWORD="$password" nohup python3 -B tests/integration/mysql_server.py \
             start rui-mysql "$socket_dir" "$RUNNER_TEMP/mysql-started" > "$RUNNER_TEMP/mysql-start.log" 2>&1 &
+          RUI_TEST_REQUIRE_ENGINES="${RUI_TEST_REQUIRE_ENGINES:+$RUI_TEST_REQUIRE_ENGINES,}sqlite" \
           python3 -B tests/ci/live_engine_step.py export mysql \
             "$socket_dir/mysqld.sock" "$password" "$RUNNER_TEMP/mysql-dialect-check-record"
       - name: Use the verified producer artifact or compile locally

@@ -336,12 +336,14 @@ const ToolNameList = struct {
 fn configurationShape(comptime name: []const u8, comptime instructions: anytype, comptime output_schema: anytype) type {
     return struct {
         pub const openapi_name = name;
+        pub const openapi_optional_fields = .{"loaded_tools"};
         pub const openapi_shape = .{
             "{\"workspace\":",          State(Hole{ .string = protocol.max_workspace_bytes }, false),
             ",\"provider\":",           State(Hole{ .string = protocol.max_provider_bytes }, false),
             ",\"model\":",              State(Hole{ .string = protocol.max_model_bytes }, false),
             ",\"instructions\":",       instructions,
             ",\"tools\":",              State(ToolNameList, false),
+            ",\"loaded_tools\":",       State(ToolNameList, false),
             ",\"permission_mode\":",    State(Hole{ .string = 16 }, false),
             ",\"output_schema\":",      output_schema,
             ",\"compaction_trigger\":", State(Hole{ .string = 20 }, true),
@@ -507,7 +509,21 @@ pub const Document = struct {
     }
 
     fn typeSchema(d: *Document, comptime T: type) !Value {
-        if (@hasDecl(T, "openapi_shape")) return d.shapeSchema(T.openapi_shape);
+        if (@hasDecl(T, "openapi_shape")) {
+            var schema = try d.shapeSchema(T.openapi_shape);
+            if (@hasDecl(T, "openapi_optional_fields")) {
+                const required = &schema.object.getPtr("required").?.array;
+                inline for (T.openapi_optional_fields) |optional| {
+                    for (required.items, 0..) |field, index| {
+                        if (std.mem.eql(u8, field.string, optional)) {
+                            _ = required.orderedRemove(index);
+                            break;
+                        }
+                    }
+                }
+            }
+            return schema;
+        }
         if (T == protocol.WorkStateJson) return d.anyOf(&.{
             try d.shapeSchema(T.plain_shape),
             try d.shapeSchema(T.retrying_shape),

@@ -77,7 +77,7 @@ pub fn everMaskSql(comptime session: []const u8, comptime revision: []const u8) 
     comptime {
         var sum: []const u8 = "(0";
         for (std.enums.values(Tool)) |tool| sum = sum ++ std.fmt.comptimePrint(
-            "+CASE WHEN EXISTS(SELECT 1 FROM session_revision ever JOIN tool_set_member ever_member ON ever_member.tool_set_id=ever.tool_set_id " ++
+            "+CASE WHEN EXISTS(SELECT 1 FROM session_revision ever JOIN tool_set_member ever_member ON ever_member.tool_set_id=coalesce(ever.loaded_tool_set_id,ever.tool_set_id) " ++
                 "JOIN tool_record ever_tool ON ever_tool.tool_record_id=ever_member.tool_record_id " ++
                 "WHERE ever.session_ref={s} AND ever.revision<={s} AND ever_tool.name='{s}') THEN {d} ELSE 0 END",
             .{ session, revision, @tagName(tool), tool_catalog.toolBit(tool) },
@@ -86,12 +86,12 @@ pub fn everMaskSql(comptime session: []const u8, comptime revision: []const u8) 
     }
 }
 
-/// A Session's member named `name` in the catalog set `catalog`, as
-/// member `ordinal` of `set`. One row, or the catalog lacks it.
+/// A Session's member named `name` in the source set `source`, as
+/// member `ordinal` of `set`. One row, or the source lacks it.
 const insert_selected_member = rsql.Write(.{
     .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT ?1,?2,member.tool_record_id " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?3 AND tool.name=?4",
-    .Args = struct { set: u64, ordinal: u64, catalog: u64, name: []const u8 },
+    .Args = struct { set: u64, ordinal: u64, source: u64, name: []const u8 },
     .expect = .{ .counted = .{ .otherwise = error.CorruptStore } },
 });
 
@@ -305,6 +305,55 @@ pub const Selection = struct {
         while (each.next()) |name| digest.add(&catalog.digests[catalog.find(name) orelse return null]);
         return .{ .names = names, .digest = digest.final() };
     }
+
+    /// Selects from an already saved set, not today's catalog. The digest
+    /// and finishSelection's inserted members must use the same source.
+    pub fn ofSaved(a: anytype, source_set: u64, names: *const protocol.ToolsField) !Selection {
+        var selected: SavedSelection = .{ .names = names };
+        a.readEach(selection_records, .{ .set = source_set }, protocol.max_tools + 1, &selected);
+        try a.run();
+        if (selected.count != names.count) return error.CorruptStore;
+        return .{ .names = names, .digest = selected.digest.final() };
+    }
+};
+
+const selection_records = rsql.Read(.{
+    .sql = "SELECT tool.name,tool.owner,tool.server,description.digest AS description,input_schema.digest AS input_schema " ++
+        "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "JOIN content description ON description.content_id=tool.description_content_id " ++
+        "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
+    .Args = struct { set: u64 },
+    .Row = struct {
+        name: protocol.Bounded(tool_catalog.max_name_bytes),
+        owner: tool_catalog.Owner,
+        server: protocol.Bounded(tool_catalog.max_server_bytes),
+        description: [32]u8,
+        input_schema: [32]u8,
+    },
+    .cardinality = .each,
+});
+
+const SavedSelection = struct {
+    names: *const protocol.ToolsField,
+    digest: tool_catalog.SetDigest = .init(),
+    count: usize = 0,
+
+    pub fn visit(self: *SavedSelection, row: *const selection_records.Row) bool {
+        var names = self.names.iterator();
+        while (names.next()) |name| if (std.mem.eql(u8, name, row.name.slice())) {
+            const identity: tool_catalog.RecordIdentity = .{
+                .name = row.name.slice(),
+                .owner = row.owner,
+                .server = row.server.slice(),
+                .description = row.description,
+                .input_schema = row.input_schema,
+            };
+            self.digest.add(&identity.digest());
+            self.count += 1;
+            break;
+        };
+        return true;
+    }
 };
 
 /// Queues the read `finishSelection` follows: the set by its digest.
@@ -313,13 +362,13 @@ pub fn lookupSelection(a: anytype, selection: *Selection) void {
 }
 
 /// After `lookupSelection`'s round: the id of the set `selection` names,
-/// the saved one or one queued now from the catalog set `catalog_set`.
-pub fn finishSelection(a: anytype, selection: *const Selection, catalog_set: u64) !u64 {
+/// the saved one or one queued now from the source set `source_set`.
+pub fn finishSelection(a: anytype, selection: *const Selection, source_set: u64) !u64 {
     if (selection.set) |row| return row.tool_set_id.get();
     const set_id = try a.identity(.tool_set_id);
     a.write(insert_set, .{ .id = set_id, .digest = selection.digest, .count = selection.names.count });
     var names = selection.names.iterator();
     var ordinal: u64 = 0;
-    while (names.next()) |name| : (ordinal += 1) a.writeCount(insert_selected_member, .{ .set = set_id, .ordinal = ordinal, .catalog = catalog_set, .name = name }, 1);
+    while (names.next()) |name| : (ordinal += 1) a.writeCount(insert_selected_member, .{ .set = set_id, .ordinal = ordinal, .source = source_set, .name = name }, 1);
     return set_id;
 }

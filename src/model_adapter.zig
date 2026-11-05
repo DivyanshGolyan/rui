@@ -4014,6 +4014,62 @@ test "a tool change keeps each request's input a prefix of the next" {
     }
 }
 
+test "a loaded tools revision adds exactly the newly loaded tool without a cache miss" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const donor = try configureMemoSessionForTesting(&setup);
+    const session = try setup.configure("loaded-memo-main");
+    var configure: protocol.ConfigureCommand = .{};
+    try configure.key.set("loaded-memo-tools");
+    configure.session = session;
+    configure.configuration.tools = try .of(&.{ "bash", "message_agent" });
+    configure.configuration.permission_mode.state = .value;
+    try configure.configuration.permission_mode.value.set("ask");
+    try std.testing.expect(setup.storage.configure(&configure, .{}) == .accepted);
+    // Seed a subset: production configure cannot create one until find_tools
+    // is added. Both configured tools stay unchanged throughout this test.
+    try store.setLoadedToolsForTesting(&setup.storage, session.slice(), donor.slice());
+    try setup.submit("loaded-memo-first", "loaded-memo-first", session.slice(), "start work");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const first = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(first.bytes);
+    try std.testing.expectEqual(@as(usize, 0), first.copied);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, declared_bash_json) != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "message_agent") == null);
+    const covered = heldMemoLength(&memos, session.slice());
+    try std.testing.expect(covered > 0);
+
+    var grow: protocol.ConfigureCommand = .{};
+    try grow.key.set("loaded-memo-grow");
+    grow.session = session;
+    grow.configuration.loaded_tools = try .of(&.{ "bash", "message_agent" });
+    try std.testing.expect(setup.storage.configure(&grow, .{}) == .accepted);
+    binding = try advanceHistoryForTesting(&setup, session, binding, 1, 1);
+    // The old request's history is still a valid prefix and the memo is hit.
+    try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const input_end = std.mem.indexOf(u8, first.bytes, "],\"tools\":[").?;
+    try std.testing.expectStringStartsWith(request.bytes, first.bytes[0..input_end]);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    var declarations: usize = 0;
+    for (parsed.value.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "additional_tools")) continue;
+        const added = item.object.get("tools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), added.len);
+        try std.testing.expectEqualStrings(if (declarations == 0) "bash" else "message_agent", added[0].object.get("name").?.string);
+        declarations += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), declarations);
+}
+
 test "a full rebuild must begin with the Session's prefix seal" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
