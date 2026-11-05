@@ -67,4 +67,8 @@ test {
     _ = @import("store/tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/mysql_dialect_check.zig");
+    _ = @import("store/mysql_literal.zig");
+    _ = @import("store/mysql_row.zig");
+    _ = @import("store/mysql_session_tests.zig");
+    _ = @import("store/wire/mysql_connection.zig");
 }

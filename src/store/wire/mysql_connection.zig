@@ -241,15 +241,22 @@ pub const Connection = struct {
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        _ = data;
-        _ = splat;
         const self: *Connection = @alignCast(@fieldParentPtr("writer", w));
         self.flushStream() catch |err| {
             self.write_error = err;
             self.lost = true;
             return error.WriteFailed;
         };
-        // The buffer is empty again; the writer copies the data into it.
+        // The buffer is empty again: take what fits of the first bytes due,
+        // the last slice only when it is repeated at least once.
+        for (data, 0..) |bytes, index| {
+            if (index == data.len - 1 and splat == 0) break;
+            if (bytes.len == 0) continue;
+            const n = @min(bytes.len, w.buffer.len);
+            @memcpy(w.buffer[0..n], bytes[0..n]);
+            w.end = n;
+            return n;
+        }
         return 0;
     }
 
@@ -502,6 +509,7 @@ const Peer = struct {
         var address: std.c.sockaddr.un = std.mem.zeroes(std.c.sockaddr.un);
         address.family = std.c.AF.UNIX;
         @memcpy(address.path[0..path.len], path);
+        if (@hasField(std.c.sockaddr.un, "len")) address.len = @sizeOf(std.c.sockaddr.un);
         if (std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.un)) != 0) return error.Bind;
         if (std.c.listen(fd, 1) != 0) return error.Listen;
         return .{ .listener = fd, .steps = steps };

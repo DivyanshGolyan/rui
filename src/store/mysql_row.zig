@@ -43,7 +43,7 @@ pub fn kindOf(column: mysql.Column) Kind {
 /// The columns `Row` decodes: one per field, three for a SessionHead.
 pub fn columnCount(comptime Row: type) usize {
     var count: usize = 0;
-    for (@typeInfo(Row).@"struct".field_types) |Field| count += if (Field == rsql.SessionHead) 3 else 1;
+    inline for (@typeInfo(Row).@"struct".field_types) |Field| count += if (Field == rsql.SessionHead) 3 else 1;
     return count;
 }
 
@@ -55,7 +55,7 @@ pub fn Columns(comptime Row: type) type {
 /// After a `.columns` event of `count`: reads the `.column` events that
 /// follow. A count other than `Row`'s is `CorruptStore`.
 pub fn readColumns(comptime Row: type, source: anytype, count: u16) !Columns(Row) {
-    if (count != columnCount(Row)) return error.CorruptStore;
+    if (count != comptime columnCount(Row)) return error.CorruptStore;
     var columns: Columns(Row) = undefined;
     for (&columns.kinds) |*kind| switch (try source.next()) {
         .column => |column| kind.* = kindOf(column),
@@ -240,17 +240,17 @@ const Script = struct {
     }
 };
 
-fn column(column_type: mysql.ColumnType, charset: u16) mysql.Event {
-    return .{ .column = .{ .name = "c", .type = column_type, .flags = @bitCast(@as(u16, 0)), .charset = charset };
+fn testColumn(column_type: mysql.ColumnType, charset: u16) mysql.Event {
+    return .{ .column = .{ .name = "c", .type = column_type, .flags = @bitCast(@as(u16, 0)), .charset = charset } };
 }
 
 const utf8mb4_0900_bin = 309;
-const integer_column = column(.longlong, binary_charset);
-const bytes_column = column(.blob, binary_charset);
-const text_column = column(.var_string, utf8mb4_0900_bin);
+const integer_column = testColumn(.longlong, binary_charset);
+const bytes_column = testColumn(.blob, binary_charset);
+const text_column = testColumn(.var_string, utf8mb4_0900_bin);
 
 /// A value's events as the client emits them: no `.bytes` for an empty one.
-fn value(comptime text: []const u8) [if (text.len == 0) 1 else 2]mysql.Event {
+fn testValue(comptime text: []const u8) [if (text.len == 0) 1 else 2]mysql.Event {
     return if (text.len == 0) .{.{ .value = 0 }} else .{ .{ .value = text.len }, .{ .bytes = text } };
 }
 
@@ -258,9 +258,9 @@ fn value(comptime text: []const u8) [if (text.len == 0) 1 else 2]mysql.Event {
 /// values) at every split.
 fn decodeAll(comptime Row: type, events: []const mysql.Event, row: *Row) !void {
     var largest: usize = 1;
-    for (events) |event| if (event == .bytes) {
-        largest = @max(largest, event.bytes.len);
-    };
+    for (events) |event| {
+        if (event == .bytes) largest = @max(largest, event.bytes.len);
+    }
     for (1..largest + 1) |split| {
         var script: Script = .{ .events = events, .split = split };
         const columns = try readColumns(Row, &script, @intCast(columnCount(Row)));
@@ -289,9 +289,9 @@ test "a row decodes each field type, its values streamed in pieces" {
     const events = [_]mysql.Event{
         integer_column, integer_column, integer_column, text_column, bytes_column, text_column, integer_column, integer_column,
         text_column,    bytes_column,   integer_column, text_column, text_column,  text_column,
-    } ++ value("9223372036854775807") ++ value("0") ++ value("1") ++ value("closed_for_good") ++ value("\x00\xff\x10") ++
-        value("abc123") ++ value("7") ++ value("8") ++ value("é!") ++ value("") ++
-        [_]mysql.Event{ .{ .value = null }, .{ .value = null } } ++ value("ok") ++ value("in place");
+    } ++ testValue("9223372036854775807") ++ testValue("0") ++ testValue("1") ++ testValue("closed_for_good") ++ testValue("\x00\xff\x10") ++
+        testValue("abc123") ++ testValue("7") ++ testValue("8") ++ testValue("é!") ++ testValue("") ++
+        [_]mysql.Event{ .{ .value = null }, .{ .value = null } } ++ testValue("ok") ++ testValue("in place");
     var target: Bounded(16) = .{ .len = 0 };
     var row: Row = undefined;
     row.into = &target;
@@ -322,27 +322,27 @@ fn expectCorrupt(comptime Field: type, kind: mysql.Event, events: []const mysql.
 
 test "a value that breaks its field's type is CorruptStore" {
     // Integers: digits only, within BIGINT, never negative, from an integer column.
-    try expectCorrupt(u64, integer_column, &value("-1"));
-    try expectCorrupt(u64, integer_column, &value("9223372036854775808"));
-    try expectCorrupt(u64, integer_column, &value("12345678901234567890"));
-    try expectCorrupt(u64, integer_column, &value("1.5"));
-    try expectCorrupt(u64, integer_column, &value(""));
-    try expectCorrupt(u64, text_column, &value("1"));
-    try expectCorrupt(u8, integer_column, &value("256"));
-    try expectCorrupt(rsql.Positive, integer_column, &value("0"));
-    try expectCorrupt(bool, integer_column, &value("2"));
+    try expectCorrupt(u64, integer_column, &testValue("-1"));
+    try expectCorrupt(u64, integer_column, &testValue("9223372036854775808"));
+    try expectCorrupt(u64, integer_column, &testValue("12345678901234567890"));
+    try expectCorrupt(u64, integer_column, &testValue("1.5"));
+    try expectCorrupt(u64, integer_column, &testValue(""));
+    try expectCorrupt(u64, text_column, &testValue("1"));
+    try expectCorrupt(u8, integer_column, &testValue("256"));
+    try expectCorrupt(rsql.Positive, integer_column, &testValue("0"));
+    try expectCorrupt(bool, integer_column, &testValue("2"));
     try expectCorrupt(u64, integer_column, &.{.{ .value = null }});
     // Bytes: from a binary column only, a digest of its exact length.
-    try expectCorrupt([2]u8, text_column, &value("ab"));
-    try expectCorrupt([2]u8, column(.long, binary_charset), &value("12"));
-    try expectCorrupt([2]u8, bytes_column, &value("abc"));
-    try expectCorrupt(rsql.Blob(2), bytes_column, &value("abc"));
-    try expectCorrupt(rsql.Blob(2), text_column, &value("ab"));
+    try expectCorrupt([2]u8, text_column, &testValue("ab"));
+    try expectCorrupt([2]u8, testColumn(.long, binary_charset), &testValue("12"));
+    try expectCorrupt([2]u8, bytes_column, &testValue("abc"));
+    try expectCorrupt(rsql.Blob(2), bytes_column, &testValue("abc"));
+    try expectCorrupt(rsql.Blob(2), text_column, &testValue("ab"));
     // Text: within its bound, UTF-8, a known tag.
-    try expectCorrupt(Bounded(2), text_column, &value("abc"));
-    try expectCorrupt(Bounded(2), text_column, &value("\xff"));
-    try expectCorrupt(Tag, text_column, &value("shut"));
-    try expectCorrupt(Tag, text_column, &value("closed_for_good!"));
+    try expectCorrupt(Bounded(2), text_column, &testValue("abc"));
+    try expectCorrupt(Bounded(2), text_column, &testValue("\xff"));
+    try expectCorrupt(Tag, text_column, &testValue("shut"));
+    try expectCorrupt(Tag, text_column, &testValue("closed_for_good!"));
     try expectCorrupt(Bounded(2), text_column, &.{.{ .value = null }});
 }
 
@@ -354,10 +354,10 @@ test "a result of another column count is CorruptStore" {
 }
 
 test "column kinds: integers and DECIMAL, bytes by the binary character set" {
-    try std.testing.expectEqual(Kind.integer, kindOf(column(.newdecimal, binary_charset).column));
-    try std.testing.expectEqual(Kind.integer, kindOf(column(.tiny, binary_charset).column));
-    try std.testing.expectEqual(Kind.bytes, kindOf(column(.var_string, binary_charset).column));
-    try std.testing.expectEqual(Kind.bytes, kindOf(column(.medium_blob, binary_charset).column));
-    try std.testing.expectEqual(Kind.other, kindOf(column(.medium_blob, utf8mb4_0900_bin).column));
-    try std.testing.expectEqual(Kind.other, kindOf(column(.datetime, binary_charset).column));
+    try std.testing.expectEqual(Kind.integer, kindOf(testColumn(.newdecimal, binary_charset).column));
+    try std.testing.expectEqual(Kind.integer, kindOf(testColumn(.tiny, binary_charset).column));
+    try std.testing.expectEqual(Kind.bytes, kindOf(testColumn(.var_string, binary_charset).column));
+    try std.testing.expectEqual(Kind.bytes, kindOf(testColumn(.medium_blob, binary_charset).column));
+    try std.testing.expectEqual(Kind.other, kindOf(testColumn(.medium_blob, utf8mb4_0900_bin).column));
+    try std.testing.expectEqual(Kind.other, kindOf(testColumn(.datetime, binary_charset).column));
 }

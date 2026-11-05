@@ -66,7 +66,7 @@ pub fn writeHex(w: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
     var chunk: [128]u8 = undefined;
     var at: usize = 0;
     while (at < bytes.len) {
-        const n = @min(chunk.len / 2, bytes.len - at);
+        const n: usize = @min(chunk.len / 2, bytes.len - at);
         for (bytes[at..][0..n], 0..) |byte, i| {
             chunk[2 * i] = digits[byte >> 4];
             chunk[2 * i + 1] = digits[byte & 0xf];
