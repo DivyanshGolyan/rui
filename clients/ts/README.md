@@ -50,3 +50,22 @@ RUI_BINARY=../../zig-out/bin/rui npm test
 It publishes nothing; the first npm publish waits for the maintainer.
 
 The repository's `zig build ts-client` runs the tests against the Rui it builds.
+
+## Session settings
+
+`create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`.
+`provider` may be left out when the Host serves one provider.
+`effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
+An update may leave out any setting, and an omitted setting stays as it is.
+
+```ts
+const session = await rui.sessions.create({
+	model: "gpt-6.1-sol",
+	effort: "high",
+	compactAt: 244800,
+	tools: ["bash"],
+	permissionMode: "ask",
+	workspace: "/work/project",
+}, { idempotencyKey: "project:1" });
+await session.update({ compactAt: 200000 });
+```

@@ -612,11 +612,11 @@ const parent_settings = rsql.Read(.{
 
 /// Runs a `start_agent` call as one core command (D24, D122): creates a
 /// Session with `configuration` in the caller's Workspace and with its
-/// provider, as its child when `attached`, admits `task` to it from the
-/// caller, and resolves the call with what happened, in one transaction.
-/// The spec may only narrow the caller's tools and permission mode.
-/// `configuration` is the caller's; its Workspace and provider are filled
-/// here. `committed` runs once the task's admission commits.
+/// provider (D122, D221), as its child when `attached`, admits `task` to it
+/// from the caller, and resolves the call with what happened, in one
+/// transaction. The spec may only narrow the caller's tools and permission
+/// mode. `configuration` is the caller's; its Workspace and provider are
+/// filled here. `committed` runs once the task's admission commits.
 pub fn startAgent(
     a: anytype,
     io: std.Io,

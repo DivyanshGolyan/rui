@@ -22,12 +22,12 @@ pub const CompactionPolicy = struct {
 /// reads a row; an ID without a row has no inferred capability.
 pub const Model = struct {
     id: []const u8,
-    /// Catalog default when a Session sets no override.
+    /// D111: the effort a client may choose when building a new spec.
     default_effort: ReasoningEffort,
     /// Whether the catalog advertises `max`. Every row advertises low through
     /// xhigh, and none advertises `none`.
     max_effort: bool,
-    /// Tokens; the automatic compaction trigger is a percentage of it.
+    /// D166: the largest compactAt a spec may request for this model.
     context_window: u64,
 };
 
@@ -114,9 +114,11 @@ pub fn contextWindow(model: []const u8) u64 {
 /// No alias inference, account entitlement or live qualification is implied.
 /// Reservation is extra heuristic headroom, never a provider output limit.
 pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
-    const automatic = contextWindow(model) * product_defaults.compaction_trigger_percent / 100;
+    // D111: a stored null setting has fixed headroom, not a catalog default.
+    // New specs always save their explicit token count.
+    _ = model;
     return .{
-        .compaction_trigger = trigger_override orelse automatic,
+        .compaction_trigger = trigger_override orelse product_defaults.unlisted_context_window * product_defaults.compaction_trigger_percent / 100,
         .output_reservation = reservation_override orelse product_defaults.output_reservation,
     };
 }
@@ -141,11 +143,10 @@ pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_
     return out;
 }
 
-test "supported model compaction defaults and exact identifier boundary" {
+test "compaction policy never infers a spec from the model catalog" {
     for (models) |row| {
         const policy = compactionPolicy(row.id, null, null);
-        // 90% of each listed window: 500000 for gpt-6.1-terra, 272000 for the rest.
-        const expected: u64 = if (std.mem.eql(u8, row.id, "gpt-6.1-terra")) 450000 else 244800;
+        const expected: u64 = 115200;
         try std.testing.expectEqual(expected, policy.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 0), policy.output_reservation);
         const overridden = compactionPolicy(row.id, 7, 3);
@@ -153,7 +154,7 @@ test "supported model compaction defaults and exact identifier boundary" {
         try std.testing.expectEqual(@as(u64, 3), overridden.output_reservation);
     }
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other| {
-        // An unlisted model compacts at the same share of the smaller window.
+        // D111: stored null values use the same fixed threshold on every model.
         try std.testing.expectEqual(@as(u64, 115200), compactionPolicy(other, null, null).compaction_trigger);
         try std.testing.expect(!supportsModel(other));
     }

@@ -1574,6 +1574,12 @@ test "real preparation consumes the configured allowance across multiple advance
     try configuration.configuration.provider.value.set("codex");
     configuration.configuration.model.state = .value;
     try configuration.configuration.model.value.set("model-a");
+    configuration.configuration.tools = try .of(&.{ "bash", "web_search" });
+    configuration.configuration.permission_mode.state = .value;
+    try configuration.configuration.permission_mode.value.set("bypass");
+    configuration.configuration.compaction_trigger.state = .value;
+    try configuration.configuration.compaction_trigger.value.set("115200");
+    configuration.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
@@ -1711,6 +1717,12 @@ const PreparationTestSetup = struct {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         const configured = self.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
@@ -2086,6 +2098,9 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
         command.configuration.tools = try .of(&.{"bash"});
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("ask");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.output_schema = .{
             .state = .value,
             .file = file,
@@ -2382,6 +2397,12 @@ test "request preparation escapes instructions and user content" {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.instructions = .{
             .state = .value,
             .file = file,
@@ -2437,6 +2458,12 @@ test "request preparation escapes instructions and user content" {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.instructions = .{
             .state = .value,
             .file = file,
@@ -2515,10 +2542,17 @@ test "request preparation keeps the starting effort at the top and changes it at
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set(case.model);
-        if (case.override) |effort| {
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        // D111: the client states the effort; a listed model's starting one is
+        // its catalog default unless the case overrides it.
+        if (case.override orelse case.expected) |effort| {
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
-        }
+        } else command.configuration.reasoning_effort.state = .explicit_null;
         const configured = setup.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
@@ -3785,6 +3819,13 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
+    // D111: a listed model states its catalog effort; null is for unlisted ones.
+    if (@import("model_capability.zig").defaultReasoningEffort(model)) |effort| {
+        command.configuration.reasoning_effort.state = .value;
+        try command.configuration.reasoning_effort.value.set(@tagName(effort));
+    } else command.configuration.reasoning_effort.state = .explicit_null;
+    command.configuration.compaction_trigger.state = .value;
+    try command.configuration.compaction_trigger.value.set("115200");
     const reply = setup.storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;
