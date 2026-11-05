@@ -10,6 +10,7 @@ export {
 	type SendOptions,
 	type SessionSpec,
 	type SessionSummary,
+	type SessionStatus,
 	type SessionUpdate,
 	type WriteOptions,
 } from "./sessions.ts";

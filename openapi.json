@@ -670,10 +670,12 @@
         },
         "responses": {
           "200": {
-            "description": "The Session report (JSON; its schema is not described yet), or, for a failed response export, that response's bytes.",
+            "description": "The Session report, or, for a failed response export, that response's bytes.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InspectSessionReply"
+                }
               },
               "application/octet-stream": {
                 "schema": {
@@ -4235,6 +4237,276 @@
           "store"
         ],
         "additionalProperties": false
+      },
+      "InspectSessionReply": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "8"
+              },
+              "type": {
+                "const": "session_report"
+              },
+              "profile": {
+                "const": "current"
+              },
+              "session": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonSettings"
+              },
+              "pending_messages": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "work": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonWork"
+              },
+              "peers": {
+                "$ref": "#/components/schemas/PeerFacts"
+              },
+              "first_message": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/FirstMessage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "selected_message": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recent_messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/domainreportCurrentJsonRecent"
+                }
+              },
+              "actions": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonActions"
+              },
+              "rejected_calls": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonRejectedCalls"
+              },
+              "actionable_permissions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/domainreportCurrentJsonActionable"
+                }
+              },
+              "execution": {
+                "$ref": "#/components/schemas/domainreportExecutionJson"
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "profile",
+              "session",
+              "pending_messages",
+              "work",
+              "peers",
+              "first_message",
+              "selected_message",
+              "recent_messages",
+              "actions",
+              "rejected_calls",
+              "actionable_permissions",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "8"
+              },
+              "type": {
+                "const": "session_report"
+              },
+              "profile": {
+                "const": "full"
+              },
+              "session": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonSettings"
+              },
+              "pending_messages": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "work": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonWork"
+              },
+              "peers": {
+                "$ref": "#/components/schemas/PeerFacts"
+              },
+              "first_message": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/FirstMessage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "selected_message": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recent_messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/domainreportCurrentJsonRecent"
+                }
+              },
+              "actions": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonActions"
+              },
+              "rejected_calls": {
+                "$ref": "#/components/schemas/domainreportCurrentJsonRejectedCalls"
+              },
+              "actionable_permissions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/domainreportCurrentJsonActionable"
+                }
+              },
+              "full": {
+                "$ref": "#/components/schemas/domainreport_full_shapeFull"
+              },
+              "execution": {
+                "$ref": "#/components/schemas/domainreportExecutionJson"
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "profile",
+              "session",
+              "pending_messages",
+              "work",
+              "peers",
+              "first_message",
+              "selected_message",
+              "recent_messages",
+              "actions",
+              "rejected_calls",
+              "actionable_permissions",
+              "full",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "8"
+              },
+              "type": {
+                "const": "session_report"
+              },
+              "profile": {
+                "const": "current"
+              },
+              "session": {
+                "type": "null"
+              },
+              "pending_messages": {
+                "const": "0"
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "const": "session_not_found"
+                  }
+                },
+                "required": [
+                  "status",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "profile",
+              "session",
+              "pending_messages",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "8"
+              },
+              "type": {
+                "const": "session_report"
+              },
+              "profile": {
+                "const": "full"
+              },
+              "session": {
+                "type": "null"
+              },
+              "pending_messages": {
+                "const": "0"
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "const": "session_not_found"
+                  }
+                },
+                "required": [
+                  "status",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "profile",
+              "session",
+              "pending_messages",
+              "execution"
+            ],
+            "additionalProperties": false
+          }
+        ]
       },
       "InspectSessionRequest": {
         "anyOf": [
@@ -9745,6 +10017,1464 @@
             "additionalProperties": false
           }
         ]
+      },
+      "domainreportCurrentJsonActionable": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "permission_revision": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "action",
+          "permission_revision"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonActions": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "unresolved": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreportCurrentJsonUnresolved"
+            }
+          },
+          "resolved": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreportCurrentJsonResolved"
+            }
+          }
+        },
+        "required": [
+          "count",
+          "unresolved",
+          "resolved"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonOutcome": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 96,
+            "x-rui-max-bytes": 96
+          },
+          "content": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActivityItemContent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonRecent": {
+        "type": "object",
+        "properties": {
+          "turn": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "outcome": {
+            "type": "string",
+            "maxLength": 96,
+            "x-rui-max-bytes": 96
+          }
+        },
+        "required": [
+          "turn",
+          "message",
+          "outcome"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonRejected": {
+        "type": "object",
+        "properties": {
+          "parent_operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 32,
+            "x-rui-max-bytes": 32
+          },
+          "acceptance_position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "result": {
+            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+          },
+          "name": {
+            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+          },
+          "call_id": {
+            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+          },
+          "arguments": {
+            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/ToolPresentation"
+          }
+        },
+        "required": [
+          "parent_operation",
+          "call_ordinal",
+          "code",
+          "acceptance_position",
+          "result",
+          "name",
+          "call_id",
+          "arguments",
+          "presentation"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonRejectedCalls": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreportCurrentJsonRejected"
+            }
+          }
+        },
+        "required": [
+          "count",
+          "items"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonResolved": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "parent_operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 23,
+            "x-rui-max-bytes": 23
+          },
+          "acceptance_position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "result": {
+            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/ToolPresentation"
+          }
+        },
+        "required": [
+          "action",
+          "parent_operation",
+          "call_ordinal",
+          "code",
+          "acceptance_position",
+          "result",
+          "presentation"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonSettings": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspace": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-rui-max-bytes": 4096
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "openai"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 256,
+            "x-rui-max-bytes": 256
+          },
+          "compaction_trigger": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "context_estimate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_reservation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "compaction_trigger_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_reservation_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning_effort": {
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              null
+            ]
+          },
+          "reasoning_effort_override": {
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              null
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
+          "loaded_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
+          "permission_mode": {
+            "type": "string",
+            "enum": [
+              "ask",
+              "bypass"
+            ]
+          },
+          "instructions": {
+            "$ref": "#/components/schemas/ActivityItemContent"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActivityItemContent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "x-rui-max-bytes": 100
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "reference",
+          "parent",
+          "workspace",
+          "provider",
+          "model",
+          "compaction_trigger",
+          "context_estimate",
+          "output_reservation",
+          "compaction_trigger_override",
+          "output_reservation_override",
+          "reasoning_effort",
+          "reasoning_effort_override",
+          "revision",
+          "tools",
+          "loaded_tools",
+          "permission_mode",
+          "instructions",
+          "output_schema",
+          "label",
+          "created_at"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonTextReference": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "text"
+          },
+          "bytes": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "type",
+          "bytes",
+          "sha256"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonUnresolved": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "parent_operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "tool": {
+            "type": "string",
+            "enum": [
+              "bash",
+              "find_tools",
+              "message_agent",
+              "read_transcript",
+              "start_agent",
+              "web_search"
+            ]
+          },
+          "permission_revision": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "authorization": {
+            "type": "string",
+            "enum": [
+              "core",
+              "pending",
+              "bypass",
+              "allow_once"
+            ]
+          },
+          "call_id": {
+            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+          },
+          "arguments": {
+            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/ToolPresentation"
+          }
+        },
+        "required": [
+          "action",
+          "parent_operation",
+          "call_ordinal",
+          "tool",
+          "permission_revision",
+          "authorization",
+          "call_id",
+          "arguments",
+          "presentation"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportCurrentJsonWork": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/WorkStateJson"
+          },
+          "turn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "first_action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreportCurrentJsonOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "turn",
+          "operation",
+          "first_action",
+          "latest_outcome"
+        ],
+        "additionalProperties": false
+      },
+      "domainreportExecutionJson": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "partial"
+          },
+          "dispatch_fenced": {
+            "type": "boolean"
+          },
+          "custody_occupied": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "scratch_used_bytes": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "unavailable": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "const": "structured_output"
+              }
+            ],
+            "items": false,
+            "minItems": 1
+          }
+        },
+        "required": [
+          "status",
+          "dispatch_fenced",
+          "custody_occupied",
+          "scratch_used_bytes",
+          "unavailable"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFull": {
+        "type": "object",
+        "properties": {
+          "session_revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullRevision"
+            }
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullMessage"
+            }
+          },
+          "conversation": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullConversation"
+            }
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullTurn"
+            }
+          },
+          "model_operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullOperation"
+            }
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullCall"
+            }
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullAction"
+            }
+          },
+          "permission_decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullDecision"
+            }
+          },
+          "session_stops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullStop"
+            }
+          },
+          "model_interruptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullInterruption"
+            }
+          },
+          "tool_results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/domainreport_full_shapeFullResult"
+            }
+          }
+        },
+        "required": [
+          "session_revisions",
+          "messages",
+          "conversation",
+          "turns",
+          "model_operations",
+          "tool_calls",
+          "actions",
+          "permission_decisions",
+          "session_stops",
+          "model_interruptions",
+          "tool_results"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullAction": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "parent_operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "permission_revision": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "permission": {
+            "type": "string",
+            "enum": [
+              "denied",
+              "authorized",
+              "requested"
+            ]
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 23,
+                "x-rui-max-bytes": 23
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "acceptance_position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "parent_operation",
+          "call_ordinal",
+          "permission_revision",
+          "permission",
+          "resolution",
+          "result",
+          "acceptance_position"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullCall": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "item_ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "rejection": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32,
+                "x-rui-max-bytes": 32
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "acceptance_position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+          },
+          "call_id": {
+            "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+          },
+          "arguments": {
+            "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+          },
+          "rejection_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "call_ordinal",
+          "item_ordinal",
+          "rejection",
+          "acceptance_position",
+          "name",
+          "call_id",
+          "arguments",
+          "rejection_result"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullConversation": {
+        "type": "object",
+        "properties": {
+          "ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "message",
+              "settings",
+              "assistant"
+            ]
+          },
+          "turn": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "source_admission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_revision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_operation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content": {
+            "$ref": "#/components/schemas/ActivityItemContent"
+          }
+        },
+        "required": [
+          "ordinal",
+          "position",
+          "kind",
+          "turn",
+          "source_admission",
+          "source_revision",
+          "source_operation",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullDecision": {
+        "type": "object",
+        "properties": {
+          "command_key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "action": {
+            "type": "string",
+            "maxLength": 20,
+            "x-rui-max-bytes": 20
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow_once",
+              "deny"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 96,
+            "x-rui-max-bytes": 96
+          }
+        },
+        "required": [
+          "command_key",
+          "action",
+          "decision",
+          "status",
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullExclusion": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "const": "session_stopped"
+          },
+          "command_key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          }
+        },
+        "required": [
+          "code",
+          "command_key"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullInline": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "text"
+          },
+          "bytes": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "text": {
+            "type": "string",
+            "description": "Text of any length, saved as content."
+          }
+        },
+        "required": [
+          "type",
+          "bytes",
+          "sha256",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullInterruption": {
+        "type": "object",
+        "properties": {
+          "command_key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 96,
+            "x-rui-max-bytes": 96
+          },
+          "turn": {
+            "type": "string",
+            "maxLength": 20,
+            "x-rui-max-bytes": 20
+          },
+          "operation": {
+            "type": "string",
+            "maxLength": 20,
+            "x-rui-max-bytes": 20
+          }
+        },
+        "required": [
+          "command_key",
+          "status",
+          "code",
+          "turn",
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullMessage": {
+        "type": "object",
+        "properties": {
+          "admission": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "command_key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "content": {
+            "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+          },
+          "turn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "application": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "pending",
+              "excluded"
+            ]
+          },
+          "exclusion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullExclusion"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "admission",
+          "command_key",
+          "content",
+          "turn",
+          "application",
+          "exclusion",
+          "outcome"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullOperation": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "turn": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "interrupted_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "settings_revision": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "x-rui-max-bytes": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning_effort": {
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              null
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "turn",
+          "resolution",
+          "interrupted_by",
+          "settings_revision",
+          "request_id",
+          "reasoning_effort"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullOutcome": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 96,
+            "x-rui-max-bytes": 96
+          },
+          "content": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActivityItemContent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullResolution": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 96,
+            "x-rui-max-bytes": 96
+          },
+          "content": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullResult": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "acceptance_position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "call_id": {
+            "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 32,
+            "x-rui-max-bytes": 32
+          },
+          "result": {
+            "$ref": "#/components/schemas/domainreport_full_shapeFullInline"
+          }
+        },
+        "required": [
+          "operation",
+          "call_ordinal",
+          "acceptance_position",
+          "call_id",
+          "code",
+          "result"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullRevision": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "command_key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "workspace": {
+            "type": "string",
+            "maxLength": 4096,
+            "x-rui-max-bytes": 4096
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "openai"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 256,
+            "x-rui-max-bytes": 256
+          },
+          "compaction_trigger": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_reservation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning_effort": {
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              null
+            ]
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "x-rui-max-bytes": 100
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
+          "loaded_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
+          "permission_mode": {
+            "type": "string",
+            "enum": [
+              "ask",
+              "bypass"
+            ]
+          },
+          "instructions": {
+            "$ref": "#/components/schemas/domainreport_full_shapeFullRevisionContent"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullRevisionContent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "revision",
+          "command_key",
+          "workspace",
+          "provider",
+          "model",
+          "compaction_trigger",
+          "output_reservation",
+          "reasoning_effort",
+          "label",
+          "tools",
+          "loaded_tools",
+          "permission_mode",
+          "instructions",
+          "output_schema"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullRevisionContent": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "text"
+              },
+              "bytes": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "text": {
+                "type": "string",
+                "description": "Text of any length, saved as content."
+              }
+            },
+            "required": [
+              "type",
+              "bytes",
+              "sha256",
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "bytes": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "owner": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "field": {
+                    "type": "string",
+                    "enum": [
+                      "instructions",
+                      "output_schema"
+                    ]
+                  }
+                },
+                "required": [
+                  "revision",
+                  "field"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "bytes",
+              "sha256",
+              "owner"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "domainreport_full_shapeFullStop": {
+        "type": "object",
+        "properties": {
+          "command_key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 96,
+            "x-rui-max-bytes": 96
+          },
+          "selected_turn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "admission_cutoff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "command_key",
+          "status",
+          "code",
+          "selected_turn",
+          "admission_cutoff"
+        ],
+        "additionalProperties": false
+      },
+      "domainreport_full_shapeFullTurn": {
+        "type": "object",
+        "properties": {
+          "turn": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "first_admission": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "input_cutoff": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/domainreport_full_shapeFullOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "turn",
+          "first_admission",
+          "input_cutoff",
+          "operation",
+          "outcome"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {

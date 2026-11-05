@@ -571,6 +571,56 @@ pub fn testingSessionReportWithProfile(
     return bytes;
 }
 
+/// Visits real Current and Full captures, including absent, idle, terminal
+/// and active approval work. The caller supplies the schema checker.
+pub fn checkSessionReportsForTesting(context: anytype) !void {
+    const Fixture = struct {
+        fn run(engine: *store_testing.Case, checker: @TypeOf(context)) !void {
+            const Profiles = struct {
+                fn check(sink: @TypeOf(context), storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !void {
+                    inline for (.{ protocol.ReportProfile.current, protocol.ReportProfile.full }) |profile| {
+                        const bytes = try testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, profile);
+                        defer std.testing.allocator.free(bytes);
+                        try sink.report(bytes);
+                    }
+                }
+            };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try Profiles.check(checker, &storage, &tmp, "aaaaaa");
+            const session = try configureTestSessionAsk(&storage, "schema-config");
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+            try store_testing.answerTestTurn(&storage, &tmp, session.slice(), "schema-answer", &.{.{ .encoded = "done", .decoded = "done" }});
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+            try store_testing.submitTestMessage(&storage, &tmp, "schema-message", "schema-message", session.slice(), "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "schema-calls");
+            const active = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+            defer std.testing.allocator.free(active);
+            const active_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, active, .{});
+            defer active_json.deinit();
+            const unresolved = active_json.value.object.get("actions").?.object.get("unresolved").?.array.items;
+            try std.testing.expectEqual(@as(usize, 2), unresolved.len);
+            try std.testing.expectEqualStrings("approval", active_json.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+            // Keep one unresolved Action while the other supplies a resolved row,
+            // permission decision and ordered Tool Result to both profiles.
+            var deny: protocol.PermissionDecisionCommand = .{ .action_id = try std.fmt.parseInt(u64, unresolved[0].object.get("action").?.string, 10), .decision = .deny };
+            try deny.key.set("schema-deny");
+            try deny.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+        }
+    };
+    inline for (comptime std.enums.values(store_testing.Engine)) |engine| {
+        var case: store_testing.Case = .{ .engine = engine };
+        try Fixture.run(&case, context);
+    }
+}
+
 pub fn testingSessionList(storage: *Store, tmp: *std.testing.TmpDir, request: protocol.ListSessions, used: *std.atomic.Value(u64), request_number: u64) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
@@ -2378,6 +2428,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("find_tools_tests.zig"),
@@ -8710,6 +8761,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("find_tools_tests.zig"),

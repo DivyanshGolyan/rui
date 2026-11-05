@@ -130,13 +130,16 @@ function fakeSession(state: Schemas["WorkStateJson"]["kind"] = "idle", queued = 
 	let deliver = false;
 	const link: Link = {
 		activity: new SessionNotifications(),
-		exchange: async (path, build) => {
-			const request = JSON.parse(build("store"));
+		exchange: async (path) => {
+			if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify({
+				session: { parent: null, label: null, model: "model-a", reasoning_effort: null, tools: [], permission_mode: "ask" },
+				pending_messages: queued,
+				work: { turn: null, operation: null, state: { kind: "idle", since: "1" }, latest_outcome: null },
+			}));
 			if (path !== "/v1/activity-page") {
 				deliver = true;
 				return Buffer.from(JSON.stringify({ answer: { status: "accepted", admission: "1" } }));
 			}
-			if (request.direction === "backward") return Buffer.from(JSON.stringify({ work: { turn: null, operation: null, state: { kind: "idle" } } }));
 			pages++;
 			const items = deliver ? [{ position: String(pages), ordinal: "0", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }] : [];
 			deliver = false;

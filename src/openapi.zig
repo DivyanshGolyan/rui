@@ -14,6 +14,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const model_list = @import("model_list.zig");
+const store = @import("store.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -56,8 +57,7 @@ const Reply = union(enum) {
     bytes,
     /// Text content (`text/plain`), as the result and Action reads send it.
     text,
-    /// A Session report (JSON, schema not described yet), or the failed
-    /// response's bytes.
+    /// A described Session report (JSON), or a failed response's raw bytes.
     report,
 };
 
@@ -508,6 +508,9 @@ pub const Document = struct {
     /// A reference to `T`'s named schema, built on first use.
     fn typeRef(d: *Document, comptime T: type) !Value {
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
+        if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
+        if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
+        if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
         if (!d.schemas.contains(name)) {
             // Claim the name first, so a type that refers to itself ends.
@@ -532,6 +535,11 @@ pub const Document = struct {
                 }
             }
             return schema;
+        }
+        if (@hasDecl(T, "openapi_shapes")) {
+            var values: [T.openapi_shapes.len]Value = undefined;
+            inline for (T.openapi_shapes, 0..) |shape, index| values[index] = try d.shapeSchema(shape);
+            return d.anyOf(&values);
         }
         if (T == protocol.WorkStateJson) return d.anyOf(&.{
             try d.shapeSchema(T.plain_shape),
@@ -712,10 +720,18 @@ pub const Document = struct {
                 .text => try responses.put(d.arena, "200", try d.response("The content, as text.", "text/plain", try d.object(.{ .type = Value{ .string = "string" } }))),
                 .report => {
                     var content: ObjectMap = .empty;
-                    try content.put(d.arena, "application/json", try d.object(.{ .schema = try d.object(.{}) }));
+                    const reply_name = try std.fmt.allocPrint(d.arena, "{s}Reply", .{base});
+                    const shapes = store.session_report_shapes;
+                    try d.schemas.put(d.arena, reply_name, try d.anyOf(&.{
+                        try d.shapeSchema(shapes.current),
+                        try d.shapeSchema(shapes.full),
+                        try d.shapeSchema(shapes.missing_current),
+                        try d.shapeSchema(shapes.missing_full),
+                    }));
+                    try content.put(d.arena, "application/json", try d.object(.{ .schema = try d.ref(reply_name) }));
                     try content.put(d.arena, "application/octet-stream", try d.object(.{ .schema = try d.binary() }));
                     try responses.put(d.arena, "200", try d.object(.{
-                        .description = Value{ .string = "The Session report (JSON; its schema is not described yet), or, for a failed response export, that response's bytes." },
+                        .description = Value{ .string = "The Session report, or, for a failed response export, that response's bytes." },
                         .content = Value{ .object = content },
                     }));
                 },
@@ -1086,6 +1102,12 @@ test "replies the Host renders conform to their schemas" {
                 return error.Nonconforming;
             }
         }
+        schemas: ObjectMap,
+        allocator: std.mem.Allocator,
+
+        pub fn report(self: @This(), bytes: []const u8) !void {
+            try check(self.schemas, "InspectSessionReply", bytes, self.allocator);
+        }
     };
     const a = arena.allocator();
     var out: std.Io.Writer.Allocating = .init(a);
@@ -1114,6 +1136,10 @@ test "replies the Host renders conform to their schemas" {
     try row.writeJson(&out.writer);
     try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
+
+    // These are the Store's real streaming reports, not schema examples:
+    // an added hand-written field must fail additionalProperties here.
+    try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
 }
 
 test "statuses, media types and required headers match what the Host sends" {
@@ -1135,6 +1161,7 @@ test "statuses, media types and required headers match what the Host sends" {
         .{ .path = "/v1/conversation-content", .type = "application/octet-stream" },
         .{ .path = "/v1/activity-content", .type = "application/octet-stream" },
         .{ .path = "/v1/inspect-session", .type = "application/json" },
+        .{ .path = "/v1/inspect-session", .type = "application/octet-stream" },
     };
     for (media) |each| {
         const responses = paths.get(each.path).?.object.get("post").?.object.get("responses").?.object;

@@ -1,11 +1,11 @@
-// Sessions: create, list, send, update, stop, interrupt and decide, plus the
+// Sessions: create, list, status, send, update, stop, interrupt and decide, plus the
 // model list and Host pause (D7, D8, D14 to D17, D121, D123, D128, D167,
 // D171). Every call is one request to a Host route that exists today.
 import { randomUUID } from "node:crypto";
 
 import type { SessionNotifications } from "./notifications.ts";
 import { RuiRequestError } from "./errors.ts";
-import { FEED_KINDS, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -65,6 +65,24 @@ export interface SessionSummary {
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
 	state: string;
 	parent: string | null;
+}
+
+type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current"; work: unknown }>;
+
+/** Current Host facts. Decimal counts, times and IDs remain lossless strings. */
+export interface SessionStatus {
+	state: CurrentReport["work"]["state"]["kind"];
+	since: CurrentReport["work"]["state"]["since"];
+	turn: CurrentReport["work"]["turn"];
+	operation: CurrentReport["work"]["operation"];
+	pendingMessages: CurrentReport["pending_messages"];
+	parent: CurrentReport["session"]["parent"];
+	label: CurrentReport["session"]["label"];
+	model: CurrentReport["session"]["model"];
+	effort: CurrentReport["session"]["reasoning_effort"];
+	tools: CurrentReport["session"]["tools"];
+	permissionMode: CurrentReport["session"]["permission_mode"];
+	latestOutcome: CurrentReport["work"]["latest_outcome"];
 }
 
 export interface ModelSummary {
@@ -172,6 +190,33 @@ export class Session {
 		return readContentBytes(this.#link, this.id, entry);
 	}
 
+	/** A Current report's summary (D12). A separate ending is not reported. */
+	async status(): Promise<SessionStatus> {
+		const reply = parse<Extract<Schemas["InspectSessionReply"], { profile: "current" }>>(
+			await this.#link.exchange("/v1/inspect-session", (store) => JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "inspect_session",
+				store,
+				session: this.id,
+			} satisfies Schemas["InspectSessionRequest"])),
+		);
+		if (reply.session === null) throw new RuiRequestError("invocation_error", "session_not_found");
+		return {
+			state: reply.work.state.kind,
+			since: reply.work.state.since,
+			turn: reply.work.turn,
+			operation: reply.work.operation,
+			pendingMessages: reply.pending_messages,
+			parent: reply.session.parent,
+			label: reply.session.label,
+			model: reply.session.model,
+			effort: reply.session.reasoning_effort,
+			tools: reply.session.tools,
+			permissionMode: reply.session.permission_mode,
+			latestOutcome: reply.work.latest_outcome,
+		};
+	}
+
 	/** Sends a Message. The receipt is its admission number; the answer arrives in the feed (D8). */
 	async send(text: string, options: SendOptions): Promise<{ messageId: string }> {
 		const body = (store: string) =>
@@ -223,26 +268,9 @@ export class Session {
 	 * call is current, or when the call ended before the cut arrived (D167, D171).
 	 */
 	async interrupt(): Promise<void> {
-		const page = parse<Schemas["ActivityPageReply"]>(
-			await this.#link.exchange(
-				"/v1/activity-page",
-				(store) =>
-					JSON.stringify({
-						version: WIRE_VERSION,
-						kind: "activity_page",
-						store,
-						session: this.id,
-						end: null,
-						position: "0",
-						ordinal: null,
-						direction: "backward",
-						kinds: [...FEED_KINDS],
-						limit: "1",
-					} satisfies Schemas["ActivityPageRequest"]),
-			),
-		);
-		const { turn, operation } = page.work;
-		if (turn === null || operation === null || !modelCallCurrent(page.work.state.kind)) {
+		const status = await this.status();
+		const { turn, operation } = status;
+		if (turn === null || operation === null || !modelCallCurrent(status.state)) {
 			this.#link.activity?.notify(this.id);
 			return;
 		}

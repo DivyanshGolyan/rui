@@ -80,6 +80,31 @@ test("models lists each provider's models", { skip }, async () => {
 	}
 });
 
+test("status reflects an idle Session and paused queued work", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:status" });
+		const idle = await session.status();
+		assert.deepEqual(idle, {
+			state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
+			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], permissionMode: "ask", latestOutcome: null,
+		});
+		assert.match(idle.since, /^[1-9][0-9]*$/);
+		await session.send("queued", { idempotencyKey: "status:message" });
+		await session.update({ label: "Queued work", effort: "high" });
+		const queued = await session.status();
+		assert.deepEqual(queued, {
+			...idle, state: "pending", since: queued.since, pendingMessages: "1", label: "Queued work", effort: "high",
+		});
+		assert.match(queued.since, /^[1-9][0-9]*$/);
+		await session.interrupt(); // Queued input has no model target.
+		assert.equal((await session.status()).pendingMessages, "1");
+	} finally {
+		await rui.close();
+	}
+});
+
 test("a paused Host takes Messages and resumes", { skip }, async () => {
 	const rui = await connect();
 	try {
