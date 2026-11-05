@@ -154,6 +154,8 @@ pub const CurrentConfiguration = struct {
     workspace_key: u64 = 0,
     /// Read only: the creator of an attached agent; absent for other Sessions.
     parent_ref: ?protocol.Bounded(protocol.session_id_bytes) = null,
+    /// Read only: the latest Operation's frozen effort, for pre-D111 null specs.
+    previous_reasoning_effort: ?protocol.ReasoningEffort = null,
 };
 
 /// The Session columns turn work, settlement and page cursors read, without
@@ -264,7 +266,7 @@ pub fn configurationBeforeWorkspace(
         if (model_catalog.find(model_catalog.shipped, model)) |known| {
             if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
         }
-        if (current) |existing| if (existing.reasoning_effort != null) return .unsupported_reasoning_effort;
+        if (current) |existing| if (effectiveReasoningEffort(existing) != null) return .unsupported_reasoning_effort;
     }
     if (requested.reasoning_effort.state == .value) {
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
@@ -274,9 +276,19 @@ pub fn configurationBeforeWorkspace(
     return null;
 }
 
-/// D111/D209: Operations freeze the spec's effort, never a catalog default.
+/// D111/D209: an explicit spec wins. A pre-D111 null spec carries forward
+/// its last Operation's frozen effort, never a catalog or product default.
+/// With no earlier concrete effort, null still means unspecified.
 pub fn effectiveReasoningEffort(current: anytype) ?protocol.ReasoningEffort {
-    return current.reasoning_effort;
+    return current.reasoning_effort orelse current.previous_reasoning_effort;
+}
+
+/// Both configuration reads and admission use the same durable legacy fact.
+/// The admission index bounds the lookup, including all-null Session histories.
+pub fn previousReasoningEffortSql(comptime session: []const u8) []const u8 {
+    return "CASE WHEN " ++ session ++ ".reasoning_effort IS NULL THEN " ++
+        "(SELECT o.reasoning_effort FROM model_operation o @index(model_operation_admission) WHERE o.session_ref=" ++
+        session ++ ".session_ref ORDER BY o.admission_position DESC LIMIT 1) END";
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -517,7 +529,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        "reasoning_effort,label,created_at,workspace_key,parent_ref FROM session WHERE session_ref=?1",
+        "reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,

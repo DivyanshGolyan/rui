@@ -399,6 +399,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 /// instruction updates `project_instructions` would project.
 const admission_facts = rsql.Read(.{
     .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
+        configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions " ++
@@ -414,6 +415,7 @@ const admission_facts = rsql.Read(.{
         compaction_trigger: ?rsql.Positive,
         output_reservation: ?u64,
         reasoning_effort: ?protocol.ReasoningEffort,
+        previous_reasoning_effort: ?protocol.ReasoningEffort,
         latest_turn: ?rsql.Positive,
         latest_active: bool,
         latest_first: ?rsql.Positive,

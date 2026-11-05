@@ -442,7 +442,9 @@ A listed model with effort levels takes one of those values; explicit `null` is 
 On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
 The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
 The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
-Current inspection reports the saved nullable `reasoning_effort` and `reasoning_effort_override`; non-null effort is the Session's explicit value, not a Host-inferred catalog default.
+Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
+For an admitted pre-D111 Session with null settings, the configuration owner carries forward its latest Operation's frozen effort, so continuation never clears that historical value; it does not infer a catalog or product default.
+Fresh explicit-null specs have no earlier concrete effort and remain unspecified.
 Each model Operation, including compaction and continuation, freezes the resolved effort at admission.
 Replacement Attempts and reopened historical views emit that stored value without consulting later Session settings or catalog policy.
 Persisted values outside the closed grammar are corruption.

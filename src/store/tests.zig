@@ -10513,6 +10513,19 @@ test "null effort supports nonreasoning catalog entries but never clears assigne
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
 }
 
+test "effective effort carries legacy history without inferring a fresh default" {
+    var current: CurrentConfiguration = .{ .provider = .codex };
+    try current.model.set("unlisted-model");
+    try std.testing.expect(configuration_domain.effectiveReasoningEffort(&current) == null);
+    current.previous_reasoning_effort = .high;
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), configuration_domain.effectiveReasoningEffort(&current));
+    var requested: protocol.Configuration = .{};
+    requested.reasoning_effort.state = .explicit_null;
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
+    current.reasoning_effort = .low;
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), configuration_domain.effectiveReasoningEffort(&current));
+}
+
 test "loaded tools configure defaults equality membership and reachability" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
