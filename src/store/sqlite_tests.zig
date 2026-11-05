@@ -8,6 +8,7 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
+const protocol_reply = @import("../protocol_reply.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const tool_catalog = @import("../tools.zig");
@@ -138,7 +139,7 @@ const touchForTesting = tests.touchForTesting;
 
 /// A catalog with one tool beyond the built-ins, between them by name.
 const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
-const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, testing_record, tool_catalog.web_search_record };
+const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, testing_record, tool_catalog.web_search_record };
 const testing_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [testing_records.len][32]u8 = undefined;
@@ -1125,11 +1126,12 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // The Store saved the catalog's three texts when it opened: Bash's two
-    // and web search's empty one. The configure adds its two values.
-    try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    // The Store saved the catalog's five texts when it opened: Bash's two,
+    // message_agent's two and web search's empty one. The configure adds
+    // its two values.
     try std.testing.expectEqual(@as(u64, 5), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1154,17 +1156,19 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of both built-ins, saved at open.
-    try std.testing.expectEqual([3]u64{ 1, 2, 2 }, try Tools.counts(&storage));
+    // The Host's catalog: one set of the three built-ins, saved at open.
+    try std.testing.expectEqual([3]u64{ 1, 3, 3 }, try Tools.counts(&storage));
     // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 2, 3, 4 }, try Tools.counts(&storage));
     // A set with the catalog's members is the catalog's set.
+    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "web_search" });
+    try std.testing.expectEqual([3]u64{ 2, 3, 4 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, 3, 6 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 3, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, 3, 6 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
@@ -8581,19 +8585,239 @@ test "a compaction's floor read costs the same however long its Session's histor
     try std.testing.expectEqual(thousand, try Walk.steps(&storage, compaction.operation_id));
 }
 
+/// A Session that offers only `message_agent`, under an `ask` revision, so
+/// a core call that needed a person would wait.
+fn configureMessagingSession(storage: *Store, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try store_testing.completeConfiguration(key, "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools = try .of(&.{"message_agent"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    return reply.accepted.session;
+}
+
+test "a message_agent call runs as one core command: the Message is admitted from its Session and the call resolves" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const caller = try configureMessagingSession(&storage, "agent-caller");
+    const receiver = try configureTestSession(&storage, "agent-receiver");
+    try submitTestMessage(&storage, &tmp, "agent-task", "agent-task", caller.slice(), "ask the receiver");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var arguments_buffer: [96]u8 = undefined;
+    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"report back\"}}", .{receiver.slice()});
+    var encoded_buffer: [128]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"report back\\\"}}", .{receiver.slice()});
+    const calls = [_]TestingCall{
+        .{ .item_id = "agent-item", .name = "message_agent", .encoded_call_id = "agent-call", .decoded_call_id = "agent-call", .encoded_arguments = encoded, .decoded_arguments = arguments },
+        .{ .item_id = "agent-missing-item", .name = "message_agent", .encoded_call_id = "agent-missing", .decoded_call_id = "agent-missing", .encoded_arguments = "{\\\"id\\\":\\\"zzzzzz\\\",\\\"text\\\":\\\"hi\\\"}", .decoded_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hi\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, model, "agent-metadata", &calls);
+
+    // Both calls are decided at once under `ask`, described by the core,
+    // and never reach the Bash runner.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
+    var line_buffer: [32]u8 = undefined;
+    const line = try std.fmt.bufPrint(&line_buffer, "Message {s}", .{receiver.slice()});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{line}));
+    try std.testing.expect(try storage.admitNextActionAttempt(300_000, .{}) == null);
+
+    const first = (try storage.nextCoreAction()).?;
+    try std.testing.expectEqualStrings(caller.slice(), first.session.slice());
+    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(first.binding, receiver.slice(), "report back", .{}));
+    const second = (try storage.nextCoreAction()).?;
+    try std.testing.expect(second.binding.action_id != first.binding.action_id);
+    try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(second.binding, "zzzzzz", "hi", .{}));
+    try std.testing.expect(try storage.nextCoreAction() == null);
+    // A resolved call is not run again.
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.deliverAgentMessage(first.binding, receiver.slice(), "report back", .{}));
+
+    // The receiver holds one Message from the caller, waiting for a Turn.
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2 AND turn_id IS NULL", .{ receiver.slice(), caller.slice() }));
+    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+    try expectContent(&storage, try testingContentReference(&storage, text_id), "report back");
+    // Each call resolved with what happened, and the caller's Turn can continue.
+    var delivered_buffer: [32]u8 = undefined;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "succeeded", try std.fmt.bufPrint(&delivered_buffer, "Delivered to {s}.", .{receiver.slice()}) },
+        .{ "failed", "No Session zzzzzz in this Store; nothing was sent." },
+    }) |case| {
+        const result_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code=?1", .{case[0]});
+        try expectContent(&storage, try testingContentReference(&storage, result_id), case[1]);
+    }
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code IS NULL AND continuation_operation_id=operation_id", .{caller.slice()}));
+    try expectDenseSessionPositions(&storage, caller.slice());
+    try expectDenseSessionPositions(&storage, receiver.slice());
+}
+
+test "a message_agent call of the longest escaped text is read back past one content window and delivered whole" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const caller = try configureMessagingSession(&storage, "long-caller");
+    const receiver = try configureTestSession(&storage, "long-receiver");
+    try submitTestMessage(&storage, &tmp, "long-task", "long-task", caller.slice(), "send it all");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const gpa = std.testing.allocator;
+    // Every byte of the text is a quote, so the arguments hold twice the
+    // text and are read in more than one window.
+    const text = try gpa.alloc(u8, tool_catalog.core_tools.message_agent_max_text_bytes);
+    defer gpa.free(text);
+    @memset(text, '"');
+    var decoded: std.ArrayList(u8) = .empty;
+    defer decoded.deinit(gpa);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(gpa);
+    try decoded.print(gpa, "{{\"id\":\"{s}\",\"text\":\"", .{receiver.slice()});
+    try encoded.print(gpa, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"", .{receiver.slice()});
+    for (text) |_| {
+        try decoded.appendSlice(gpa, "\\\"");
+        try encoded.appendSlice(gpa, "\\\\\\\"");
+    }
+    try decoded.appendSlice(gpa, "\"}");
+    try encoded.appendSlice(gpa, "\\\"}");
+    try std.testing.expect(decoded.items.len > content_domain.ContentReader.content_window_bytes);
+    const calls = [_]TestingCall{.{ .item_id = "long-item", .name = "message_agent", .encoded_call_id = "long-call", .decoded_call_id = "long-call", .encoded_arguments = encoded.items, .decoded_arguments = decoded.items }};
+    try settleCallsForTesting(&storage, &tmp, model, "long-metadata", &calls);
+
+    const input = (try storage.nextCoreAction()).?;
+    const bytes = try gpa.alloc(u8, @intCast(input.arguments.length));
+    defer gpa.free(bytes);
+    try storage.readCoreArguments(&input, bytes);
+    try std.testing.expectEqualStrings(decoded.items, bytes);
+    var source: tool_catalog.core_tools.SliceSource = .{ .bytes = bytes };
+    const Text = struct {
+        list: std.ArrayList(u8) = .empty,
+
+        pub fn writeAll(self: *@This(), part: []const u8) !void {
+            try self.list.appendSlice(std.testing.allocator, part);
+        }
+    };
+    var read_text: Text = .{};
+    defer read_text.list.deinit(gpa);
+    const check = try tool_catalog.core_tools.checkMessageAgent(&source, &read_text);
+    try std.testing.expect(check == .accepted);
+    try std.testing.expectEqualStrings(text, read_text.list.items);
+    try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(input.binding, check.accepted.id.slice(), read_text.list.items, .{}));
+    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+    var reader: content_domain.ContentReader = undefined;
+    reader.open(try storage.openContent(try testingContentReference(&storage, text_id)));
+    defer reader.close();
+    const delivered = try gpa.alloc(u8, text.len + 1);
+    defer gpa.free(delivered);
+    var count: usize = 0;
+    while (true) {
+        const read = try reader.read(count, delivered[count..@min(delivered.len, count + content_domain.ContentReader.content_window_bytes)]);
+        if (read == 0) break;
+        count += read;
+    }
+    try std.testing.expectEqualStrings(text, delivered[0..count]);
+}
+
+test "a stop that selects a message_agent call's Turn cancels it before it runs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const caller = try configureMessagingSession(&storage, "stopped-caller");
+    try submitTestMessage(&storage, &tmp, "stopped-task", "stopped-task", caller.slice(), "message yourself");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var arguments_buffer: [96]u8 = undefined;
+    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"later\"}}", .{caller.slice()});
+    var encoded_buffer: [128]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"later\\\"}}", .{caller.slice()});
+    const calls = [_]TestingCall{.{ .item_id = "stopped-item", .name = "message_agent", .encoded_call_id = "stopped-call", .decoded_call_id = "stopped-call", .encoded_arguments = encoded, .decoded_arguments = arguments }};
+    try settleCallsForTesting(&storage, &tmp, model, "stopped-metadata", &calls);
+    const pending = (try storage.nextCoreAction()).?;
+    var stop = try completeSessionStop("stopped-stop", caller.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expect(try storage.nextCoreAction() == null);
+    try std.testing.expectError(error.StaleActionAttemptBinding, storage.deliverAgentMessage(pending.binding, caller.slice(), "later", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{caller.slice()}));
+}
+
+test "a Session with message_agent keeps it through its list row and report, as the client reads them" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, io);
+    defer storage.close() catch unreachable;
+    const session = try configureMessagingSession(&storage, "listed-messaging");
+    const file = try tmp.dir.createFile(io, "client-reply", .{ .read = true });
+    defer file.close(io);
+
+    var used = std.atomic.Value(u64).init(0);
+    const listed = try testingSessionList(&storage, &tmp, .{}, &used, 1);
+    defer std.testing.allocator.free(listed);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "\"tools\":[\"message_agent\"]") != null);
+    try file.writePositionalAll(io, listed, 0);
+    const list = try protocol_reply.SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = listed.len } });
+    try std.testing.expectEqual(@as(usize, 1), list.page.count);
+    try std.testing.expect(list.page.rows[0].tools.eql(.initOne(.message_agent)));
+
+    // A call waiting to run shows as the core tool's, which needed no
+    // permission decision under `ask`.
+    try submitTestMessage(&storage, &tmp, "listed-task", "listed-task", session.slice(), "tell yourself");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var arguments_buffer: [64]u8 = undefined;
+    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
+    var encoded_buffer: [96]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
+    const calls = [_]TestingCall{.{ .item_id = "listed-item", .name = "message_agent", .encoded_call_id = "listed-call", .decoded_call_id = "listed-call", .encoded_arguments = encoded, .decoded_arguments = arguments }};
+    try settleCallsForTesting(&storage, &tmp, model, "listed-metadata", &calls);
+
+    const reported = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+    defer std.testing.allocator.free(reported);
+    try std.testing.expect(std.mem.indexOf(u8, reported, "\"tool\":\"message_agent\",\"permission_revision\":\"1\",\"authorization\":\"core\"") != null);
+    try file.setLength(io, 0);
+    try file.writePositionalAll(io, reported, 0);
+    const current = try protocol_reply.CurrentReply.decode(io, file, session.slice(), .{ .report = .{ .bytes = reported.len } });
+    try std.testing.expect(current.current.settings.tools.set.eql(.initOne(.message_agent)));
+    const Sink = struct {
+        core_calls: usize = 0,
+        pub fn visit(self: *@This(), attention: protocol_reply.Current.Attention) !void {
+            switch (attention) {
+                .unresolved => |row| {
+                    try std.testing.expect(row.tool.value == .message_agent and row.authorization.value == .core);
+                    self.core_calls += 1;
+                },
+                else => {},
+            }
+        }
+    };
+    var sink: Sink = .{};
+    try current.current.traverse(io, file, &sink);
+    try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
+}
+
 test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const count = tool_catalog.max_catalog_records - 2;
+    const count = tool_catalog.max_catalog_records - 3;
     var names: [count][9]u8 = undefined;
-    var records: [count + 2]tool_catalog.Record = undefined;
-    var digests: [count + 2][32]u8 = undefined;
+    var records: [count + 3]tool_catalog.Record = undefined;
+    var digests: [count + 3][32]u8 = undefined;
     records[0] = tool_catalog.bash_record;
-    for (&names, records[1 .. count + 1], 0..) |*name, *record, index| {
+    records[1] = tool_catalog.message_agent_record;
+    for (&names, records[2 .. count + 2], 0..) |*name, *record, index| {
         _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
-    records[count + 1] = tool_catalog.web_search_record;
+    records[count + 2] = tool_catalog.web_search_record;
     for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
     const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
@@ -8601,12 +8825,12 @@ test "a catalog at its bound saves and opens again" {
     try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, count + 2), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+    try std.testing.expectEqual(@as(u64, count + 3), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
 
 /// The testing catalog with an MCP server's tool beside it.
 const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
-const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, testing_record, tool_catalog.web_search_record };
+const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.message_agent_record, testing_record, tool_catalog.web_search_record };
 const mcp_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [mcp_records.len][32]u8 = undefined;
@@ -8669,7 +8893,7 @@ test "a saved catalog whose text no longer matches its digest fences the Store" 
     try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
     defer storage.close() catch unreachable;
     try storage.saveCatalog(&mcp_catalog);
-    try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+    try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
     try std.testing.expectError(error.CorruptStore, storage.readCatalog(std.testing.allocator));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));

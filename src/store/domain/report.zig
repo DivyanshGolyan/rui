@@ -673,8 +673,7 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
         .workspace = row.workspace.slice(),
         .provider = row.provider,
         .model = row.model.slice(),
-        .bash = tools.contains(.bash),
-        .web_search = tools.contains(.web_search),
+        .tools = tools,
         .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
         .label = if (row.label) |*label| label.slice() else null,
         .created_at = row.created_at.get(),
@@ -875,12 +874,13 @@ const recent_messages = rsql.Read(.{
 const unresolved_actions = rsql.Read(.{
     .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
+        "call_name.digest AS name_digest,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
+        "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
         "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NULL ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -894,6 +894,7 @@ const unresolved_actions = rsql.Read(.{
         call_id_digest: [32]u8,
         arguments_length: u64,
         arguments_digest: [32]u8,
+        name_digest: [32]u8,
         description: ?Description,
     },
     .cardinality = .each,
@@ -1206,12 +1207,17 @@ fn renderRecent(capture: *SessionReportCapture, row: *const recent_messages.Row)
 fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actions.Row) !void {
     // The insert authorizes every Action proposed under `bypass`.
     if (row.permission_mode == 1 and !row.authorized) return error.CorruptStore;
-    try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
+    const tool = actionTool(&row.name_digest) orelse return error.CorruptStore;
+    const core = tool_catalog.Runner.of(tool_catalog.record(tool)) == .core;
+    // Settlement authorizes a core call at once, with no decision.
+    if (core and !row.authorized) return error.CorruptStore;
+    try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
         row.action_id.get(),
         row.parent_operation_id.get(),
         row.call_ordinal,
+        @tagName(tool),
         row.permission_revision.get(),
-        if (!row.authorized) "pending" else if (row.permission_mode == 1) "bypass" else "allow_once",
+        if (core) "core" else if (!row.authorized) "pending" else if (row.permission_mode == 1) "bypass" else "allow_once",
     });
     try capture.appendContentReference(.{ .length = row.call_id_length, .digest = row.call_id_digest });
     try capture.append(",\"arguments\":");
@@ -1220,6 +1226,15 @@ fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actio
     // has no rejection, so main's code, either one's, is none.
     try appendPresentation(capture, try reads_domain.presentationOf(row.description, null, row.authorized, null));
     try capture.append("}");
+}
+
+/// The built-in tool whose name has `digest`, among those an Action runs.
+fn actionTool(digest: *const [32]u8) ?protocol.BuiltInTool {
+    for (std.enums.values(protocol.BuiltInTool)) |tool| {
+        const owned = tool_catalog.record(tool);
+        if (owned.owner == .rui and std.mem.eql(u8, digest, &protocol.contentDigest(owned.name))) return tool;
+    }
+    return null;
 }
 
 fn renderResolved(capture: *SessionReportCapture, row: *const resolved_actions.Row) !void {

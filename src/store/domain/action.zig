@@ -3,6 +3,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const tool_catalog = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
@@ -16,6 +17,19 @@ const Faults = store_core.Faults;
 /// Matches the ordinal the Store issues an Action Attempt, so statements
 /// compare it as a literal rather than a bound value.
 const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
+
+/// Whether the Action `action` carries out a call the core runs (D24): its
+/// call names a core tool, whose name's digest `param` binds. Derived from
+/// the call, never stored (D46).
+fn coreCallSql(comptime param: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM model_tool_call tool_call JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
+        "WHERE tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal AND call_name.digest=" ++ param ++ ")";
+}
+
+/// The digest of the one core tool's name that `coreCallSql` binds.
+pub fn coreName() [32]u8 {
+    return protocol.contentDigest(tool_catalog.message_agent_record.name);
+}
 /// The next Action ready for an Attempt, with its Session. Reads only
 /// `action_operation_executable`, so an Action waiting for permission costs
 /// admission nothing.
@@ -26,13 +40,52 @@ const next_action_attempt = rsql.Read(.{
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
         "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ coreCallSql("?1") ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
-    .Args = struct {},
+    .Args = struct { core_name: [32]u8 },
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, bash_timeout_override_ms: ?rsql.Positive, session: rsql.SessionHead },
     .cardinality = .optional,
 });
 pub const next_action_attempt_sql = next_action_attempt.sql;
+
+/// The next core tool call ready to run (D24), as `next_action_attempt`
+/// finds Bash's: decided, never attempted, of an open Turn no stop selected.
+const next_core_action = rsql.Read(.{
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session " ++
+        "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
+        "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+        "JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+        "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
+        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ coreCallSql("?1") ++ " " ++
+        "ORDER BY action.action_id LIMIT 1",
+    .Args = struct { core_name: [32]u8 },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: protocol.Bounded(protocol.max_session_bytes) },
+    .cardinality = .optional,
+});
+
+/// A core tool call to run: which Action it is, its Session, and its
+/// arguments' content.
+pub const CoreActionInput = struct {
+    binding: ActionAttemptBinding,
+    session: protocol.Bounded(protocol.max_session_bytes),
+    arguments: ContentReference,
+};
+
+/// The next core tool call to run, or null. It writes nothing: the core
+/// command that runs it resolves it in one transaction, so a call read
+/// here and never run is simply read again.
+pub fn nextCoreAction(a: anytype) !?CoreActionInput {
+    var next: next_core_action.Result = undefined;
+    a.read(next_core_action, .{ .core_name = coreName() }, &next);
+    try a.run();
+    const found = next orelse return null;
+    return .{
+        .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
+        .session = found.session,
+        .arguments = try actionContent(a, found.session.slice(), found.action_id.get(), .arguments),
+    };
+}
 
 const attempt_action = rsql.Write(.{
     .sql = "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=@now,bash_timeout_ms=?2,sender_handle=?3 " ++
@@ -136,7 +189,7 @@ pub fn admitNextActionAttempt(
     faults: Faults,
 ) !?ActionAttemptAdmission {
     var next: next_action_attempt.Result = undefined;
-    candidate.read(next_action_attempt, .{}, &next);
+    candidate.read(next_action_attempt, .{ .core_name = coreName() }, &next);
     try candidate.run();
     const found = next orelse return null;
     var random: [16]u8 = undefined;
@@ -195,6 +248,42 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
     const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(protocol.ProposalField.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
     out.timeout_ms = row.timeout_ms.get();
+}
+
+/// The core tool call `binding` names while it waits to run: its Session
+/// and whether a stop selected its Turn.
+pub const core_facts = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position," ++
+        "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
+        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++
+        "AND action.authorized=1 AND action.attempt_ordinal=0 AND action.resolution_code IS NULL AND " ++ coreCallSql("?4"),
+    .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64, core_name: [32]u8 },
+    .Row = struct { session: rsql.SessionHead, stopped: bool },
+    .cardinality = .optional,
+});
+
+const resolve_core_action = rsql.Write(.{
+    .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,resolved_at=@now " ++
+        "WHERE action_id=?1 AND parent_operation_id=?5 AND session_ref=@session(?6) AND attempt_ordinal=0 AND resolution_code IS NULL",
+    .Args = struct { action_id: u64, code: ActionResolutionCode, content_id: u64, position: u64, parent_operation_id: u64, session: rsql.SessionHead },
+    // Its round read the call, under the single writer.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Resolves the core tool call `binding` names with its result, at its
+/// Session's next position, and lets its Turn continue.
+pub fn queueCoreResolution(a: anytype, binding: ActionAttemptBinding, session: rsql.SessionHead, code: ActionResolutionCode, content_id: u64) !void {
+    a.write(resolve_core_action, .{
+        .action_id = binding.action_id,
+        .code = code,
+        .content_id = content_id,
+        .position = try (try a.positions(session)).take(1),
+        .parent_operation_id = binding.parent_operation_id,
+        .session = session,
+    });
+    turn_domain.queueContinuation(a, binding.turn_id, session);
 }
 
 /// The Session of the Attempt `binding` names, while it is attempted.

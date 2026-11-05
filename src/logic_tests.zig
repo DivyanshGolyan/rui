@@ -10,6 +10,7 @@ const cores = .{
     .{ "attention.zig", @import("attention.zig") },
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
+    .{ "built_in_tool.zig", @import("built_in_tool.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
@@ -79,6 +80,7 @@ test {
     _ = @import("TerminalEditor.zig");
     _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("tools.zig");
+    _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];
 }
 
