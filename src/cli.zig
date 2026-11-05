@@ -539,8 +539,10 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             const writer = output.init(io, .stdout);
             try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
-            try writer.print(",\"instance\":\"{s}\",\"retirement\":\"unconfirmed\"}}\n", .{&hex});
+            const retired = try awaitRetirement(io, paths.store.slice(), target);
+            try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"}}\n", .{ &hex, if (retired) "confirmed" else "unconfirmed" });
             try output.finish();
+            if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{product_defaults.host_shutdown_seconds});
         },
         .instance_changed => {
             stderr.diagnostic("rui: Host instance changed; replacement was not paused. Inspect rui host status before any new intent.\n", .{});
@@ -550,6 +552,23 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             stderr.diagnostic("rui: Host pause unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
             return error.HostStopUnconfirmed;
         },
+    }
+}
+
+/// The old Host holds the Store's lease until it lets go of the Store, so a
+/// free lease, or a different Host owning it, confirms retirement. The wait
+/// shares the launched Host's drain bound.
+fn awaitRetirement(io: std.Io, store: []const u8, target: protocol.InstanceId) !bool {
+    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
+    while (true) {
+        switch (client.hostStatusUntil(io, store, until)) {
+            .unavailable => return true,
+            .ready => |ready| if (!std.mem.eql(u8, &ready.instance, &target)) return true,
+            .owned_unavailable, .incompatible, .access_failure => {},
+        }
+        const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (remaining <= 0) return false;
+        try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
     }
 }
 
