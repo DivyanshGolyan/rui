@@ -334,6 +334,7 @@ D227. An MCP call's conversation line is `rui_call_description`, extracted once 
 D228. The TS client's `Rui.connect` takes `tools`, written to the launch frame as `mcpServers` (D3, D132).
 D229. Effort is checked only for a model the catalog lists (D137). For a model it does not list, any effort is passed through and the provider's refusal is the error (D80, D194).
 D230. The PR 7 Store thread was built as a combining queue on the Host's existing threads (D94). That replaces the "Store thread" wording in D91 and D215. On MySQL, a network fault exits the Host with `store_fenced` (D157); reconnect is deferred to 8e.
+D231. (lane T call, accepted) One `find_tools` call is one revision with one `loaded_tools` row. It takes 1 to 8 words of at most 64 bytes each, loads at most 8 tools, and its arguments are at most 4096 bytes. Matching uses `word_search.Matcher` (D216).
 
 ## Replaced
 
