@@ -562,7 +562,7 @@ A done ending's Message is the child's saved answer itself, so nothing is copied
 An ending caused by the parent's owed stop under `rui.core/stop/` settles quietly without admitting a Message (D139).
 One Store command delivers it and marks the retained owed row delivered, so a retry cannot deliver it twice.
 An attached child's approval request and Turn ending also appear in every ancestor's Activity feed, naming the Session whose Action or Turn it is (D135, D180).
-The originating transaction queues an unpositioned `session_forward` row for the direct parent; after owed stops and ending Messages, the Host delivers one hop per Store command before core tool calls.
+An approval request queues an unpositioned `session_forward` row for the direct parent in the transaction that saves it, and a Turn ending queues one in the transaction that delivers its owed ending Message (so a root Session's Turn end writes nothing extra); after owed stops and ending Messages, the Host delivers one hop per Store command before core tool calls.
 Each delivery claims a position only in the receiving ancestor, retains the delivered row and atomically queues the same child fact for that ancestor's parent, if any.
 The unique `(target_ref,kind,source_id)` key and retained rows make retries no-ops, and no transaction walks the tree or grows with its depth.
 A Permission Decision addressed to an ancestor may name the child's Action only after that ancestor received its forwarded request; it updates the child's Action and Turn, while the saved command retains the Session the client named.

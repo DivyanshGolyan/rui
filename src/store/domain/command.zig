@@ -6,6 +6,7 @@ const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
+const forward_domain = @import("forward.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -552,6 +553,9 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
         return false;
     };
     a.write(settle_owed_ending, .{ .turn_id = turn_id });
+    // The ending's feed row climbs the tree from here (D180): queued with
+    // the owed Message, so a root Session's Turn end writes nothing more.
+    try forward_domain.queue(a, &found.child.ref, &found.child.ref, .ending, turn_id);
     if (found.quiet) {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try a.commit();
