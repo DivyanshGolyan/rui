@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
 import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
@@ -118,6 +119,8 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	#restart: NodeJS.Timeout | undefined;
 	#closing: Promise<void> | undefined;
 	#dead: Error | undefined;
+	/** Local Session write notifications, shared by every handle. Internal. */
+	readonly activity = new SessionNotifications();
 	/** Create and list Sessions. */
 	readonly sessions: Sessions = new Sessions(this);
 
@@ -263,6 +266,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#fail(error: Error): void {
+		this.activity.fail(error);
 		for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
 	}
 

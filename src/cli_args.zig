@@ -278,6 +278,33 @@ pub const live_configure: Definition = .{ .resource = .session, .name = "/config
 /// The live Session's /setup: the defaults grammar, where none means inspect.
 pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
 
+/// Every grammar contributes its options, including hex spellings and hidden flags.
+const option_names = blk: {
+    @setEvalBranchQuota(100_000);
+    var grammars: []const Definition = &.{ fresh_session, live_configure, live_setup };
+    for (std.enums.values(Command)) |command| grammars = grammars ++ .{command.definition()};
+    var names: []const []const u8 = &.{};
+    for (grammars) |grammar| {
+        for (grammar.options) |option| {
+            for (names) |name| {
+                if (std.mem.eql(u8, name, option.name)) break;
+            } else {
+                names = names ++ .{option.name};
+            }
+        }
+    }
+    break :blk names;
+};
+
+fn hasOptionName(name: []const u8) bool {
+    for (option_names) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
+    return false;
+}
+
+fn checkOptionName(comptime name: []const u8) void {
+    if (name.len != 0 and !hasOptionName(name)) @compileError("no CLI option is named --" ++ name);
+}
+
 pub const Definition = struct {
     resource: Resource,
     name: []const u8,
@@ -428,7 +455,7 @@ pub const Definition = struct {
             const slot = if (option.hex_of) |named| self.indexOf(named).? else n;
             if (parsed.values[slot] != null) {
                 for (self.options) |other| {
-                    if (parsed.has(other.name) and !std.mem.eql(u8, other.name, option.name) and std.mem.eql(u8, other.hex_of orelse other.name, self.options[slot].name)) {
+                    if (parsed.hasNamed(other.name) and !std.mem.eql(u8, other.name, option.name) and std.mem.eql(u8, other.hex_of orelse other.name, self.options[slot].name)) {
                         problem.* = .{ .code = .identity_spelling_repeated, .token = other.name, .other = arg };
                         break;
                     }
@@ -438,11 +465,11 @@ pub const Definition = struct {
             parsed.values[slot] = args[index];
             if (option.hex_of != null) hexed |= @as(u64, 1) << @as(u6, @intCast(slot));
         }
-        for (self.conflicts) |pair| if (parsed.has(pair.a) and parsed.has(pair.b)) {
+        for (self.conflicts) |pair| if (parsed.hasNamed(pair.a) and parsed.hasNamed(pair.b)) {
             problem.* = .{ .code = pair.code, .token = pair.a, .other = pair.b };
             return error.ConflictingArguments;
         };
-        if (parsed.positional != null) for (self.positional_conflicts) |conflict| if (parsed.has(conflict.option)) {
+        if (parsed.positional != null) for (self.positional_conflicts) |conflict| if (parsed.hasNamed(conflict.option)) {
             problem.* = .{ .code = conflict.code, .token = conflict.option, .other = self.positional.? };
             return error.ConflictingArguments;
         };
@@ -504,19 +531,37 @@ pub const Parsed = struct {
 
     /// The value of `name` in either spelling; null when not given or not
     /// part of this grammar.
-    pub fn get(self: *const Parsed, name: []const u8) ?[]const u8 {
+    pub fn get(self: *const Parsed, comptime name: []const u8) ?[]const u8 {
+        comptime checkOptionName(name);
+        return self.getNamed(name);
+    }
+
+    /// Runtime lookup for names from a table; prefer `get` for known names.
+    pub fn getNamed(self: *const Parsed, name: []const u8) ?[]const u8 {
         return self.values[self.definition.indexOf(name) orelse return null];
     }
 
     /// Whether the invocation spelled `name` ("" is the positional).
-    pub fn has(self: *const Parsed, name: []const u8) bool {
+    pub fn has(self: *const Parsed, comptime name: []const u8) bool {
+        comptime checkOptionName(name);
+        return self.hasNamed(name);
+    }
+
+    /// Runtime lookup for names from a table; "" still names the positional.
+    pub fn hasNamed(self: *const Parsed, name: []const u8) bool {
         if (name.len == 0) return self.positional != null;
         const n = self.definition.indexOf(name) orelse return false;
         return self.seen & (@as(u64, 1) << @as(u6, @intCast(n))) != 0;
     }
 
     /// Every value of the repeatable option, in order.
-    pub fn all(self: *const Parsed, name: []const u8) []const []const u8 {
+    pub fn all(self: *const Parsed, comptime name: []const u8) []const []const u8 {
+        comptime checkOptionName(name);
+        return self.allNamed(name);
+    }
+
+    /// Runtime lookup for names from a table; prefer `all` for known names.
+    pub fn allNamed(self: *const Parsed, name: []const u8) []const []const u8 {
         const n = self.definition.indexOf(name) orelse return &.{};
         if (!self.definition.options[n].repeated) return &.{};
         const first = std.mem.indexOfScalar(usize, self.repeat_options[0..self.repeat_count], n) orelse return &.{};
@@ -540,18 +585,19 @@ pub const Parsed = struct {
         }
         for (self.definition.options) |option| {
             if (option.repeated) {
-                for (self.all(option.name)) |text| try validateValue(option, text, refusal);
-            } else if (self.get(option.name)) |text| try validateValue(option, text, refusal);
+                for (self.allNamed(option.name)) |text| try validateValue(option, text, refusal);
+            } else if (self.getNamed(option.name)) |text| try validateValue(option, text, refusal);
         }
     }
 
     /// A decimal value of `name`, when given.
-    pub fn number(self: *const Parsed, comptime T: type, name: []const u8) !?T {
+    pub fn number(self: *const Parsed, comptime T: type, comptime name: []const u8) !?T {
+        comptime checkOptionName(name);
         return try std.fmt.parseInt(T, self.get(name) orelse return null, 10);
     }
 
     fn any(self: *const Parsed, names: []const []const u8) bool {
-        for (names) |name| if (self.has(name)) return true;
+        for (names) |name| if (self.hasNamed(name)) return true;
         return false;
     }
 
@@ -634,6 +680,16 @@ fn expectMissing(command: Command, args: []const []const u8) !?[]const u8 {
     var storage: [1024]u8 = undefined;
     const parsed = try testParse(command.definition(), args, &storage);
     return if (parsed.missing()) |group| group[0] else null;
+}
+
+test "option name set covers every grammar and rejects unknown names" {
+    for (std.enums.values(Command)) |command| {
+        for (command.definition().options) |option| try std.testing.expect(hasOptionName(option.name));
+    }
+    for ([_]Definition{ fresh_session, live_configure, live_setup }) |grammar| {
+        for (grammar.options) |option| try std.testing.expect(hasOptionName(option.name));
+    }
+    try std.testing.expect(!hasOptionName("made-up-option-name"));
 }
 
 test "grammar rejects ambiguous invocations before any effect" {

@@ -84,8 +84,8 @@ test("the feed asks for every kind by default and keeps approval requests when a
 	};
 	assert.equal((await listActivity(link, "s").next()).value?.kind, "approval_requested");
 	const only = await listActivity(link, "s", { kinds: ["approval_requested"] }).next();
-	assert.equal(only.value?.kind, "approval_requested");
-	assert.equal(only.value?.sessionId, "ch1ld1");
+	assert.ok(only.value && only.value.kind === "approval_requested");
+	assert.equal(only.value.sessionId, "ch1ld1");
 	assert.deepEqual(JSON.parse(bodies[0] ?? "{}").kinds, [...FEED_KINDS]);
 	assert.deepEqual(JSON.parse(bodies[1] ?? "{}").kinds, ["approval_requested"]);
 });
@@ -130,7 +130,7 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 		exchange: async (_path, build) => {
 			bodies.push(build("/s"));
 			if (bodies.length === 2) controller.abort();
-			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9" }));
+			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } }));
 		},
 	};
 	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
@@ -198,8 +198,9 @@ test("approval and ending feed entries expose the child sessionId", async () => 
 	]) {
 		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ items: [{ position: "1", ordinal: "0", at: "1", value }], more: false, end: "1" })) };
 		const entry = (await listActivity(link, "p4rent").next()).value;
-		const sessionId: string | undefined = entry?.sessionId;
+		assert.ok(entry && (entry.kind === "approval_requested" || entry.kind === "turn_ended"));
+		const sessionId: string = entry.sessionId;
 		assert.equal(sessionId, "ch1ld1");
-		assert.equal(entry?.session, undefined);
+		assert.equal("session" in entry, false);
 	}
 });

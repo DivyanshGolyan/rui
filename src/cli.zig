@@ -2323,7 +2323,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         .{ .short = "/effort high", .spelled = "/configure --reasoning-effort high", .option = "reasoning-effort" },
         .{ .short = "/effort \"high\"", .spelled = "/configure --reasoning-effort \"high\"", .option = "reasoning-effort" },
     };
-    for (cases) |case| {
+    inline for (cases) |case| {
         errdefer std.debug.print("short={s}\n", .{case.short});
         var values: [2][]const u8 = undefined;
         var lines: [2][64]u8 = undefined;
@@ -2400,7 +2400,7 @@ fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live
         try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
         return false;
     }
-    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
+    inline for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
         return false;
     };
