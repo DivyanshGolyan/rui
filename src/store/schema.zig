@@ -1742,8 +1742,8 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
 /// as run, and only bootstrap and `migrate` write it, so a dropped CHECK, a
 /// changed column, a migration that leaves other text than bootstrap's, or a
 /// missing or extra index or trigger is a WrongStoreSchema. A
-/// network engine keeps no such text: PR 8/9 compare its catalog's tables,
-/// columns and indexes by name and type instead, which cannot see a CHECK.
+/// network engine keeps no such text: MySQL's open compares its catalog's
+/// structure instead (`catalogDigest`), which sees a CHECK only by count.
 /// Its caller has read user_version as schema_version, or set it.
 fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
     {
