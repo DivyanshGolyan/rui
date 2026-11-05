@@ -147,7 +147,7 @@ const testing_digests = blk: {
 };
 const testing_catalog: tool_catalog.Catalog = .{ .records = &testing_records, .digests = &testing_digests };
 
-fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: *const tool_catalog.Catalog) !void {
+fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: ?*const tool_catalog.Catalog) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
     const root = root_buffer[0..root_length];
@@ -8231,7 +8231,7 @@ fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
         // The rows hold the catalog the open saved, under their own ids.
-        try sqlite.exec(raw, "DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
+        try sqlite.exec(raw, "DELETE FROM host_catalog; DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
         try sqlite.exec(raw, store_testing.expected_rows);
         const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
         defer _ = c.sqlite3_finalize(violations);
@@ -8585,12 +8585,12 @@ test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const count = tool_catalog.max_catalog_records - 2;
-    var names: [count][8]u8 = undefined;
+    var names: [count][9]u8 = undefined;
     var records: [count + 2]tool_catalog.Record = undefined;
     var digests: [count + 2][32]u8 = undefined;
     records[0] = tool_catalog.bash_record;
     for (&names, records[1 .. count + 1], 0..) |*name, *record, index| {
-        _ = try std.fmt.bufPrint(name, "tool_{d:0>3}", .{index});
+        _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
     records[count + 1] = tool_catalog.web_search_record;
@@ -8602,4 +8602,86 @@ test "a catalog at its bound saves and opens again" {
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
     try std.testing.expectEqual(@as(u64, count + 2), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+}
+
+/// The testing catalog with an MCP server's tool beside it.
+const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
+const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, testing_record, tool_catalog.web_search_record };
+const mcp_digests = blk: {
+    @setEvalBranchQuota(1_000_000);
+    var out: [mcp_records.len][32]u8 = undefined;
+    for (&mcp_records, &out) |*each, *digest| digest.* = tool_catalog.recordDigest(each);
+    break :blk out;
+};
+const mcp_catalog: tool_catalog.Catalog = .{ .records = &mcp_records, .digests = &mcp_digests };
+
+fn expectCatalog(expected: *const tool_catalog.Catalog, saved: *const store_core.SavedCatalog) !void {
+    try std.testing.expectEqual(expected.records.len, saved.records.len);
+    for (expected.records, saved.records, expected.digests, saved.digests) |want, got, want_digest, got_digest| {
+        try std.testing.expectEqualStrings(want.name, got.name);
+        try std.testing.expectEqual(want.owner, got.owner);
+        try std.testing.expectEqualStrings(want.server, got.server);
+        try std.testing.expectEqualStrings(want.description, got.description);
+        try std.testing.expectEqualStrings(want.input_schema, got.input_schema);
+        try std.testing.expectEqualSlices(u8, &want_digest, &got_digest);
+    }
+}
+
+test "a Store opened without a catalog reads back the last one saved, an MCP server's tools included" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    try std.testing.expect(try storage.readCatalog(std.testing.allocator) == null);
+    try storage.saveCatalog(&mcp_catalog);
+    try storage.close();
+
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    {
+        var saved = (try storage.readCatalog(std.testing.allocator)).?;
+        defer saved.deinit(std.testing.allocator);
+        try expectCatalog(&mcp_catalog, &saved);
+        // The Host saves what it read when it reaches no server.
+        const read = saved.catalog();
+        try storage.saveCatalog(&read);
+    }
+    // A later catalog without the server's tool replaces it, and saving
+    // the earlier one again finds its set.
+    try storage.saveCatalog(&testing_catalog);
+    {
+        var saved = (try storage.readCatalog(std.testing.allocator)).?;
+        defer saved.deinit(std.testing.allocator);
+        try expectCatalog(&testing_catalog, &saved);
+    }
+    const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
+    try storage.saveCatalog(&mcp_catalog);
+    try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+    var saved = (try storage.readCatalog(std.testing.allocator)).?;
+    defer saved.deinit(std.testing.allocator);
+    try expectCatalog(&mcp_catalog, &saved);
+    try storage.close();
+}
+
+test "a saved catalog whose text no longer matches its digest fences the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+    try storage.saveCatalog(&mcp_catalog);
+    try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+    try std.testing.expectError(error.CorruptStore, storage.readCatalog(std.testing.allocator));
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));
+}
+
+test "a record names a server exactly when an MCP server owns it" {
+    try std.testing.expect(tool_catalog.validServer(&mcp_record));
+    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp }));
+    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp, .server = "docs server" }));
+    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "bash", .owner = .rui, .server = "docs" }));
+    // Moving servers makes another record.
+    var moved = mcp_record;
+    moved.server = "wiki";
+    try std.testing.expect(!std.mem.eql(u8, &tool_catalog.recordDigest(&mcp_record), &tool_catalog.recordDigest(&moved)));
 }

@@ -188,7 +188,10 @@ pub const Store = struct {
         try self.engine.sqlite.prepareRollback();
         try loadIdentities(self, .full);
         self.queue().opened();
-        try self.saveCatalog(options.catalog);
+        if (options.catalog) |offered| try self.saveCatalog(offered) else {
+            const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
+        }
     }
 
     /// The tools the Host offers, and the id of their saved set.
@@ -198,8 +201,9 @@ pub const Store = struct {
     }
 
     /// Saves `offered` as the catalog set, if no set holds it yet: its
-    /// records a few to a transaction, then the set in one more. Once per
-    /// open, before any request.
+    /// records a few to a transaction, then the set in one more. It becomes
+    /// the catalog `readCatalog` reads back. Once per open, before any
+    /// request.
     pub fn saveCatalog(self: *Store, offered: *const tool_catalog.Catalog) !void {
         if (!offered.valid()) return error.InvalidToolCatalog;
         for (std.enums.values(tool_catalog.Tool)) |tool| {
@@ -228,6 +232,113 @@ pub const Store = struct {
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, saveCatalogStep(&access, offered, digest, start)));
+    }
+
+    /// The catalog the last `saveCatalog` saved, read back with every
+    /// text, in `allocator`'s memory; null before the first. A Host reads
+    /// it at start to keep the tools of a server it cannot reach. A saved
+    /// catalog that fails its checks fences the Store.
+    pub fn readCatalog(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
+        return self.readCatalogChecked(allocator) catch |err| switch (err) {
+            error.CorruptStore => fence(self, error.CorruptStore),
+            else => err,
+        };
+    }
+
+    fn readCatalogChecked(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
+        const head = (try self.readCatalogSet()) orelse return null;
+        const count = std.math.cast(usize, head.member_count) orelse return error.CorruptStore;
+        if (count > tool_catalog.max_catalog_records) return error.CorruptStore;
+        const rows = try allocator.alloc(tool_set_domain.catalog_records.Row, count);
+        defer allocator.free(rows);
+        var filled: usize = 0;
+        while (filled < count) {
+            const read = try self.readCatalogRecords(head.tool_set_id.get(), filled, rows[filled..]);
+            if (read == 0) return error.CorruptStore;
+            filled += read;
+        }
+        var text_bytes: usize = 0;
+        for (rows, 0..) |*row, ordinal| {
+            if (row.ordinal != ordinal or row.description_private or row.schema_private) return error.CorruptStore;
+            text_bytes += row.name.slice().len + row.server.slice().len;
+            text_bytes += std.math.cast(usize, row.description_length) orelse return error.CorruptStore;
+            text_bytes += std.math.cast(usize, row.schema_length) orelse return error.CorruptStore;
+        }
+        var saved: SavedCatalog = .{
+            .records = try allocator.alloc(tool_catalog.Record, count),
+            .digests = &.{},
+            .texts = &.{},
+        };
+        errdefer saved.deinit(allocator);
+        saved.digests = try allocator.alloc([32]u8, count);
+        saved.texts = try allocator.alloc(u8, text_bytes);
+        var used: usize = 0;
+        for (rows, saved.records, saved.digests) |*row, *out, *digest| {
+            const name = take(saved.texts, &used, row.name.slice().len);
+            @memcpy(name, row.name.slice());
+            const server = take(saved.texts, &used, row.server.slice().len);
+            @memcpy(server, row.server.slice());
+            const description = take(saved.texts, &used, @intCast(row.description_length));
+            const schema = take(saved.texts, &used, @intCast(row.schema_length));
+            try self.readCatalogText(row.description_id.get(), description);
+            try self.readCatalogText(row.schema_id.get(), schema);
+            if (!std.mem.eql(u8, &protocol.contentDigest(description), &row.description_digest) or
+                !std.mem.eql(u8, &protocol.contentDigest(schema), &row.schema_digest)) return error.CorruptStore;
+            out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
+            digest.* = tool_catalog.recordDigest(out);
+        }
+        if (!saved.catalog().valid()) return error.CorruptStore;
+        return saved;
+    }
+
+    fn take(texts: []u8, used: *usize, length: usize) []u8 {
+        defer used.* += length;
+        return texts[used.*..][0..length];
+    }
+
+    /// The Host's catalog set and its record count, in one round.
+    pub fn readCatalogSet(self: *Store) !tool_set_domain.SavedCatalog {
+        return self.queue().run(readCatalogSetHeld, .{self});
+    }
+
+    /// One round: the catalog set's records from `ordinal`, at most one
+    /// batch and `rows.len`; how many it read.
+    pub fn readCatalogRecords(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.catalog_records.Row) !usize {
+        return self.queue().run(readCatalogRecordsHeld, .{ self, set, ordinal, rows });
+    }
+
+    fn readCatalogSetHeld(self: *Store) !tool_set_domain.SavedCatalog {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, tool_set_domain.savedCatalogOf(&access));
+    }
+
+    fn readCatalogRecordsHeld(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.catalog_records.Row) !usize {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, tool_set_domain.catalogRecordsOf(&access, set, ordinal, rows));
+    }
+
+    /// `destination` from the content row `content_id`, a window at a time.
+    pub fn readCatalogText(self: *Store, content_id: u64, destination: []u8) !void {
+        var start: usize = 0;
+        while (start < destination.len) {
+            const window = destination[start..][0..@min(destination.len - start, content_domain.ContentReader.content_window_bytes)];
+            try self.queue().run(readCatalogTextHeld, .{ self, content_id, start, window });
+            start += window.len;
+        }
+    }
+
+    fn readCatalogTextHeld(self: *Store, content_id: u64, start: usize, window: []u8) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, access.readRaw(content_id, start, window));
     }
 
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
@@ -952,7 +1063,9 @@ pub const OpenOptions = struct {
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
     /// The tools the Host offers, which it keeps for the Store's life.
-    catalog: *const tool_catalog.Catalog = &tool_catalog.built_in,
+    /// Null saves none: the Host reads the last one back (`readCatalog`)
+    /// and saves its own (`saveCatalog`) before it serves.
+    catalog: ?*const tool_catalog.Catalog = &tool_catalog.built_in,
 };
 
 pub const SqliteDiagnostic = struct {
@@ -1384,8 +1497,17 @@ fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *co
         var set: tool_set_domain.CatalogSet = null;
         tool_set_domain.lookupCatalog(a, digest, &set);
         try a.run();
-        try a.abandon(.{});
-        return if (set) |row| row.tool_set_id.get() else null;
+        const row = set orelse {
+            try a.abandon(.{});
+            return null;
+        };
+        if (row.current) {
+            try a.abandon(.{});
+        } else {
+            tool_set_domain.pointCatalog(a, row.tool_set_id.get());
+            try a.commit();
+        }
+        return row.tool_set_id.get();
     };
     if (at < offered.records.len) {
         var reads: tool_set_domain.RecordReads = undefined;
@@ -1395,9 +1517,29 @@ fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *co
     }
     const set_id = try a.identity(.tool_set_id);
     tool_set_domain.insertCatalog(a, offered, digest, set_id);
+    tool_set_domain.pointCatalog(a, set_id);
     try a.commit();
     return set_id;
 }
+
+/// A catalog `readCatalog` read back, in its caller's memory.
+pub const SavedCatalog = struct {
+    records: []tool_catalog.Record,
+    digests: [][32]u8,
+    /// Every name, server and text the records point into.
+    texts: []u8,
+
+    pub fn catalog(self: *const SavedCatalog) tool_catalog.Catalog {
+        return .{ .records = self.records, .digests = self.digests };
+    }
+
+    pub fn deinit(self: *SavedCatalog, allocator: std.mem.Allocator) void {
+        allocator.free(self.records);
+        allocator.free(self.digests);
+        allocator.free(self.texts);
+        self.* = undefined;
+    }
+};
 
 /// The tools the Host offers and the id of their saved set, which
 /// configure resolves a Session's tool names against.
