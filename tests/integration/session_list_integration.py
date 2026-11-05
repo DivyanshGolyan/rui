@@ -174,7 +174,7 @@ def main():
                     "provider": {"state": "value", "value": "codex"},
                     "model": {"state": "value", "value": model},
                     "instructions": {"state": "omitted"},
-                    "tools": {"state": "value", "value": ["bash"]},
+                    "tools": {"state": "value", "value": ["bash", "web_search"]},
                     "permission_mode": {"state": "value", "value": "bypass"},
                     "output_schema": {"state": "omitted"},
                     "compaction_trigger": {"state": "value", "value": "100000"},

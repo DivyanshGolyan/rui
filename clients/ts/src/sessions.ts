@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 
 import { RuiRequestError } from "./errors.ts";
-import { FEED_KINDS, listActivity, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { FEED_KINDS, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -144,6 +144,11 @@ export class Session {
 	 */
 	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
 		return listActivity(this.#link, this.id, options);
+	}
+
+	/** Search public feed text newest first, with bounded snippets. */
+	searchActivity(query: string, options?: SearchActivityOptions): AsyncGenerator<ActivitySearchEntry, void, undefined> {
+		return searchActivity(this.#link, this.id, query, options);
 	}
 
 	/** The whole text of an entry (D134). Past about 512 MiB a string cannot hold it and this throws: use `readContentBytes`. */

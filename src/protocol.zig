@@ -262,6 +262,7 @@ pub const Kind = enum {
     conversation_page,
     conversation_content,
     activity_page,
+    activity_search,
     activity_content,
     model_list,
 };
@@ -648,6 +649,81 @@ pub const ActivityPage = struct {
         if (self.kinds.count() == 0 or self.limit == 0 or self.limit > items) return error.InvalidCursor;
     }
 };
+pub const ActivitySearch = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    query: Bounded(256) = .{},
+    kinds: ActivityPage.Kinds = .full,
+    before_position: ?u64 = null,
+    before_ordinal: ?u64 = null,
+    limit: u8 = ActivityPage.items,
+
+    pub fn validate(self: ActivitySearch) !void {
+        if (self.query.len == 0 or !std.unicode.utf8ValidateSlice(self.query.slice())) return error.InvalidCursor;
+        if (self.before_position) |position| {
+            if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidCursor;
+        }
+        if (self.before_ordinal) |ordinal| {
+            if (self.before_position == null or ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
+        }
+        if (self.kinds.count() == 0 or self.limit == 0 or self.limit > ActivityPage.items) return error.InvalidCursor;
+    }
+};
+
+pub const ActivitySearchFacts = struct {
+    items: [ActivityPage.items]Item = undefined,
+    count: usize = 0,
+    next: ?Cursor = null,
+
+    pub const Hit = struct {
+        snippet: Bounded(160) = .{},
+        offset: usize,
+        length: usize,
+        pub const json_shape = .{ "{\"snippet\":", Hole{ .string = 160 }, ",\"offset\":\"", Hole.decimal, "\",\"length\":\"", Hole.decimal, "\"}" };
+        pub const max_json_bytes = shapeBytes(json_shape);
+        pub fn writeJson(self: *const Hit, out: *std.Io.Writer) !void {
+            try writeShape(out, json_shape, .{ self.snippet.slice(), self.offset, self.length });
+        }
+    };
+    pub const Cursor = struct {
+        position: u64,
+        ordinal: u64,
+        pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
+        pub const max_json_bytes = shapeBytes(json_shape);
+        pub fn writeJson(self: *const Cursor, out: *std.Io.Writer) !void {
+            try writeShape(out, json_shape, .{ self.position, self.ordinal });
+        }
+    };
+    pub const Item = struct {
+        position: u64,
+        ordinal: u64,
+        kind: ActivityItem.Kind,
+        hits: [3]Hit = undefined,
+        count: usize = 0,
+        pub const head = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"", Hole{ .tag = ActivityItem.Kind }, "\",\"hits\":[" };
+        pub const max_json_bytes = shapeBytes(Item.head) + jsonListBytes(3, Hit.max_json_bytes) + 2;
+        pub fn writeJson(self: *const Item, out: *std.Io.Writer) !void {
+            try writeShape(out, Item.head, .{ self.position, self.ordinal, self.kind });
+            for (self.hits[0..self.count], 0..) |*hit, index| {
+                if (index != 0) try out.writeByte(',');
+                try hit.writeJson(out);
+            }
+            try out.writeAll("]}");
+        }
+    };
+    pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":["};
+    pub const tail = .{ "],\"next\":", Hole{ .optional_json = Cursor }, "}" };
+    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(ActivityPage.items, Item.max_json_bytes) + shapeBytes(tail);
+    pub fn writeJson(self: *const ActivitySearchFacts, out: *std.Io.Writer) !void {
+        try writeShape(out, head, .{});
+        for (self.items[0..self.count], 0..) |*item, index| {
+            if (index != 0) try out.writeByte(',');
+            try item.writeJson(out);
+        }
+        try writeShape(out, tail, .{self.next});
+    }
+};
+
 pub const ToolPresentation = struct {
     description: ?Bounded(max_tool_description_bytes),
     code: Code,
@@ -1163,6 +1239,7 @@ pub const Request = union(Kind) {
     conversation_page: ConversationPage,
     conversation_content: ConversationContent,
     activity_page: ActivityPage,
+    activity_search: ActivitySearch,
     activity_content: ReadActivityContent,
     model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
@@ -1170,7 +1247,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .host_pause, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
+            .host_info, .host_stop, .host_pause, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .model_list => {},
         }
     }
 
@@ -1557,6 +1634,10 @@ const Parser = struct {
             .conversation_content => {
                 out.* = .{ .conversation_content = .{ .store = store } };
                 try self.parseConversationContent(&out.conversation_content, &members);
+            },
+            .activity_search => {
+                out.* = .{ .activity_search = .{ .store = store } };
+                try self.parseActivitySearch(&out.activity_search, &members);
             },
             .activity_page => {
                 out.* = .{ .activity_page = .{ .store = store } };
@@ -2061,6 +2142,40 @@ const Parser = struct {
             .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
         };
         try require(Field, seen, &.{ .session, .end, .position, .ordinal, .direction, .kinds, .limit });
+        try out.validate();
+    }
+
+    fn parseActivitySearch(self: *Parser, out: *ActivitySearch, members: *Members) !void {
+        const Field = enum { session, query, before_position, before_ordinal, kinds, limit };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .query => try self.readSmallString(&out.query),
+            .before_position => if (!try self.readNull()) {
+                out.before_position = try self.readCanonicalU64();
+            },
+            .before_ordinal => if (!try self.readNull()) {
+                out.before_ordinal = try self.readCanonicalU64();
+            },
+            .kinds => {
+                try self.expectByte('[');
+                // Each kind at most once, in tag order, so one set has one spelling.
+                out.kinds = .empty;
+                var last: ?ActivityItem.Kind = null;
+                if (!try self.consumeIf(']')) while (true) {
+                    var name: Bounded(32) = .{};
+                    try self.readSmallString(&name);
+                    const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
+                    if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
+                    out.kinds.insert(kind);
+                    last = kind;
+                    if (try self.consumeIf(']')) break;
+                    try self.expectByte(',');
+                };
+            },
+            .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
+        };
+        try require(Field, seen, &.{ .session, .query });
         try out.validate();
     }
 
@@ -2721,6 +2836,9 @@ pub const conversation_content_request = .{ "{\"version\":\"" ++ wire_version ++
 /// Holes: Store, Session, end, before position, before ordinal.
 pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, end, position, ordinal, direction, kinds, limit.
+pub const activity_search_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 }, ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"before_position\":", Hole.optional_id, ",\"before_ordinal\":", Hole.optional_id, ",\"limit\":\"", Hole.decimal, "\"}" };
+pub const max_activity_search_request_bytes = shapeBytes(activity_search_request);
+pub const max_activity_search_response_bytes = ActivitySearchFacts.max_json_bytes;
 pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
@@ -2770,8 +2888,8 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     observe_command_request,       host_info_request,           host_stop_request,
     host_pause_request,            read_result_request,         list_sessions_changed_request,
     read_action_arguments_request, read_action_call_id_request, conversation_content_request,
-    conversation_page_request,     activity_page_request,       activity_content_request,
-    model_list_request,
+    conversation_page_request,     activity_search_request,     activity_page_request,
+    activity_content_request,      model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -4168,4 +4286,48 @@ test "protocol creation requires five explicit settings independent of field ord
             }
         }
     }
+}
+
+test "activity search wire validates query and paired backward cursor" {
+    const cases = [_]struct { fields: []const u8, failure: ?anyerror = null }{
+        .{ .fields = "\"query\":\"start_agent\"" },
+        .{ .fields = "\"query\":\"雪\",\"before_position\":\"1\",\"before_ordinal\":\"0\",\"kinds\":[\"call\"],\"limit\":\"1\"" },
+        .{ .fields = "\"query\":\"\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"before_position\":\"0\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"kinds\":[]", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"limit\":\"17\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"query\":\"y\"", .failure = error.UnexpectedField },
+    };
+    for (cases) |case| {
+        var buffer: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.fields});
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const request = try parseForTest(&parser);
+            try std.testing.expect(request == .activity_search);
+        }
+    }
+}
+
+test "activity search reply bounds preserve snippets and nullable continuation" {
+    var facts: ActivitySearchFacts = .{};
+    facts.count = 1;
+    facts.items[0] = .{ .position = 9, .ordinal = 2, .kind = .call, .count = 1 };
+    facts.items[0].hits[0] = .{ .offset = 1, .length = 3 };
+    try facts.items[0].hits[0].snippet.set("\"雪\n");
+    facts.next = .{ .position = 8, .ordinal = 0 };
+    var buffer: [max_activity_search_response_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try facts.writeJson(&out);
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[{\"position\":\"9\",\"ordinal\":\"2\",\"kind\":\"call\",\"hits\":[{\"snippet\":\"\\\"雪\\n\",\"offset\":\"1\",\"length\":\"3\"}]}],\"next\":{\"position\":\"8\",\"ordinal\":\"0\"}}", out.buffered());
+    facts.count = 0;
+    facts.next = null;
+    out = std.Io.Writer.fixed(&buffer);
+    try facts.writeJson(&out);
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[],\"next\":null}", out.buffered());
 }

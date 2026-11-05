@@ -2098,6 +2098,9 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
         command.configuration.tools = try .of(&.{"bash"});
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("ask");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.output_schema = .{
             .state = .value,
             .file = file,
@@ -2539,10 +2542,17 @@ test "request preparation keeps the starting effort at the top and changes it at
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set(case.model);
-        if (case.override) |effort| {
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        // D111: the client states the effort; a listed model's starting one is
+        // its catalog default unless the case overrides it.
+        if (case.override orelse case.expected) |effort| {
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
-        }
+        } else command.configuration.reasoning_effort.state = .explicit_null;
         const configured = setup.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
@@ -3809,7 +3819,11 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    command.configuration.reasoning_effort.state = .explicit_null;
+    // D111: a listed model states its catalog effort; null is for unlisted ones.
+    if (@import("model_capability.zig").defaultReasoningEffort(model)) |effort| {
+        command.configuration.reasoning_effort.state = .value;
+        try command.configuration.reasoning_effort.value.set(@tagName(effort));
+    } else command.configuration.reasoning_effort.state = .explicit_null;
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     const reply = setup.storage.configure(&command, .{});

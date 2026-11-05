@@ -1179,7 +1179,7 @@ Changing tools without specifying loaded_tools keeps equality when the saved set
 The Session and each revision store a nullable `loaded_tool_set_id`, interned like `tool_set_id`, with NULL denoting equality; Current and Full reports expose both sets, and a newly loaded tool follows the existing `additional_tools` history path without discarding the cache prefix.
 Who runs an accepted call is derived from its name, never stored.
 A **core tool** call runs as one core command, with no process: `message_agent(id, text)` admits `text` to Session `id` as a Message from the calling Session, with no client environment, and resolves the call `Delivered to ID.` in the same transaction; an unknown `id` resolves it failed and sends nothing.
-`read_transcript(id?, kinds?, before?, limit?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
+`read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
 It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
 `start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, Permission Mode, optional provider, Workspace, instructions, output schema and label), admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
 Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, unsupported effort or an excessive known-window compaction threshold (D165, D166).
@@ -1387,7 +1387,8 @@ Once migrations keep old Stores usable across format changes, Rui should switch 
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
-The unreleased wire label is `8`: it changed after v0.50.0 shipped `7` when the Host dropped the `proposal_page` and `proposal_field` requests, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request, which Divyansh asked for on 2026-11-03.
+Public activity search was added to wire label `8` after v0.53.1 shipped it: an added request needs no new label, and an older Host answers it as unknown.
+Wire label `8` changed after v0.50.0 shipped `7` when the Host dropped the `proposal_page` and `proposal_field` requests, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request, which Divyansh asked for on 2026-11-03.
 The Store records the wire label it was created with in `store_meta` and opens only at the current one.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
 Pre-provider captures are not accepted or defaulted to Codex.
@@ -2518,6 +2519,7 @@ Any other waits in the row, which shows only in the latest view, whenever the Ho
 It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
+Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
 Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
 Opening adds no configuration banner or command tutorial.
@@ -3053,6 +3055,17 @@ Null ordinal denotes a sequence boundary, excluding all rows at position; positi
 Forward catch-up captures a fresh end from the preceding end with null ordinal, so group ties are not replayed.
 Later appends and group completion cannot backfill an earlier prefix.
 Query work may grow with history; item bounds do not promise traversal latency.
+
+`POST /v1/activity-search` takes `kind:"activity_search"`, `session`, `query`, `kinds`, nullable decimal-string `before_position` and `before_ordinal`, and decimal-string `limit` with the Activity page's kind and limit rules.
+The query is 1 to 256 UTF-8 bytes; matching folds only ASCII A–Z and keeps every other byte exact, independent of the Store engine.
+The Host streams existing public content through `ContentReader`, with a fixed 8 MiB content-byte scan budget per request, and SQL chooses only candidate identities, never text matches.
+Searched text is Message text (admission, user, received and sent), assistant text, Turn-ending content, Tool Results, and a call's tool name followed by a newline and its stored arguments JSON; instructions, output schemas, usage, call IDs and private provider material are not searched.
+The reply is `type:"activity_search"` with newest-first `items`, each naming `position`, `ordinal`, `kind` and up to three `hits`, and nullable `next` naming the last scanned entry.
+A hit carries a UTF-8-aligned `snippet` of at most 160 bytes and decimal-string byte `offset` and `length` inside that snippet; when the full matched query exceeds the snippet bound, the highlight is its visible prefix, but matching still uses the entire query.
+Malformed stored text bytes appear as `?` in snippets, one byte each, preserving byte offsets.
+A budget-limited reply may contain no matches and still have `next`; the exclusive cursor proceeds to older entries, including when scanning stopped inside a large entry, rather than resuming that entry's remaining bytes.
+`read_transcript` with `query` uses this same search, prints each matching entry's outline followed by quoted snippets, and preserves the query in its continuation hint; `query` with `full` is refused.
+Search adds no Store format, index or SQL text-matching dependency.
 
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model table knows its facts.
 A model the table does not list runs with default limits (see compaction).

@@ -733,6 +733,12 @@ fn readCreation(a: anytype, reads: *ConfigurationReads) void {
     a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
 }
 
+/// noinline: the hash state stays off applyConfiguration's frame, which
+/// sits on the engine thread's deepest chain.
+noinline fn rootWorkspaceDigest() [32]u8 {
+    return store_core.workspaceDigest("/");
+}
+
 /// After `prepareConfiguration`'s round: decides the configuration, and
 /// queues its content and the Session's insert or update. Creation and its
 /// first Message can share this owner without an intermediate commit. The
@@ -786,7 +792,7 @@ pub fn applyConfiguration(
         // column stays nonempty, so a spec without one saves the root.
         std.debug.assert(!requestsBash(configuration));
         next.workspace.set("/") catch unreachable;
-        reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
+        reads.workspace_digest = rootWorkspaceDigest();
         break :unused null;
     } else if (configuration.workspace.state == .value) matches: {
         if (reads.found.get()) {
