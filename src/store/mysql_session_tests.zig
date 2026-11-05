@@ -356,3 +356,90 @@ test "text literals compare binary and without padding, and text that is not UTF
     try readOne(Count, connection, &count);
     try std.testing.expectEqual(0, count.count);
 }
+
+// MySQL's Store engine is not implemented yet. Exercise its durable chunk
+// layout, literal writer and wire reader here; feed binary result windows
+// directly to the production matcher, never concatenate chunks in SQL or Zig.
+test "word search streams across MySQL content chunk edges including split UTF-8" {
+    const Matcher = @import("../word_search.zig").Matcher;
+    const allocator = std.testing.allocator;
+    const connection = try allocator.create(Connection);
+    defer allocator.destroy(connection);
+    _ = try open(connection) orelse return error.SkipZigTest;
+    defer connection.close();
+
+    inline for (comptime schema.objects(.mysql)) |object| {
+        if (comptime object.kind == .table and
+            (std.mem.eql(u8, object.name, "content") or std.mem.eql(u8, object.name, "content_chunk")))
+            _ = try expectOks(connection, object.sql);
+    }
+    const insert_content = comptime rendered("INSERT INTO content(content_id,digest,byte_length,private) VALUES(?1,?2,?3,?4)");
+    const Content = struct { id: rsql.Positive, digest: [32]u8, length: u64, private: bool };
+    const insert_chunk = comptime rendered("INSERT INTO content_chunk(content_id,chunk_index,bytes) VALUES(?1,?2,?3)");
+    const Chunk = struct { id: rsql.Positive, index: u64, bytes: rsql.Bytes };
+    const select_chunks = comptime rendered("SELECT content_chunk.bytes FROM content_chunk JOIN content ON content.content_id=content_chunk.content_id WHERE content.content_id=?1 AND content.private=0 ORDER BY content_chunk.chunk_index");
+    const cases = [_]struct { query: []const u8, stored: []const u8, left: usize }{
+        .{ .query = "start_agent", .stored = "StArT_AgEnT", .left = 5 },
+        // The first chunk ends with C3, the second begins with A9. Text
+        // conversion of either chunk would lose the value; binary reads do not.
+        .{ .query = "café", .stored = "CaFé", .left = 4 },
+    };
+    const bytes = try allocator.alloc(u8, schema.content_chunk_bytes + 180);
+    defer allocator.free(bytes);
+    for (cases, 0..) |case, index| {
+        @memset(bytes, '.');
+        const start = schema.content_chunk_bytes - case.left;
+        @memcpy(bytes[start..][0..case.stored.len], case.stored);
+        const id: rsql.Positive = .of(@intCast(index + 1));
+        try send(connection, insert_content, Content, &.{ .id = id, .digest = @splat(@intCast(index)), .length = bytes.len, .private = false }, 0);
+        try std.testing.expectEqual(1, try okUntilReady(connection));
+        for (0..2) |chunk_index| {
+            const at = chunk_index * schema.content_chunk_bytes;
+            const chunk = bytes[at..@min(bytes.len, at + schema.content_chunk_bytes)];
+            try send(connection, insert_chunk, Chunk, &.{ .id = id, .index = chunk_index, .bytes = .{ .bytes = chunk } }, 0);
+            try std.testing.expectEqual(1, try okUntilReady(connection));
+        }
+
+        var matcher: Matcher = undefined;
+        matcher.init(case.query);
+        try send(connection, select_chunks, Key, &.{ .id = id }, 0);
+        const columns = switch (try connection.next()) {
+            .columns => |n| n,
+            else => return error.UnexpectedEvent,
+        };
+        const Row = struct { bytes: rsql.Blob(schema.content_chunk_bytes) };
+        _ = try row_decoder.readColumns(Row, connection, columns);
+        var rows: usize = 0;
+        while (true) {
+            switch (try connection.next()) {
+                .row => {},
+                .rows_end => break,
+                else => return error.UnexpectedEvent,
+            }
+            const length = switch (try connection.next()) {
+                .value => |n| n orelse return error.UnexpectedEvent,
+                else => return error.UnexpectedEvent,
+            };
+            try std.testing.expectEqual(@as(u32, if (rows == 0) schema.content_chunk_bytes else 180), length);
+            var read: usize = 0;
+            while (read < length) switch (try connection.next()) {
+                .bytes => |window| {
+                    try std.testing.expect(window.len <= length - read);
+                    matcher.feed(window);
+                    read += window.len;
+                },
+                else => return error.UnexpectedEvent,
+            };
+            rows += 1;
+        }
+        try std.testing.expect(connection.isReady());
+        try std.testing.expectEqual(@as(usize, 2), rows);
+        matcher.finish();
+        try std.testing.expectEqual(@as(usize, 1), matcher.count);
+        const hit = matcher.hits[0];
+        try std.testing.expectEqual(start, hit.raw_offset);
+        try std.testing.expectEqual(case.stored.len, hit.length);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(hit.snippet.slice()));
+        try std.testing.expectEqualStrings(case.stored, hit.snippet.slice()[hit.offset..][0..hit.length]);
+    }
+}

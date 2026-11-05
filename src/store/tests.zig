@@ -8610,6 +8610,7 @@ const EntryPoint = enum {
     publicConversationPage,
     openPublicConversationContent,
     activityPage,
+    searchActivity,
     openActivityContent,
     activityTool,
     captureFailedResponse,
@@ -8670,6 +8671,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .publicConversationPage = 4,
     .openPublicConversationContent = 2,
     .activityPage = 7,
+    .searchActivity = 5,
     .openActivityContent = 4,
     .activityTool = 4,
     .captureFailedResponse = 1,
@@ -8728,7 +8730,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite, .mysql => switch (point) {
-            .readOwnedContent, .readCatalogText => 1,
+            .readOwnedContent, .readCatalogText, .searchActivity => 1,
             else => 0,
         },
     };
@@ -8995,6 +8997,14 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try submitTestMessage(storage, tmp, "budget-plain-input", "budget-plain-key", session.slice(), "hello");
             meter.stop(.submitMessageWithModel);
+            const search = try std.testing.allocator.create(protocol.ActivitySearchFacts);
+            defer std.testing.allocator.destroy(search);
+            var search_request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission), .limit = 1 };
+            try search_request.query.set("hello");
+            meter.start();
+            try storage.searchActivity(&search_request, search);
+            meter.stop(.searchActivity);
+            try std.testing.expectEqual(@as(usize, 1), search.count);
             meter.start();
             _ = try storage.observeCommand("budget-plain-key");
             meter.stop(.observeCommand);

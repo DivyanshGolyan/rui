@@ -26,6 +26,7 @@ test {
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");
     _ = @import("protocol_reply.zig");
+    _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");

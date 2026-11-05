@@ -20,7 +20,16 @@ import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
 
+export interface McpServer {
+	name: string;
+	url: string;
+	bearerToken: string;
+	callTimeoutMs: number;
+}
+
 export interface ConnectOptions {
+	/** The MCP servers whose tools Sessions may name. */
+	tools?: McpServer[];
 	/** The Store: a SQLite directory or a mysql:// URL, sent only in the stdin launch frame. */
 	database: string;
 	/** The OpenAI-compatible provider. Only the key Adapter is offered to a launched Host (D149). */
@@ -289,7 +298,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 }
 
-function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
+export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 	// A URL is passed through; anything else is a SQLite Store directory.
 	const store = /^[a-z][a-z0-9+.-]*:\/\//i.test(options.database) ? options.database : resolve(options.database);
 	const frame = {
@@ -299,6 +308,8 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		...(options.activeCapacity === undefined ? {} : { activeCapacity: options.activeCapacity }),
 		...(options.paused ? { paused: true } : {}),
 		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
+		// Only the Host's fields are copied: it refuses unknown ones.
+		mcpServers: (options.tools ?? []).map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })),
 	};
 	// The child gets only what it needs to find programs and its home (D185).
 	const env: NodeJS.ProcessEnv = {};

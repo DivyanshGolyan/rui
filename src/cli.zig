@@ -8,6 +8,15 @@ const session_reads = @import("session_reads.zig");
 const overview_view = @import("overview_view.zig");
 const TestObservation = @import("TestObservation.zig");
 const caller_error = @import("caller_error.zig");
+const caller_exit = @import("caller_exit.zig");
+const caller_rejection = @import("caller_rejection.zig");
+
+// One invocation, including every member of a multi-request command.
+var exit_status: caller_exit.Status = .done;
+
+fn recordExit(status: caller_exit.Status) void {
+    exit_status = exit_status.merge(status);
+}
 const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
@@ -53,10 +62,14 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 
 pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
+        if (err != error.Reported and err != error.CallerFailure) recordExit(caller_exit.knownError(err));
+        if (exit_status == .done) recordExit(.unclassified);
         if (err == error.EmptyMessageInput) {
-            @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
-        } else if (err != error.Reported) stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
-        std.process.exit(1);
+            stderr.print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
+        } else if (err != error.Reported and err != error.CallerFailure and err != error.InvalidInvocation) {
+            stderr.diagnostic("error: {s} (exit status {d})\n", .{ @errorName(err), @backingInt(exit_status) });
+        }
+        std.process.exit(@backingInt(exit_status));
     };
 }
 
@@ -73,13 +86,13 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
         return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
     }
-    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) error.Reported else err;
+    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
         stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
-        return error.Reported;
+        return error.InvalidInvocation;
     }
-    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) error.Reported else err;
+    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
     if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) {
         return printHelp(init.io, .{ .resource = resource });
     }
@@ -87,22 +100,22 @@ fn run(init: std.process.Init) !void {
         var operation: [64]u8 = undefined;
         if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
             stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
-            return error.Reported;
+            return error.InvalidInvocation;
         };
         stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
-        return error.Reported;
+        return error.InvalidInvocation;
     };
     const definition = command.definition();
     // The arena outlives this invocation, so decoded identities do too.
     var problem: cli_args.Refusal = undefined;
     const parsed = definition.parseSyntax(args[3..], init.arena.allocator(), &problem) catch {
         reportParseProblem(problem, @tagName(resource), definition.name, null);
-        return error.Reported;
+        return error.InvalidInvocation;
     };
     if (parsed.help) return printHelp(init.io, .{ .command = definition });
     if (parsed.missing()) |group| {
         reportMissing(resource, definition, group) catch {};
-        return error.Reported;
+        return error.InvalidInvocation;
     }
     // Fresh argv is checked before capture. A saved explicit capture instead
     // belongs to its original validator and answer, even after enum changes.
@@ -110,13 +123,15 @@ fn run(init: std.process.Init) !void {
         switch (err) {
             error.InvalidOptionValue, error.InvalidInstructionsSource, error.ConflictingArguments => {
                 reportParseProblem(problem, @tagName(resource), definition.name, null);
-                return error.Reported;
+                return error.InvalidInvocation;
             },
             else => return err,
         }
     };
     dispatching = true;
     dispatch(init, command, &parsed, args) catch |err| {
+        if (err == error.CallerFailure) return err;
+        recordExit(caller_exit.knownError(err));
         if (err == error.InvalidArguments) {
             stderr.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
             return error.Reported;
@@ -124,7 +139,7 @@ fn run(init: std.process.Init) !void {
         if (err == error.EmptyMessageInput) return err;
         if (reportedByOwner(err)) return error.Reported;
         if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
-        // Until every owner reports its own cause, this line carries it.
+        // The unclassified internal-error path remains exit 1.
         stderr.diagnostic("rui: {s} {s} failed: {s}. Syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @errorName(err), @tagName(resource), definition.name });
         return error.Reported;
     };
@@ -137,7 +152,12 @@ fn run(init: std.process.Init) !void {
 /// missing terminal names the one-shot commands to use instead.
 /// `error.Reported` tells main the caller has already been told.
 fn reportedByOwner(err: anyerror) bool {
-    return err == error.InvalidModel or err == error.MutationNotAccepted or err == error.HostStopped or err == error.InteractiveTerminalRequired;
+    return err == error.InvalidModel or err == error.HostStopped or err == error.InteractiveTerminalRequired or err == error.CallerFailure;
+}
+
+fn reportedFailure(err: anyerror) anyerror {
+    if (err != error.CallerFailure) recordExit(caller_exit.knownError(err));
+    return error.Reported;
 }
 
 // `run` stays under the Host for its whole life, so client-only buffers
@@ -701,7 +721,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         if (count > 0) startup_length += @intCast(count);
         const startup = startup_bytes[0..startup_length];
         if ((std.mem.indexOf(u8, startup, "(exit status 1)\n") != null or count == 0 or startup_length == startup_bytes.len) and
-            std.mem.indexOf(u8, startup, "error: StoreAlreadyOwned (exit status 1)\n") == null)
+            std.mem.indexOf(u8, startup, "error: StoreAlreadyOwned (exit status 6)\n") == null)
         {
             // A competing candidate may have lost the lease to a ready Host.
             if (client.hostStatusUntil(io, paths.store.slice(), until) != .ready) {
@@ -732,7 +752,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 const notices = startup_bytes[0..startup_length];
                 // A competing launcher lost to this ready owner; its expected
                 // lease refusal is not a warning about the running Host.
-                if (startup_length != 0 and std.mem.indexOf(u8, notices, "error: StoreAlreadyOwned (exit status 1)\n") == null)
+                if (startup_length != 0 and std.mem.indexOf(u8, notices, "error: StoreAlreadyOwned (exit status 6)\n") == null)
                     _ = @import("stderr.zig").write(notices);
                 return reportStartedHost(io, ready, quiet, capacity);
             },
@@ -1255,7 +1275,7 @@ const NewSessionOptions = struct {
         var problem: cli_args.Refusal = undefined;
         const parsed = cli_args.fresh_session.parse(args, nothing.allocator(), &problem) catch {
             reportParseProblem(problem, null, null, null);
-            return error.Reported;
+            return error.InvalidInvocation;
         };
         if (parsed.help) return null;
         return .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model") };
@@ -1845,15 +1865,15 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
+        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
     } catch |err| {
-        if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
+        if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
     writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json, replay) catch |err| {
-        if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
+        if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
@@ -1865,6 +1885,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
 fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) void {
     const status = if (admitted) |accepted| if (accepted) "accepted; do not resubmit it" else "rejected" else "not confirmed; do not replace uncertain work";
     if (admitted == null) {
+        recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
         stderr.diagnostic("rui: Configuration {s} ({s}). Inspect with rui request inspect {s}; if still unconfirmed, rui request recover {s} retransmits the same saved request.\n", .{ status, @errorName(err), key, key });
         return;
     }
@@ -1923,7 +1944,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
+    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
@@ -1949,14 +1970,35 @@ fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
 
 /// A send's reply. A framed reply leaves nothing to report; an unreadable
 /// one leaves admission unknown.
-fn takeReply(step: *?client.Step, stepped: anytype) !protocol_reply.MutationReply {
-    const reply = try takeStep(step, stepped);
+fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.MutationIdentity, replay: client.Replay) !protocol_reply.MutationReply {
+    const reply = takeStep(step, stepped) catch |err| {
+        if (step.*) |failed| {
+            if (failed.mayHaveReachedHost()) {
+                recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
+                reportUnconfirmed(context, replay, err);
+                if (err == error.Cancelled or err == error.Canceled) return err;
+                return error.CallerFailure;
+            }
+            if ((failed == .connect or failed == .endpoint) and client.hostUnreachable(err)) {
+                recordExit(caller_exit.forCode(.not_sent, .host_unreachable));
+                reportFailureStep(step.*, err);
+                stderr.diagnostic("rui: Host unreachable ({s}); start or repair this Store's Host, then retry the same saved request.\n", .{@errorName(err)});
+                return error.CallerFailure;
+            }
+        }
+        recordExit(caller_exit.knownError(err));
+        reportFailureStep(step.*, err);
+        if (err == error.EnvironmentTooLarge) return err;
+        if (err == error.Cancelled or err == error.Canceled) return err;
+        return error.CallerFailure;
+    };
     step.* = if (reply.answer) |_| null else |_| .admission_response;
     return reply;
 }
 
 /// Null once the Host's reply was presented.
 fn reportFailureStep(held: ?client.Step, err: anyerror) void {
+    if (err == error.CallerFailure) return;
     const step = held orelse return;
     stderr.diagnostic("rui: failure during {s}: {s}.\n", .{ @tagName(step), @errorName(err) });
     if (step.mayHaveReachedHost())
@@ -2565,7 +2607,7 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
     var traversal = protocol_reply.SessionTraversal.init(null);
     var asked: usize = 0;
     var failed: usize = 0;
-    var first_failure: ?anyerror = null;
+
     while (true) {
         const page = readSessionPage(init, store, null, traversal.cursor) catch |err| {
             if (asked != 0) stderr.diagnostic("rui: the Session listing failed after {d} stops ({s}); Sessions it had not listed yet were not stopped.\n", .{ asked, @errorName(err) });
@@ -2577,17 +2619,19 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
             asked += 1;
             stderr.diagnostic("rui: stopping {s}\n", .{session});
             sendSessionStop(init, parsed, .{ .store = store, .session = session }, target) catch |err| {
-                stderr.diagnostic("rui: stopping {s} failed ({s}).\n", .{ session, @errorName(err) });
+                if (err != error.CallerFailure) {
+                    recordExit(caller_exit.knownError(err));
+                    stderr.diagnostic("rui: stopping {s} failed ({s}).\n", .{ session, @errorName(err) });
+                }
                 failed += 1;
-                first_failure = first_failure orelse err;
             };
         }
         if (!traversal.advance(&page)) break;
     }
     if (asked == 0) stderr.diagnostic("rui: no Session in this Store has work to stop.\n", .{});
-    if (first_failure) |err| {
+    if (failed != 0) {
         stderr.diagnostic("rui: {d} of {d} stops failed.\n", .{ failed, asked });
-        return err;
+        return error.CallerFailure;
     }
 }
 
@@ -2614,7 +2658,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer));
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
     };
     try writeMutationReply(io, reply, .json, replay);
 }
@@ -2686,7 +2730,7 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const reply = try protocol_reply.CurrentReply.decode(io, file, reference, wire_reply);
         if (reply == .failure) {
             try writeCommandReply(io, wire_reply.command, .stdout);
-            return reply.failure.err();
+            return readFailureError(reply.failure);
         }
         var output: JsonOutput = undefined;
         const writer = output.init(io, .stdout);
@@ -2718,7 +2762,7 @@ fn readConversation(init: std.process.Init, parsed: *const cli_args.Parsed) !voi
     const requests_: client.Requests = .{ .io = init.io };
     if (try requests_.readConversationContent(try selectedStore(init, parsed.get("store"), &selected_buffer), reference, target, item, null, std.Io.File.stdout())) |failure| {
         try writeReadFailure(init.io, failure, reference, .stderr);
-        return failure.err();
+        return readFailureError(failure);
     }
 }
 
@@ -2744,7 +2788,7 @@ fn readResult(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         .answer => {},
         .failure => |failure| {
             try writeReadFailure(io, failure, target, .stderr);
-            return failure.err();
+            return readFailureError(failure);
         },
     }
 }
@@ -2813,6 +2857,13 @@ fn writeCommandReply(io: std.Io, reply: protocol_reply.CommandReply, stream: Jso
     writer.writeAll("\n") catch |err| return output.failure(err);
     try output.finish();
     try protocol_reply.checkCanonicalFailure(reply);
+    if (reply.status == 503) {
+        const failure = try protocol_reply.decodeReadFailure(reply, false);
+        if (readFailureStatus(failure)) |status| {
+            recordExit(status);
+            return error.CallerFailure;
+        }
+    }
 }
 
 fn writeReadFailure(io: std.Io, failure: protocol_reply.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
@@ -2832,7 +2883,7 @@ fn checkedObservation(io: std.Io, reply: protocol_reply.ObservationReply, key: [
         .observation => |observation| observation,
         .failure => |failure| {
             try writeReadFailure(io, failure, key, .stdout);
-            return failure.err();
+            return readFailureError(failure);
         },
     };
 }
@@ -2880,17 +2931,35 @@ const MutationPresentation = enum {
 };
 
 fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation, replay: client.Replay) !void {
-    if (reply.answer) |answer| {
-        if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
-            stderr.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
-    } else |_| {}
+    // Admission is known before output. A failed writer cannot turn a saved
+    // answer into uncertain work, or an unconfirmed answer into non-admission.
+    const answer = reply.answer catch |err| {
+        recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
+        reportUnconfirmed(reply.context, replay, err);
+        presentMutationOutput(io, reply, presentation) catch |presentation_error| {
+            if (presentation_error != err) recordExit(.unclassified);
+        };
+        // Canonical failure still reaches the terminal owner's fatal cleanup.
+        return if (err == error.CanonicalStoreFailure) err else error.CallerFailure;
+    };
+    if (answer.result != .accepted) {
+        recordExit(caller_exit.forCode(.saved_refusal, savedRejectionCode(answer)));
+        var bytes: [4096]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        try writeSavedRejection(&notice, reply);
+        stderr.diagnosticBytes(notice.buffered());
+    }
+    presentMutationOutput(io, reply, presentation) catch |err| {
+        if (err == error.MutationNotAccepted) return error.CallerFailure;
+        return err;
+    };
+    if (answer.result != .accepted and presentation == .json) return error.CallerFailure;
+}
+
+fn presentMutationOutput(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (presentation == .json) {
         var output: JsonOutput = undefined;
-        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| {
-            const cause = output.failure(err);
-            if (cause == error.MutationNotAccepted) reportNotAccepted(reply.context, replay);
-            return cause;
-        };
+        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| return output.failure(err);
         return output.finish();
     }
     var buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -2898,19 +2967,39 @@ fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentat
     presentMutationReply(&output.interface, reply, presentation) catch |err| return output.err orelse err;
 }
 
-/// Names the replay the caller actually holds: a generated handle, or the
-/// explicit record, since repeating its capture refuses the existing --record.
-fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: client.Replay) void {
-    var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
-    var notice = std.Io.Writer.fixed(&bytes);
-    writeNotAccepted(&notice, context, replay) catch return;
-    stderr.diagnostic("{s}", .{notice.buffered()});
+fn savedRejectionCode(answer: protocol_reply.MutationAnswer) caller_error.Code {
+    return switch (answer.result) {
+        .accepted => unreachable,
+        .conflict => .idempotency_key_conflict,
+        // The Host may be newer than this build; its saved answer stays authoritative.
+        .rejected => |code| caller_rejection.fromRejection(code.slice()) orelse .rejection_unrecognized,
+    };
 }
 
-fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: client.Replay) !void {
-    try notice.writeAll("rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ");
+fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply) !void {
+    const answer = try reply.answer;
+    const operation: []const u8 = switch (reply.target) {
+        .configure => "configure",
+        .message => |target| if (target.creates_session) "start" else "send",
+        .session_stop => "stop",
+        .model_interruption => "interrupt-model",
+        .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
+    };
+    // Only the saved rejection is authority. In particular, replay never
+    // borrows a current argv value or reads today's configuration for advice.
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision) "action" else "session", .operation = operation });
+}
+
+fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
+    var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
+    var notice = std.Io.Writer.fixed(&bytes);
+    writeUnconfirmed(&notice, context, replay, err) catch return;
+    stderr.diagnosticBytes(notice.buffered());
+}
+
+fn writeUnconfirmed(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) !void {
+    try notice.print("rui: admission not confirmed ({s}); do not replace uncertain work. Recover it with rui request recover ", .{@errorName(err)});
     switch (replay) {
-        // validRequestHandle admits only shell-inert handle bytes.
         .generated => try notice.writeAll(context.key.slice()),
         .explicit => |record| {
             try notice.writeAll("--store ");
@@ -2922,7 +3011,21 @@ fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIden
             }
         },
     }
-    try notice.writeByte('\n');
+    try notice.writeAll(". Never resubmit with a new key. [reply_unconfirmed]\n");
+}
+
+fn readFailureError(failure: protocol_reply.ReadFailure) anyerror {
+    if (readFailureStatus(failure)) |status| {
+        recordExit(status);
+        return error.CallerFailure;
+    }
+    return failure.err();
+}
+
+fn readFailureStatus(failure: protocol_reply.ReadFailure) ?caller_exit.Status {
+    if (failure.diagnostic.code.eql("result_not_ready")) return caller_exit.forCode(.confirmed, .result_not_ready);
+    if (failure.diagnostic.type.eql("busy")) return caller_exit.forCode(.confirmed, .host_busy);
+    return null;
 }
 
 fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const u8) !void {
@@ -3122,18 +3225,19 @@ test "mutation presentation wrong binding keeps caller context even interactivel
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
-test "not-accepted guidance names the generated handle or the quoted explicit recover form" {
+test "unconfirmed guidance names the generated handle or the quoted explicit recover form" {
     var context: protocol_reply.MutationIdentity = .{ .kind = .session_stop };
     try context.store.set("/it's \\store");
     try context.key.set("0f8fad5b-d9cb-469f-a165-70867728950e");
     var buffer: [512]u8 = undefined;
-    const prefix = "rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ";
+    const prefix = "rui: admission not confirmed (TruncatedResponse); do not replace uncertain work. Recover it with rui request recover ";
+    const suffix = ". Never resubmit with a new key. [reply_unconfirmed]\n";
     var generated = std.Io.Writer.fixed(&buffer);
-    try writeNotAccepted(&generated, context, .generated);
-    try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e\n", generated.buffered());
+    try writeUnconfirmed(&generated, context, .generated, error.TruncatedResponse);
+    try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e" ++ suffix, generated.buffered());
     var explicit = std.Io.Writer.fixed(&buffer);
-    try writeNotAccepted(&explicit, context, .{ .explicit = "stop\x1b.json" });
-    try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop\n", explicit.buffered());
+    try writeUnconfirmed(&explicit, context, .{ .explicit = "stop\x1b.json" }, error.TruncatedResponse);
+    try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop" ++ suffix, explicit.buffered());
 }
 
 const SavedRequest = protocol_reply.MutationIdentity;
@@ -3189,7 +3293,7 @@ fn readSessionPage(init: std.process.Init, store: []const u8, workspace: ?[]cons
             try std.json.Stringify.value(.{ .status = failure.status, .type = failure.diagnostic.type.slice(), .code = failure.diagnostic.code.slice() }, .{}, &diagnostic.interface);
             try diagnostic.interface.writeAll("\n");
             try diagnostic.interface.flush();
-            return failure.err();
+            return readFailureError(failure);
         },
     };
 }
@@ -3281,7 +3385,8 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer).get();
+        var step: ?client.Step = null;
+        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), captured.identity().*, replay);
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }
@@ -3330,7 +3435,7 @@ fn showResult(init: std.process.Init, requester: client.Requests, saved: *const 
     };
     if (answer == .failure) {
         try writeReadFailure(init.io, answer.failure, saved.key.slice(), .stdout);
-        return answer.failure.err();
+        return readFailureError(answer.failure);
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }
@@ -3387,7 +3492,7 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
             try out.writeAll(reply.command.body);
             try out.writeByte('\n');
             try protocol_reply.checkCanonicalFailure(reply.command);
-            return failure.err();
+            return readFailureError(failure);
         },
     }
 }
@@ -3492,6 +3597,11 @@ const usage_text =
     \\Non-interactive calls never implicitly start a Host or sign in. Administration is explicit.
     \\After uncertainty, inspect or recover the original handle or record, never a new key.
     \\A nonzero exit can follow acceptance. Inspection never admits work; recovery can.
+    \\Exit statuses: 0 done; 1 unclassified failure, read stderr;
+    \\  2 invalid fresh invocation, nothing sent; 3 saved refusal;
+    \\  4 admission unconfirmed: rui request recover HANDLE, never resubmit;
+    \\  5 retry unchanged later; 6 repair environment, retry unchanged.
+    \\Multiple outcomes choose: 4 > 1 > 6 > 5 > 3 > 2 > 0.
     \\Store selection: --store, saved defaults, then HOME/.local/share/rui/store.
     \\Generated captures: HOME/.config/rui/requests. Use explicit --record and --key
     \\to retain a pre-known identity even if every notice and receipt is lost.
@@ -3621,4 +3731,77 @@ test "parser diagnostic hands off its complete line without a smaller format buf
     try std.testing.expect(std.mem.startsWith(u8, line, "rui host start: --active-capacity bad: "));
     try std.testing.expect(std.mem.endsWith(u8, line, "Nothing was captured or sent. [count_malformed]\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+}
+
+test "a saved rejection code this build does not know keeps the answer and says so" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .configure);
+    try reply.context.store.set("/s");
+    try reply.context.key.set("saved");
+    reply.context.kind = .configure;
+    var storage: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try writeSavedRejection(&out, reply);
+    try std.testing.expect(std.mem.startsWith(u8, out.buffered(), "rui session configure: Rui saved a rejection whose code this rui build does not know"));
+    try std.testing.expect(std.mem.endsWith(u8, out.buffered(), "[rejection_unrecognized]\n"));
+    try std.testing.expectEqual(caller_exit.Status.refused, caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer)));
+    out = .fixed(&storage);
+    try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
+    try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/s\",\"session\":\"k7m2qx\",\"key\":\"saved\",\"kind\":\"configure\"},\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"}}\n", out.buffered());
+}
+
+test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
+    const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
+        .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: An initial configuration needs workspace, provider and model; one or more are missing. Accepted: --workspace ABSOLUTE_DIRECTORY --provider PROVIDER --model MODEL. Next: Supply all three required flags: --workspace, --provider and --model. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+    };
+    for (cases) |case| {
+        var wire: [1024]u8 = undefined;
+        const body = try std.fmt.bufPrint(&wire, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\"}},\"execution\":{{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}}}", .{ protocol.wire_version, case.session, case.code });
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, case.session, .configure);
+        try reply.context.store.set("/s");
+        try reply.context.key.set("saved");
+        reply.context.kind = .configure;
+        var storage: [2048]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        try writeSavedRejection(&out, reply);
+        try std.testing.expectEqualStrings(case.line, out.buffered());
+        try std.testing.expectEqual(caller_exit.Status.refused, caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer)));
+        out = .fixed(&storage);
+        try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
+        var expected: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&expected, "{{\"context\":{{\"store\":\"/s\",\"session\":\"{s}\",\"key\":\"saved\",\"kind\":\"configure\"}},\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\"}}}}\n", .{ case.session, case.session, case.code });
+        try std.testing.expectEqualStrings(json, out.buffered());
+    }
+}
+
+test "CLI read remedies distinguish busy pending and internal failures" {
+    const cases = [_]struct { kind: []const u8, code: []const u8, expected: ?caller_exit.Status }{
+        .{ .kind = "busy", .code = "ordinary_capacity_exhausted", .expected = .later },
+        .{ .kind = "result_unavailable", .code = "result_not_ready", .expected = .later },
+        .{ .kind = "invocation_error", .code = "canonical_store_failure", .expected = null },
+        .{ .kind = "result_unavailable", .code = "result_not_found", .expected = null },
+    };
+    for (cases) |case| {
+        var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+        try failure.diagnostic.type.set(case.kind);
+        try failure.diagnostic.code.set(case.code);
+        try std.testing.expectEqual(case.expected, readFailureStatus(failure));
+    }
+}
+
+test "stop-all refusal and uncertain recovery golden aggregates to exit four" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"unknown_session\"},\"completion\":{\"status\":\"unavailable\"}}";
+    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .session_stop);
+    var context: protocol_reply.MutationIdentity = .{ .kind = .session_stop };
+    try context.key.set("uncertain-handle");
+    var storage: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try writeSavedRejection(&out, reply);
+    try writeUnconfirmed(&out, context, .generated, error.TruncatedResponse);
+    try std.testing.expectEqualStrings("rui session stop: --session / --to: No Session with this ID exists in this Store. Accepted: an existing Session ID from rui session list. Next: Select the right --store and an ID from rui session list, or create a Session with rui session start. This rejection was saved and replays as saved; a resend needs a new key. [unknown_session]\nrui: admission not confirmed (TruncatedResponse); do not replace uncertain work. Recover it with rui request recover uncertain-handle. Never resubmit with a new key. [reply_unconfirmed]\n", out.buffered());
+    const refused = caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer));
+    const uncertain = caller_exit.forCode(.unconfirmed, .reply_unconfirmed);
+    try std.testing.expectEqual(caller_exit.Status.unconfirmed, refused.merge(uncertain));
+    try std.testing.expectEqual(caller_exit.Status.unconfirmed, uncertain.merge(refused));
 }

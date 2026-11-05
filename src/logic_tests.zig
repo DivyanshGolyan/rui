@@ -6,12 +6,14 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic.
 const cores = .{
+    .{ "word_search.zig", @import("word_search.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
     .{ "attention.zig", @import("attention.zig") },
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
+    .{ "caller_exit.zig", @import("caller_exit.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },

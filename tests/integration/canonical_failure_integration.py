@@ -310,13 +310,13 @@ def binding_cases(state, null_code=False):
                     expect_mutation_error(failed, saved, status=200, reason=reason, diagnostic=None)
                     assert record.read_bytes() == request
                 # Replay returns the original saved answer; a saved rejection
-                # still arrives on stdout and exits 1.
+                # still arrives on stdout and exits 3.
                 original_answer = json.loads(original_reply.split(b"\r\n\r\n", 1)[1])["answer"]
                 for recovery in (["request", "recover", "--store", store, "--record", record, "--kind", kind],
                         *([["request", "recover", key]] if mode != "raw" else [])):
                     recovered = invoke(home, *recovery)
                     replayed = json.loads(recovered.stdout)["answer"]
-                    assert recovered.returncode == (0 if original_answer["status"] == "accepted" else 1), recovered
+                    assert recovered.returncode == (0 if original_answer["status"] == "accepted" else 3), recovered
                     assert replayed["replayed"] is True and replayed["status"] == original_answer["status"], recovered
                 assert record.read_bytes() == request
     finally:
@@ -771,7 +771,8 @@ def store_read_cases(state):
         session = fixture.configure(home, store, "store-read-configure", None, "gpt-6-sol")
         fixture.message(home, store, "store-read-message", session, "queued work")
         before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
-        assert content_failure(before)["error"]["code"] == "result_not_ready", before
+        assert before.returncode == 5 and before.stdout == "", before
+        assert json.loads(before.stderr.splitlines()[0])["error"]["code"] == "result_not_ready", before
         # The Host holds its Store exclusively, so corrupt the stopped file:
         # startup reads core_command only for its greatest command_seq, its
         # rowid, never its command_key index, and the keyed read then fails
@@ -821,9 +822,9 @@ def keyed_observation_cases(state, only="keyed"):
             args = [*command, *address]
             args += [] if kind == "message" else ["--record", home / f"{kind}.json", "--key", kind]
             submitted = invoke(home, *args, input="submitted bytes" if kind == "message" else None)
-            # A saved rejection is delivered on stdout with exit 1.
+            # A saved rejection is delivered on stdout with exit 3.
             rejected = kind in ("model_interruption", "permission_decision")
-            assert submitted.returncode == (1 if rejected else 0), submitted
+            assert submitted.returncode == (3 if rejected else 0), submitted
             if kind == "configure":
                 session = json.loads(submitted.stdout)["answer"]["session"]
             key = announced(submitted) if kind == "message" else kind

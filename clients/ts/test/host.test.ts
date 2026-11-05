@@ -145,6 +145,18 @@ test("a refused frame is a RuiStartError", { skip }, async () => {
 	});
 });
 
+test("an invalid MCP server is a RuiStartError", { skip }, async () => {
+	const token = "mcp-secret-test";
+	const tools = [{ name: "drift", url: "https://example.com/mcp", bearerToken: token, callTimeoutMs: 1000 }];
+	await assert.rejects(Rui.connect(options(newStore(), { tools })), (error: unknown) => {
+		assert.ok(error instanceof RuiStartError);
+		assert.equal(error.code, "launch_frame_invalid");
+		assert.match(error.message, /mcpServers/);
+		assert.ok(!error.message.includes(token));
+		return true;
+	});
+});
+
 test("a missing executable is RuiUnavailableError", async () => {
 	await assert.rejects(Rui.connect(options(newStore(), { binary: "/nonexistent/rui" })), RuiUnavailableError);
 });

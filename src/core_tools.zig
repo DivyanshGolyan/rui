@@ -19,7 +19,7 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
 pub const read_transcript_max_argument_bytes = 4096;
 
 // Prompt text: written here, and given no tests (D141).
-pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Private content is never shown.";
+pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
 const transcript_kind_schema = blk: {
     var names: []const u8 = "";
     for (std.enums.values(protocol.ActivityItem.Kind), 0..) |kind, index| {
@@ -29,6 +29,7 @@ const transcript_kind_schema = blk: {
 };
 pub const read_transcript_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"id\":{\"type\":\"string\",\"description\":\"Session ID; omitted means your own Session.\"}," ++
+    "\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"Search public text (1 to 256 UTF-8 bytes); not with full.\"}," ++
     "\"kinds\":{\"type\":\"array\",\"items\":" ++ transcript_kind_schema ++ ",\"minItems\":1,\"description\":\"Public feed kind names, exactly as on the wire. Omitted means all kinds.\"}," ++
     "\"before\":{\"type\":\"string\",\"description\":\"List entries strictly older than this P or P.O address.\"}," ++
     "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16}," ++
@@ -45,6 +46,7 @@ pub const ReadTranscript = struct {
     before: ?TranscriptAddress = null,
     limit: u8 = protocol.ActivityPage.items,
     full: ?TranscriptAddress = null,
+    query: ?protocol.Bounded(256) = null,
     offset: u64 = 0,
 };
 
@@ -75,7 +77,7 @@ pub fn checkReadTranscript(arena: std.mem.Allocator, bytes: []const u8, out: *Re
         .object => |object| object,
         else => return refused("the arguments are not one JSON object"),
     };
-    if (unknownField(top, &.{ "id", "kinds", "before", "limit", "full", "offset" })) |name| return refusedField(arena, name, "is not a read_transcript field");
+    if (unknownField(top, &.{ "id", "kinds", "before", "limit", "full", "offset", "query" })) |name| return refusedField(arena, name, "is not a read_transcript field");
     out.* = .{};
     if (top.get("id")) |value| {
         var id: protocol.Bounded(protocol.session_id_bytes) = .{};
@@ -83,6 +85,11 @@ pub fn checkReadTranscript(arena: std.mem.Allocator, bytes: []const u8, out: *Re
         id.set(value.string) catch return refused("id must be a Session ID");
         if (!protocol.validSessionId(id.slice())) return refused("id must be a Session ID");
         out.id = id;
+    }
+    if (top.get("query")) |value| {
+        if (value != .string or value.string.len == 0 or value.string.len > 256 or !std.unicode.utf8ValidateSlice(value.string)) return refused("query must be 1 to 256 bytes of UTF-8");
+        out.query = .{};
+        out.query.?.set(value.string) catch unreachable;
     }
     if (top.get("kinds")) |value| {
         if (value != .array or value.array.items.len == 0) return refused("kinds must be a nonempty array of feed kind names");
@@ -104,7 +111,7 @@ pub fn checkReadTranscript(arena: std.mem.Allocator, bytes: []const u8, out: *Re
     if (top.get("full")) |value| {
         if (value != .string) return refused("full must be an entry address P.O");
         out.full = transcriptAddress(value.string, true) orelse return refused("full must be an entry address P.O");
-        inline for (.{ "kinds", "before", "limit" }) |name| if (top.get(name) != null) return refused(name ++ " must be absent with full");
+        inline for (.{ "kinds", "before", "limit", "query" }) |name| if (top.get(name) != null) return refused(name ++ " must be absent with full");
     }
     if (top.get("offset")) |value| {
         if (out.full == null) return refused("offset is only accepted with full");
@@ -604,7 +611,9 @@ test "read_transcript arguments defaults filters addresses and every refusal" {
         .{ .bytes = "{", .refusal = "the arguments are not one well-formed JSON object" },
         .{ .bytes = "{} {}", .refusal = "the arguments are not one well-formed JSON object" },
         .{ .bytes = "{\"id\":\"k7m2qx\",\"id\":\"k7m2qx\"}", .refusal = "a field appears more than once" },
-        .{ .bytes = "{\"query\":\"word\"}", .refusal = "query is not a read_transcript field" },
+        .{ .bytes = "{\"query\":\"\"}", .refusal = "query must be 1 to 256 bytes of UTF-8" },
+        .{ .bytes = "{\"query\":7}", .refusal = "query must be 1 to 256 bytes of UTF-8" },
+        .{ .bytes = "{\"query\":\"word\",\"full\":\"42.0\"}", .refusal = "query must be absent with full" },
         .{ .bytes = "{\"id\":7}", .refusal = "id must be a Session ID" },
         .{ .bytes = "{\"id\":\"TOOLONG\"}", .refusal = "id must be a Session ID" },
         .{ .bytes = "{\"id\":\"K7M2QX\"}", .refusal = "id must be a Session ID" },
@@ -676,4 +685,27 @@ test "read_transcript arguments defaults filters addresses and every refusal" {
         try std.testing.expect(try checkReadTranscript(arena.allocator(), bytes, &read) == .accepted);
         try std.testing.expect(read.kinds.eql(.initOne(kind)));
     }
+}
+
+test "read_transcript query accepts UTF-8 byte bounds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var read: ReadTranscript = .{};
+    for ([_]usize{ 1, 256, 257 }) |length| {
+        const query = try arena.alloc(u8, length);
+        @memset(query, 'a');
+        const args = try std.fmt.allocPrint(arena, "{{\"query\":\"{s}\"}}", .{query});
+        const check = try checkReadTranscript(arena, args, &read);
+        if (length <= 256) {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqualStrings(query, read.query.?.slice());
+        } else try std.testing.expect(check == .rejected);
+    }
+    const multibyte = try arena.alloc(u8, 256);
+    for (0..128) |index| @memcpy(multibyte[index * 2 ..][0..2], "é");
+    const args = try std.fmt.allocPrint(arena, "{{\"query\":\"{s}\"}}", .{multibyte});
+    try std.testing.expect(try checkReadTranscript(arena, args, &read) == .accepted);
+    try std.testing.expectEqualStrings(multibyte, read.query.?.slice());
+    try std.testing.expect(try checkReadTranscript(arena, "{\"query\":\"\xff\"}", &read) == .rejected);
 }
