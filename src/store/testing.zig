@@ -274,6 +274,13 @@ pub fn setLoadedToolsForTesting(storage: *Store, session: []const u8, source: []
     try exec(storage, "UPDATE session_revision SET loaded_tool_set_id=(SELECT loaded_tool_set_id FROM session WHERE session_ref=?1) WHERE session_ref=?1", .{session});
 }
 
+/// Pre-D111 population: null Session settings while earlier Operations retain
+/// the concrete effort they froze. Only the fixture bypasses fresh-spec admission.
+pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void {
+    try exec(storage, "UPDATE session SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
+    try exec(storage, "UPDATE session_revision SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
+}
+
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
 /// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {

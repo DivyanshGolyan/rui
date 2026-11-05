@@ -3960,9 +3960,7 @@ test "a legacy null Session continues with its earlier Operation effort" {
 
     // Pre-D111 gpt-5.5 Sessions stored null while Operations froze medium.
     // Formats 51..53 migrate to the current Store without replacing these rows.
-    const testing_store = @import("store/testing.zig");
-    try testing_store.sqlite_only.exec(&setup.storage, "UPDATE session SET reasoning_effort=NULL WHERE session_ref=?1", .{session.slice()});
-    try testing_store.sqlite_only.exec(&setup.storage, "UPDATE session_revision SET reasoning_effort=NULL WHERE session_ref=?1", .{session.slice()});
+    try store.setLegacyNullEffortForTesting(&setup.storage, session.slice());
     const earlier = try prepareMemoForTesting(&setup, first, null, .{});
     defer std.testing.allocator.free(earlier.bytes);
     try setup.submit("legacy-second", "legacy-second", session.slice(), "continue");
