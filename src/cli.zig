@@ -1756,6 +1756,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
     if (parsed.get("instructions")) |path| input.instructions = .{ .state = .value, .path = path };
     input.tools = parsed.get("tools");
+    input.loaded_tools = parsed.get("loaded-tools");
     if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
     if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
@@ -1867,33 +1868,34 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         return error.InvalidSession;
     }
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
-    // Never let incomplete or malformed peer context fall back to HOME or
-    // become an anonymous send. The Host still authenticates the live handle.
+    // Peer context names a Session in its own Store, so it signs only sends
+    // to that Store; an explicit --store naming another Store is a plain
+    // caller's send there (#957). Incomplete or malformed context never falls
+    // back to HOME or becomes an anonymous send. The Host still
+    // authenticates the live handle.
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
-    input.sender_handle = init.environ_map.get("RUI_SENDER_HANDLE");
-    if (address != null or sender_store != null or input.sender_handle != null) {
-        if (address == null or sender_store == null or input.sender_handle == null or
-            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or input.sender_handle.?.len == 0)
+    const handle = init.environ_map.get("RUI_SENDER_HANDLE");
+    if (address != null or sender_store != null or handle != null) {
+        if (address == null or sender_store == null or handle == null or
+            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0 or
+            std.meta.isError(client.validatePeer(sender_store.?, address.?, handle.?)))
         {
             stderr.diagnostic("rui: invalid peer context; nothing was sent. RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE come as a set from a Session's Bash. To send as a plain caller, run without them: " ++ plain_caller ++ "\n", .{});
             return error.InvalidRuiAddress;
         }
-        input.sender = .{ .store = sender_store.?, .session = address.? };
+        const elsewhere = if (parsed.get("store")) |override|
+            !(try platform.resolveClientPaths(io, override)).store.eql((try platform.resolveClientPaths(io, sender_store.?)).store.slice())
+        else
+            false;
+        if (!elsewhere) {
+            input.sender = .{ .store = sender_store.?, .session = address.? };
+            input.sender_handle = handle;
+        }
     }
     step.* = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (sender_store) |trusted| {
-        const sender_paths = try platform.resolveClientPaths(io, trusted);
-        if (parsed.get("store")) |override| {
-            const override_paths = try platform.resolveClientPaths(io, override);
-            if (!override_paths.store.eql(sender_paths.store.slice())) {
-                stderr.diagnostic("rui: peer sends must use the sender's Store; nothing was sent. This rui inherited RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE from a Session's Bash, so it sends as that Session, and --store names a different Store. To send as a plain caller, for example from a harness that starts its own Host, run without them: " ++ plain_caller ++ "\n", .{});
-                return error.CrossStorePeerSend;
-            }
-        }
-        input.store = trusted;
-    } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    input.store = if (input.sender != null) sender_store.? else try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(step, client.captureMessage(io, input, target));
@@ -2013,7 +2015,7 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -3447,7 +3449,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,read_transcript,start_agent,web_search|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,read_transcript,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:

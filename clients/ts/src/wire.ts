@@ -506,7 +506,7 @@ export interface components {
                 session_changed: {
                     revision: components["schemas"]["Decimal"];
                     /** @enum {string} */
-                    field: "provider" | "model" | "instructions" | "tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label";
+                    field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label";
                 };
             };
         } | {
@@ -597,6 +597,15 @@ export interface components {
                 value: string;
             };
             tools: {
+                /** @constant */
+                state: "omitted";
+            } | {
+                /** @constant */
+                state: "value";
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
+            };
+            loaded_tools?: {
                 /** @constant */
                 state: "omitted";
             } | {
@@ -721,7 +730,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             execution: {
                 /** @constant */
@@ -1151,6 +1160,15 @@ export interface components {
                 /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
                 value: string[];
             };
+            loaded_tools?: {
+                /** @constant */
+                state: "omitted";
+            } | {
+                /** @constant */
+                state: "value";
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
+            };
             permission_mode: {
                 /** @constant */
                 state: "omitted";
@@ -1268,7 +1286,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             input: {
                 /** @constant */
