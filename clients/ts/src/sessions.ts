@@ -54,7 +54,6 @@ export interface SessionSummary {
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
 	state: string;
-	/** Always `null` until Sessions have parents. */
 	parent: string | null;
 }
 
@@ -300,7 +299,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: null });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: row.parent });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

@@ -523,6 +523,7 @@ Agents compose ordinary Session configuration and Message admission through the 
 `rui session send --to k7m2qx` takes one exact canonical ID, without JSON.
 Anonymous human and script sends may select `--store PATH` or use their ordinary Store defaults.
 A peer destination is always in the trusted sender's Store, before HOME preferences; an explicit Store override must canonicalize to that same Store or reject before capture.
+Both peer refusals name the three variables and the plain-caller form, `env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...`, which a harness that starts its own Host inside a Session uses (#957).
 Incomplete or malformed peer environment rejects without anonymous or default-Store fallback, including with an explicit Store selector.
 Store selection is canonicalized without changing Session bytes.
 A Session may send to itself.
@@ -1913,7 +1914,7 @@ The public client `listSessions` streams one complete JSON page to caller-owned 
 Request fields are `version`, `kind`, canonical `store`, `workspace` (exact canonical stored path or `null` for all), and string-valued `after`/`ceiling` (both `"0"` initially).
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
-Each row has exact `reference`, `workspace`, `provider`, `model`, `tools` and `permission_mode`; nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Each row has exact `reference`, `workspace`, `provider`, `model`, `tools` and `permission_mode`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
 `work` is the same value that activity pages, Current and Message progress carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
@@ -2849,7 +2850,7 @@ Host work and captured-request recovery are independent of terminal state; unsen
 A report may lag and has no global cross-Session revision.
 The one in-memory exception is Session listing's `since` token: an opaque Host-opening hint that says which Sessions may have changed, not a revision any read can be asked to be "as of", never stored and void after a Host restart.
 
-Reports have exactly two closed profiles. **Current**, the default, contains effective settings including the Label, `created_at`, `context_estimate`, the Session work, `first_message` and `from_person_at` that Session listing reports, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, accepted call outcomes still participating in the active Turn, the selected work's original Message key (active Turn's first admission or oldest unexcluded queued admission), and up to ten most recent applied Messages from terminal Turns with their keys and outcomes.
+Reports have exactly two closed profiles. **Current**, the default, contains effective settings including the Label, `parent`, `created_at`, `context_estimate`, the Session work, `first_message` and `from_person_at` that Session listing reports, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, accepted call outcomes still participating in the active Turn, the selected work's original Message key (active Turn's first admission or oldest unexcluded queued admission), and up to ten most recent applied Messages from terminal Turns with their keys and outcomes.
 Selection and recent identities are committed Host facts, not local caller records; growing terminal history is excluded.
 Explicit **Full** contains Current plus the following closed inventory:
 

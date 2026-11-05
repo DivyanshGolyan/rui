@@ -314,7 +314,7 @@ def managed_descriptor_rejection(store, env, limit):
     before = time.monotonic()
     failed = run_start(store, env, preexec_fn=limits)
     assert failed.returncode != 0 and time.monotonic() - before < 5, failed
-    for text in ("DescriptorCapacityInsufficient", "exit status 1", "RLIMIT_NOFILE",
+    for text in ("DescriptorCapacityInsufficient", "host serve failed: ", "RLIMIT_NOFILE",
                  "minimum intake", "ulimit -Hn", "rui host start"):
         assert text in failed.stderr, (text, failed.stderr)
     line = next(line for line in failed.stderr.splitlines() if "descriptor capacity insufficient:" in line)
@@ -500,7 +500,7 @@ def startup_limits(root, env):
     before = time.monotonic()
     failed = run_start(store, env, preexec_fn=lower_descriptor_limit)
     assert failed.returncode != 0 and time.monotonic() - before < 5, failed
-    assert "DescriptorCapacityInsufficient" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
+    assert "DescriptorCapacityInsufficient" in failed.stderr and "host serve failed: " in failed.stderr, failed.stderr
     assert "RLIMIT_NOFILE" in failed.stderr and "minimum intake" in failed.stderr, failed.stderr
     assert not (store / "host.lock").exists()
 
@@ -515,7 +515,7 @@ def startup_limits(root, env):
     assert failed.returncode != 0 and time.monotonic() - before < 5, failed
     assert str(store.resolve()) in failed.stderr, failed.stderr
     assert "found schema 21" in failed.stderr and f"supports schema {SCHEMA}" in failed.stderr, failed.stderr
-    assert "back up" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
+    assert "back up" in failed.stderr and "host serve failed: " in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
     for wire in (None, "future"):
@@ -563,7 +563,7 @@ def startup_limits(root, env):
         failed = run_start(hostile, env)
         assert failed.returncode != 0 and time.monotonic() - before < 5, failed
         assert f" at {escaped}: found schema {schema}" in failed.stderr, failed.stderr
-        assert "back up" in failed.stderr and "No migration" in failed.stderr and "exit status 1" in failed.stderr
+        assert "back up" in failed.stderr and "No migration" in failed.stderr and "host serve failed: " in failed.stderr
         assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
         assert hashlib.sha256(hostile_database.read_bytes()).digest() == original
     print("startup limits passed: soft raise, hard-limit minimum boundary, below-minimum and unsupported-version fast failure", flush=True)
@@ -943,7 +943,7 @@ def main():
             assert failed.returncode != 0
             assert elapsed < 5, elapsed
             assert "DescriptorCapacityInsufficient" in failed.stderr, failed.stderr
-            assert "exit status 1" in failed.stderr, failed.stderr
+            assert "host serve failed: " in failed.stderr, failed.stderr
             assert status(failure_store, env)["status"] == "unavailable"
             assert not credential.exists()
         finally:
