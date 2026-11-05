@@ -8334,6 +8334,7 @@ const EntryPoint = enum {
     revokeActionSender,
     nextCoreWork,
     deliverAgentMessage,
+    deliverChildEnding,
     startAgent,
     stopOwedSession,
     failCoreCall,
@@ -8392,6 +8393,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .revokeActionSender = 2,
     .nextCoreWork = 3,
     .deliverAgentMessage = 3,
+    .deliverChildEnding = 3,
     .startAgent = 4,
     .stopOwedSession = 2,
     .failCoreCall = 2,
@@ -8726,6 +8728,8 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
             meter.stop(.failCoreCall);
+            // Admit the child task so stopping it closes a Turn.
+            while (try storage.admitNextModelAttempt(.{})) |_| {}
             var stop = try completeSessionStop("budget-core-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             const owed = (try storage.nextCoreWork()).?.stop;
@@ -8734,6 +8738,10 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
             meter.stop(.stopOwedSession);
+            const ending = (try storage.nextCoreWork()).?.ending;
+            meter.start();
+            try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, null, .{}));
+            meter.stop(.deliverChildEnding);
         }
 
         /// Two Bash calls under ask: one allowed, run and settled, one

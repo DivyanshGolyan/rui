@@ -1113,8 +1113,14 @@ pub const Store = struct {
     /// Reads a core call's whole arguments into `bytes`, which holds exactly
     /// their length, one content window at a time.
     pub fn readCoreArguments(self: *Store, input: *const CoreActionInput, bytes: []u8) !void {
+        return self.readContent(input.arguments, bytes);
+    }
+
+    /// Reads the content `reference` names whole into `bytes`, which holds
+    /// exactly its length, one content window at a time.
+    pub fn readContent(self: *Store, reference: ContentReference, bytes: []u8) !void {
         var reader: content_domain.ContentReader = undefined;
-        reader.open(try self.openContent(input.arguments));
+        reader.open(try self.openContent(reference));
         defer reader.close();
         var offset: usize = 0;
         while (offset < bytes.len) {

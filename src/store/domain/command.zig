@@ -505,7 +505,7 @@ fn childEndingKey(buffer: *[protocol.max_key_bytes]u8, turn_id: u64) []const u8 
 
 /// The owed ending of `turn_id`, its child's Session and its parent's.
 const owed_ending_sessions = rsql.Read(.{
-    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref FROM session_ending_owed e " ++
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent FROM session_ending_owed e " ++
         "JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE e.turn_id=?1",
     .Args = struct { turn_id: u64 },
     .Row = struct { child: rsql.SessionHead, parent: protocol.Bounded(protocol.session_id_bytes) },
