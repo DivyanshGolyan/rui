@@ -8435,7 +8435,7 @@ test "schema 53 moves forward to 54 with loaded tools defaulting to NULL" {
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, 54), try store_testing.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    try std.testing.expectEqual(@as(u64, 54), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
     inline for (.{ "session", "session_revision" }) |table| {
         try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table, .{})) > 0);
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table ++ " WHERE loaded_tool_set_id IS NOT NULL", .{}));
