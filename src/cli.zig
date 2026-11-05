@@ -1928,8 +1928,11 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
-    try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
-    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, .stdout);
+    writeMutationJson(writer, reply, StartConfiguration.resolve(configuration.?, parsed.has("reasoning-effort"))) catch |err| return output.failure(err);
+    writer.writeByte('\n') catch |err| return output.failure(err);
+    try output.finish();
 }
 
 /// The value of a capture or send, after recording the step a failure
@@ -3023,7 +3026,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         return writer.flush();
     }
     if (presentation == .json) {
-        try writeMutationJson(writer, reply);
+        try writeMutationJson(writer, reply, null);
         try writer.writeByte('\n');
         try writer.flush();
         _ = try reply.answer;
@@ -3069,8 +3072,27 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
     try writer.flush();
 }
 
+/// Borrowed from the resolved configuration sent with the first Message.
+/// A cleared/omitted override still reports the catalog's effective default.
+const StartConfiguration = struct {
+    provider: []const u8,
+    model: []const u8,
+    reasoning_effort: ?[]const u8,
+    effort_source: enum { flag, saved, model_default },
+
+    fn resolve(input: client.ConfigureInput, effort_flag: bool) StartConfiguration {
+        const model = input.model.value;
+        return .{
+            .provider = input.provider.value,
+            .model = model,
+            .reasoning_effort = input.reasoning_effort.value orelse if (model_capability.defaultReasoningEffort(model)) |effort| @tagName(effort) else null,
+            .effort_source = if (effort_flag) .flag else if (input.reasoning_effort.value != null) .saved else .model_default,
+        };
+    }
+};
+
 // Presentation of owned facts only: no wire representation or second parser.
-fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply) !void {
+fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, configuration: ?StartConfiguration) !void {
     try writer.writeAll("{\"context\":");
     try std.json.Stringify.value(.{
         .store = reply.context.store.slice(),
@@ -3078,6 +3100,11 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .key = reply.context.key.slice(),
         .kind = @tagName(reply.context.kind),
     }, .{}, writer);
+    if (configuration) |value| {
+        std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
+        try writer.writeAll(",\"configuration\":");
+        try std.json.Stringify.value(value, .{}, writer);
+    }
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
@@ -3128,6 +3155,58 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     try writer.writeByte('}');
 }
 
+test "session start configuration reports resolved effort and its source" {
+    const Case = struct {
+        model: []const u8 = "gpt-6.1-sol",
+        override: ?[]const u8 = null,
+        present: bool = false,
+        flag: bool = false,
+        effort: ?[]const u8 = "low",
+        source: @FieldType(StartConfiguration, "effort_source") = .model_default,
+    };
+    for ([_]Case{
+        .{},
+        .{ .model = "unlisted-model", .effort = null },
+        .{ .override = "high", .present = true, .source = .saved, .effort = "high" },
+        .{ .override = "xhigh", .present = true, .flag = true, .source = .flag, .effort = "xhigh" },
+        .{ .present = true, .flag = true, .source = .flag },
+        .{ .model = "unlisted-model", .present = true, .flag = true, .source = .flag, .effort = null },
+    }) |case| {
+        const value = StartConfiguration.resolve(.{
+            .store = "/store",
+            .session = .create,
+            .provider = .{ .present = true, .value = "openai" },
+            .model = .{ .present = true, .value = case.model },
+            .reasoning_effort = .{ .present = case.present, .value = case.override },
+        }, case.flag);
+        try std.testing.expectEqualStrings("openai", value.provider);
+        try std.testing.expectEqualStrings(case.model, value.model);
+        try std.testing.expectEqual(case.source, value.effort_source);
+        if (case.effort) |effort| {
+            try std.testing.expect(value.reasoning_effort != null);
+            try std.testing.expectEqualStrings(effort, value.reasoning_effort.?);
+        } else try std.testing.expectEqual(@as(?[]const u8, null), value.reasoning_effort);
+    }
+}
+
+test "session start mutation receipt adds configuration without changing send" {
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "", .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } });
+    try reply.context.store.set("/store");
+    try reply.context.key.set("handle");
+    reply.context.kind = .message;
+    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"handle\",\"kind\":\"message\"}";
+    const tail = ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}}";
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
+    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
+    writer.end = 0;
+    reply.target.message.creates_session = false;
+    try writeMutationJson(&writer, reply, null);
+    try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
+}
+
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
@@ -3138,11 +3217,11 @@ test "mutation presentation renders owned diagnostics and context with bounded w
     @memset(&bytes, 'x');
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try writeMutationJson(&writer, reply);
+    try writeMutationJson(&writer, reply, null);
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/store\",\"session\":\"original/session\",\"key\":\"original\\\"key\",\"kind\":\"configure\"},\"error\":{\"status\":\"409\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"invocation_error\",\"code\":\"busy/µ\"}}", writer.buffered());
     var tiny: [1]u8 = undefined;
     var failing = std.Io.Writer.fixed(&tiny);
-    try std.testing.expectError(error.WriteFailed, writeMutationJson(&failing, reply));
+    try std.testing.expectError(error.WriteFailed, writeMutationJson(&failing, reply, null));
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
@@ -3574,7 +3653,7 @@ const usage_text =
     \\and return on admission, not completion. Set instructions separately using
     \\session configure --instructions - with instructions on stdin.
     \\Reads observe once; request read-result streams only the original saved answer.
-    \\session start prints its new ID; other metadata is JSON. Diagnostics use stderr.
+    \\Mutation receipts and metadata are JSON. Diagnostics use stderr.
     \\Non-interactive calls never implicitly start a Host or sign in. Administration is explicit.
     \\After uncertainty, inspect or recover the original handle or record, never a new key.
     \\A nonzero exit can follow acceptance. Inspection never admits work; recovery can.
