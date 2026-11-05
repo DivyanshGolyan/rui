@@ -31,7 +31,7 @@ STORE_WIRE = "src/store/wire/"
 STORE_TESTS = "src/store/tests.zig"
 # Test files hold no entry point, so the lock-and-fence test does not read them.
 STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig", "src/store/mysql_dialect_check.zig",
-                    "src/store/mysql_session_tests.zig")
+                    "src/store/mysql_session_tests.zig", "src/store/mysql_testing.zig")
 # The tests that scan every Store file's source, each by its own embed list.
 SOURCE_SCAN_TESTS = ("Store entry points queue and fence only through canonical access",
                      "every function that enters the Store has a round budget")
@@ -162,6 +162,9 @@ def store_boundary(root):
             if source.startswith(STORE_WIRE) and target.startswith(STORE_DIRECTORY) and not target.startswith(STORE_WIRE):
                 raise ValueError(f"{source} imports {target}; a wire client imports only wire/")
             if target.startswith(STORE_WIRE):
+                continue
+            if source == "src/logic_tests.zig" and target == "src/store/engine/mysql_refusal.zig":
+                # The refusal decision is a registered value-only core.
                 continue
             if target.startswith(STORE_DIRECTORY) and not source.startswith(STORE_DIRECTORY) and source != STORE_FACADE:
                 raise ValueError(f"{source} imports {target}; import {STORE_FACADE} instead")

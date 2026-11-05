@@ -1028,8 +1028,10 @@ test "a queued read's destination holds poison until the pass that steps it" {
             @memset(std.mem.asBytes(&second), 0);
             a.read(TestingRound.head, .{ .session_ref = session.slice() }, &first);
             try std.testing.expect(poisoned(std.mem.asBytes(&first)));
-            // Queuing it again steps the first: defined before `run`, as a network
-            // engine would not have it.
+            // Overflow the queue to force an automatic pass on every engine.
+            // SQLite may step earlier on rebind; MySQL has no cached handles.
+            var fillers: [a.queue.len - 1]TestingRound.head.Result = undefined;
+            for (&fillers) |*filler| a.read(TestingRound.head, .{ .session_ref = session.slice() }, filler);
             a.read(TestingRound.head, .{ .session_ref = session.slice() }, &second);
             try std.testing.expect(!poisoned(std.mem.asBytes(&first)));
             try std.testing.expectEqualSlices(u8, session.slice(), &first.head.ref);
@@ -1060,7 +1062,11 @@ test "a queued readInto's Found is pending until the pass that steps it" {
             var missing: store_access.Found = .found;
             configuration_domain.readSaved(&a, session.slice(), &current, &found);
             try std.testing.expectEqual(store_access.Found.pending, found);
-            // Queuing it again steps the first, which defines it before `run`.
+            // Fill with small rows in distinct stable destinations, rather
+            // than copying the 4.6 KiB configuration Row for every queue slot.
+            // Overflow forces a pass even without SQLite's rebind boundary.
+            var fillers: [a.queue.len - 1]TestingRound.head.Result = undefined;
+            for (&fillers) |*filler| a.read(TestingRound.head, .{ .session_ref = session.slice() }, filler);
             configuration_domain.readSaved(&a, "AAAAAA", &missing_current, &missing);
             try std.testing.expectEqual(store_access.Found.found, found);
             try std.testing.expectEqual(store_access.Found.pending, missing);
@@ -1199,14 +1205,14 @@ test "an Access commits its writes, positions and identities together, or none o
             const next_sql = "SELECT next_position FROM session";
             const position = try store_testing.queryU64(&storage, next_sql, .{});
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            const content_id = storage.ids.next.get(.content_id);
+            const content_id = storage.identities().next.get(.content_id);
 
             // A failed guard stops the round before COMMIT: no row, position or id stays.
             try std.testing.expectError(error.TestingGuard, TestingRound.change(&storage, session.slice(), "round rolled back", 99));
             try std.testing.expect(!storage.isFenced());
             try std.testing.expectEqual(position, try store_testing.queryU64(&storage, next_sql, .{}));
             try std.testing.expectEqual(contents, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-            try std.testing.expectEqual(content_id, storage.ids.next.get(.content_id));
+            try std.testing.expectEqual(content_id, storage.identities().next.get(.content_id));
 
             const before = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
             try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
@@ -2356,6 +2362,10 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("access.zig"),
         @embedFile("engine.zig"),
         @embedFile("engine/Sqlite.zig"),
+        @embedFile("engine/Mysql.zig"),
+        @embedFile("engine/mysql_content.zig"),
+        @embedFile("engine/mysql_open.zig"),
+        @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -4086,6 +4096,226 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             try explicit.configuration.provider.value.set("codex");
             try std.testing.expect(storage.configure(&explicit, .{}) == .conflict);
             try std.testing.expect(storage.configure(&omitted, .{}).accepted.replayed);
+        }
+    }.run);
+}
+
+test "loaded tools configure defaults equality membership and reachability" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+            var initial = try completeConfiguration("loaded-default", "", workspace, "model-a");
+            const created = storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+
+            var update: protocol.ConfigureCommand = .{};
+            try update.session.set(session.slice());
+            try update.key.set("loaded-equal");
+            update.configuration.tools = try .of(&.{"bash"});
+            update.configuration.loaded_tools = try .of(&.{"bash"});
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(storage.configure(&update, .{}).accepted.replayed);
+            var conflict = update;
+            conflict.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&conflict, .{}) == .conflict);
+
+            try update.key.set("loaded-not-in-tools");
+            update.configuration.loaded_tools = try .of(&.{"web_search"});
+            const outside = storage.configure(&update, .{});
+            try std.testing.expect(outside == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, outside.rejected.code);
+            try std.testing.expect(storage.configure(&update, .{}).rejected.replayed);
+
+            try update.key.set("loaded-unreachable");
+            update.configuration.loaded_tools = try .of(&.{});
+            const unreachable_set = storage.configure(&update, .{});
+            try std.testing.expect(unreachable_set == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
+
+            // Membership is checked against saved tools if tools is omitted.
+            try update.key.set("loaded-saved-tools");
+            update.configuration.tools.state = .omitted;
+            update.configuration.loaded_tools = try .of(&.{"web_search"});
+            const saved_outside = storage.configure(&update, .{});
+            try std.testing.expect(saved_outside == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, saved_outside.rejected.code);
+
+            // An omitted loaded list continues to follow tools after equality.
+            try update.key.set("loaded-follow-tools");
+            update.configuration.tools = try .of(&.{ "bash", "web_search" });
+            update.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=3", .{session.slice()}));
+
+            // Explicit equality is also accepted on create, including empty sets.
+            var equal = try completeConfiguration("loaded-create-equal", "", workspace, "model-a");
+            equal.configuration.tools = try .of(&.{"bash"});
+            equal.configuration.loaded_tools = try .of(&.{"bash"});
+            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try equal.key.set("loaded-create-empty");
+            equal.configuration.tools = try .of(&.{});
+            equal.configuration.loaded_tools = try .of(&.{});
+            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try equal.key.set("loaded-create-unreachable");
+            equal.configuration.tools = try .of(&.{"bash"});
+            const rejected_create = storage.configure(&equal, .{});
+            try std.testing.expect(rejected_create == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, rejected_create.rejected.code);
+        }
+    }.run);
+}
+
+test "loaded tools preserve and intersect a saved subset through the catalog" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // A synthetic catalog entry exercises the rule without implementing
+            // find_tools or adding it to the Host's production catalog.
+            var records: [tool_catalog.built_in.records.len + 1]tool_catalog.Record = undefined;
+            records[0] = tool_catalog.built_in.records[0];
+            records[1] = .{ .name = "find_tools", .owner = .rui };
+            @memcpy(records[2..], tool_catalog.built_in.records[1..]);
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            try storage.saveCatalog(&catalog);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");
+            initial.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            initial.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
+            const created = storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            const loaded_id = try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()});
+            try std.testing.expect(loaded_id > 0);
+
+            // An unrelated update must preserve the saved set id.
+            var update: protocol.ConfigureCommand = .{};
+            try update.session.set(session.slice());
+            try update.key.set("loaded-subset-label");
+            update.configuration.label.state = .value;
+            try update.configuration.label.value.set("same loaded subset");
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(loaded_id, try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()}));
+
+            try update.key.set("loaded-subset-intersect");
+            update.configuration.tools = try .of(&.{ "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='find_tools'", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
+
+            // Re-adding a configured tool does not implicitly load it.
+            try update.key.set("loaded-subset-grow-tools");
+            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
+
+            try update.key.set("loaded-subset-unreachable");
+            update.configuration.tools = try .of(&.{"bash"});
+            const unreachable_set = storage.configure(&update, .{});
+            try std.testing.expect(unreachable_set == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
+
+            // Intersection with an empty tools set is equality, not an
+            // unreachable subset, and normalizes to NULL.
+            try update.key.set("loaded-subset-clear");
+            update.configuration.tools = try .of(&.{});
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+
+            // Explicit equality uses NULL, including when clearing both sets.
+            try update.key.set("loaded-subset-equal");
+            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            update.configuration.loaded_tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try update.key.set("loaded-subset-empty");
+            update.configuration.tools = try .of(&.{});
+            update.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+        }
+    }.run);
+}
+
+test "loaded tools select saved records even after the Host catalog changes or removes them" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "find_tools", .owner = .rui },
+                tool_catalog.message_agent_record,
+                .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            try storage.saveCatalog(&original);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("loaded-records-create", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "other_page" });
+            create.configuration.loaded_tools = try .of(&.{"find_tools"});
+            const first = storage.configure(&create, .{}).accepted.session;
+            try create.key.set("loaded-records-second");
+            const second = storage.configure(&create, .{}).accepted.session;
+            const saved_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+
+            var changed_records = records;
+            changed_records[1] = .{ .name = "fetch_page", .owner = .mcp, .server = "replacement", .description = "New page", .input_schema = "{\"type\":\"object\",\"additionalProperties\":false}" };
+            var changed_digests = digests;
+            changed_digests[1] = tool_catalog.recordDigest(&changed_records[1]);
+            const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
+            try storage.saveCatalog(&changed);
+            var update: protocol.ConfigureCommand = .{};
+            try update.key.set("loaded-records-reworded");
+            update.session = first;
+            update.configuration.loaded_tools = try .of(&.{ "fetch_page", "find_tools" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+            try std.testing.expectEqual(saved_record, loaded_record);
+
+            var removed_records: [records.len - 1]tool_catalog.Record = undefined;
+            removed_records[0] = records[0];
+            @memcpy(removed_records[1..], records[2..]);
+            var removed_digests: [removed_records.len][32]u8 = undefined;
+            for (&removed_records, &removed_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const removed: tool_catalog.Catalog = .{ .records = &removed_records, .digests = &removed_digests };
+            try storage.saveCatalog(&removed);
+            try update.key.set("loaded-records-removed");
+            update.session = second;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            // Both configurations select the original records and intern
+            // the very same loaded set despite today's catalog contents.
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
+            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }
@@ -7827,7 +8057,7 @@ test "Full history takes a round per chunk" {
             // The Message's and the answer's content are content rounds,
             // which differ by engine: on SQLite a `readRaw` window each.
             const content_rounds: u16 = switch (case.engine) {
-                .sqlite => 2,
+                .sqlite, .mysql => 2,
             };
             try std.testing.expectEqual(content_rounds, storage.testing_content_work.content_rounds - content_before);
         }
@@ -8290,7 +8520,7 @@ test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
 test "a required engine these tests do not build fails them" {
     const Name = store_testing.EngineName;
     try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty, .empty));
-    try std.testing.expectEqual(Name.mysql, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql }), .empty));
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql }), .empty));
     try std.testing.expectEqual(Name.postgres, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres }), .initOne(Name.mysql)));
     // CI's live shards list both servers; each has a test of its own here.
     try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql, Name.postgres }), store_testing.checked_elsewhere));
@@ -8442,7 +8672,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
 fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
-        .sqlite => switch (point) {
+        .sqlite, .mysql => switch (point) {
             .readOwnedContent, .readCatalogText => 1,
             else => 0,
         },
@@ -8461,6 +8691,10 @@ test "every function that enters the Store has a round budget" {
         @embedFile("access.zig"),
         @embedFile("engine.zig"),
         @embedFile("engine/Sqlite.zig"),
+        @embedFile("engine/Mysql.zig"),
+        @embedFile("engine/mysql_content.zig"),
+        @embedFile("engine/mysql_open.zig"),
+        @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8532,13 +8766,52 @@ const RoundMeter = struct {
     storage: *Store,
     rounds_before: u16 = 0,
     content_before: u16 = 0,
+    shape_before: QueryShape = .{},
     measured: std.EnumArray(EntryPoint, ?Measured) = .initFill(null),
 
-    const Measured = struct { rounds: u16, content_rounds: u16 };
+    const Measured = struct { rounds: u16, content_rounds: u16, shape: QueryShape };
+
+    /// Actual protocol sends beside independently counted semantic work.
+    /// Empty Access rounds send nothing; deferred BEGIN/SAVEPOINT share the
+    /// next pass, RELEASE sends nothing, and only real controls count here.
+    const QueryShape = struct {
+        queries: u64 = 0,
+        access_passes: u64 = 0,
+        identity_passes: u64 = 0,
+        content_queries: u64 = 0,
+        controls: u64 = 0,
+        prefix_only: u64 = 0,
+
+        fn snapshot(storage: *Store) QueryShape {
+            if (storage.engine != .mysql) return .{};
+            const state = storage.engine.mysql.state;
+            const shape = state.testing_shape;
+            return .{
+                .queries = state.connection.queries,
+                .access_passes = shape.access_passes,
+                .identity_passes = shape.identity_passes,
+                .content_queries = shape.content_queries,
+                .controls = shape.controls,
+                .prefix_only = shape.prefix_only,
+            };
+        }
+
+        fn since(after: QueryShape, before: QueryShape) QueryShape {
+            var delta: QueryShape = undefined;
+            inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
+                @field(delta, name) = @field(after, name) - @field(before, name);
+            return delta;
+        }
+
+        fn expected(shape: QueryShape) u64 {
+            return shape.access_passes + shape.identity_passes + shape.content_queries + shape.controls + shape.prefix_only;
+        }
+    };
 
     fn start(meter: *RoundMeter) void {
         meter.rounds_before = meter.storage.testing_content_work.rounds;
         meter.content_before = meter.storage.testing_content_work.content_rounds;
+        meter.shape_before = QueryShape.snapshot(meter.storage);
     }
 
     fn stop(meter: *RoundMeter, point: EntryPoint) void {
@@ -8546,9 +8819,24 @@ const RoundMeter = struct {
         meter.measured.set(point, .{
             .rounds = meter.storage.testing_content_work.rounds - meter.rounds_before,
             .content_rounds = meter.storage.testing_content_work.content_rounds - meter.content_before,
+            .shape = QueryShape.snapshot(meter.storage).since(meter.shape_before),
         });
     }
 };
+
+test "MySQL round shape subtracts the entry baseline from every component" {
+    const Shape = RoundMeter.QueryShape;
+    const before: Shape = .{ .queries = 100, .access_passes = 10, .identity_passes = 4, .content_queries = 7, .controls = 12, .prefix_only = 3 };
+    const after: Shape = .{ .queries = 109, .access_passes = 12, .identity_passes = 5, .content_queries = 10, .controls = 14, .prefix_only = 4 };
+    const delta = after.since(before);
+    try std.testing.expectEqual(@as(u64, 2), delta.access_passes);
+    try std.testing.expectEqual(@as(u64, 1), delta.identity_passes);
+    try std.testing.expectEqual(@as(u64, 3), delta.content_queries);
+    try std.testing.expectEqual(@as(u64, 2), delta.controls);
+    try std.testing.expectEqual(@as(u64, 1), delta.prefix_only);
+    try std.testing.expectEqual(@as(u64, 9), delta.queries);
+    try std.testing.expectEqual(delta.expected(), delta.queries);
+}
 
 /// A `start_agent` spec as the Host's check leaves it: gpt-6.1-sol at low
 /// effort, `tools`, `permission_mode` and no label.
@@ -8604,6 +8892,12 @@ test "each Store entry point takes its round budget on its common path" {
                 };
                 if (measured.rounds != round_budgets.get(point)) failed = true;
                 if (measured.content_rounds != contentRoundBudget(case.engine, point)) failed = true;
+                if (case.engine == .mysql) {
+                    std.testing.expectEqual(measured.shape.expected(), measured.shape.queries) catch {
+                        std.debug.print("{s}: COM_QUERY shape differs\n", .{@tagName(point)});
+                        failed = true;
+                    };
+                }
             }
             if (failed) {
                 for (std.enums.values(EntryPoint)) |point| {
@@ -8615,6 +8909,18 @@ test "each Store entry point takes its round budget on its common path" {
                         measured.content_rounds,
                         contentRoundBudget(case.engine, point),
                     });
+                    if (case.engine == .mysql) std.debug.print(
+                        "  COM_QUERY {d} = Access passes {d} + identity passes {d} + content queries {d} + controls {d} + prefix-only passes {d} (expected {d})\n",
+                        .{
+                            measured.shape.queries,
+                            measured.shape.access_passes,
+                            measured.shape.identity_passes,
+                            measured.shape.content_queries,
+                            measured.shape.controls,
+                            measured.shape.prefix_only,
+                            measured.shape.expected(),
+                        },
+                    );
                 }
                 return error.RoundBudgetChanged;
             }
@@ -9897,4 +10203,11 @@ test "each compaction that succeeds is one compacted row, with the entries its f
             try std.testing.expect(page.items[0].position < page.items[1].position);
         }
     }.run);
+}
+
+// Engine transcripts and content boundary tests remain part of the native suite.
+test {
+    _ = @import("engine/Mysql.zig");
+    _ = @import("engine/mysql_content.zig");
+    _ = @import("mysql_testing.zig");
 }

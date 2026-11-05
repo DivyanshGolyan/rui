@@ -220,6 +220,7 @@ pub const Configuration = struct {
     model: OptionalBounded(max_model_bytes) = .{},
     instructions: ContentField = .{},
     tools: ToolsField = .{},
+    loaded_tools: ToolsField = .{},
     permission_mode: OptionalBounded(16) = .{},
     output_schema: ContentField = .{},
     compaction_trigger: OptionalBounded(20) = .{},
@@ -288,12 +289,7 @@ fn configureDigest(session: []const u8, configuration: *const Configuration, req
     hashOptional(&hash, &configuration.provider);
     hashOptional(&hash, &configuration.model);
     hashContent(&hash, &configuration.instructions);
-    hash.update(&.{@backingInt(configuration.tools.state)});
-    if (configuration.tools.state == .value) {
-        hash.update(&.{configuration.tools.count});
-        var names = configuration.tools.iterator();
-        while (names.next()) |name| hashField(&hash, name);
-    }
+    hashTools(&hash, &configuration.tools);
     hashOptional(&hash, &configuration.permission_mode);
     hashContent(&hash, &configuration.output_schema);
     hashOptional(&hash, &configuration.compaction_trigger);
@@ -301,6 +297,12 @@ fn configureDigest(session: []const u8, configuration: *const Configuration, req
     hashOptional(&hash, &configuration.reasoning_effort);
     hashOptional(&hash, &configuration.label);
     hash.update(&.{@intFromBool(require_model)});
+    // Omission retains the pre-loaded-tools digest, including creating
+    // Messages: saved requests must still replay after a Store upgrade.
+    if (configuration.loaded_tools.state != .omitted) {
+        hashField(&hash, "rui/core/configure/loaded-tools/v1");
+        hashTools(&hash, &configuration.loaded_tools);
+    }
     return hash.finalResult();
 }
 
@@ -394,6 +396,8 @@ pub const ConfigurationRejection = enum {
     unsupported_reasoning_effort,
     unknown_tool,
     provider_tool_missing,
+    loaded_tools_not_in_tools,
+    loaded_tools_unreachable,
     invalid_label,
     incomplete_initial_configuration,
     invalid_workspace,
@@ -416,6 +420,8 @@ pub const MessageRejection = enum {
     unsupported_reasoning_effort,
     unknown_tool,
     provider_tool_missing,
+    loaded_tools_not_in_tools,
+    loaded_tools_unreachable,
     invalid_label,
     incomplete_initial_configuration,
     invalid_workspace,
@@ -701,7 +707,7 @@ pub const NamedPeer = struct {
 
 /// A Session setting a revision can change, named on the wire as in a
 /// configuration.
-pub const SessionField = enum { provider, model, instructions, tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+pub const SessionField = enum { provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
 
 pub const ActivityItem = struct {
     position: u64,
@@ -1186,6 +1192,15 @@ fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     hash.update(value);
 }
 
+fn hashTools(hash: *std.crypto.hash.sha2.Sha256, tools: *const ToolsField) void {
+    hash.update(&.{@backingInt(tools.state)});
+    if (tools.state == .value) {
+        hash.update(&.{tools.count});
+        var names = tools.iterator();
+        while (names.next()) |name| hashField(hash, name);
+    }
+}
+
 fn hashOptional(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
     hash.update(&.{@backingInt(field.state)});
     if (field.state == .value) hashField(hash, field.value.slice());
@@ -1259,7 +1274,7 @@ pub const Ingress = struct {
     // bytes), plus punctuation and one preserved whitespace separator at
     // every lexical boundary.
     const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
-        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + max_tool_list_name_bytes + 128 * 32) + (128 + max_tools) * 8);
+        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 2 * max_tool_list_name_bytes + 128 * 32) + (128 + 2 * max_tools) * 8);
 
     /// Builds the Ingress in its home. `request` stays unwritten.
     pub fn init(self: *Ingress, allocator: std.mem.Allocator, options: ParseOptions) void {
@@ -1745,7 +1760,7 @@ const Parser = struct {
     /// Fills `out`, which holds its defaults.
     fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { workspace, provider, model, instructions, tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+        const Field = enum { workspace, provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
         try self.expectByte('{');
         var members: Members = .{};
         var seen: std.EnumSet(Field) = .empty;
@@ -1755,6 +1770,7 @@ const Parser = struct {
             .model => try self.readOptionalSmall(max_model_bytes, &out.model),
             .instructions => try self.readContent(&out.instructions, false, allow_content),
             .tools => try self.readTools(&out.tools),
+            .loaded_tools => try self.readTools(&out.loaded_tools),
             .permission_mode => try self.readOptionalSmall(16, &out.permission_mode),
             .output_schema => try self.readContent(&out.output_schema, true, allow_content),
             .compaction_trigger => try self.readOptionalPolicy(&out.compaction_trigger),
@@ -3516,7 +3532,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
-test "configuration tools are tool names, sorted, each once" {
+test "configuration tools and loaded tools are tool names, sorted, each once" {
     const cases = [_]struct { value: []const u8, names: []const u8 = "", count: u8 = 0, failure: ?anyerror = null }{
         .{ .value = "[]" },
         .{ .value = "[\"bash\"]", .names = "bash", .count = 1 },
@@ -3535,27 +3551,31 @@ test "configuration tools are tool names, sorted, each once" {
         .{ .value = "[\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
         .{ .value = "[\"bash\",\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
     };
-    for (cases) |case| {
-        var buffer: [1024]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
-            "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
-            "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"value\",\"value\":{s}}}," ++
-            "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
-        var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
-        if (case.failure) |failure| {
-            try std.testing.expectError(failure, parseForTest(&parser));
-        } else {
-            const request = try parseForTest(&parser);
-            try std.testing.expectEqual(case.count, request.configure.configuration.tools.count);
-            try std.testing.expectEqualStrings(case.names, request.configure.configuration.tools.names.slice());
+    inline for (.{ "tools", "loaded_tools" }) |field_name| {
+        for (cases) |case| {
+            var buffer: [1024]u8 = undefined;
+            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+                "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
+                "\"instructions\":{{\"state\":\"omitted\"}}," ++
+                (if (comptime std.mem.eql(u8, field_name, "loaded_tools")) "\"tools\":{{\"state\":\"omitted\"}}," else "") ++
+                "\"" ++ field_name ++ "\":{{\"state\":\"value\",\"value\":{s}}}," ++
+                "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
+            var source: MetadataSource = .{ .input = json };
+            var retained: ?named_scratch.Owner = null;
+            var parser = Parser{ .source = &source, .options = .{
+                .io = std.testing.io,
+                .content_length = json.len,
+                .scratch_path = "unused",
+                .request_number = 0,
+                .retained_scratch = &retained,
+            } };
+            if (case.failure) |failure| {
+                try std.testing.expectError(failure, parseForTest(&parser));
+            } else {
+                const request = try parseForTest(&parser);
+                try std.testing.expectEqual(case.count, @field(request.configure.configuration, field_name).count);
+                try std.testing.expectEqualStrings(case.names, @field(request.configure.configuration, field_name).names.slice());
+            }
         }
     }
 }
@@ -4048,6 +4068,22 @@ test "an order-free request still names each member once, carries every required
     }
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expect(retained == null);
+}
+
+test "omitted loaded tools preserve pre-T4a Configure and creating Message digests" {
+    // Golden bytes of the pre-T4a hash stream, not recomputed by the
+    // implementation under test. Keys are deliberately outside identity.
+    var configure: ConfigureCommand = .{};
+    try std.testing.expectEqualStrings("e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a", &std.fmt.bytesToHex(configure.semanticDigest(), .lower));
+    var message: MessageCommand = .{ .configuration = .{} };
+    message.text = .{ .state = .value, .length = 2, .digest = contentDigest("go") };
+    try std.testing.expectEqualStrings("29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127", &std.fmt.bytesToHex(message.semanticDigest(), .lower));
+    const previous = configure.semanticDigest();
+    configure.configuration.loaded_tools = try .of(&.{});
+    try std.testing.expect(!std.mem.eql(u8, &previous, &configure.semanticDigest()));
+    const empty = configure.semanticDigest();
+    configure.configuration.loaded_tools = try .of(&.{"bash"});
+    try std.testing.expect(!std.mem.eql(u8, &empty, &configure.semanticDigest()));
 }
 
 test "SessionRow borrowed fields preserve offered tool names" {
