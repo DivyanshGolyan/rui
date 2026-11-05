@@ -2415,6 +2415,23 @@ test "retry and generated recovery select captured mutations by kind" {
     try std.testing.expectError(error.FileNotFound, testResend(io, .{ .explicit = .{ .store = root, .record = message_record, .kind = .message } }));
 }
 
+test "peer Store address CLI validation accepts opaque ids and preserves SQLite paths" {
+    // session send calls this before capture or transport, including sends
+    // with an explicit destination in another Store.
+    const id = "0123456789abcdef0123456789abcdef";
+    for ([_][]const u8{ id, "/", "/store", "/store with spaces/é" }) |store|
+        try validatePeer(store, "k7m2qx", "handle");
+    for ([_][]const u8{
+        "",                "relative",                         "0123456789abcdef0123456789abcde",
+        id ++ "0",         "0123456789ABCDEF0123456789abcdef", "g123456789abcdef0123456789abcdef",
+        "/store/",         "/store//child",                    "/store/./child",
+        "/store/../child", "/store\n",                         "/store\x7f",
+    }) |store| try std.testing.expectError(error.InvalidRuiAddress, validatePeer(store, "k7m2qx", "handle"));
+    try std.testing.expectError(error.InvalidUtf8, validatePeer("/store\xff", "k7m2qx", "handle"));
+    try std.testing.expectError(error.InvalidRuiAddress, validatePeer(id, "INVALID", "handle"));
+    try std.testing.expectError(error.InvalidSenderHandle, validatePeer(id, "k7m2qx", &@as([protocol.max_sender_handle_bytes + 1]u8, @splat('x'))));
+}
+
 test "a peer capture preserves the full sender including self and leaves foreign Store admission to the Host" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });

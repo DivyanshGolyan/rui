@@ -5,6 +5,7 @@ const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
+const store_schema = @import("store/schema.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "8";
@@ -107,7 +108,9 @@ pub const Address = struct {
 
     pub fn validate(self: Address) !void {
         const path = self.store.slice();
-        if (path.len == 0 or path[0] != '/' or !validSessionId(self.session.slice()) or
+        if (!validSessionId(self.session.slice())) return error.InvalidRuiAddress;
+        if (store_schema.isStoreId(path)) return;
+        if (path.len == 0 or path[0] != '/' or
             !std.unicode.utf8ValidateSlice(path)) return error.InvalidRuiAddress;
         for (path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRuiAddress;
         if (path.len > 1) {
@@ -3716,6 +3719,41 @@ test "a client command cannot take a key Rui keeps for its own commands" {
         var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
+    }
+}
+
+test "protocol peer Store address wire parsing accepts opaque ids and preserves SQLite paths" {
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":{\"store\":\"";
+    const suffix = "\",\"session\":\"k7m2qx\"},\"sender_handle\":\"handle\",\"text\":{\"state\":\"value\",\"value\":\"\"}}";
+    const cases = [_]struct { store: []const u8, valid: bool }{
+        .{ .store = "0123456789abcdef0123456789abcdef", .valid = true },
+        .{ .store = "/", .valid = true },
+        .{ .store = "/store with spaces/é", .valid = true },
+        .{ .store = "relative", .valid = false },
+        .{ .store = "0123456789abcdef0123456789abcde", .valid = false },
+        .{ .store = "0123456789abcdef0123456789abcdef0", .valid = false },
+        .{ .store = "0123456789ABCDEF0123456789abcdef", .valid = false },
+        .{ .store = "g123456789abcdef0123456789abcdef", .valid = false },
+        .{ .store = "/store/", .valid = false },
+        .{ .store = "/store//child", .valid = false },
+        .{ .store = "/store/./child", .valid = false },
+        .{ .store = "/store/../child", .valid = false },
+        .{ .store = "/store\\n", .valid = false },
+        .{ .store = "/store\\u007f", .valid = false },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ prefix, case.store, suffix });
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        // Ingress has replaced its captured content with an empty placeholder.
+        var parser = Parser{ .source = &source, .captured = &.{.{}}, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.valid) {
+            const request = try parseForTest(&parser);
+            try std.testing.expectEqualStrings(case.store, request.message.sender.?.store.slice());
+            try std.testing.expectEqualStrings("k7m2qx", request.message.sender.?.session.slice());
+        } else try std.testing.expectError(error.InvalidRuiAddress, parseForTest(&parser));
+        try std.testing.expect(retained == null);
     }
 }
 
