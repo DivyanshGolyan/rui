@@ -9133,7 +9133,8 @@ test "read_transcript core runner reads other Session outlines before full windo
     const oldest = page.items[2].position;
     const args = [_][]const u8{
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}),
-        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"before\":\"{d}.0\",\"limit\":1}}", .{ other.slice(), newest }),
+        // Exactly the continuation call 0 emits, so the test follows it.
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), newest }),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), middle }),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), middle }),
         "{\"id\":\"zzzzzz\"}",
@@ -9176,7 +9177,7 @@ test "read_transcript core runner reads other Session outlines before full windo
                 try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
                 try std.testing.expect(std.mem.indexOf(u8, bytes, "new message") != null);
                 try std.testing.expect(std.mem.indexOf(u8, bytes, "old message") == null);
-                const more = try std.fmt.allocPrint(arena, "before \"{d}.0\"", .{newest});
+                const more = try std.fmt.allocPrint(arena, "More: call read_transcript with {s}.\n", .{args[1]});
                 try std.testing.expect(std.mem.indexOf(u8, bytes, more) != null);
             },
             1 => {
@@ -9188,7 +9189,7 @@ test "read_transcript core runner reads other Session outlines before full windo
                 try std.testing.expect(std.mem.indexOf(u8, bytes, older) == null);
             },
             2 => {
-                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with full \"{d}.0\" offset 16383.\n", .{ middle, long.len, long[0..16383], middle });
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ middle, long.len, long[0..16383], args[3] });
                 try std.testing.expectEqualStrings(expected, bytes);
             },
             3 => {

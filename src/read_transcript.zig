@@ -62,7 +62,19 @@ fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, 
         }
         if (page.more) {
             const last = &page.items[page.count - 1];
-            try out.print("More: call read_transcript with before \"{d}.{d}\".\n", .{ last.position, last.ordinal });
+            try out.print("More: call read_transcript with {{\"id\":\"{s}\"", .{session});
+            if (!arguments.kinds.eql(.full)) {
+                try out.writeAll(",\"kinds\":[");
+                var kinds = arguments.kinds.iterator();
+                var first_kind = true;
+                while (kinds.next()) |kind| {
+                    try out.print("{s}\"{s}\"", .{ if (first_kind) "" else ",", @tagName(kind) });
+                    first_kind = false;
+                }
+                try out.writeAll("]");
+            }
+            if (arguments.limit != protocol.ActivityPage.items) try out.print(",\"limit\":{d}", .{arguments.limit});
+            try out.print(",\"before\":\"{d}.{d}\"}}.\n", .{ last.position, last.ordinal });
         } else try out.writeAll("Start of the Session.\n");
     }
     return output.written();
@@ -235,7 +247,7 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
     const end = offset + text.len;
     try out.print("Entry {d}.{d} {s}, bytes {d} to {d} of {d}:\n", .{ item.position, item.ordinal, @tagName(item.value), offset, end, total });
     try out.writeAll(text);
-    if (end < total) try out.print("\nMore: call read_transcript with full \"{d}.{d}\" offset {d}.\n", .{ item.position, item.ordinal, end });
+    if (end < total) try out.print("\nMore: call read_transcript with {{\"id\":\"{s}\",\"full\":\"{d}.{d}\",\"offset\":{d}}}.\n", .{ session, item.position, item.ordinal, end });
 }
 
 test "read_transcript previews and windows cut only at whole UTF-8 characters" {
