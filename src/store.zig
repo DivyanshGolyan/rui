@@ -15,6 +15,7 @@ const store_schema = @import("store/schema.zig");
 const store_testing = @import("store/testing.zig");
 
 pub const Store = store_core.Store;
+pub const ActivityTool = reads_domain.ActivityTool;
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 pub const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 pub const AgentDelivery = command_domain.AgentDelivery;

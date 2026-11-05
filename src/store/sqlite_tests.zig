@@ -139,7 +139,7 @@ const touchForTesting = tests.touchForTesting;
 
 /// A catalog with one tool beyond the built-ins, between them by name.
 const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
-const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, tool_catalog.read_transcript_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
 const testing_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [testing_records.len][32]u8 = undefined;
@@ -1126,12 +1126,12 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // The Store saved the catalog's seven texts when it opened: two each
-    // for Bash, message_agent and start_agent, and web search's empty one.
+    // The Store saved the catalog's nine texts when it opened: two each
+    // for Bash, message_agent, read_transcript and start_agent, and web search's empty one.
     // The configure adds its two values.
-    try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
     try std.testing.expectEqual(@as(u64, 9), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 11), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1156,19 +1156,19 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of the four built-ins, saved at open.
-    try std.testing.expectEqual([3]u64{ 1, 4, 4 }, try Tools.counts(&storage));
+    // The Host's catalog: one set of the five built-ins, saved at open.
+    try std.testing.expectEqual([3]u64{ 1, 5, 5 }, try Tools.counts(&storage));
     // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 2, 5, 6 }, try Tools.counts(&storage));
     // A set with the catalog's members is the catalog's set.
-    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "start_agent", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
+    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "read_transcript", "start_agent", "web_search" });
+    try std.testing.expectEqual([3]u64{ 2, 5, 6 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 3, 4, 7 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, 5, 8 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 4, 4, 7 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, 5, 8 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
@@ -9098,21 +9098,227 @@ test "a start_agent call creates its agent where its caller works, with the task
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.permissionMode:%'", .{}));
 }
 
+test "read_transcript core runner reads other Session outlines before full windows unknown id and self" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("transcript-caller", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"read_transcript"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const caller = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "transcript-task", "transcript-task", caller.slice(), "read the public feed");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+    const other = try configureTestSession(&storage, "transcript-other");
+    const long = try arena.alloc(u8, 16 * 1024 + 64);
+    @memset(long, 'x');
+    @memcpy(long[16383..][0..4], "😀");
+    try submitTestMessage(&storage, &tmp, "transcript-old", "transcript-old", other.slice(), "old message");
+    try submitTestMessage(&storage, &tmp, "transcript-long", "transcript-long", other.slice(), long);
+    try submitTestMessage(&storage, &tmp, "transcript-new", "transcript-new", other.slice(), "new message");
+    const page = try arena.create(protocol.ActivityFacts);
+    try storage.activityPage(&.{ .session = other, .direction = .backward }, page);
+    try std.testing.expectEqual(@as(usize, 3), page.count);
+    const newest = page.items[0].position;
+    const middle = page.items[1].position;
+    const oldest = page.items[2].position;
+    const args = [_][]const u8{
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"before\":\"{d}.0\",\"limit\":1}}", .{ other.slice(), newest }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), middle }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), middle }),
+        "{\"id\":\"zzzzzz\"}",
+        "{}",
+        "{\"limit\":0}",
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"999999.0\"}}", .{other.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16384}}", .{ other.slice(), middle }),
+    };
+    var calls: [args.len]TestingCall = undefined;
+    for (&calls, args, 0..) |*call, arguments, index| {
+        const quoted = try std.json.Stringify.valueAlloc(arena, arguments, .{});
+        const id = try std.fmt.allocPrint(arena, "read-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "read_transcript", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments };
+    }
+    try settleCallsForTesting(&storage, &tmp, model, "transcript-metadata", &calls);
+    // Even malformed runtime arguments settle as core calls under ask.
+    try std.testing.expectEqual(@as(u64, args.len), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
+    try std.testing.expect(try storage.admitNextActionAttempt(300_000, .{}) == null);
+    const note = try std.fmt.allocPrint(arena, "Read {s}'s transcript", .{other.slice()});
+    try std.testing.expectEqual(@as(u64, 6), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{note}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description='Read own transcript'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
+
+    for (args, 0..) |_, index| {
+        const work = (try storage.nextCoreWork()).?.action;
+        try std.testing.expect(work.tool == .read_transcript);
+        try @import("../read_transcript.zig").run(&storage, arena, &work, .{});
+        const result_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
+        const reference = try testingContentReference(&storage, result_id);
+        const bytes = try arena.alloc(u8, @intCast(reference.length));
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+        const succeeded = index < 4 or index == 5;
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ work.binding.action_id, if (succeeded) "succeeded" else "failed" }));
+        switch (index) {
+            0 => {
+                const expected = try std.fmt.allocPrint(arena, "{d}.0 admission person", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "new message") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "old message") == null);
+                const more = try std.fmt.allocPrint(arena, "before \"{d}.0\"", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, more) != null);
+            },
+            1 => {
+                const expected = try std.fmt.allocPrint(arena, "{d}.0 admission person", .{middle});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+                const excluded = try std.fmt.allocPrint(arena, "{d}.0 admission", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, excluded) == null);
+                const older = try std.fmt.allocPrint(arena, "{d}.0 admission", .{oldest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, older) == null);
+            },
+            2 => {
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with full \"{d}.0\" offset 16383.\n", .{ middle, long.len, long[0..16383], middle });
+                try std.testing.expectEqualStrings(expected, bytes);
+            },
+            3 => {
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 16383 to {d} of {d}:\n{s}", .{ middle, long.len, long.len, long[16383..] });
+                try std.testing.expectEqualStrings(expected, bytes);
+            },
+            4 => try std.testing.expectEqualStrings("Rui could not read the transcript: id names an unknown Session.", bytes),
+            5 => {
+                const heading = try std.fmt.allocPrint(arena, "Session {s}, newest first", .{caller.slice()});
+                try std.testing.expect(std.mem.startsWith(u8, bytes, heading));
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "read_transcript") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "Read own transcript") != null);
+            },
+            6 => try std.testing.expectEqualStrings("Rui could not read the transcript: limit must be 1 to 16.", bytes),
+            7 => try std.testing.expectEqualStrings("Rui could not read the transcript: full names no public entry.", bytes),
+            8 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within the entry and on a UTF-8 character boundary") != null),
+            else => unreachable,
+        }
+    }
+    try std.testing.expect(try storage.nextCoreWork() == null);
+}
+
+test "read_transcript opens public calls and no-content rows and identifies nonzero result ordinals" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const source = try configureMessagingSession(&storage, "transcript-source");
+    try submitTestMessage(&storage, &tmp, "transcript-source-message", "transcript-source-message", source.slice(), "make calls");
+    const source_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const source_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hello\"}";
+    const quoted = try std.json.Stringify.valueAlloc(arena, source_arguments, .{});
+    const source_calls = [_]TestingCall{
+        .{ .item_id = "unknown", .name = "not_offered", .encoded_call_id = "unknown", .decoded_call_id = "unknown", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "message", .name = "message_agent", .encoded_call_id = "message", .decoded_call_id = "message", .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = source_arguments },
+    };
+    try settleCallsForTesting(&storage, &tmp, source_model, "transcript-source-calls", &source_calls);
+    const work = (try storage.nextCoreWork()).?.action;
+    try std.testing.expect(try storage.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
+    var stop = try completeSessionStop("transcript-source-stop", source.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const page = try arena.create(protocol.ActivityFacts);
+    try storage.activityPage(&.{ .session = source, .direction = .backward }, page);
+    var call_address: u64 = 0;
+    var stop_address: u64 = 0;
+    for (page.items[0..page.count]) |*item| switch (item.value) {
+        .call => |call| if (call.call_ordinal == 1) {
+            call_address = item.position;
+        },
+        .stop => stop_address = item.position,
+        else => {},
+    };
+    try std.testing.expect(call_address != 0 and stop_address != 0);
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("transcript-reader", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"read_transcript"});
+    const reader_session = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "transcript-reader-message", "transcript-reader-message", reader_session.slice(), "read calls");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const full_text = "message_agent\n" ++ source_arguments;
+    const arguments = [_][]const u8{
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"kinds\":[\"tool_result\"]}}", .{source.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), call_address }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":13}}", .{ source.slice(), call_address }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), stop_address }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"kinds\":[\"assistant\"]}}", .{source.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":{d}}}", .{ source.slice(), call_address, full_text.len + 1 }),
+        "{" ++ @as([4096]u8, @splat(' ')),
+        "{",
+    };
+    var calls: [arguments.len]TestingCall = undefined;
+    for (&calls, arguments, 0..) |*call, args, index| {
+        const encoded = try std.json.Stringify.valueAlloc(arena, args, .{});
+        const id = try std.fmt.allocPrint(arena, "tool-read-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "read_transcript", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = args };
+    }
+    try settleCallsForTesting(&storage, &tmp, model, "transcript-reader-calls", &calls);
+    for (arguments, 0..) |_, index| {
+        const input = (try storage.nextCoreWork()).?.action;
+        try @import("../read_transcript.zig").run(&storage, arena, &input, .{});
+        const result_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{input.binding.action_id});
+        const reference = try testingContentReference(&storage, result_id);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        const bytes = try arena.alloc(u8, @intCast(reference.length));
+        try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, if (index < 5) "succeeded" else "failed" }));
+        switch (index) {
+            0 => {
+                try std.testing.expect(std.mem.indexOf(u8, bytes, ".2 tool_result message_agent failed") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, ".1 tool_result not_offered unknown_tool") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "Message zzzzzz") != null);
+            },
+            1, 2 => {
+                const offset: usize = if (index == 1) 0 else 13;
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 call, bytes {d} to {d} of {d}:\n{s}", .{ call_address, offset, full_text.len, full_text.len, full_text[offset..] });
+                try std.testing.expectEqualStrings(expected, bytes);
+            },
+            3 => try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}.0 stop\n", .{stop_address}), bytes),
+            4 => try std.testing.expect(std.mem.indexOf(u8, bytes, "empty selection") != null),
+            5 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within") != null),
+            6 => try std.testing.expect(std.mem.indexOf(u8, bytes, "more than 4096 bytes") != null),
+            7 => try std.testing.expect(std.mem.indexOf(u8, bytes, "not one well-formed JSON object") != null),
+            else => unreachable,
+        }
+    }
+}
+
 test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const count = tool_catalog.max_catalog_records - 4;
+    const count = tool_catalog.max_catalog_records - 5;
     var names: [count][9]u8 = undefined;
-    var records: [count + 4]tool_catalog.Record = undefined;
-    var digests: [count + 4][32]u8 = undefined;
+    var records: [count + 5]tool_catalog.Record = undefined;
+    var digests: [count + 5][32]u8 = undefined;
     records[0] = tool_catalog.bash_record;
     records[1] = tool_catalog.message_agent_record;
-    records[2] = tool_catalog.start_agent_record;
-    for (&names, records[3 .. count + 3], 0..) |*name, *record, index| {
+    records[2] = tool_catalog.read_transcript_record;
+    records[3] = tool_catalog.start_agent_record;
+    for (&names, records[4 .. count + 4], 0..) |*name, *record, index| {
         _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
-    records[count + 3] = tool_catalog.web_search_record;
+    records[count + 4] = tool_catalog.web_search_record;
     for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
     const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
@@ -9120,12 +9326,12 @@ test "a catalog at its bound saves and opens again" {
     try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, count + 4), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+    try std.testing.expectEqual(@as(u64, count + 5), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
 
 /// The testing catalog with an MCP server's tool beside it.
 const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
-const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.message_agent_record, tool_catalog.read_transcript_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
 const mcp_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [mcp_records.len][32]u8 = undefined;

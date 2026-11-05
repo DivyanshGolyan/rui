@@ -1154,11 +1154,13 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 ### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `message_agent` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+It holds `bash`, which Rui runs as Actions; `message_agent`, `read_transcript` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
 A fresh Session gets `bash` and `web_search`.
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `message_agent`, `start_agent`, `web_search`).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `message_agent`, `read_transcript`, `start_agent`, `web_search`).
 Who runs an accepted call is derived from its name, never stored.
 A **core tool** call runs as one core command, with no process: `message_agent(id, text)` admits `text` to Session `id` as a Message from the calling Session, with no client environment, and resolves the call `Delivered to ID.` in the same transaction; an unknown `id` resolves it failed and sends nothing.
+`read_transcript(id?, kinds?, before?, limit?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
+It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
 `start_agent(task, attached, spec)` creates a Session in the caller's Workspace with the caller's provider, configured by `spec` (model, effort, compaction threshold, tools, Permission Mode, label), admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
 A spec that names a Workspace or provider, widens the caller's tools, or asks for `bypass` under a caller that asks resolves the call failed with a result naming the field, and starts nothing; the Host checks the arguments when it runs the call, not at admission.
 The agent's Bash starts from the caller's client environment, installed as the task commits.

@@ -8327,6 +8327,7 @@ const EntryPoint = enum {
     openPublicConversationContent,
     activityPage,
     openActivityContent,
+    activityTool,
     captureFailedResponse,
     captureSessionReport,
     captureSessionList,
@@ -8340,7 +8341,7 @@ const EntryPoint = enum {
     deliverChildEnding,
     startAgent,
     stopOwedSession,
-    failCoreCall,
+    resolveCoreCall,
     actionSupersededByStop,
     withActionDispatchHandoff,
     settleActionAttempt,
@@ -8386,6 +8387,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .openPublicConversationContent = 2,
     .activityPage = 7,
     .openActivityContent = 4,
+    .activityTool = 4,
     .captureFailedResponse = 1,
     .captureSessionReport = 5,
     .captureSessionList = 6,
@@ -8399,7 +8401,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .deliverChildEnding = 2,
     .startAgent = 4,
     .stopOwedSession = 2,
-    .failCoreCall = 2,
+    .resolveCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
     .settleActionAttempt = 3,
@@ -8732,7 +8734,17 @@ test "each Store entry point takes its round budget on its common path" {
             const refused = (try storage.nextCoreWork()).?.action;
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
-            meter.stop(.failCoreCall);
+            meter.stop(.resolveCoreCall);
+            // A Tool Result's identity comes from its original call, not the
+            // group's position. Drive the public read on the last ordinal.
+            const result_page = try store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.tool_result), .limit = 1 });
+            const result = result_page.items[0];
+            try std.testing.expectEqual(@as(u64, 3), result.ordinal);
+            meter.start();
+            const tool = try storage.activityTool(&.{ .session = session, .position = result.position, .ordinal = result.ordinal });
+            meter.stop(.activityTool);
+            try std.testing.expect(tool.presentation.code == .failed);
+            try expectContent(storage, .{ .length = tool.name.length, .digest = tool.name.digest }, "start_agent");
             // Admit the child task so stopping it closes a Turn.
             while (try storage.admitNextModelAttempt(.{})) |_| {}
             var stop = try completeSessionStop("budget-core-stop", session.slice());

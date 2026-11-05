@@ -48,6 +48,7 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
+    _ = @import("read_transcript.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");
