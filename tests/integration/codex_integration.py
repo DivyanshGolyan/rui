@@ -214,15 +214,27 @@ def run():
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
         settings = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "high", settings
+        # Keep the atomic unsupported-effort guard on a model that does not
+        # list `none`; changing this Session's immutable model is not that guard.
+        guard = fixture.command(
+            "session", "configure", "--store", store, "--record", state / "effort-guard.json",
+            "--key", "effort-guard", "--workspace", fixture.ROOT,
+            "--provider", "codex", "--model", "gpt-6.1-sol", "--tools", "bash",
+            "--reasoning-effort", "high", "--permission-mode", "ask",
+        )
+        assert guard["answer"]["status"] == "accepted", guard
+        guard_session = guard["answer"]["session"]
+        guard_settings = fixture.command("session", "inspect", "--store", store, "--session", guard_session)["session"]
         for effort in ("none",):
             rejected = fixture.command(
-                "session", "configure", "--store", store, "--session", session,
+                "session", "configure", "--store", store, "--session", guard_session,
                 "--record", state / f"effort-{effort}.json", "--key", f"effort-{effort}",
-                "--model", "gpt-6.1-sol", "--reasoning-effort", effort, "--permission-mode", "bypass", expect=3,
+                "--reasoning-effort", effort, "--permission-mode", "bypass", expect=3,
             )
             assert rejected["answer"]["status"] == "rejected", rejected
-            unchanged = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            assert unchanged == settings and len(endpoint.requests) == 2, unchanged
+            assert rejected["answer"]["code"] == "unsupported_reasoning_effort", rejected
+            unchanged = fixture.command("session", "inspect", "--store", store, "--session", guard_session)["session"]
+            assert unchanged == guard_settings and len(endpoint.requests) == 2, unchanged
         # `none` is a literal listed effort on this model, not a reset.
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
