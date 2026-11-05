@@ -997,35 +997,13 @@ pub fn serve(
         }));
     }
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
-    var found_schema_version: u32 = store_module.schema_version;
     // The catalog's records point into this arena, and the Store keeps the
     // catalog for its life, so it outlives the Store.
     var catalog_memory = std.heap.ArenaAllocator.init(allocator);
     defer catalog_memory.deinit();
     const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
     var storage: store_module.Store = undefined;
-    const store_options: store_module.OpenOptions = .{
-        .served = served.routes(),
-        .cache_spill = limits.sqlite_cache_spill,
-        .cache_kib = limits.sqlite_cache_kib,
-        .found_schema_version = &found_schema_version,
-        // With MCP servers the catalog is saved below, once they are listed.
-        .catalog = if (mcp_servers.len == 0) &tools.built_in else null,
-    };
-    if (mysql_url) |url| {
-        // Only this call borrows the login. Neither metadata nor filesystem
-        // paths ever see the URL, and admission failure wipes it too.
-        defer url.wipe();
-        try storage.openMysql(io, url.options(), url.database.slice(), store_options);
-        try lease.paths.store.set(storage.mysqlStoreId());
-        try storage.selector.set(storage.mysqlStoreId());
-    } else storage.openWithOptions(io, lease.paths.database.slice(), lease.paths.store.slice(), store_options) catch |err| {
-        if (err == error.WrongStoreVersion) {
-            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
-            if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
-        }
-        return err;
-    };
+    try openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null);
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
     if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, &storage, mcp_servers, if (launch) |value| value.stdin else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
@@ -1152,6 +1130,43 @@ pub fn serve(
 
 // serve's frame stays resident for the Host's life, so each startup-only
 // buffer lives in a noinline function of its own.
+
+/// Admission's options and login framing are startup scratch, not part of
+/// serve's resident frame on either engine. The caller provides both owners.
+noinline fn openStoreForHost(
+    io: std.Io,
+    storage: *store_module.Store,
+    lease: *platform.StoreLease,
+    served: *const providers.Providers,
+    limits: *const Limits,
+    has_mcp: bool,
+    mysql_url: ?*launch_frame.MysqlUrl,
+    diagnostics: ?*HostDiagnostics,
+) !void {
+    var found_schema_version: u32 = store_module.schema_version;
+    const store_options: store_module.OpenOptions = .{
+        .served = served.routes(),
+        .cache_spill = limits.sqlite_cache_spill,
+        .cache_kib = limits.sqlite_cache_kib,
+        .found_schema_version = &found_schema_version,
+        // With MCP servers the catalog is saved below, once they are listed.
+        .catalog = if (!has_mcp) &tools.built_in else null,
+    };
+    if (mysql_url) |url| {
+        // Only this call borrows the login. Neither metadata nor filesystem
+        // paths ever see the URL, and admission failure wipes it too.
+        defer url.wipe();
+        try storage.openMysql(io, url.options(), url.database.slice(), store_options);
+        lease.paths.store.set(storage.mysqlStoreId()) catch unreachable;
+        storage.selector.set(storage.mysqlStoreId()) catch unreachable;
+    } else storage.openWithOptions(io, lease.paths.database.slice(), lease.paths.store.slice(), store_options) catch |err| {
+        if (err == error.WrongStoreVersion) {
+            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
+            if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
+        }
+        return err;
+    };
+}
 
 noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version: u32) !void {
     var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
