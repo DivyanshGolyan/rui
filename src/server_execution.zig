@@ -1158,11 +1158,10 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
 noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) execution_turn.Admission {
     var command: protocol.SessionStopCommand = .{ .key = owed.key };
     command.session.set(owed.session.slice()) catch unreachable;
-    switch (host.store.stopSession(&command, host.hooks.storeFaults(.action_result))) {
-        .accepted => {},
-        // The key is the cause's own, for this Session: nothing else
-        // could have saved it, and the Session row is the owed row's.
-        .rejected, .conflict, .infrastructure_failure => {
+    switch (host.store.stopOwedSession(&command, host.hooks.storeFaults(.action_result))) {
+        // A command that already held the key settled the owed stop.
+        .accepted, .rejected, .conflict => {},
+        .infrastructure_failure => {
             fenceDispatch(host, "owed stop", error.CanonicalStoreFailure);
             return .retry_later;
         },

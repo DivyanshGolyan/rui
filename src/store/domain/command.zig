@@ -688,6 +688,12 @@ const insert_stop = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
+fn settleOwed(a: anytype, session: *const [protocol.session_id_bytes]u8, faults: Faults) !void {
+    a.write(settle_owed_stop, .{ .session = session });
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+}
+
 const settle_owed_stop = rsql.Write(.{
     .sql = "DELETE FROM session_stop_owed WHERE child_ref=?1",
     .Args = struct { session: []const u8 },
@@ -789,7 +795,18 @@ fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
 /// A stop's own interruption finding the Operation changed is the stop's
 /// selection changing, as on main.
 pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
-    return stopRounds(a, command, faults) catch |err| switch (err) {
+    return stopRounds(a, command, false, faults) catch |err| switch (err) {
+        error.InterruptionTargetChanged => error.StopSelectionChanged,
+        else => err,
+    };
+}
+
+/// The stop an attached child owes (D38), under its owed key. Any stop
+/// settles what the Session owes; when that key already names a command,
+/// as a client may choose any key, the owed stop is settled with the
+/// reply that command has, so it never runs again.
+pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
+    return stopRounds(a, command, true, faults) catch |err| switch (err) {
         error.InterruptionTargetChanged => error.StopSelectionChanged,
         else => err,
     };
@@ -810,7 +827,7 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
 /// the text is new). The last page's write and the Turn's close run in the
 /// final round, at commit, with the position advance. With no Actions to
 /// cancel, every write runs at commit.
-fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
+fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: bool, faults: Faults) !SessionStopReply {
     const digest = command.semanticDigest();
     const key = command.key.slice();
     const session = command.session.slice();
@@ -823,10 +840,12 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: F
         a.read(stop_turn, .{ .session = session }, &turn);
     }
     try a.run();
+    // An owed stop whose key a command already holds settles what it owed.
+    const settles = owed and target != null and target.?.owes;
     switch (try classify(protocol.SessionStopRejection, &saved, .session_stop, session, &digest)) {
         .fresh => {},
         .conflict => {
-            try a.abandon(.{});
+            if (settles) try settleOwed(a, &target.?.session.ref, faults) else try a.abandon(.{});
             return .conflict;
         },
         .accepted => {
@@ -835,7 +854,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: F
             a.read(stop_selection, .{ .key = key }, &selection);
             a.read(stop_interrupted, .{ .key = key }, &interrupted);
             try a.run();
-            try a.abandon(.{});
+            if (settles) try settleOwed(a, &target.?.session.ref, faults) else try a.abandon(.{});
             const observed = stopObservation(&selection);
             return .{ .accepted = .{
                 .replayed = true,
@@ -845,7 +864,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: F
             } };
         },
         .rejected => |code| {
-            try a.abandon(.{});
+            if (settles) try settleOwed(a, &target.?.session.ref, faults) else try a.abandon(.{});
             return .{ .rejected = .{ .replayed = true, .code = code } };
         },
     }

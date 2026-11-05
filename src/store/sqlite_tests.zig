@@ -8684,11 +8684,11 @@ test "a stop or a context full ending stops every attached child below it, each 
     // The child's stop is an ordinary stop: it excludes the child's queued
     // task, settles what it owed and passes the stop down.
     var child_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
-    try std.testing.expect(storage.stopSession(&child_stop, .{}) == .accepted);
+    try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
     const next = (try storage.nextCoreWork()).?.stop;
     try std.testing.expectEqualStrings(grandchild.slice(), next.session.slice());
     var grandchild_stop = try completeSessionStop(next.key.slice(), next.session.slice());
-    try std.testing.expect(storage.stopSession(&grandchild_stop, .{}) == .accepted);
+    try std.testing.expect(storage.stopOwedSession(&grandchild_stop, .{}) == .accepted);
     try std.testing.expect(try storage.nextCoreWork() == null);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE session_ref=?1", .{child.slice()}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE session_ref=?1", .{standalone.slice()}));
@@ -8710,6 +8710,41 @@ test "a stop or a context full ending stops every attached child below it, each 
     const close_position = try store_testing.sqlite_only.queryU64(&storage, "SELECT outcome_position FROM turn WHERE session_ref=?1", .{parent.slice()});
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&key_buffer, "rui.core/stop/{s}/{s}/{d}", .{ child.slice(), parent.slice(), close_position }), full.key.slice());
     try expectDenseSessionPositions(&storage, parent.slice());
+}
+
+test "an owed stop whose key a client already used is settled by that command and never runs again" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const parent = try configureTestSession(&storage, "taken-parent");
+    const matching = try configureTestSession(&storage, "taken-matching");
+    const conflicting = try configureTestSession(&storage, "taken-conflicting");
+    const other = try configureTestSession(&storage, "taken-other");
+    for ([_][]const u8{ matching.slice(), conflicting.slice() }) |child|
+        try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child });
+    var stop = try completeSessionStop("taken-stop", parent.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+
+    var settled: usize = 0;
+    while (try storage.nextCoreWork()) |work| : (settled += 1) {
+        const owed = work.stop;
+        // A client took each key first: the same stop for one child, a
+        // stop of another Session under the other child's key.
+        const target = if (std.mem.eql(u8, owed.session.slice(), matching.slice())) matching.slice() else other.slice();
+        var client = try completeSessionStop(owed.key.slice(), target);
+        try std.testing.expect(storage.stopSession(&client, .{}) == .accepted);
+        var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
+        const reply = storage.stopOwedSession(&owed_stop, .{});
+        if (target.ptr == matching.slice().ptr) try std.testing.expect(reply == .accepted and reply.accepted.replayed) else try std.testing.expect(reply == .conflict);
+        try std.testing.expect(settled < 2);
+    }
+    try std.testing.expectEqual(@as(usize, 2), settled);
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "a stop that selects a message_agent call's Turn cancels it before it runs" {

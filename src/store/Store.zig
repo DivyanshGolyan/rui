@@ -477,6 +477,19 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
+    /// The stop an attached child owes (D38), as `nextCoreWork` names it.
+    pub fn stopOwedSession(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+        return self.queue().write(stopOwedSessionHeld, .{ self, command, faults });
+    }
+
+    fn stopOwedSessionHeld(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+        const entry = enter(self, .none) catch return .infrastructure_failure;
+        defer entry.release();
+        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopOwedSession(&access, command, faults))) catch .infrastructure_failure;
+    }
+
     pub fn interruptModel(
         self: *Store,
         command: *const protocol.ModelInterruptionCommand,
