@@ -89,7 +89,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_prepush_leaves_server_targets_to_ci(self):
         import prepush
-        for path in ("src/store/rsql.zig", "src/store/wire/mysql_driver.zig", "src/store/wire/pg.zig"):
+        for path in ("src/store/rsql.zig", "src/store/wire/mysql_connection.zig", "src/store/wire/pg.zig"):
             with self.subTest(path=path):
                 builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
                 self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
@@ -620,6 +620,15 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(result["manual_checks"])
         self.assertFalse(result["linux_memory_checks"])
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
+
+    def test_real_mcp_sdk_is_selected_with_transport_and_fixture(self):
+        for path in ("src/mcp/Listing.zig", "src/http1/request.zig",
+                     "tests/integration/mcp_sdk/server.mjs",
+                     "tests/integration/mcp_sdk/package-lock.json"):
+            targets = set(select([path], "review", AVAILABLE)["targets"])
+            self.assertTrue(covered("launch-frame-integration", targets), (path, targets))
+        for target in ("launch-frame-integration", "check", "check-full"):
+            self.assertTrue(setup_requirements([target])["node"], target)
 
     def test_setup_installs_fixture_packages_for_any_target(self):
         self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False})

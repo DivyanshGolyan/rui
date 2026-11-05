@@ -763,8 +763,9 @@ const PacketWriter = struct {
 };
 
 /// One connection's bytes as a real MySQL 8.4.13 exchanged them with this
-/// client, recorded by a proxy between the two, in order.
-const Capture = struct {
+/// client, recorded by a proxy between the two, in order. The connection's
+/// tests (`mysql_connection.zig`) replay them over a socket.
+pub const Capture = struct {
     transport: Transport,
     user: []const u8 = "rui",
     password: []const u8,
@@ -1138,7 +1139,7 @@ const cold_cache_tcp: Capture = .{
     },
 };
 
-const wrong_password_unix: Capture = .{
+pub const wrong_password_unix: Capture = .{
     .transport = .unix_socket,
     .password = "not the password",
     .chunks = &.{
@@ -1150,7 +1151,7 @@ const wrong_password_unix: Capture = .{
     },
 };
 
-const cached_tcp: Capture = .{
+pub const cached_tcp: Capture = .{
     .transport = .tcp,
     .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
@@ -1163,7 +1164,7 @@ const cached_tcp: Capture = .{
     },
 };
 
-const multi_statement: Capture = .{
+pub const multi_statement: Capture = .{
     .transport = .unix_socket,
     .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
@@ -1182,7 +1183,7 @@ const multi_statement: Capture = .{
     },
 };
 
-const error_stops: Capture = .{
+pub const error_stops: Capture = .{
     .transport = .unix_socket,
     .password = "2eb44bf811303c6a65647341debc2afc",
     .chunks = &.{
