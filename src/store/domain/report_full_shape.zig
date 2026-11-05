@@ -48,8 +48,9 @@ pub const Full = struct {
             "\",\"model\":",            H{ .string = protocol.max_model_bytes },          ",\"compaction_trigger\":", H.optional_id,
             ",\"output_reservation\":", H.optional_id,                                    ",\"reasoning_effort\":",   H{ .optional_tag = protocol.ReasoningEffort },
             ",\"label\":",              H{ .optional_string = protocol.max_label_bytes }, ",\"tools\":",              Tools,
-            ",\"permission_mode\":\"",  H{ .tag = protocol.PermissionMode },              "\",\"instructions\":",     H{ .json = RevisionContent },
-            ",\"output_schema\":",      H{ .optional_json = RevisionContent },            "}",
+            ",\"loaded_tools\":",       Tools,                                            ",\"permission_mode\":\"",  H{ .tag = protocol.PermissionMode },
+            "\",\"instructions\":",     H{ .json = RevisionContent },                     ",\"output_schema\":",      H{ .optional_json = RevisionContent },
+            "}",
         };
     };
     pub const Outcome = struct {

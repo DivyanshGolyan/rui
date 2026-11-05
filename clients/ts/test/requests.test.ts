@@ -42,12 +42,12 @@ test("configuration preserves omitted, null and value states and normalizes tool
 
 type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { profile: "current"; work: unknown }>;
 
-function report(work: CurrentReport["work"]): CurrentReport {
+function report(work: CurrentReport["work"], parent: string | null = null): CurrentReport {
 	return {
 		version: WIRE_VERSION, type: "session_report", profile: "current",
 		session: {
-			reference: "abc123", workspace: "/work", provider: "openai", model: "model-a", revision: "1",
-			tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",
+			reference: "abc123", parent, workspace: "/work", provider: "openai", model: "model-a", revision: "1",
+			tools: ["bash"], loaded_tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",
 			instructions: { bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
 			compaction_trigger: "100000", context_estimate: null, output_reservation: "0",
 			compaction_trigger_override: null, output_reservation_override: null,
@@ -65,21 +65,23 @@ const idleWork: CurrentReport["work"] = {
 	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, latest_outcome: null,
 };
 
-test("status requests the Current profile and maps only reported facts losslessly", async () => {
+test("status requests the Current profile and maps reported facts and parent losslessly", async () => {
 	const latestOutcome = { code: "failed_saved", content: { bytes: "7", sha256: "a".repeat(64) } };
-	const link: Link = {
-		async exchange(path, build) {
-			assert.equal(path, "/v1/inspect-session");
-			assert.deepEqual(JSON.parse(build('store"\n')), {
-				version: WIRE_VERSION, kind: "inspect_session", store: 'store"\n', session: 'session"\n',
-			});
-			return Buffer.from(JSON.stringify(report({ ...idleWork, latest_outcome: latestOutcome })));
-		},
-	};
-	assert.deepEqual(await new Session(link, 'session"\n').status(), {
-		state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
-		label: "Review", model: "model-a", effort: "high", tools: ["bash"], permissionMode: "ask", latestOutcome,
-	});
+	for (const parent of [null, "p4rent"]) {
+		const link: Link = {
+			async exchange(path, build) {
+				assert.equal(path, "/v1/inspect-session");
+				assert.deepEqual(JSON.parse(build('store"\n')), {
+					version: WIRE_VERSION, kind: "inspect_session", store: 'store"\n', session: 'session"\n',
+				});
+				return Buffer.from(JSON.stringify(report({ ...idleWork, latest_outcome: latestOutcome }, parent)));
+			},
+		};
+		assert.deepEqual(await new Session(link, 'session"\n').status(), {
+			state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
+			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], permissionMode: "ask", latestOutcome,
+		});
+	}
 });
 
 test("status reports a missing Session as a request error", async () => {

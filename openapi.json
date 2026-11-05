@@ -837,6 +837,52 @@
         }
       }
     },
+    "/v1/activity-search": {
+      "post": {
+        "operationId": "activitySearch",
+        "summary": "Search public Session activity newest first with bounded snippets.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActivitySearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivitySearchReply"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/activity-page": {
       "post": {
         "operationId": "activityPage",
@@ -1429,6 +1475,11 @@
                   "turn_ended": {
                     "type": "object",
                     "properties": {
+                      "session": {
+                        "type": "string",
+                        "maxLength": 6,
+                        "x-rui-max-bytes": 6
+                      },
                       "turn": {
                         "$ref": "#/components/schemas/Decimal"
                       },
@@ -1464,6 +1515,7 @@
                       }
                     },
                     "required": [
+                      "session",
                       "turn",
                       "operation",
                       "ending",
@@ -1767,6 +1819,11 @@
                   "approval_requested": {
                     "type": "object",
                     "properties": {
+                      "session": {
+                        "type": "string",
+                        "maxLength": 6,
+                        "x-rui-max-bytes": 6
+                      },
                       "action": {
                         "$ref": "#/components/schemas/Decimal"
                       },
@@ -1778,6 +1835,7 @@
                       }
                     },
                     "required": [
+                      "session",
                       "action",
                       "operation",
                       "call_ordinal"
@@ -1827,6 +1885,7 @@
                           "model",
                           "instructions",
                           "tools",
+                          "loaded_tools",
                           "permission_mode",
                           "output_schema",
                           "compaction_trigger",
@@ -2064,6 +2123,206 @@
         ],
         "additionalProperties": false
       },
+      "ActivitySearchFactsCursor": {
+        "type": "object",
+        "properties": {
+          "position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "position",
+          "ordinal"
+        ],
+        "additionalProperties": false
+      },
+      "ActivitySearchFactsHit": {
+        "type": "object",
+        "properties": {
+          "snippet": {
+            "type": "string",
+            "maxLength": 160,
+            "x-rui-max-bytes": 160
+          },
+          "offset": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "length": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "snippet",
+          "offset",
+          "length"
+        ],
+        "additionalProperties": false
+      },
+      "ActivitySearchItem": {
+        "type": "object",
+        "properties": {
+          "position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "admission",
+              "user",
+              "assistant",
+              "call",
+              "tool_result",
+              "hosted_call",
+              "turn_ended",
+              "stop",
+              "sent",
+              "send_failed",
+              "received",
+              "approval_requested",
+              "session_changed",
+              "compacted"
+            ]
+          },
+          "hits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivitySearchFactsHit"
+            }
+          }
+        },
+        "required": [
+          "position",
+          "ordinal",
+          "kind",
+          "hits"
+        ],
+        "additionalProperties": false
+      },
+      "ActivitySearchReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "type": {
+            "const": "activity_search"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivitySearchItem"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActivitySearchFactsCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "items",
+          "next"
+        ],
+        "additionalProperties": false
+      },
+      "ActivitySearchRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "8"
+          },
+          "kind": {
+            "const": "activity_search"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 256,
+            "x-rui-max-bytes": 256
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "admission",
+                "user",
+                "assistant",
+                "call",
+                "tool_result",
+                "hosted_call",
+                "turn_ended",
+                "stop",
+                "sent",
+                "send_failed",
+                "received",
+                "approval_requested",
+                "session_changed",
+                "compacted"
+              ]
+            },
+            "uniqueItems": true,
+            "description": "Each at most once, in the order the enum lists them."
+          },
+          "before_position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "before_ordinal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "session",
+          "query",
+          "kinds",
+          "before_position",
+          "before_ordinal",
+          "limit"
+        ],
+        "additionalProperties": false
+      },
       "CallActivity": {
         "type": "object",
         "properties": {
@@ -2239,6 +2498,46 @@
             ]
           },
           "tools": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "omitted"
+                  }
+                },
+                "required": [
+                  "state"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "value"
+                  },
+                  "value": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                    },
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "x-rui-max-bytes": 4096,
+                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "loaded_tools": {
             "anyOf": [
               {
                 "type": "object",
@@ -2722,6 +3021,8 @@
                       "unsupported_reasoning_effort",
                       "unknown_tool",
                       "provider_tool_missing",
+                      "loaded_tools_not_in_tools",
+                      "loaded_tools_unreachable",
                       "invalid_label",
                       "incomplete_initial_configuration",
                       "unknown_preset",
@@ -4780,6 +5081,46 @@
               }
             ]
           },
+          "loaded_tools": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "omitted"
+                  }
+                },
+                "required": [
+                  "state"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "value"
+                  },
+                  "value": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                    },
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "x-rui-max-bytes": 4096,
+                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
           "permission_mode": {
             "anyOf": [
               {
@@ -5235,8 +5576,12 @@
                       "unsupported_reasoning_effort",
                       "unknown_tool",
                       "provider_tool_missing",
+                      "loaded_tools_not_in_tools",
+                      "loaded_tools_unreachable",
                       "invalid_label",
                       "incomplete_initial_configuration",
+                      "unknown_preset",
+                      "preset_on_update",
                       "invalid_workspace",
                       "workspace_is_immutable",
                       "provider_is_immutable",
@@ -9078,6 +9423,18 @@
               "bypass"
             ]
           },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "label": {
             "anyOf": [
               {
@@ -9123,6 +9480,7 @@
           "model",
           "tools",
           "permission_mode",
+          "parent",
           "label",
           "created_at",
           "revision",
@@ -9862,6 +10220,18 @@
             "maxLength": 128,
             "x-rui-max-bytes": 128
           },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "workspace": {
             "type": "string",
             "maxLength": 4096,
@@ -9951,6 +10321,17 @@
             "x-rui-max-bytes": 4096,
             "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
+          "loaded_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
           "permission_mode": {
             "type": "string",
             "enum": [
@@ -9989,6 +10370,7 @@
         },
         "required": [
           "reference",
+          "parent",
           "workspace",
           "provider",
           "model",
@@ -10001,6 +10383,7 @@
           "reasoning_effort_override",
           "revision",
           "tools",
+          "loaded_tools",
           "permission_mode",
           "instructions",
           "output_schema",
@@ -10046,7 +10429,9 @@
             "type": "string",
             "enum": [
               "bash",
+              "find_tools",
               "message_agent",
+              "read_transcript",
               "start_agent",
               "web_search"
             ]
@@ -10888,6 +11273,17 @@
             "x-rui-max-bytes": 4096,
             "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
+          "loaded_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
           "permission_mode": {
             "type": "string",
             "enum": [
@@ -10920,6 +11316,7 @@
           "reasoning_effort",
           "label",
           "tools",
+          "loaded_tools",
           "permission_mode",
           "instructions",
           "output_schema"

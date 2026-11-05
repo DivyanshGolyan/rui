@@ -23,8 +23,7 @@ const stderr = @import("stderr.zig");
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
 pub const default_bash_path = "/bin/bash";
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
-pub const default_retention_entry_capacity =
-    output_retention.orchestration_bytes / @sizeOf(output_retention.Entry);
+pub const default_retention_entry_capacity = @import("retention_capacity.zig").entries;
 /// Real operating limits. Tests may narrow them; production uses the defaults.
 pub const Limits = struct {
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,

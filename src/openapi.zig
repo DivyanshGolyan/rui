@@ -220,6 +220,13 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
+        .path = "/v1/activity-search",
+        .kind = .activity_search,
+        .summary = "Search public Session activity newest first with bounded snippets.",
+        .variants = &.{variant(protocol.activity_search_request, .{})},
+        .reply = jsonReply(.{protocol.ActivitySearchFacts.head ++ .{ListOf(ActivitySearchItem)} ++ protocol.ActivitySearchFacts.tail}),
+    },
+    .{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
@@ -338,12 +345,14 @@ const ToolNameList = struct {
 fn configurationShape(comptime name: []const u8, comptime instructions: anytype, comptime output_schema: anytype) type {
     return struct {
         pub const openapi_name = name;
+        pub const openapi_optional_fields = .{"loaded_tools"};
         pub const openapi_shape = .{
             "{\"workspace\":",          State(Hole{ .string = protocol.max_workspace_bytes }, false),
             ",\"provider\":",           State(Hole{ .string = protocol.max_provider_bytes }, false),
             ",\"model\":",              State(Hole{ .string = protocol.max_model_bytes }, false),
             ",\"instructions\":",       instructions,
             ",\"tools\":",              State(ToolNameList, false),
+            ",\"loaded_tools\":",       State(ToolNameList, false),
             ",\"permission_mode\":",    State(Hole{ .string = 16 }, false),
             ",\"output_schema\":",      output_schema,
             ",\"compaction_trigger\":", State(Hole{ .string = 20 }, true),
@@ -512,7 +521,21 @@ pub const Document = struct {
     }
 
     fn typeSchema(d: *Document, comptime T: type) !Value {
-        if (@hasDecl(T, "openapi_shape")) return d.shapeSchema(T.openapi_shape);
+        if (@hasDecl(T, "openapi_shape")) {
+            var schema = try d.shapeSchema(T.openapi_shape);
+            if (@hasDecl(T, "openapi_optional_fields")) {
+                const required = &schema.object.getPtr("required").?.array;
+                inline for (T.openapi_optional_fields) |optional| {
+                    for (required.items, 0..) |field, index| {
+                        if (std.mem.eql(u8, field.string, optional)) {
+                            _ = required.orderedRemove(index);
+                            break;
+                        }
+                    }
+                }
+            }
+            return schema;
+        }
         if (@hasDecl(T, "openapi_shapes")) {
             var values: [T.openapi_shapes.len]Value = undefined;
             inline for (T.openapi_shapes, 0..) |shape, index| values[index] = try d.shapeSchema(shape);
@@ -1102,7 +1125,7 @@ test "replies the Host renders conform to their schemas" {
     out.clearRetainingCapacity();
     var facts: protocol.ActivityFacts = .{ .end = 9, .count = 2 };
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 3, .digest = @splat(1) }, .admitted_at = 7 } } };
-    facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
+    facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
     try facts.writeJson(&out.writer);
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
@@ -1151,3 +1174,7 @@ test "statuses, media types and required headers match what the Host sends" {
     }
     try std.testing.expect(required);
 }
+
+const ActivitySearchItem = struct {
+    pub const openapi_shape = protocol.ActivitySearchFacts.Item.head ++ .{ ListOf(protocol.ActivitySearchFacts.Hit), "]}" };
+};

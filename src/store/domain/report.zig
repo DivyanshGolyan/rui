@@ -557,7 +557,7 @@ fn writeToolNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writ
     try writer.writeAll("]");
 }
 
-const settings_columns = "s.session_ref,s.workspace,s.provider,s.model," ++ tool_set.namesSql("s.tool_set_id") ++ " AS tools,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
+const settings_columns = "s.session_ref,s.parent_ref,s.workspace,s.provider,s.model," ++ tool_set.namesSql("s.tool_set_id") ++ " AS tools,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
     "(" ++ person_message_sql ++ ") AS from_person_at,";
 
 /// One list row: the Session's settings, its latest Message from no
@@ -583,6 +583,7 @@ const list_row_bare = rsql.Read(.{
 
 const ListRow = struct {
     session_ref: SessionText,
+    parent_ref: ?protocol.Bounded(protocol.session_id_bytes),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
@@ -704,6 +705,7 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
     const peers: protocol.PeerFacts = .{ .from_person_at = optional(row.from_person_at) };
     const fields: protocol.SessionRow.Fields = .{
         .reference = row.session_ref.slice(),
+        .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .workspace = row.workspace.slice(),
         .provider = row.provider,
         .model = row.model.slice(),
@@ -1095,9 +1097,9 @@ const CurrentFacts = struct {
 
 /// The names of the tool set ?1, joined (`tool_set.namesSql`).
 const set_names = rsql.Read(.{
-    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names FROM tool_set s WHERE s.tool_set_id=?1",
-    .Args = struct { set: u64 },
-    .Row = struct { names: ?protocol.Bounded(tool_set.max_names_bytes) },
+    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names," ++ tool_set.namesSql("?2") ++ " AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
+    .Args = struct { set: u64, loaded: u64 },
+    .Row = struct { names: ?protocol.Bounded(tool_set.max_names_bytes), loaded_names: ?protocol.Bounded(tool_set.max_names_bytes) },
     .cardinality = .optional,
 });
 
@@ -1133,7 +1135,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
     a.read(person_message, .{ .session = session_ref }, &facts.person);
-    a.readInto(set_names, .{ .set = current.tool_set_id }, facts.tools, &facts.tools_found);
+    a.readInto(set_names, .{ .set = current.tool_set_id, .loaded = current.loaded_tool_set_id orelse current.tool_set_id }, facts.tools, &facts.tools_found);
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
@@ -1162,6 +1164,8 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
 
     try capture.append("{\"reference\":");
     try capture.appendJsonString(session_ref);
+    try capture.append(",\"parent\":");
+    if (current.parent_ref) |*parent| try capture.appendJsonString(parent.slice()) else try capture.append("null");
     try capture.append(",\"workspace\":");
     try capture.appendJsonString(current.workspace.slice());
     try capture.append(",\"provider\":");
@@ -1183,6 +1187,8 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
     if (!facts.tools_found.get()) return error.CorruptStore;
     try capture.appendTools(if (facts.tools.names) |*names| names.slice() else null);
+    try capture.append(",\"loaded_tools\":");
+    try capture.appendTools(if (facts.tools.loaded_names) |*names| names.slice() else null);
     try capture.append(",\"permission_mode\":");
     try capture.appendPermissionMode(current.permission_mode);
     try capture.append(",\"instructions\":");
@@ -1244,6 +1250,7 @@ pub const CurrentJson = struct {
     pub const Settings = struct {
         pub const json_shape = .{
             "{\"reference\":",                     H{ .string = protocol.max_session_bytes },
+            ",\"parent\":",                        H{ .optional_string = protocol.session_id_bytes },
             ",\"workspace\":",                     H{ .string = protocol.max_workspace_bytes },
             ",\"provider\":\"",                    H{ .tag = protocol.Provider },
             "\",\"model\":",                       H{ .string = protocol.max_model_bytes },
@@ -1256,6 +1263,7 @@ pub const CurrentJson = struct {
             ",\"reasoning_effort_override\":",     H{ .optional_tag = protocol.ReasoningEffort },
             ",\"revision\":\"",                    H.decimal,
             "\",\"tools\":",                       ToolNames,
+            ",\"loaded_tools\":",                  ToolNames,
             ",\"permission_mode\":\"",             H{ .tag = protocol.PermissionMode },
             "\",\"instructions\":",                H{ .json = Reference },
             ",\"output_schema\":",                 H{ .optional_json = Reference },
@@ -2168,6 +2176,7 @@ const RevisionRow = struct {
     reasoning_effort: ?protocol.ReasoningEffort,
     label: ?protocol.Bounded(protocol.max_label_bytes),
     tools: ?protocol.Bounded(tool_set.max_names_bytes),
+    loaded_tools: ?protocol.Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
     instructions_id: rsql.Positive,
     instructions_length: u64,
@@ -2192,7 +2201,7 @@ pub const full_revisions = rsql.Page(.{
         .on = .{ .primary_key = "session_revision" },
         .alias = "r",
         .columns = "(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
-            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.namesSql("r.tool_set_id") ++ " AS tools,r.permission_mode," ++
+            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.namesSql("r.tool_set_id") ++ " AS tools," ++ tool_set.namesSql("coalesce(r.loaded_tool_set_id,r.tool_set_id)") ++ " AS loaded_tools,r.permission_mode," ++
             "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
             "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
             owner_column("instructions") ++ " AS instructions_owner," ++ owner_column("output_schema") ++ " AS output_schema_owner",
@@ -2353,6 +2362,8 @@ const RevisionChunk = struct {
         } else try capture.append("null");
         try capture.append(",\"tools\":");
         try capture.appendTools(if (row.tools) |*names| names.slice() else null);
+        try capture.append(",\"loaded_tools\":");
+        try capture.appendTools(if (row.loaded_tools) |*names| names.slice() else null);
         try capture.append(",\"permission_mode\":");
         try capture.appendPermissionMode(row.permission_mode);
     }

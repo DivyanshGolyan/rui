@@ -11,6 +11,7 @@ const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
 const store_access = @import("../access.zig");
 const turn_domain = @import("turn.zig");
+const forward_domain = @import("forward.zig");
 const ContentReference = content_domain.ContentReference;
 const Faults = store_core.Faults;
 
@@ -26,21 +27,25 @@ fn callNameSql(comptime test_sql: []const u8) []const u8 {
 }
 
 /// Whether the Action `action` carries out a call the core runs (D24): its
-/// call names a core tool, whose names' digests `first` and the parameter
+/// call names a core tool, whose names' digests `first` and the three parameters
 /// after it bind, in `CoreNames` order.
 fn coreCallSql(comptime first: u8) []const u8 {
-    return callNameSql(std.fmt.comptimePrint(" IN(?{d},?{d})", .{ first, first + 1 }));
+    return callNameSql(std.fmt.comptimePrint(" IN(?{d},?{d},?{d},?{d})", .{ first, first + 1, first + 2, first + 3 }));
 }
 
 /// The digests of the core tools' names, which `coreCallSql` binds.
 pub const CoreNames = struct {
     message_agent: [32]u8,
+    read_transcript: [32]u8,
     start_agent: [32]u8,
+    find_tools: [32]u8,
 
     pub fn of() CoreNames {
         return .{
             .message_agent = protocol.contentDigest(tool_catalog.message_agent_record.name),
+            .read_transcript = protocol.contentDigest(tool_catalog.read_transcript_record.name),
             .start_agent = protocol.contentDigest(tool_catalog.start_agent_record.name),
+            .find_tools = protocol.contentDigest(tool_catalog.find_tools_record.name),
         };
     }
 };
@@ -57,7 +62,7 @@ const next_action_attempt = rsql.Read(.{
         "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
         "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ coreCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
-    .Args = struct { message_agent_name: [32]u8, start_agent_name: [32]u8 },
+    .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8 },
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, bash_timeout_override_ms: ?rsql.Positive, session: rsql.SessionHead },
     .cardinality = .optional,
 });
@@ -66,7 +71,7 @@ pub const next_action_attempt_sql = next_action_attempt.sql;
 /// The next core tool call ready to run (D24), as `next_action_attempt`
 /// finds Bash's: decided, never attempted, of an open Turn no stop selected.
 const next_core_action = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session," ++ callNameSql("=?2") ++ " AS starts " ++
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session," ++ "CASE WHEN " ++ callNameSql("=?1") ++ " THEN 'message_agent' WHEN " ++ callNameSql("=?2") ++ " THEN 'read_transcript' WHEN " ++ callNameSql("=?3") ++ " THEN 'start_agent' ELSE 'find_tools' END AS tool " ++
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
         "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
@@ -74,16 +79,18 @@ const next_core_action = rsql.Read(.{
         "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
         "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ coreCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
-    .Args = struct { message_agent_name: [32]u8, start_agent_name: [32]u8 },
-    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: protocol.Bounded(protocol.max_session_bytes), starts: bool },
+    .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8 },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: protocol.Bounded(protocol.max_session_bytes), tool: CoreTool },
     .cardinality = .optional,
 });
 
 /// A core tool call to run: which Action it is, which tool it calls, its
 /// Session, and its arguments' content.
+pub const CoreTool = enum { message_agent, read_transcript, start_agent, find_tools };
+
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
-    tool: enum { message_agent, start_agent },
+    tool: CoreTool,
     session: protocol.Bounded(protocol.max_session_bytes),
     arguments: ContentReference,
 };
@@ -113,10 +120,11 @@ pub const OwedEnding = struct {
 
 /// The core's next piece of work: a stop a child owes comes first, so
 /// none of its calls runs after its parent stopped, then an ending a
-/// parent is owed.
+/// parent is owed, then one ancestor feed hop, before core tool calls.
 pub const CoreWork = union(enum) {
     stop: OwedStop,
     ending: OwedEnding,
+    forward: u64,
     action: CoreActionInput,
 };
 
@@ -146,7 +154,7 @@ const owed_ending = rsql.Read(.{
 });
 
 const owed_stop = rsql.Read(.{
-    .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed ORDER BY child_ref LIMIT 1",
+    .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed WHERE settled=0 ORDER BY child_ref LIMIT 1",
     .Args = struct {},
     .Row = struct { child_ref: protocol.Bounded(protocol.session_id_bytes), cause_ref: protocol.Bounded(protocol.session_id_bytes), cause_position: u64 },
     .cardinality = .optional,
@@ -164,9 +172,11 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
     var next: next_core_action.Result = undefined;
     const names: CoreNames = .of();
     var ending: owed_ending.Result = undefined;
+    var forward: forward_domain.next.Result = undefined;
     a.read(owed_stop, .{}, &stop);
     a.read(owed_ending, .{}, &ending);
-    a.read(next_core_action, .{ .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &next);
+    a.read(forward_domain.next, .{}, &forward);
+    a.read(next_core_action, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &next);
     try a.run();
     if (stop) |owed| {
         var work: OwedStop = .{ .session = owed.child_ref, .key = .{} };
@@ -184,10 +194,11 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
             .quiet = owed.quiet,
         } };
     }
+    if (forward) |owed| return .{ .forward = owed.forward_id.get() };
     const found = next orelse return null;
     return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
-        .tool = if (found.starts) .start_agent else .message_agent,
+        .tool = found.tool,
         .session = found.session,
         .arguments = try actionContent(a, found.session.slice(), found.action_id.get(), .arguments),
     } };
@@ -296,7 +307,7 @@ pub fn admitNextActionAttempt(
 ) !?ActionAttemptAdmission {
     var next: next_action_attempt.Result = undefined;
     const names: CoreNames = .of();
-    candidate.read(next_action_attempt, .{ .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &next);
+    candidate.read(next_action_attempt, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &next);
     try candidate.run();
     const found = next orelse return null;
     var random: [16]u8 = undefined;
@@ -363,12 +374,12 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
 pub const core_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position," ++
         "(EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
-        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref)) AS stopped " ++
+        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0)) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++
         "AND action.authorized=1 AND action.attempt_ordinal=0 AND action.resolution_code IS NULL AND " ++ coreCallSql(4),
-    .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64, message_agent_name: [32]u8, start_agent_name: [32]u8 },
+    .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64, message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8 },
     .Row = struct { session: rsql.SessionHead, stopped: bool },
     .cardinality = .optional,
 });
