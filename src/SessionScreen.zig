@@ -1598,7 +1598,9 @@ test "prepared Action preserves selected inspection until explicit return" {
 }
 
 fn rowText(screen: *Self, row: u16, storage: []u8) []const u8 {
-    const window = screen.vx.window();
+    // The drawing grid borrows render's scratch. Inspect the owned copy of
+    // the rendered cells, which remains valid after render returns.
+    const window = &screen.vx.screen_last;
     var length: usize = 0;
     for (0..window.width) |column| {
         const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;

@@ -36,6 +36,8 @@ pub fn build(b: *std.Build) void {
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const tests = b.addTest(.{
+        // The self-hosted backend cuts this CI-critical compile on x86_64.
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
             .target = target,
