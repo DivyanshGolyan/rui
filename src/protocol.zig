@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli_value = @import("cli_value.zig");
 const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
@@ -428,24 +429,7 @@ pub const MessageRejection = enum {
     model_is_immutable,
     revision_exhausted,
 };
-pub const CommandKind = enum {
-    configure,
-    message,
-    session_stop,
-    model_interruption,
-    permission_decision,
-
-    /// The route a command's request is sent to and served from.
-    pub fn route(self: CommandKind) []const u8 {
-        return switch (self) {
-            .configure => "/v1/configure",
-            .message => "/v1/message",
-            .session_stop => "/v1/control/session-stop",
-            .model_interruption => "/v1/control/model-interruption",
-            .permission_decision => "/v1/control/permission-decision",
-        };
-    }
-};
+pub const CommandKind = cli_value.CommandKind;
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
 pub const SessionStopCompletion = enum { pending, completed };
 
@@ -522,9 +506,9 @@ pub const ReadResult = struct {
     key: Bounded(max_key_bytes) = .{},
 };
 
-pub const ReportProfile = enum { current, full };
+pub const ReportProfile = cli_value.ReportProfile;
 
-pub const FailedResponsePart = enum { body, metadata };
+pub const FailedResponsePart = cli_value.FailedResponsePart;
 pub const FailedResponseExport = struct {
     operation: u64,
     attempt: u64,
@@ -1009,7 +993,7 @@ pub const FirstMessage = struct {
     }
 };
 
-pub const PermissionMode = enum { ask, bypass };
+pub const PermissionMode = cli_value.PermissionMode;
 
 /// One `list-sessions` row. Every fact comes from the Store read that
 /// produced its page.
@@ -1020,6 +1004,7 @@ pub const SessionRow = struct {
     model: Bounded(max_model_bytes) = .{},
     tools: ToolsField = .{ .state = .value },
     permission_mode: PermissionMode = .ask,
+    parent: ?Bounded(session_id_bytes) = null,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
     revision: u64 = 0,
@@ -1031,13 +1016,14 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"reference\":",       Hole{ .string = max_session_bytes },        ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                    "\",\"model\":",           Hole{ .string = max_model_bytes },
-        ",\"tools\":",           Hole{ .text = max_tool_names_json_bytes },  ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"label\":",         Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"",      Hole.decimal,
-        "\",\"revision\":\"",    Hole.decimal,                               "\",\"end\":\"",           Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },      ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",           Hole{ .json = PeerFacts },                  "}",
+        "{\"reference\":",    Hole{ .string = max_session_bytes },         ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",   Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes },   ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"parent\":",     Hole{ .optional_string = session_id_bytes }, ",\"label\":",             Hole{ .optional_string = max_label_bytes },
+        ",\"created_at\":\"", Hole.decimal,                                "\",\"revision\":\"",      Hole.decimal,
+        "\",\"end\":\"",      Hole.decimal,                                "\",\"first_message\":",   Hole{ .optional_json = FirstMessage },
+        ",\"work\":",         Hole{ .json = SessionWork },                 ",\"peers\":",             Hole{ .json = PeerFacts },
+        "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
@@ -1057,6 +1043,7 @@ pub const SessionRow = struct {
         /// Already-rendered JSON borrowed from the Store read.
         tools: []const u8,
         permission_mode: PermissionMode,
+        parent: ?[]const u8,
         label: ?[]const u8,
         created_at: u64,
         revision: u64,
@@ -1069,10 +1056,10 @@ pub const SessionRow = struct {
 
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             try writeShape(out, json_shape, .{
-                f.reference, f.workspace,       f.provider,      f.model,
-                f.tools,     f.permission_mode, f.label,         f.created_at,
-                f.revision,  f.end,             f.first_message, f.work,
-                f.peers,
+                f.reference,  f.workspace,       f.provider, f.model,
+                f.tools,      f.permission_mode, f.parent,   f.label,
+                f.created_at, f.revision,        f.end,      f.first_message,
+                f.work,       f.peers,
             });
         }
     };
@@ -1096,6 +1083,7 @@ pub const SessionRow = struct {
             .model = self.model.slice(),
             .tools = tools_writer.buffered(),
             .permission_mode = self.permission_mode,
+            .parent = if (self.parent) |*parent| parent.slice() else null,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
             .revision = self.revision,
@@ -4090,6 +4078,7 @@ test "SessionRow borrowed fields preserve offered tool names" {
         .model = "model",
         .tools = "[\"bash\",\"offered_tool\"]",
         .permission_mode = .ask,
+        .parent = null,
         .label = null,
         .created_at = 0,
         .revision = 0,

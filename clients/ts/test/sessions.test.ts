@@ -36,7 +36,7 @@ test("create, list, send, update, interrupt and stop a Session", { skip }, async
 		);
 
 		const listed = await rui.sessions.list();
-		assert.deepEqual(listed.map((each) => [each.id, each.label]), [[session.id, "first"]]);
+		assert.deepEqual(listed.map((each) => [each.id, each.label, each.parent]), [[session.id, "first", null]]);
 
 		const receipt = await session.send("hello", { idempotencyKey: "msg:1", env: { PATH: "/usr/bin" } });
 		assert.match(receipt.messageId, /^[0-9]+$/);

@@ -140,6 +140,8 @@ pub const CurrentConfiguration = struct {
     created_at: u64 = 0,
     /// Read only: the change ring's key for the Session's Workspace.
     workspace_key: u64 = 0,
+    /// Read only: the creator of an attached agent; absent for other Sessions.
+    parent_ref: ?protocol.Bounded(protocol.session_id_bytes) = null,
 };
 
 /// The Session columns turn work, settlement and page cursors read, without
@@ -468,7 +470,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,codec,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        "reasoning_effort,label,created_at,workspace_key FROM session WHERE session_ref=?1",
+        "reasoning_effort,label,created_at,workspace_key,parent_ref FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,
@@ -654,8 +656,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_session_reference };
     }
     if (configuration.permission_mode.state == .value and
-        !configuration.permission_mode.value.eql("ask") and
-        !configuration.permission_mode.value.eql("bypass"))
+        std.meta.stringToEnum(protocol.PermissionMode, configuration.permission_mode.value.slice()) == null)
     {
         return .{ .rejected = .unsupported_permission_mode };
     }
