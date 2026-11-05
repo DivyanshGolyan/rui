@@ -5,6 +5,8 @@ test {
     _ = @import("codex_credentials.zig");
     _ = @import("model_adapter.zig");
     _ = @import("model_capability.zig");
+    _ = @import("model_catalog.zig");
+    _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
     _ = @import("os/pages.zig");

@@ -744,7 +744,7 @@ pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, 
 const stop_target = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff," ++
         turn_domain.unowedChildrenSql("?1") ++ " AS unowed_children," ++
-        "(SELECT cause_ref FROM session_stop_owed WHERE child_ref=?1) AS owed_cause,(SELECT cause_position FROM session_stop_owed WHERE child_ref=?1) AS owed_position " ++
+        "(SELECT cause_ref FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_cause,(SELECT cause_position FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_position " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -797,7 +797,7 @@ const insert_stop = rsql.Write(.{
 });
 
 const settle_owed_stop = rsql.Write(.{
-    .sql = "DELETE FROM session_stop_owed WHERE child_ref=?1",
+    .sql = "UPDATE session_stop_owed SET settled=1 WHERE child_ref=?1 AND settled=0",
     .Args = struct { session: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });

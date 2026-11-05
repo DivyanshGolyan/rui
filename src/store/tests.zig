@@ -1384,6 +1384,7 @@ test "a list row carries its Session's Label, times, first Message, work and pee
                 // Configured, never messaged: idle since its creation.
                 var listed = try testingListRow(&storage, &tmp, session.slice());
                 defer listed.deinit();
+                try std.testing.expect(listed.get(&.{"parent"}) == .null);
                 try std.testing.expectEqualStrings("Review PR 412", listed.get(&.{"label"}).string);
                 try std.testing.expectEqual(created_at, try listed.number(&.{"created_at"}));
                 try std.testing.expectEqual(@as(u64, 1), try listed.number(&.{"revision"}));
@@ -4085,6 +4086,227 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             try explicit.configuration.provider.value.set("codex");
             try std.testing.expect(storage.configure(&explicit, .{}) == .conflict);
             try std.testing.expect(storage.configure(&omitted, .{}).accepted.replayed);
+        }
+    }.run);
+}
+
+test "loaded tools configure defaults equality membership and reachability" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+            var initial = try completeConfiguration("loaded-default", "", workspace, "model-a");
+            const created = storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+
+            var update: protocol.ConfigureCommand = .{};
+            try update.session.set(session.slice());
+            try update.key.set("loaded-equal");
+            update.configuration.tools = try .of(&.{"bash"});
+            update.configuration.loaded_tools = try .of(&.{"bash"});
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(storage.configure(&update, .{}).accepted.replayed);
+            var conflict = update;
+            conflict.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&conflict, .{}) == .conflict);
+
+            try update.key.set("loaded-not-in-tools");
+            update.configuration.loaded_tools = try .of(&.{"web_search"});
+            const outside = storage.configure(&update, .{});
+            try std.testing.expect(outside == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, outside.rejected.code);
+            try std.testing.expect(storage.configure(&update, .{}).rejected.replayed);
+
+            try update.key.set("loaded-unreachable");
+            update.configuration.loaded_tools = try .of(&.{});
+            const unreachable_set = storage.configure(&update, .{});
+            try std.testing.expect(unreachable_set == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
+
+            // Membership is checked against saved tools if tools is omitted.
+            try update.key.set("loaded-saved-tools");
+            update.configuration.tools.state = .omitted;
+            update.configuration.loaded_tools = try .of(&.{"web_search"});
+            const saved_outside = storage.configure(&update, .{});
+            try std.testing.expect(saved_outside == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, saved_outside.rejected.code);
+
+            // An omitted loaded list continues to follow tools after equality.
+            try update.key.set("loaded-follow-tools");
+            update.configuration.tools = try .of(&.{ "bash", "web_search" });
+            update.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=3", .{session.slice()}));
+
+            // Explicit equality is also accepted on create, including empty sets.
+            var equal = try completeConfiguration("loaded-create-equal", "", workspace, "model-a");
+            equal.configuration.tools = try .of(&.{"bash"});
+            equal.configuration.loaded_tools = try .of(&.{"bash"});
+            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try equal.key.set("loaded-create-empty");
+            equal.configuration.tools = try .of(&.{});
+            equal.configuration.loaded_tools = try .of(&.{});
+            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try equal.key.set("loaded-create-unreachable");
+            equal.configuration.tools = try .of(&.{"bash"});
+            const rejected_create = storage.configure(&equal, .{});
+            try std.testing.expect(rejected_create == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, rejected_create.rejected.code);
+        }
+    }.run);
+}
+
+test "loaded tools preserve and intersect a saved subset through the catalog" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // A synthetic catalog entry exercises the rule without implementing
+            // find_tools or adding it to the Host's production catalog.
+            var records: [tool_catalog.built_in.records.len + 1]tool_catalog.Record = undefined;
+            records[0] = tool_catalog.built_in.records[0];
+            records[1] = .{ .name = "find_tools", .owner = .rui };
+            @memcpy(records[2..], tool_catalog.built_in.records[1..]);
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            try storage.saveCatalog(&catalog);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");
+            initial.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            initial.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
+            const created = storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            const loaded_id = try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()});
+            try std.testing.expect(loaded_id > 0);
+
+            // An unrelated update must preserve the saved set id.
+            var update: protocol.ConfigureCommand = .{};
+            try update.session.set(session.slice());
+            try update.key.set("loaded-subset-label");
+            update.configuration.label.state = .value;
+            try update.configuration.label.value.set("same loaded subset");
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(loaded_id, try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()}));
+
+            try update.key.set("loaded-subset-intersect");
+            update.configuration.tools = try .of(&.{ "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='find_tools'", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
+
+            // Re-adding a configured tool does not implicitly load it.
+            try update.key.set("loaded-subset-grow-tools");
+            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
+
+            try update.key.set("loaded-subset-unreachable");
+            update.configuration.tools = try .of(&.{"bash"});
+            const unreachable_set = storage.configure(&update, .{});
+            try std.testing.expect(unreachable_set == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
+
+            // Intersection with an empty tools set is equality, not an
+            // unreachable subset, and normalizes to NULL.
+            try update.key.set("loaded-subset-clear");
+            update.configuration.tools = try .of(&.{});
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+
+            // Explicit equality uses NULL, including when clearing both sets.
+            try update.key.set("loaded-subset-equal");
+            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            update.configuration.loaded_tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try update.key.set("loaded-subset-empty");
+            update.configuration.tools = try .of(&.{});
+            update.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+        }
+    }.run);
+}
+
+test "loaded tools select saved records even after the Host catalog changes or removes them" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "find_tools", .owner = .rui },
+                tool_catalog.message_agent_record,
+                .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.read_transcript_record,
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            try storage.saveCatalog(&original);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("loaded-records-create", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "other_page" });
+            create.configuration.loaded_tools = try .of(&.{"find_tools"});
+            const first = storage.configure(&create, .{}).accepted.session;
+            try create.key.set("loaded-records-second");
+            const second = storage.configure(&create, .{}).accepted.session;
+            const saved_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+
+            var changed_records = records;
+            changed_records[1] = .{ .name = "fetch_page", .owner = .mcp, .server = "replacement", .description = "New page", .input_schema = "{\"type\":\"object\",\"additionalProperties\":false}" };
+            var changed_digests = digests;
+            changed_digests[1] = tool_catalog.recordDigest(&changed_records[1]);
+            const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
+            try storage.saveCatalog(&changed);
+            var update: protocol.ConfigureCommand = .{};
+            try update.key.set("loaded-records-reworded");
+            update.session = first;
+            update.configuration.loaded_tools = try .of(&.{ "fetch_page", "find_tools" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+            try std.testing.expectEqual(saved_record, loaded_record);
+
+            var removed_records: [records.len - 1]tool_catalog.Record = undefined;
+            removed_records[0] = records[0];
+            @memcpy(removed_records[1..], records[2..]);
+            var removed_digests: [removed_records.len][32]u8 = undefined;
+            for (&removed_records, &removed_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const removed: tool_catalog.Catalog = .{ .records = &removed_records, .digests = &removed_digests };
+            try storage.saveCatalog(&removed);
+            try update.key.set("loaded-records-removed");
+            update.session = second;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            // Both configurations select the original records and intern
+            // the very same loaded set despite today's catalog contents.
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
+            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }

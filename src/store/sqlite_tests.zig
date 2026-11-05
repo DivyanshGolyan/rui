@@ -1222,6 +1222,69 @@ test "a Bash call the Operation did not offer is rejected and keeps its descript
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
 }
 
+test "loaded tools hide configured tools from frozen requests reports and call settlement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var empty = try completeConfiguration("loaded-empty", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    empty.configuration.tools = try .of(&.{});
+    const empty_reply = storage.configure(&empty, .{});
+    try std.testing.expect(empty_reply == .accepted);
+    const session = try configureTestSessionAsk(&storage, "loaded-hidden");
+    // Until find_tools exists configure rejects strict subsets. Seed the
+    // durable representation to exercise readers and frozen settlement now.
+    try store_testing.setLoadedToolsForTesting(&storage, session.slice(), empty_reply.accepted.session.slice());
+    for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+        const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
+        defer std.testing.allocator.free(bytes);
+        const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        const settings = report.value.object.get("session").?.object;
+        try std.testing.expectEqualStrings("bash", settings.get("tools").?.array.items[0].string);
+        try std.testing.expectEqual(@as(usize, 0), settings.get("loaded_tools").?.array.items.len);
+        if (profile == .current) {
+            const file = try tmp.dir.createFile(std.testing.io, "loaded-current-report", .{ .read = true });
+            defer file.close(std.testing.io);
+            try file.writeStreamingAll(std.testing.io, bytes);
+            const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, file, session.slice(), .{ .report = .{ .bytes = bytes.len } });
+            try std.testing.expect(decoded.current.settings.tools.set.contains(.bash));
+            try std.testing.expectEqual(@as(u8, 0), decoded.current.settings.loaded_tools.names.count);
+        }
+        if (profile == .full) {
+            const revision = report.value.object.get("full").?.object.get("session_revisions").?.array.items[0].object;
+            try std.testing.expectEqualStrings("bash", revision.get("tools").?.array.items[0].string);
+            try std.testing.expectEqual(@as(usize, 0), revision.get("loaded_tools").?.array.items.len);
+        }
+    }
+    try submitTestMessage(&storage, &tmp, "loaded-hidden-message", "loaded-hidden-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    {
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(binding, &view);
+        defer view.close();
+        var settings: HistoricalSettings = undefined;
+        try view.settings(&settings);
+        try std.testing.expectEqual(@as(u64, 0), settings.tool_count);
+        var tool: historical_domain.HistoricalTool = .{};
+        try std.testing.expect(!try view.nextTool(&tool));
+    }
+    // Loading Bash after admission does not widen that frozen Operation.
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("loaded-hidden-grow");
+    update.session = session;
+    update.configuration.loaded_tools = try .of(&.{"bash"});
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "loaded-hidden-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+}
+
 test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itself" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8340,6 +8403,62 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
+test "schema 53 moves forward to 54 with loaded tools defaulting to NULL" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 53) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=53", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','53')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, protocol.wire_version);
+        try sqlite.bindText(meta, 2, root);
+        try sqlite.expectDone(meta);
+        // Saved pre-T4a identities survive migration and must replay, not
+        // conflict. These golden digests use the old algorithm's bytes.
+        try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
+            "('legacy-configure',1,'',X'e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a',0,'incomplete_initial_configuration',0,0,1000)," ++
+            "('legacy-create-message',2,'',X'29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127',0,'incomplete_initial_configuration',0,0,1001)");
+    }
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, 54), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    inline for (.{ "session", "session_revision" }) |table| {
+        try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table, .{})) > 0);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table ++ " WHERE loaded_tool_set_id IS NOT NULL", .{}));
+    }
+    var configure: protocol.ConfigureCommand = .{};
+    try configure.key.set("legacy-configure");
+    const configure_replay = storage.configure(&configure, .{});
+    try std.testing.expect(configure_replay == .rejected);
+    try std.testing.expect(configure_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, configure_replay.rejected.code);
+    var message: protocol.MessageCommand = .{ .configuration = .{} };
+    try message.key.set("legacy-create-message");
+    message.text = try testingBytesContent(&tmp, "legacy-message", "go");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    const message_replay = storage.submitMessageWithModel(&message, null, .{});
+    try std.testing.expect(message_replay == .rejected);
+    try std.testing.expect(message_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.MessageRejection.incomplete_initial_configuration, message_replay.rejected.code);
+    const violations = try sqlite.prepare(storage.sqliteDatabase(), "PRAGMA foreign_key_check");
+    defer _ = c.sqlite3_finalize(violations);
+    try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(violations));
+}
+
 test "a migration whose step fails leaves its backup and the original Store readable, and replaces an earlier backup" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8797,7 +8916,7 @@ test "a stop or a context full ending stops every attached child below it, each 
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&key_buffer, "rui.core/stop/{s}/{s}/{d}", .{ child.slice(), parent.slice(), stop_position }), owed.key.slice());
     // A replayed parent stop owes nothing again.
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE settled=0", .{}));
 
     // The child's stop is an ordinary stop: it excludes the child's queued
     // task, settles what it owed and passes the stop down.
@@ -8863,6 +8982,41 @@ test "child endings deliver once with their answer and sender; standalone ending
         try settleItemsForTesting(&storage, &tmp, attempt.permit.binding, &.{item}, "hello");
     }
     try std.testing.expect(try storage.nextCoreWork() == null);
+}
+
+test "a child settles two parent stop obligations in place" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const parent = try configureTestSession(&storage, "repeat-stop-parent");
+    const child = try configureTestSession(&storage, "repeat-stop-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+
+    for ([_][]const u8{ "repeat-stop-first", "repeat-stop-second" }, 0..) |key, index| {
+        if (index != 0) {
+            try submitTestMessage(&storage, &tmp, "repeat-stop-message", "repeat-stop-message", parent.slice(), "work again");
+        }
+        var stop = try completeSessionStop(key, parent.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        // Replaying the cause must not add another open obligation.
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=0", .{child.slice()}));
+        try std.testing.expectEqual(@as(u64, index), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+
+        const owed = (try storage.nextCoreWork()).?.stop;
+        try std.testing.expectEqualStrings(child.slice(), owed.session.slice());
+        var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
+        try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=0", .{child.slice()}));
+        try std.testing.expectEqual(@as(u64, index + 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+        try std.testing.expect(try storage.nextCoreWork() == null);
+    }
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1", .{child.slice()}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE session_ref=?1", .{child.slice()}));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "a client stopped child delivers a nonquiet stopped ending" {
@@ -8949,7 +9103,7 @@ test "an owed stop a client's stop already settled, or a newer one replaced, run
     const newer = (try storage.nextCoreWork()).?.stop;
     try std.testing.expect(!std.mem.eql(u8, newer.key.slice(), selected.key.slice()));
     try std.testing.expect(storage.stopOwedSession(&stale, .{}) == .conflict);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE settled=0", .{}));
     var owed = try completeSessionStop(newer.key.slice(), newer.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
     const ending = (try storage.nextCoreWork()).?.ending;
@@ -9086,6 +9240,42 @@ test "a start_agent call creates its agent where its caller works, with the task
     // the attached one is its child.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
+    // Public list and both report profiles expose only the attached agent's
+    // parent; the standalone agent and its caller have none.
+    {
+        var used = std.atomic.Value(u64).init(0);
+        const bytes = try tests.testingSessionList(&storage, &tmp, .{}, &used, 77);
+        defer std.testing.allocator.free(bytes);
+        const listed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer listed.deinit();
+        const rows = listed.value.object.get("sessions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), rows.len);
+        var children: usize = 0;
+        for (rows) |row| {
+            const reference = row.object.get("reference").?.string;
+            const first = row.object.get("first_message").?;
+            const attached_child = !std.mem.eql(u8, reference, caller.slice()) and
+                std.mem.eql(u8, first.object.get("content").?.object.get("bytes").?.string, "14");
+            const parent = row.object.get("parent").?;
+            if (attached_child) {
+                try std.testing.expect(parent == .string);
+                try std.testing.expectEqualStrings(caller.slice(), parent.string);
+                children += 1;
+            } else try std.testing.expect(parent == .null);
+            for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+                const report = try testingSessionReportWithProfile(&storage, &tmp, reference, 1024 * 1024, profile);
+                defer std.testing.allocator.free(report);
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+                defer parsed.deinit();
+                const reported_parent = parsed.value.object.get("session").?.object.get("parent").?;
+                if (attached_child) {
+                    try std.testing.expect(reported_parent == .string);
+                    try std.testing.expectEqualStrings(caller.slice(), reported_parent.string);
+                } else try std.testing.expect(reported_parent == .null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), children);
+    }
     // Each task is its agent's first Message, from the caller, under the
     // call's own command key.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND admission_position=1 AND command_key LIKE 'rui.core/start_agent/%'", .{caller.slice()}));
@@ -9133,7 +9323,8 @@ test "read_transcript core runner reads other Session outlines before full windo
     const oldest = page.items[2].position;
     const args = [_][]const u8{
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}),
-        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"before\":\"{d}.0\",\"limit\":1}}", .{ other.slice(), newest }),
+        // Exactly the continuation call 0 emits, so the test follows it.
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), newest }),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), middle }),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), middle }),
         "{\"id\":\"zzzzzz\"}",
@@ -9178,7 +9369,7 @@ test "read_transcript core runner reads other Session outlines before full windo
                 try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
                 try std.testing.expect(std.mem.indexOf(u8, bytes, "new message") != null);
                 try std.testing.expect(std.mem.indexOf(u8, bytes, "old message") == null);
-                const more = try std.fmt.allocPrint(arena, "before \"{d}.0\"", .{newest});
+                const more = try std.fmt.allocPrint(arena, "More: call read_transcript with {s}.\n", .{args[1]});
                 try std.testing.expect(std.mem.indexOf(u8, bytes, more) != null);
             },
             1 => {
@@ -9190,7 +9381,7 @@ test "read_transcript core runner reads other Session outlines before full windo
                 try std.testing.expect(std.mem.indexOf(u8, bytes, older) == null);
             },
             2 => {
-                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with full \"{d}.0\" offset 16383.\n", .{ middle, long.len, long[0..16383], middle });
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ middle, long.len, long[0..16383], args[3] });
                 try std.testing.expectEqualStrings(expected, bytes);
             },
             3 => {

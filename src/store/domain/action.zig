@@ -150,7 +150,7 @@ const owed_ending = rsql.Read(.{
 });
 
 const owed_stop = rsql.Read(.{
-    .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed ORDER BY child_ref LIMIT 1",
+    .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed WHERE settled=0 ORDER BY child_ref LIMIT 1",
     .Args = struct {},
     .Row = struct { child_ref: protocol.Bounded(protocol.session_id_bytes), cause_ref: protocol.Bounded(protocol.session_id_bytes), cause_position: u64 },
     .cardinality = .optional,
@@ -367,7 +367,7 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
 pub const core_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position," ++
         "(EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
-        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref)) AS stopped " ++
+        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0)) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++

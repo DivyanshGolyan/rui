@@ -1871,6 +1871,7 @@
                           "model",
                           "instructions",
                           "tools",
+                          "loaded_tools",
                           "permission_mode",
                           "output_schema",
                           "compaction_trigger",
@@ -2522,6 +2523,46 @@
               }
             ]
           },
+          "loaded_tools": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "omitted"
+                  }
+                },
+                "required": [
+                  "state"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "value"
+                  },
+                  "value": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                    },
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "x-rui-max-bytes": 4096,
+                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
           "permission_mode": {
             "anyOf": [
               {
@@ -2965,6 +3006,8 @@
                       "unsupported_reasoning_effort",
                       "unknown_tool",
                       "provider_tool_missing",
+                      "loaded_tools_not_in_tools",
+                      "loaded_tools_unreachable",
                       "invalid_label",
                       "incomplete_initial_configuration",
                       "invalid_workspace",
@@ -4659,6 +4702,46 @@
               }
             ]
           },
+          "loaded_tools": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "omitted"
+                  }
+                },
+                "required": [
+                  "state"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "value"
+                  },
+                  "value": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                    },
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "x-rui-max-bytes": 4096,
+                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
           "permission_mode": {
             "anyOf": [
               {
@@ -5113,6 +5196,8 @@
                       "unsupported_reasoning_effort",
                       "unknown_tool",
                       "provider_tool_missing",
+                      "loaded_tools_not_in_tools",
+                      "loaded_tools_unreachable",
                       "invalid_label",
                       "incomplete_initial_configuration",
                       "invalid_workspace",
@@ -8956,6 +9041,18 @@
               "bypass"
             ]
           },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "label": {
             "anyOf": [
               {
@@ -9001,6 +9098,7 @@
           "model",
           "tools",
           "permission_mode",
+          "parent",
           "label",
           "created_at",
           "revision",

@@ -93,12 +93,13 @@ class PeerModel(TestHTTPServer):
     """Plays both models from request context. The foreign destination is an
     explicit negative control, not a supported peer route."""
 
-    def __init__(self, workspace, report_source, foreign_store, foreign_session):
+    def __init__(self, workspace, report_source, foreign_store, foreign_session, external_session):
         super().__init__(("127.0.0.1", 0), PeerHandler)
         self.workspace = workspace
         self.report_source = report_source
         self.foreign_store = foreign_store
         self.foreign_session = foreign_session
+        self.external_session = external_session
         self.a = self.b = None
         self.requests = []
         self.lock = threading.Lock()
@@ -154,10 +155,9 @@ class PeerModel(TestHTTPServer):
                    "When done, send findings back to this parent with rui session send.")
         return bash_call("a-ask", (
             "env | sed '/^RUI_SENDER_HANDLE=/d' > a-env.txt; command -v rui > a-which.txt; "
-            f"rui session send --store {shlex.quote(str(self.foreign_store))} --to {self.foreign_session} "
+            f"printf %s 'plain caller elsewhere' | rui session send --store {shlex.quote(str(self.foreign_store))} --to {self.external_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'conflicting-store.json'))} --key conflicting-store "
-            "> conflicting-store.out 2> conflicting-store.err; "
-            "[ $? -eq 1 ] || exit 91; "
+            "> conflicting-store.out 2> conflicting-store.err || exit 91; "
             f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --to {self.foreign_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send > foreign-send.out 2> foreign-send.err; "
             "[ $? -eq 1 ] || exit 90; "
@@ -244,7 +244,8 @@ def main(report_source):
             refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
                 "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
-            assert refused.returncode == 1 and b"UnknownArgument" in refused.stderr, refused
+            assert refused.returncode == 1 and refused.stderr == (b"rui session send: " + old_flag.encode() +
+                b": That option is not supported by this command. Accepted: options and values listed by rui session send --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]\n"), refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         foreign_store = state / "foreign-store"
         foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
@@ -256,9 +257,9 @@ def main(report_source):
         foreign_listing = run(installed, "session", "list", "--store", foreign_store, "--all", home=home)
         # Old caller names and noncanonical IDs fail at capture. The removed
         # hex flag must not revive NUL-bearing arbitrary references either.
-        invalid_selectors = [("--session", value, b"InvalidSession") for value in
+        invalid_selectors = [("--session", value, b"Session ID must be exactly six lowercase Crockford characters") for value in
                              ('peer/a "quoted" \\ 雪', 'ABC123', 'k7m2qi', 'rui/k7m2qx')]
-        invalid_selectors.append(("--session-hex", 'peer/nul\x00雪'.encode().hex(), b"UnknownArgument"))
+        invalid_selectors.append(("--session-hex", 'peer/nul\x00雪'.encode().hex(), b"rui session configure: --session-hex: That option is not supported by this command. Accepted: options and values listed by rui session configure --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]"))
         for flag, invalid, diagnostic in invalid_selectors:
             rejected = subprocess.run([str(installed), "session", "configure", "--store", str(foreign_store),
                 flag, invalid, "--workspace", str(workspace),
@@ -277,7 +278,7 @@ def main(report_source):
         external_capture = json.loads((home / ".config" / "rui" / "requests" / f'{external["context"]["key"]}.json').read_text())
         assert external_capture["sender"] is None and external_capture["sender_handle"] is None, external_capture
         assert (home / ".config" / "rui" / "preferences").read_bytes() == saved_defaults
-        endpoint = PeerModel(workspace, report_source, foreign_store, foreign_session)
+        endpoint = PeerModel(workspace, report_source, foreign_store, foreign_session, external_session)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
@@ -326,12 +327,13 @@ def main(report_source):
         assert b_held["work"]["state"]["kind"] != "finished", b_held
         settled = run(installed, "session", "inspect", "--store", store, "--session", session_a, "--profile", "full", home=home)["full"]["actions"][0]
         assert settled["resolution"] == "succeeded" and settled["result"]["text"].startswith("Bash succeeded. Exit code: 0.\n"), settled
-        assert (workspace / "conflicting-store.out").read_bytes() == b""
-        conflict_diagnostic = (workspace / "conflicting-store.err").read_text()
-        assert "CrossStorePeerSend" in conflict_diagnostic and "nothing was sent" in conflict_diagnostic, conflict_diagnostic
-        assert "nonexistent" not in conflict_diagnostic, conflict_diagnostic
-        assert not (state / "conflicting-store.json").exists(), "conflicting override published a capture"
-        assert not (state / ".conflicting-store.json.capture.lock").exists(), "conflicting override opened a capture"
+        # An explicit --store naming another Store is a plain caller's send
+        # there: peer identity never crosses Stores (#957).
+        elsewhere = json.loads((workspace / "conflicting-store.out").read_text())
+        assert elsewhere["answer"]["status"] == "accepted", elsewhere
+        assert elsewhere["context"]["session"] == external_session and elsewhere["context"]["store"] == str(foreign_store), elsewhere
+        elsewhere_capture = json.loads((state / "conflicting-store.json").read_text())
+        assert elsewhere_capture["sender"] is None and elsewhere_capture["sender_handle"] is None, elsewhere_capture
         foreign = json.loads((workspace / "foreign-send.out").read_text())
         assert foreign["answer"]["status"] == "rejected" and foreign["answer"]["code"] == "invalid_sender_handle", foreign
         replay = run(installed, "request", "recover", "--store", foreign_store, "--record", state / "foreign-send.json", "--kind", "message", home=home, expect=1)
@@ -474,7 +476,7 @@ def main(report_source):
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == [".preferences.lock", "preferences", "requests"]
         print(f"peer round trip passed ({report_source}): explicit/generated self-send admitted with recorded sender; "
               "anonymous explicit Store beat conflicting HOME defaults; peer canonical Store alias accepted; "
-              "conflicting peer override refused before content/capture without recipient admission; "
+              "peer --store naming another Store sent there as a plain caller; "
               "plain answers stored as local results without implicit delivery; "
               "foreign-Store peer rejected by Host and replayed without delivery; omitted Store beat conflicting HOME defaults; "
               "literal backticks and $() reached the parent byte-exact without shell evaluation; "
@@ -576,8 +578,10 @@ def stdin_start_contract():
 
         def failed(result, stage, cause):
             assert result.returncode == 1 and result.stdout == b"", result
-            assert f"failure during {stage};".encode() in result.stderr and cause in result.stderr, result
-            assert b"no Host serving" not in result.stderr, result
+            assert f"failure during {stage}:".encode() in result.stderr and cause in result.stderr, result
+            line = next(line for line in result.stderr.splitlines() if f"failure during {stage}:".encode() in line)
+            assert line.split(f"failure during {stage}: ".encode(), 1)[1].rstrip(b"."), result
+            assert b"error:" not in result.stderr and b"no Host serving" not in result.stderr, result
 
         failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store", b"FileNotFound")
         host = fixture.start_host(store, None)
@@ -595,7 +599,7 @@ def stdin_start_contract():
             assert not record.exists(), result
         directory = os.open(state, os.O_RDONLY)
         try:
-            failed(invoke("session", "start", "--store", store, stdin=directory), "stdin_read", b"error:")
+            failed(invoke("session", "start", "--store", store, stdin=directory), "stdin_read", b"failure during stdin_read:")
         finally:
             os.close(directory)
         failed(invoke("session", "configure", "--store", store,
@@ -603,7 +607,7 @@ def stdin_start_contract():
         for peer in ({"RUI_ADDRESS": "k7m2qx"}, {"RUI_STORE": str(store)},
                      {"RUI_ADDRESS": "broken", "RUI_STORE": str(store), "RUI_SENDER_HANDLE": "x"}):
             rejected = invoke("session", "start", "--store", store, extra=peer, input=b"must not run")
-            assert rejected.returncode == 1 and b"InvalidRuiAddress" in rejected.stderr and b"request:" not in rejected.stderr, rejected
+            assert rejected.returncode == 1 and b"invalid peer context; nothing was sent" in rejected.stderr and b"request:" not in rejected.stderr, rejected
         assert fixture.command("session", "list", "--store", store, "--all")["sessions"] == []
 
         text = "initial\x00雪\n`literal` $(data)\r\n\n".encode()
