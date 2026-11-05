@@ -12,10 +12,8 @@ const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const tool_set = @import("tool_set.zig");
-const sqlite = @import("../sqlite.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
-const c = sqlite.c;
 const Faults = store_core.Faults;
 const StoredAnswer = command_domain.StoredAnswer;
 
