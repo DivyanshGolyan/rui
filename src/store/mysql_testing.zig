@@ -552,8 +552,10 @@ const LinuxMemory = struct {
         var buffer: [8192]u8 = undefined;
         var filled: usize = 0;
         while (filled < buffer.len) {
-            const n = try file.readStreaming(std.testing.io, &.{buffer[filled..]});
-            if (n == 0) return parse(buffer[0..filled]);
+            const n = file.readStreaming(std.testing.io, &.{buffer[filled..]}) catch |err| switch (err) {
+                error.EndOfStream => return parse(buffer[0..filled]),
+                else => return err,
+            };
             filled += n;
         }
         return error.SmapsRollupTooLarge;
@@ -625,6 +627,12 @@ test "store.mysql live Linux unit process idle and fixed workload private memory
             rep + 1, queries, dirty_delta, @divTrunc(dirty_delta * 1024, queries),
         });
     }
+}
+
+test "store.mysql Linux memory observation reads proc without a database" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const sample = try LinuxMemory.read();
+    try std.testing.expect(sample.rss_kib > 0);
 }
 
 test "Linux memory observation parses all four exact KiB counters" {
