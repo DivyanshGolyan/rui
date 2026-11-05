@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 51;
+pub const schema_version: u32 = 52;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -30,6 +30,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
+    .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -78,7 +79,35 @@ pub const Migration = struct {
 /// Every step from `migration_baseline` to `schema_version`, oldest first.
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
 /// chain grows. Only a step past the released schema_version may change.
-pub const migrations = [_]Migration{};
+pub const migrations = [_]Migration{
+    // 52 (T1e): MCP tool records name their server, host_catalog names the
+    // Host's catalog set, and a catalog set holds up to
+    // max_catalog_records. Every record so far is Rui's or a provider's,
+    // so its server is empty. MySQL names a table's CHECKs in order, so
+    // the third of tool_record and of tool_set is the one replaced.
+    .{
+        .from = 51,
+        .sqlite = &.{
+            "ALTER TABLE tool_record RENAME TO tool_record_51",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,owner,server,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) SELECT tool_record_id,name,owner,'',description_content_id,input_schema_content_id FROM tool_record_51",
+            "DROP TABLE tool_record_51",
+            "ALTER TABLE tool_set RENAME TO tool_set_51",
+            "CREATE TABLE tool_set(\n tool_set_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_set_id>0),\n digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),\n member_count INTEGER NOT NULL CHECK(member_count BETWEEN 0 AND 1024)\n) STRICT",
+            "INSERT INTO tool_set(tool_set_id,digest,member_count) SELECT tool_set_id,digest,member_count FROM tool_set_51",
+            "DROP TABLE tool_set_51",
+            "CREATE TABLE host_catalog(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id)\n) STRICT",
+        },
+        .mysql = &.{
+            "ALTER TABLE tool_record ADD COLUMN server VARCHAR(64) NOT NULL DEFAULT '' AFTER owner",
+            "ALTER TABLE tool_record ALTER COLUMN server DROP DEFAULT",
+            "ALTER TABLE tool_record DROP INDEX name, ADD UNIQUE(name,owner,server,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record DROP CHECK tool_record_chk_3, ADD CHECK((owner='rui' OR owner='provider' OR owner='mcp')), ADD CHECK(OCTET_LENGTH(server)<=64 AND (NOT REGEXP_LIKE(server,'[^A-Za-z0-9_-]','c')) AND (owner='mcp' AND OCTET_LENGTH(server)>0 OR owner<>'mcp' AND OCTET_LENGTH(server)=0))",
+            "ALTER TABLE tool_set DROP CHECK tool_set_chk_3, ADD CHECK(member_count BETWEEN 0 AND 1024)",
+            "CREATE TABLE host_catalog(\n slot BIGINT NOT NULL,\n tool_set_id BIGINT NOT NULL,\n PRIMARY KEY(slot),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n CHECK(slot=1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+};
 
 comptime {
     if (schema_version < migration_baseline) @compileError("schema_version is below migration_baseline");
@@ -259,32 +288,40 @@ pub const tables = [_]Table{
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
     },
     // One tool as the model is told about it (D48): its name, who owns it
-    // (`rui`, or `provider` for a tool the provider runs, whose text the
-    // codec writes), and its description and input schema as content.
+    // (`rui`; `provider` for a tool the provider runs, whose text the codec
+    // writes; `mcp` for an MCP server's, which `server` names), and its
+    // description and input schema as content.
     .{
         .name = "tool_record",
         .columns = &.{
             .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
             .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_catalog.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
-            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider" } } },
+            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp" } } },
+            .{
+                .name = "server",
+                .type = .{ .text = .{ .min = 0, .max = tool_catalog.max_server_bytes } },
+                .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
+            },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "owner", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "owner", "server", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),
         },
     },
     // An ordered set of tool records, saved once: `digest` names its
-    // members' content (tools.zig `setDigest`).
+    // members' content (tools.zig `SetDigest`). A Session's set holds at
+    // most max_tools, the wire's bound; the Host's catalog set up to
+    // max_catalog_records.
     .{
         .name = "tool_set",
         .columns = &.{
             .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" },
             .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
-            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_tools}) },
+            .{ .name = "member_count", .type = .int, .check = std.fmt.comptimePrint("member_count BETWEEN 0 AND {d}", .{tool_catalog.max_catalog_records}) },
         },
         .primary_key = &.{"tool_set_id"},
         .uniques = &.{&.{"digest"}},
@@ -302,6 +339,19 @@ pub const tables = [_]Table{
             references("tool_record_id", "tool_record", &.{"tool_record_id"}),
         },
         .without_rowid = true,
+    },
+    // The Host's catalog: the set its last open saved (tools.zig
+    // `Catalog`), which the next start reads back. One row.
+    .{
+        .name = "host_catalog",
+        .columns = &.{
+            .{ .name = "slot", .type = .int, .check = "slot=1" },
+            .{ .name = "tool_set_id", .type = .int },
+        },
+        .primary_key = &.{"slot"},
+        .foreign_keys = &.{
+            references("tool_set_id", "tool_set", &.{"tool_set_id"}),
+        },
     },
     .{
         .name = "session",
