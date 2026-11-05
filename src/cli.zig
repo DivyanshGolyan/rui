@@ -491,6 +491,10 @@ fn homeRequired(comptime need: []const u8) error{HomeUnavailable} {
     return error.HomeUnavailable;
 }
 
+/// How a command started under a Session's Bash drops the peer context the
+/// Host gave it, for diagnostics that refuse that context.
+const plain_caller = "env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...";
+
 fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![]const u8 {
     if (explicit) |path| {
         if (path.len == 0) return error.InvalidStore;
@@ -1872,7 +1876,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         if (address == null or sender_store == null or input.sender_handle == null or
             !protocol.validSessionId(address.?) or sender_store.?.len == 0 or input.sender_handle.?.len == 0)
         {
-            stderr.diagnostic("rui: invalid peer context; nothing was sent.\n", .{});
+            stderr.diagnostic("rui: invalid peer context; nothing was sent. RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE come as a set from a Session's Bash. To send as a plain caller, run without them: " ++ plain_caller ++ "\n", .{});
             return error.InvalidRuiAddress;
         }
         input.sender = .{ .store = sender_store.?, .session = address.? };
@@ -1884,7 +1888,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         if (parsed.get("store")) |override| {
             const override_paths = try platform.resolveClientPaths(io, override);
             if (!override_paths.store.eql(sender_paths.store.slice())) {
-                stderr.diagnostic("rui: peer sends must use the sender's Store; nothing was sent.\n", .{});
+                stderr.diagnostic("rui: peer sends must use the sender's Store; nothing was sent. This rui inherited RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE from a Session's Bash, so it sends as that Session, and --store names a different Store. To send as a plain caller, for example from a harness that starts its own Host, run without them: " ++ plain_caller ++ "\n", .{});
                 return error.CrossStorePeerSend;
             }
         }

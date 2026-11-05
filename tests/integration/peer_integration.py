@@ -331,6 +331,7 @@ def main(report_source):
         conflict_diagnostic = (workspace / "conflicting-store.err").read_text()
         assert "CrossStorePeerSend" in conflict_diagnostic and "nothing was sent" in conflict_diagnostic, conflict_diagnostic
         assert "nonexistent" not in conflict_diagnostic, conflict_diagnostic
+        assert "env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui" in conflict_diagnostic, conflict_diagnostic
         assert not (state / "conflicting-store.json").exists(), "conflicting override published a capture"
         assert not (state / ".conflicting-store.json.capture.lock").exists(), "conflicting override opened a capture"
         foreign = json.loads((workspace / "foreign-send.out").read_text())

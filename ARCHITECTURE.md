@@ -523,6 +523,7 @@ Agents compose ordinary Session configuration and Message admission through the 
 `rui session send --to k7m2qx` takes one exact canonical ID, without JSON.
 Anonymous human and script sends may select `--store PATH` or use their ordinary Store defaults.
 A peer destination is always in the trusted sender's Store, before HOME preferences; an explicit Store override must canonicalize to that same Store or reject before capture.
+Both peer refusals name the three variables and the plain-caller form, `env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...`, which a harness that starts its own Host inside a Session uses (#957).
 Incomplete or malformed peer environment rejects without anonymous or default-Store fallback, including with an explicit Store selector.
 Store selection is canonicalized without changing Session bytes.
 A Session may send to itself.
