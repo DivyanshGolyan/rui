@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 54;
+pub const schema_version: u32 = 55;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -32,7 +32,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0xb357b133177d7023 },
+    .{ .schema_version = 54, .digest = 0xd783e05e67fa928c },
+    .{ .schema_version = 55, .digest = 0x5f487d791b48f290 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -123,19 +124,33 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
         },
     },
-    // Schema 54 (8b): each Store gets a random store_id. On MySQL,
+    // Schema 54: the stops an attached child owes (D38).
+    .{
+        .from = 53,
+        .sqlite = &.{
+            "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
+        },
+        .mysql = &.{
+            "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_parent ON session(parent_ref)",
+        },
+    },
+    // Schema 55 (8b): each Store gets a random store_id. On MySQL,
     // store_owner and content_chunk are new; each content's payload moves
     // into chunks of content_chunk_bytes (chunk.i reaches 9999, past the
     // 8192 chunks of the largest content) before the column goes; each
     // leading partial index gets its generated first column; store_meta's
-    // one CHECK and content's fourth are the ones replaced.
+    // one CHECK and content's fourth are the ones replaced. session_parent
+    // gets its plain twin first, since parent_ref's foreign key needs an
+    // index that leads with it.
     .{
-        .from = 53,
+        .from = 54,
         .sqlite = &.{
-            "ALTER TABLE store_meta RENAME TO store_meta_before_54",
+            "ALTER TABLE store_meta RENAME TO store_meta_before_55",
             "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
-            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_54",
-            "DROP TABLE store_meta_before_54",
+            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_55",
+            "DROP TABLE store_meta_before_55",
             "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
         },
         .mysql = &.{
@@ -151,6 +166,8 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_output_item ADD COLUMN model_output_call_history_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN item_kind=3 THEN session_ref END) STORED, ADD COLUMN model_output_hosted_history_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN item_kind=5 THEN session_ref END) STORED, ADD COLUMN model_output_compaction_history_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN item_kind=4 THEN session_ref END) STORED, ADD COLUMN model_output_compaction_anchor_lead BIGINT GENERATED ALWAYS AS (CASE WHEN item_kind=4 THEN operation_id END) STORED, DROP INDEX model_output_call_history, ADD INDEX model_output_call_history(model_output_call_history_lead,session_position), DROP INDEX model_output_hosted_history, ADD INDEX model_output_hosted_history(model_output_hosted_history_lead,session_position), DROP INDEX model_output_compaction_history, ADD INDEX model_output_compaction_history(model_output_compaction_history_lead,session_position), DROP INDEX model_output_compaction_anchor, ADD INDEX model_output_compaction_anchor(model_output_compaction_anchor_lead,item_ordinal)",
             "ALTER TABLE model_tool_call ADD COLUMN model_tool_call_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN model_tool_call_acceptance_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, DROP INDEX model_tool_call_session_results, ADD INDEX model_tool_call_session_results(model_tool_call_session_results_lead,operation_id,acceptance_position), DROP INDEX model_tool_call_acceptance, ADD INDEX model_tool_call_acceptance(model_tool_call_acceptance_lead,acceptance_position)",
             "ALTER TABLE action_operation ADD COLUMN action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN action_operation_approval_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN approval_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN action_operation_executable_lead BIGINT GENERATED ALWAYS AS (CASE WHEN authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 THEN action_id END) STORED, ADD COLUMN action_operation_unresolved_attempt_lead BIGINT GENERATED ALWAYS AS (CASE WHEN resolution_code IS NULL AND attempt_ordinal=1 THEN action_id END) STORED, DROP INDEX action_operation_session_results, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position), DROP INDEX action_operation_approval, ADD INDEX action_operation_approval(action_operation_approval_lead,approval_position), DROP INDEX action_operation_executable, ADD INDEX action_operation_executable(action_operation_executable_lead), DROP INDEX action_operation_unresolved_attempt, ADD INDEX action_operation_unresolved_attempt(action_operation_unresolved_attempt_lead)",
+            "ALTER TABLE session ADD COLUMN session_parent_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN parent_ref IS NOT NULL THEN parent_ref END) STORED, ADD INDEX session_parent_ref(parent_ref)",
+            "ALTER TABLE session DROP INDEX session_parent, ADD INDEX session_parent(session_parent_lead)",
         },
     },
 };
@@ -328,7 +345,7 @@ const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1,
 
 /// store_meta's keys, as bootstrap writes them: a closed set, so a key is
 /// a tag, which MySQL can key. `store_id` is the Store's own random id,
-/// drawn once when it is created and never changed (D204, format 54).
+/// drawn once when it is created and never changed (D204, format 55).
 const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format", "store_id" };
 
 /// The bytes of one MySQL `content_chunk` row; the last of a content's
@@ -661,6 +678,24 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
+        // An attached child owes a stop because its parent stopped or ran
+        // out of context (D38); the Host runs it as the child's own stop,
+        // which deletes the row. The first cause names the stop's key. Host
+        // work, not a Session's state: no reader of a Session reads it.
+        .name = "session_stop_owed",
+        .columns = &.{
+            .{ .name = "child_ref", .type = .{ .text = null } },
+            .{ .name = "cause_ref", .type = .{ .text = null } },
+            .{ .name = "cause_position", .type = .int, .check = "cause_position>0" },
+        },
+        .primary_key = &.{"child_ref"},
+        .foreign_keys = &.{
+            references("child_ref", "session", session_reference),
+            references("cause_ref", "session", session_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
         .name = "model_interruption_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
@@ -950,6 +985,7 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
+    .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },

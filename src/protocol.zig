@@ -12,6 +12,10 @@ pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
 const wire_number = std.fmt.parseInt(u32, wire_version, 10) catch unreachable;
 pub const max_key_bytes = 128;
+/// Command keys Rui gives its own commands: a core tool call's Message or
+/// agent start, and the stop an attached child owes. A client command
+/// with one is refused.
+pub const reserved_key_prefix = "rui.core/";
 pub const max_session_bytes = 128;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
 // The Store selector plus "/rui.sqlite3" and the journal suffix must stay
@@ -1756,7 +1760,7 @@ const Parser = struct {
         const Field = enum { key, session, configuration, require_model };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .configuration => try self.parseConfiguration(true, &out.configuration),
             .require_model => out.require_model = try self.readBoolean(),
@@ -1792,7 +1796,7 @@ const Parser = struct {
         const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .sender => if (!try self.readNull()) {
                 out.sender = .{};
@@ -1836,7 +1840,7 @@ const Parser = struct {
         const Field = enum { key, session };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
         };
         try require(Field, seen, &.{ .key, .session });
@@ -1846,7 +1850,7 @@ const Parser = struct {
         const Field = enum { key, target };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .target => {
                 const Target = enum { session, turn, operation };
                 try self.expectByte('{');
@@ -1867,7 +1871,7 @@ const Parser = struct {
         const Field = enum { key, session, action, decision };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .action => out.action_id = try self.readCanonicalU64(),
             .decision => {
@@ -2200,6 +2204,13 @@ const Parser = struct {
     fn skipKey(self: *Parser, discard: *DiscardSink) !void {
         try self.readJsonString(discard);
         try self.expectByte(':');
+    }
+
+    /// A command's key. Keys under `reserved_key_prefix` are Rui's own
+    /// commands', so a client command cannot take one first.
+    fn readCommandKey(self: *Parser, key: *Bounded(max_key_bytes)) !void {
+        try self.readSmallString(key);
+        if (std.mem.startsWith(u8, key.slice(), reserved_key_prefix)) return error.ReservedCommandKey;
     }
 
     fn readSmallString(self: *Parser, destination: anytype) !void {
@@ -3690,6 +3701,24 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
         if (request.since) |token| try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0xab)), &token.instance);
         try std.testing.expectEqual(case.through, if (request.changed) |changed| changed.through else null);
         if (request.changed) |changed| try std.testing.expectEqualStrings("k7m2qx", &changed.after_reference);
+    }
+}
+
+test "a client command cannot take a key Rui keeps for its own commands" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":";
+    const cases = [_]struct { key: []const u8, failure: ?anyerror }{
+        .{ .key = "\"rui.core/stop/abcdef/ghjkmn/3\"", .failure = error.ReservedCommandKey },
+        .{ .key = "\"rui.core/message_agent/1\"", .failure = error.ReservedCommandKey },
+        .{ .key = "\"rui.core\"", .failure = null },
+        .{ .key = "\"my/rui.core/stop\"", .failure = null },
+    };
+    for (cases) |case| {
+        var buffer: [256]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{s}{s},\"session\":\"peer\"}}", .{ head, case.key });
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
 }
 
