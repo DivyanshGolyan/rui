@@ -792,9 +792,10 @@ pub fn actionTool(requests: client.Requests, store: []const u8, session: []const
     return actionToolFromCapture(&observed, requests.io, scratch, action);
 }
 
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
-    const tool = try actionTool(requests, store, session, action, scratch) orelse return error.ActionReadFailed;
-    return permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
+/// Null means the selected approval target resolved since the activity scan.
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !?ActionSummary {
+    const tool = try actionTool(requests, store, session, action, scratch) orelse return null;
+    return try permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
 }
 
 /// The CLI's inspection and the conversation approval share the same MCP
