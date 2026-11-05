@@ -402,6 +402,22 @@ pub const OptionalFile = struct {
     path: []const u8 = "",
 };
 
+/// Concrete client-side defaults for a fresh Session, never sparse updates.
+pub fn defaultCompactionTrigger(model: []const u8) []const u8 {
+    const capability = @import("model_capability.zig");
+    const defaults = @import("product_defaults.zig");
+    inline for (capability.models) |row| {
+        if (std.mem.eql(u8, model, row.id)) return std.fmt.comptimePrint("{d}", .{row.context_window * defaults.compaction_trigger_percent / 100});
+    }
+    return std.fmt.comptimePrint("{d}", .{defaults.unlisted_context_window * defaults.compaction_trigger_percent / 100});
+}
+
+pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
+    const capability = @import("model_capability.zig");
+    const effort = capability.startEffort(saved, model) orelse capability.defaultReasoningEffort(model);
+    return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
+}
+
 pub const ConfigureInput = struct {
     store: []const u8,
     session: union(enum) {

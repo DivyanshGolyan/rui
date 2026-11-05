@@ -38,6 +38,12 @@ binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
 fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
 configuration = {name: {'state': 'value', 'value': values[name]} if name in values else {'state': 'omitted'} for name in fields}
+# Every creation states the rest of its agent spec (D113); these records test
+# domain rejections, which the parser only reaches with a complete spec.
+if configuration['tools']['state'] == 'omitted': configuration['tools'] = {'state': 'value', 'value': []}
+if configuration['permission_mode']['state'] == 'omitted': configuration['permission_mode'] = {'state': 'value', 'value': 'bypass'}
+configuration['compaction_trigger'] = {'state': 'value', 'value': '115200'}
+configuration['reasoning_effort'] = {'state': 'null'}
 body = json.dumps({'version': WIRE_VERSION, 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
 with pathlib.Path(record).open('xb') as captured:
@@ -289,9 +295,11 @@ body = json.dumps({
         "provider": {"state": "value", "value": "codex"},
         "model": {"state": "value", "value": "gpt-6-sol"},
         "instructions": {"state": "omitted"},
-        "tools": {"state": "omitted"},
-        "permission_mode": {"state": "omitted"},
+        "tools": {"state": "value", "value": ["bash"]},
+        "permission_mode": {"state": "value", "value": "bypass"},
         "output_schema": {"state": "omitted"},
+        "compaction_trigger": {"state": "value", "value": "244800"},
+        "reasoning_effort": {"state": "value", "value": "medium"},
     },
 }, separators=(",", ":")).encode()
 client = socket.socket(socket.AF_UNIX)
@@ -441,8 +449,9 @@ contains "$unknown_configure_replay" '"replayed":true'
 
 # A lost creation rejection remains original after another key creates a Session.
 before_incomplete=$(session_refs)
-wire_configure incomplete-key "$records/incomplete.json" '{}' after-commit >"$state/drop.out" 2>"$state/drop.err"
-require_test 'incomplete creation creates no Session' "$(session_refs)" = "$before_incomplete"
+incomplete_configuration=$(python3 -c 'import json, sys; print(json.dumps({"workspace": sys.argv[1], "provider": "codex", "model": ""}))' "$root")
+wire_configure incomplete-key "$records/incomplete.json" "$incomplete_configuration" after-commit >"$state/drop.out" 2>"$state/drop.err"
+require_test 'rejected creation creates no Session' "$(session_refs)" = "$before_incomplete"
 created=$($rui session configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$created" '"status":"accepted"'
 rejected_session=$(printf '%s' "$created" | session_id)
@@ -454,14 +463,12 @@ contains "$defaults" '"output_schema":null'
 rejected=$(not_accepted "$rui" request recover --store "$store" --record "$records/incomplete.json" --kind configure)
 contains "$rejected" '"status":"rejected"'
 contains "$rejected" '"replayed":true'
-contains "$rejected" '"code":"incomplete_initial_configuration"'
+contains "$rejected" '"code":"invalid_model"'
 
-# Store tests own all eight initial-field combinations. Keep a partially filled
-# wire request and closed-provider rejection with real request-scratch cleanup.
+# Protocol and Store tests own the missing-field cases; a provider may be
+# omitted (D133). Keep a closed-provider rejection with real request-scratch
+# cleanup.
 before_provider=$(session_refs)
-missing_configuration=$(python3 -c 'import json, sys; print(json.dumps({"workspace": sys.argv[1], "model": "gpt-6-sol"}))' "$root")
-missing_provider=$(not_accepted wire_configure missing-provider "$records/missing-provider.json" "$missing_configuration")
-contains "$missing_provider" '"code":"incomplete_initial_configuration"'
 printf 'rejected instructions' >"$state/rejected-instructions.txt"
 printf '{"type":"object"}' >"$state/rejected-schema.json"
 unknown_configuration=$(python3 - "$root" "$state/rejected-instructions.txt" "$state/rejected-schema.json" <<'PY'

@@ -72,7 +72,10 @@ test("follow wakes for two local sends and makes no requests between them while 
 			database: join(root, "store"), binary: wrapper,
 			provider: { baseUrl: `https://127.0.0.1:${address.port}/v1`, key: "local-fixture-only" },
 		});
-		const session = await rui.sessions.create({ provider: "openai", model: "model-a", workspace: tmpdir(), tools: [] }, { idempotencyKey: "feed:session" });
+		const session = await rui.sessions.create({
+			provider: "openai", model: "model-a", effort: null, compactAt: 100000,
+			workspace: tmpdir(), tools: [], permissionMode: "ask",
+		}, { idempotencyKey: "feed:session" });
 		const events = new EventEmitter();
 		let pages = 0;
 		let idlePages = 0;

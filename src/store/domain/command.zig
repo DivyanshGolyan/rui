@@ -449,7 +449,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -612,11 +612,11 @@ const parent_settings = rsql.Read(.{
 
 /// Runs a `start_agent` call as one core command (D24, D122): creates a
 /// Session with `configuration` in the caller's Workspace and with its
-/// provider, as its child when `attached`, admits `task` to it from the
-/// caller, and resolves the call with what happened, in one transaction.
-/// The spec may only narrow the caller's tools and permission mode.
-/// `configuration` is the caller's; its Workspace and provider are filled
-/// here. `committed` runs once the task's admission commits.
+/// provider (D122, D221), as its child when `attached`, admits `task` to it
+/// from the caller, and resolves the call with what happened, in one
+/// transaction. The spec may only narrow the caller's tools and permission
+/// mode. `configuration` is the caller's; its Workspace and provider are
+/// filled here. `committed` runs once the task's admission commits.
 pub fn startAgent(
     a: anytype,
     io: std.Io,
@@ -632,7 +632,7 @@ pub fn startAgent(
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
@@ -721,7 +721,7 @@ pub fn startAgent(
 pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();
