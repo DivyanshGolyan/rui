@@ -228,7 +228,7 @@ def run():
         for effort in ("none",):
             rejected = fixture.command(
                 "session", "configure", "--store", store, "--session", guard_session,
-                "--record", state / f"effort-{effort}.json", "--key", f"effort-{effort}",
+                "--record", state / f"effort-refused-{effort}.json", "--key", f"effort-refused-{effort}",
                 "--reasoning-effort", effort, "--permission-mode", "bypass", expect=3,
             )
             assert rejected["answer"]["status"] == "rejected", rejected
