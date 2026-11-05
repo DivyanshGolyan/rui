@@ -164,3 +164,27 @@ Scripts use the same flags with `rui session configure`, and `rui session inspec
 
 If the retained input still cannot fit after compaction, the request fails with an error.
 Rui does not compact unchanged input again.
+
+### Loading tools on demand
+
+The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_transcript`, `start_agent`, `web_search`.
+Fresh Sessions still default to `bash` and `web_search`.
+
+Set `--tools` to the tools a Session may use and `--loaded-tools` to the subset
+initially offered to its model.
+A strict subset must include `find_tools`, so the model can discover the remaining tools.
+For example:
+
+```sh
+rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" \
+  --tools bash,find_tools,message_agent,read_transcript,start_agent,web_search \
+  --loaded-tools bash,find_tools
+```
+
+The model calls `find_tools({"words":"transcript message"})` to load up to eight
+available tools whose saved names or descriptions contain either search word,
+ignoring ASCII case.
+Words are split on ASCII spaces; supply one to eight, at most 64 bytes each.
+The result lists loaded names and description previews.
+They become callable on the next request.
+Searches that find nothing report how many tools remain unloaded.
