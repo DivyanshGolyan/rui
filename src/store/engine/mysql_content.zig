@@ -240,3 +240,45 @@ pub fn readRaw(connection: *wire.Connection, id: u64, offset: u64, dest: []u8, o
     const expected_rows = (offset % chunk_bytes + dest.len - 1) / chunk_bytes + 1;
     if (filled != dest.len or value_left != 0 or awaiting_value or rows != expected_rows or columns != 1) return error.CorruptStore;
 }
+
+test "content sink is one pointer and empty content frames no query" {
+    try std.testing.expectEqual(@sizeOf(*SinkState), @sizeOf(ContentSink));
+    const connection = try std.testing.allocator.create(wire.Connection);
+    defer std.testing.allocator.destroy(connection);
+    var failure: ?Failure = null;
+    var changes: i64 = 0;
+    var state: SinkState = .{};
+    const sink = try state.open(connection, &failure, &changes, 1, 0, .{ .context = &changes, .server_error = ignoreTestServerError, .content_query = countTestContentQuery });
+    try sink.write("", 0);
+    sink.close();
+    try std.testing.expect(state.connection == null);
+    try std.testing.expect(failure == null);
+    try std.testing.expectEqual(@as(i64, 0), changes);
+}
+
+test "content sink rejects nonsequential and oversized writes before framing" {
+    const connection = try std.testing.allocator.create(wire.Connection);
+    defer std.testing.allocator.destroy(connection);
+    var failure: ?Failure = null;
+    var changes: i64 = 0;
+    var state: SinkState = .{};
+    var sink = try state.open(connection, &failure, &changes, 1, 5, .{ .context = &changes, .server_error = ignoreTestServerError, .content_query = countTestContentQuery });
+    try std.testing.expectError(error.ContentWriteFailed, sink.write("x", 1));
+    try std.testing.expect(failure == null);
+    sink.close();
+    try std.testing.expect(failure == null);
+    failure = null;
+    sink = try state.open(connection, &failure, &changes, 1, 5, .{ .context = &changes, .server_error = ignoreTestServerError, .content_query = countTestContentQuery });
+    try std.testing.expectError(error.ContentTooLarge, sink.write("123456", 0));
+    try std.testing.expect(failure == null);
+    sink.close();
+    try std.testing.expect(failure == null);
+    try std.testing.expectEqual(@as(i64, 0), changes);
+}
+
+fn ignoreTestServerError(_: *anyopaque, _: u16) void {}
+
+fn countTestContentQuery(context: *anyopaque) void {
+    const count: *i64 = @ptrCast(@alignCast(context));
+    count.* += 1;
+}

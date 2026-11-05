@@ -429,6 +429,20 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// outlive the round.
         pub fn writeContent(a: *Self, content_id: u64, bytes: []const u8) void {
             comptime std.debug.assert(mode != .read and mode != .single);
+            if (a.store.engine == .mysql) {
+                const Chunk = engine.Mysql.insert_chunk;
+                var offset: usize = 0;
+                while (offset < bytes.len) {
+                    const n = @min(bytes.len - offset, 128 * 1024);
+                    if (!a.queueStatement(Chunk, &.{
+                        .content_id = content_id,
+                        .chunk_index = @intCast(offset / (128 * 1024)),
+                        .bytes = .{ .bytes = bytes[offset..][0..n] },
+                    }, runWrite(Chunk), .{ .none = {} })) break;
+                    offset += n;
+                }
+                return;
+            }
             if (a.reserve()) |slot| {
                 slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
                 slot.borrowed = .ofBytes(bytes);
