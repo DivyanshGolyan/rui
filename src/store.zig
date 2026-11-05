@@ -13,6 +13,7 @@ const report_domain = @import("store/domain/report.zig");
 const store_core = @import("store/Store.zig");
 const store_schema = @import("store/schema.zig");
 const store_testing = @import("store/testing.zig");
+const store_test_fixtures = @import("store/tests.zig");
 
 pub const Store = store_core.Store;
 pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError;
@@ -76,6 +77,12 @@ pub const turnEndedForTesting = store_testing.turnEndedForTesting;
 pub const SettlementTrace = store_core.SettlementTrace;
 pub const SettlementTracePhase = store_core.SettlementTracePhase;
 pub const testingPublicProjection = store_testing.testingPublicProjection;
+pub const testingStoreWith = store_testing.testingStoreWith;
+pub const testingCanonicalCwd = store_testing.canonicalCwd;
+pub const testingCompleteConfiguration = store_testing.completeConfiguration;
+pub const testingSubmitMessage = store_testing.submitTestMessage;
+pub const settleCallsForTesting = store_test_fixtures.settleCallsForTesting;
+pub const testingSessionReportWithProfile = store_test_fixtures.testingSessionReportWithProfile;
 pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 test {

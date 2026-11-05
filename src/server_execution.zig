@@ -1145,6 +1145,7 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
+        .mcp => |call| runMcpAction(host, call.action_id),
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
         .action => |*input| switch (input.tool) {
@@ -1154,6 +1155,15 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
             .start_agent => runStartAgent(host, input),
         },
     };
+}
+
+/// Until the MCP runner lands, resolve without taking execution custody.
+noinline fn runMcpAction(host: *Host, action_id: u64) execution_turn.Admission {
+    host.store.resolveMcpAction(action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "MCP resolution", err);
+        return .retry_later;
+    };
+    return .admitted;
 }
 
 /// Stops an attached child whose parent stopped or ran out of context
@@ -3952,4 +3962,76 @@ test "a Session the register does not hold launches with the system PATH and the
     const held = (try launchBase(&environments, "n3w5es", std.testing.allocator)).?;
     defer std.testing.allocator.free(held);
     try std.testing.expectEqualStrings("PATH=/client/bin\x00HOME=/client\x00", held);
+}
+
+test "Host resolves MCP calls without Bash admission and continues the Turn" {
+    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
+        .name = "fetch_page",
+        .owner = .mcp,
+        .server = "docs",
+        .description = "Fetch a page.",
+        .input_schema = "{\"type\":\"object\"}",
+    }, tools.record(.find_tools).*, tools.record(.message_agent).*, tools.record(.read_transcript).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    const digests = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        var out: [records.len][32]u8 = undefined;
+        for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
+        break :blk out;
+    };
+    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try store_module.testingCompleteConfiguration("host-mcp-config", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    const configured = storage.configure(&command, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session;
+    try store_module.testingSubmitMessage(&storage, &tmp, "host-mcp-message", "host-mcp-message", session.slice(), "fetch");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, binding, "host-mcp-calls", &.{.{
+        .item_id = "item-1",
+        .name = "fetch_page",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{}",
+        .decoded_arguments = "{}",
+    }});
+    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    {
+        const pending = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+        defer std.testing.allocator.free(pending);
+        try std.testing.expect(std.mem.indexOf(u8, pending, "\"tool\":\"fetch_page\"") != null);
+    }
+    var custody: [1]execution.CustodyRecord = @splat(.{});
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = &storage,
+        .custody = execution.CustodyPool.initialize(&custody),
+    };
+    var native: NativeTurn = .{
+        .host = &host,
+        .reactor = null,
+        .slots = &.{},
+        .workspace = undefined,
+        .measurement = undefined,
+        .fenced = false,
+    };
+    // No execution capacity, process environment or transport is available.
+    try std.testing.expect(native.runCoreAction() == .admitted);
+    try std.testing.expect(native.runCoreAction() == .no_work);
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    const report = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, "Failed, not run: this Host does not run MCP tool calls yet.") != null);
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
 }
