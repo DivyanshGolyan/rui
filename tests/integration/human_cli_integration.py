@@ -259,7 +259,7 @@ def help_case():
             result = subprocess.run([str(fixture.RUI), *map(str, args)], env={**os.environ, "HOME": str(home)},
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             operation = " ".join(args[:2])
-            assert result.returncode == 1 and result.stdout == "", (args, result)
+            assert result.returncode == 2 and result.stdout == "", (args, result)
             assert result.stderr == (f"rui {operation}: {accepted}: A required option or selector is missing. "
                 f"Accepted: {accepted}. Next: Supply one of the accepted alternatives. "
                 "Nothing was captured or sent. [option_required]\n"), (args, result.stderr)
@@ -287,7 +287,7 @@ def help_case():
                 os.write(input_write, untouched)
                 result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
                     stdin=input_read, capture_output=True, text=True, timeout=5)
-                assert result.returncode == 1 and result.stdout == "", (args, result)
+                assert result.returncode == 2 and result.stdout == "", (args, result)
                 assert result.stderr == f"rui {args[0]} {args[1]}: {correction}\n", (args, result.stderr)
                 assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
                 assert list(home.iterdir()) == [], ("invalid input created runtime state", args)
@@ -308,7 +308,7 @@ def help_case():
                 os.write(input_write, untouched)
                 result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
                     stdin=input_read, capture_output=True, text=True, timeout=5)
-                assert result.returncode == 1 and result.stdout == "" and result.stderr == expected, (args, result)
+                assert result.returncode == 2 and result.stdout == "" and result.stderr == expected, (args, result)
                 assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
                 assert list(home.iterdir()) == [], (args, "rejected invocation created runtime state")
             finally:
@@ -323,7 +323,7 @@ def help_case():
             output, errors = terminal_exit(caller, master)
         finally:
             dispose_all(lambda: os.close(master), lambda: os.close(slave))
-        assert caller.returncode == 1, (output, errors)
+        assert caller.returncode == 2, (output, errors)
         assert ("rui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. "
             "Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n").encode() in errors, errors
         assert b"Provider:" not in output + errors and b"Codex login" not in output + errors, (output, errors)
@@ -332,7 +332,7 @@ def help_case():
         # Bare entry has no inline Message operand, even after --.
         literal = subprocess.run([str(fixture.RUI), "--", "setup"], env={**os.environ, "HOME": str(home)},
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
-        assert literal.returncode == 1 and '[positional_unexpected]' in literal.stderr, literal
+        assert literal.returncode == 2 and '[positional_unexpected]' in literal.stderr, literal
         assert "is now" not in literal.stderr, literal.stderr
         assert list(home.iterdir()) == [], "literal prompt without a terminal created runtime state"
 
@@ -372,14 +372,15 @@ def compiled_model_cases():
                 assert "\x1b" not in result.stderr, result.stderr
                 assert not record.exists() and not (root / "absent-store").exists()
                 assert list(home.iterdir()) == [], "invalid model created capture or preference state"
-        # A failure no owner explains still names its cause on the generic line.
-        result = subprocess.run([str(fixture.RUI), "session", "list", "--store", ""], env=env, capture_output=True, text=True, timeout=10)
-        assert result.returncode == 1 and not result.stdout, result
-        assert "failed: InvalidStore. Syntax and recovery:" in result.stderr, result.stderr
-        result = subprocess.run([str(fixture.RUI), "session", "inspect", "--store", str(root / "absent-store"), "--session", "k7m2qx",
-            "--profile", "invalid"], env=env, capture_output=True, text=True, timeout=10)
-        assert result.returncode == 1 and not result.stdout, result
-        assert "--profile invalid: That value is not supported. Accepted: current, full." in result.stderr, result.stderr
+        # Unclassified failures keep exit 1; closed parser choices exit 2.
+        for arguments, cause in ((("session", "list", "--store", ""), "InvalidStore"),
+                (("session", "inspect", "--store", str(root / "absent-store"), "--session", "k7m2qx", "--profile", "invalid"), "UnknownReportProfile")):
+            result = subprocess.run([str(fixture.RUI), *arguments], env=env, capture_output=True, text=True, timeout=10)
+            assert result.returncode == (2 if cause == "UnknownReportProfile" else 1) and not result.stdout, result
+            if cause == "UnknownReportProfile":
+                assert "[choice_unsupported]" in result.stderr, result.stderr
+            else:
+                assert f"failed: {cause}. Syntax and recovery:" in result.stderr, result.stderr
         rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "two words"],
             env=env, capture_output=True, text=True, timeout=10)
         assert rejected_default.returncode != 0 and listing in rejected_default.stderr and not list(home.iterdir())
@@ -1731,7 +1732,7 @@ def command_entry_cases():
                 # Without cursor addressing Rui refuses before any Host or
                 # terminal change, naming the recovery.
                 _, errors = caller.communicate(timeout=10)
-                assert caller.returncode == 1, (caller.returncode, errors)
+                assert caller.returncode == 2, (caller.returncode, errors)
                 assert b"TERM=dumb does not" in errors and b"No Host or Session changed." in errors, errors
                 assert not select.select([master], [], [], 0.2)[0], "dumb terminal was drawn"
                 assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
@@ -1776,7 +1777,7 @@ def command_entry_cases():
         before_peer_refusal = set(records.glob("*.json"))
         for address in (chosen, "000000", "not an ID"):
             for flags in ((), ("--model", "gpt-6-astra")):
-                refused_peer = invoke(home, "session", "configure", *flags, expect=1,
+                refused_peer = invoke(home, "session", "configure", *flags, expect=2,
                     environment={"RUI_ADDRESS": address})
                 assert not refused_peer.stdout and "InvalidRuiAddress" in refused_peer.stderr, refused_peer
                 assert set(records.glob("*.json")) == before_peer_refusal
@@ -1879,7 +1880,7 @@ def command_entry_cases():
                 os.write(input_write, unrelated)
                 sent = subprocess.run([str(fixture.RUI), "session", "send", "--to", literal, "--", prompt],
                     cwd=workspace, env=env, stdin=input_read, capture_output=True, timeout=5)
-                assert sent.returncode == 1 and b"[message_not_stdin]" in sent.stderr, sent
+                assert sent.returncode == 2 and b"[message_not_stdin]" in sent.stderr, sent
                 assert sent.stdout == b"" and select.select([input_read], [], [], 0)[0], sent
                 assert os.read(input_read, len(unrelated)) == unrelated
                 sent = subprocess.run([str(fixture.RUI), "session", "send", "--to", literal],
@@ -2336,7 +2337,7 @@ def persistent_opening_case():
                 ("--store", store, "--store-hex", "61")):
             rejected = subprocess.run([str(fixture.RUI), "session", "read-conversation", *map(str, flags),
                 "--position", "1", "--ordinal", "0"], capture_output=True, timeout=10)
-            assert rejected.returncode == 1 and not rejected.stdout, (flags, rejected)
+            assert rejected.returncode == 2 and not rejected.stdout, (flags, rejected)
             assert any(code in rejected.stderr for code in (b"[option_unknown]", b"[hex_malformed]", b"[identity_spelling_repeated]")), rejected.stderr
             assert b"Accepted: " in rejected.stderr and b" Next: " in rejected.stderr and b"Nothing was captured or sent." in rejected.stderr, rejected.stderr
         assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
@@ -3702,7 +3703,7 @@ def saved_capture_cases(state, store, workspace):
     for operation, kind in (("configure", "configure"), ("start", "message")):
         rejected = admit(home, "session", operation, "--store", store,
             "--workspace", state / "missing-workspace", "--provider", "codex", "--model", "gpt-6-sol",
-            input="rejected first Message" if operation == "start" else None, expect=1)
+            input="rejected first Message" if operation == "start" else None, expect=3)
         rejected_handle = rejected["request"]
         rejected_handles.append(rejected_handle)
         rejected_answer = rejected["admission"]["answer"]
@@ -3944,11 +3945,14 @@ def opaque_session_commands_case():
             "rui/" + reference, "01234567-89ab-4cde-8012-3456789abcde", "human/name", "'" + reference + "'")
         for invalid in (*invalid_ids, json.dumps({"session": reference}),
                 json.dumps({"store": str(store), "session": reference})):
-            rejected = invoke(home, "session", "send", "--store", store, "--to", invalid, input="not sent", expect=1)
+            rejected = invoke(home, "session", "send", "--store", store, "--to", invalid, input="not sent", expect=2)
             assert not rejected.stdout and "InvalidSession" in rejected.stderr and "request:" not in rejected.stderr, rejected
         for invalid in invalid_ids:
-            rejected = invoke(home, "session", "configure", "--store", store, "--session", invalid, expect=1)
+            rejected = invoke(home, "session", "configure", "--store", store, "--session", invalid, expect=2)
             assert not rejected.stdout and "InvalidSession" in rejected.stderr and "request:" not in rejected.stderr, rejected
+        for label in (" ", "two\nlines", "x" * 101):
+            rejected = invoke(home, "session", "configure", "--store", store, "--session", reference, "--label", label, expect=2)
+            assert not rejected.stdout and "--label must be one line" in rejected.stderr and "request:" not in rejected.stderr, rejected
         for route in (("session", "resume"), ("action", "allow"), ("action", "deny")):
             extra = [] if route[1] == "resume" else ["--action", "1"]
             negatives = [["--session-hex", value] for value in invalid_hex]
@@ -3976,7 +3980,7 @@ def opaque_session_commands_case():
         assert set((home / ".config/rui/requests").glob("*.json")) == set(before)
         absent = "000000" if reference != "000000" else "111111"
         unknown = admit(home, "session", "configure", "--store", store, "--session", absent,
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", expect=1)
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", expect=3)
         assert unknown["admission"]["answer"] == {"status": "rejected", "replayed": False,
             "session": absent, "code": "unknown_session"}, unknown
         assert [row["reference"] for row in json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"]] == [reference]
@@ -6719,7 +6723,7 @@ def main(selected="all"):
         text = state / "input"
         text.write_text("first input")
         dropped = invoke(home, "session", "send", "--store", store, "--to", session,
-            "--test-drop-reply", "after-commit", input=text.read_text(), expect=1)
+            "--test-drop-reply", "after-commit", input=text.read_text(), expect=4)
         assert dropped.stdout == "", dropped
         first = CAPTURE_NOTICE.match(dropped.stderr).group(1)
         record = home / ".config/rui/requests" / f"{first}.json"
@@ -6783,7 +6787,7 @@ def main(selected="all"):
         assert not counter.exists()
 
         lost_decision = invoke(home, "action", "allow", "--store", store, "--session", session,
-            "--action", action, "--test-drop-reply", "after-commit", expect=1)
+            "--action", action, "--test-drop-reply", "after-commit", expect=4)
         assert lost_decision.stdout == "", lost_decision
         decision_key = CAPTURE_NOTICE.match(lost_decision.stderr).group(1)
         assert decision_key in json.loads(run(home, "request", "list"))
@@ -6792,7 +6796,7 @@ def main(selected="all"):
         fixture.wait_for(lambda: fixture.completed_observation(store, first), "first saved answer")
         fixture.wait_for(lambda: fixture.completed_observation(store, queued), "queued answer after permission")
         stale = admit(home, "action", "deny", "--store", store, "--session", session,
-            "--action", action, expect=1)
+            "--action", action, expect=3)
         assert stale["admission"]["answer"]["status"] == "rejected", stale
         assert fixture.read_result(store, queued) == b"first answer"
         current = fixture.command("session", "inspect", "--store", store, "--session", session)
@@ -6890,10 +6894,10 @@ def main(selected="all"):
                 "request_target": {"action": action, "decision": "deny"},
                 "answer": {"status": "rejected", "replayed": replayed, "session": session, "action": action,
                     "decision": "deny", "code": "action_not_pending"}}
-        recovered_stale = json.loads(invoke(home, "request", "recover", stale["request"], expect=1).stdout)
+        recovered_stale = json.loads(invoke(home, "request", "recover", stale["request"], expect=3).stdout)
         assert recovered_stale == rejected_decision(stale["request"], True), recovered_stale
         stale_default = admit(home, "action", "deny", "--store", store, "--session", session,
-            "--action", action, expect=1)
+            "--action", action, expect=3)
         assert stale_default["admission"] == rejected_decision(stale_default["request"], False), stale_default
         assert run(home, "request", "read-result", first, environment=render_environment) == "first answer"
         assert fixture.observe(store, first)["result"]["status"] == "completed"
@@ -7078,33 +7082,32 @@ def main(selected="all"):
         known_sessions = {row["reference"] for row in json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"]}
         absent = next(candidate for candidate in ("000000", "111111", "222222") if candidate not in known_sessions)
         rejected = admit(home, "session", "send", "--to", absent,
-            input="unknown session", expect=1)
+            input="unknown session", expect=3)
         assert rejected["admission"]["answer"] == {"status": "rejected", "replayed": False,
             "session": absent, "code": "unknown_session"}, rejected
         refused = fixture.observe(store, rejected["request"])
         assert refused["status"] == "rejected" and refused["code"] == "unknown_session", refused
-        not_accepted = ("\nrui: the Host did not accept this request; stdout carries its saved answer and code. "
-            "Replay returns that same answer and never resubmits: rui request recover ")
-        assert f"{not_accepted}{rejected['request']}\n" in rejected["stderr"], rejected["stderr"]
-        recovered_rejection = invoke(home, "request", "recover", rejected["request"], expect=1)
-        assert f"{not_accepted}{rejected['request']}\n" in recovered_rejection.stderr, recovered_rejection.stderr
+        assert "[unknown_session]" in rejected["stderr"], rejected["stderr"]
+        assert "MutationNotAccepted" not in rejected["stderr"] and "Syntax and recovery" not in rejected["stderr"], rejected["stderr"]
+        recovered_rejection = invoke(home, "request", "recover", rejected["request"], expect=3)
+        assert "[unknown_session]" in recovered_rejection.stderr, recovered_rejection.stderr
         replayed_rejection = json.loads(recovered_rejection.stdout)
         assert replayed_rejection == {"context": {"store": str(store), "session": absent,
             "key": rejected["request"], "kind": "message"}, "answer": {"status": "rejected", "replayed": True,
             "session": absent, "code": "unknown_session"}, "input": rejected["admission"]["input"]}, replayed_rejection
         stop_record = state / "absent-stop.json"
         refused_stop = invoke(home, "session", "stop", "--store", store, "--session", absent,
-            "--record", stop_record, "--key", "absent-stop", expect=1)
+            "--record", stop_record, "--key", "absent-stop", expect=3)
         assert json.loads(refused_stop.stdout)["answer"] == {"status": "rejected", "replayed": False,
             "session": absent, "code": "unknown_session"}, refused_stop
         repeated_stop = invoke(home, "session", "stop", "--store", store, "--session", absent,
             "--record", stop_record, "--key", "absent-stop", expect=1)
         assert not repeated_stop.stdout and "RecordAlreadyExists" in repeated_stop.stderr, repeated_stop
         explicit_route = f"rui request recover --store $'{store}' --record $'{stop_record}' --kind session-stop"
-        assert f"{not_accepted[:-len('rui request recover ')]}{explicit_route}\n" in refused_stop.stderr, refused_stop.stderr
+        assert "[unknown_session]" in refused_stop.stderr, refused_stop.stderr
         replayed_stop = subprocess.run(["bash", "-c", shlex.quote(str(fixture.RUI)) + explicit_route[len("rui"):]],
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=20)
-        assert replayed_stop.returncode == 1 and replayed_stop.stderr == refused_stop.stderr, replayed_stop
+        assert replayed_stop.returncode == 3 and replayed_stop.stderr == refused_stop.stderr, replayed_stop
         assert json.loads(replayed_stop.stdout)["answer"] == {"status": "rejected", "replayed": True,
             "session": absent, "code": "unknown_session"}, replayed_stop
         assert rejected["admission"]["input"]["bytes"] == str(len(b"unknown session")), rejected
@@ -7243,7 +7246,7 @@ def main(selected="all"):
                 "--action", action_id))
             assert exact == {"action": action_id, "call_id": control_call, "arguments": padded_arguments}, exact
             mismatch = admit(home, "action", "allow", "--store", store, "--session", session,
-                "--action", action_id, expect=1)
+                "--action", action_id, expect=3)
             assert mismatch["admission"]["answer"]["status"] == "rejected", mismatch
             assert mismatch["admission"]["answer"]["code"] == "target_mismatch", mismatch
             records = home / ".config/rui/requests"
@@ -7278,7 +7281,7 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         invalid_name = "human/name\n\x1b[2J\u202e"
-        rejected_name = invoke(home, "session", "configure", "--store", store, "--session", invalid_name, expect=1)
+        rejected_name = invoke(home, "session", "configure", "--store", store, "--session", invalid_name, expect=2)
         assert not rejected_name.stdout and "InvalidSession" in rejected_name.stderr, rejected_name
         control_workspace = workspace / "name\n\x1b[2J\u202e"
         control_workspace.mkdir()
