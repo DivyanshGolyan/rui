@@ -2547,8 +2547,7 @@ test "request preparation keeps the starting effort at the top and changes it at
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        // D111: the client states the effort; a listed model's starting one is
-        // its catalog default unless the case overrides it.
+        // D111: the test client states the effort explicitly.
         if (case.override orelse case.expected) |effort| {
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
@@ -3819,8 +3818,8 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    // D111: a listed model states its catalog effort; null is for unlisted ones.
-    if (@import("model_capability.zig").defaultReasoningEffort(model)) |effort| {
+    // D111: test clients supply an explicit effort using the client product choice.
+    if (if (@import("model_capability.zig").supportsModel(model)) @import("client_defaults.zig").startEffort(model, null) else null) |effort| {
         command.configuration.reasoning_effort.state = .value;
         try command.configuration.reasoning_effort.value.set(@tagName(effort));
     } else command.configuration.reasoning_effort.state = .explicit_null;
@@ -3941,11 +3940,73 @@ test "request N+1 begins with request N's history span" {
     }
 }
 
+test "a legacy null Session continues with its earlier Operation effort" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    var storage_open = true;
+    defer {
+        if (storage_open) setup.storage.close() catch unreachable;
+        setup.tmp.cleanup();
+    }
+    const session = try configureMemoSessionModelForTesting(&setup, "gpt-5.5");
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("legacy-medium");
+    update.session = session;
+    update.configuration.reasoning_effort.state = .value;
+    try update.configuration.reasoning_effort.value.set("medium");
+    try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+    try setup.submit("legacy-first", "legacy-first", session.slice(), "first");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+    // Pre-D111 gpt-5.5 Sessions stored null while Operations froze medium.
+    // Formats 51..53 migrate to the current Store without replacing these rows.
+    try store.setLegacyNullEffortForTesting(&setup.storage, session.slice());
+    const earlier = try prepareMemoForTesting(&setup, first, null, .{});
+    defer std.testing.allocator.free(earlier.bytes);
+    try setup.submit("legacy-second", "legacy-second", session.slice(), "continue");
+    try settleComposedForTesting(&setup, first, "legacy-output", .message, "{\"type\":\"message\",\"id\":\"legacy-answer\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}", &.{});
+
+    try setup.storage.close();
+    storage_open = false;
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+    try setup.storage.open(std.testing.io, database, setup.root);
+    storage_open = true;
+    const second = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const continued = try prepareMemoForTesting(&setup, second, null, .{});
+    defer std.testing.allocator.free(continued.bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, continued.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("medium", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, continued.bytes, "configuration_update"));
+    const observed = try setup.storage.inspectSessionForTesting(session.slice());
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
+
+    // An explicit new spec still wins over the earlier frozen value.
+    try update.key.set("legacy-low");
+    try update.configuration.reasoning_effort.value.set("low");
+    try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+    const third = try advanceMemoHistoryForTesting(&setup, session, second, 1);
+    const changed = try prepareMemoForTesting(&setup, third, null, .{});
+    defer std.testing.allocator.free(changed.bytes);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, changed.bytes, "configuration_update"));
+    try std.testing.expect(std.mem.indexOf(u8, changed.bytes, "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"low\"}}") != null);
+}
+
 test "an effort change keeps each request's input a prefix of the next" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
     const session = try configureMemoSessionModelForTesting(&setup, "gpt-5.5");
+    // The prefix fixture starts at medium explicitly, independently of the
+    // client's product default (low under C1b).
+    var initial: protocol.ConfigureCommand = .{};
+    try initial.key.set("effort-initial-medium");
+    initial.session = session;
+    initial.configuration.reasoning_effort.state = .value;
+    try initial.configuration.reasoning_effort.value.set("medium");
+    try std.testing.expect(setup.storage.configure(&initial, .{}) == .accepted);
     try setup.submit("memo-first", "memo-first", session.slice(), "start \"work\"\n");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();

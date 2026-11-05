@@ -267,6 +267,20 @@ def openai_base_url_run():
         # One stream per connection: the held list and the message each
         # needed their own.
         assert len(endpoint.connections) == 2, endpoint.connections
+        # A new Host whose list response is invalid publishes the catalog fallback.
+        fixture.stop_host(host)
+        host = None
+        endpoint.models = b'{"error":"model list unavailable"}'
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1"], env={
+            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
+            "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
+        })
+        fallback = fixture.wait_for(
+            lambda: (value if (value := model_list())[0]["source"] != "pending" else None),
+            "the OpenAI catalog fallback", timeout=20)
+        assert fallback[0]["source"] == "catalog_fallback", fallback
+        assert fallback[0]["models"] and all(model["known"] for model in fallback[0]["models"]), fallback
+        print("openai catalog fallback passed: failed live list exposes catalog_fallback with known catalog models")
         print("openai base URL passed: the key goes over TLS to /custom/v1/models and /custom/v1/responses under RUI_OPENAI_BASE_URL, a message completes beside a held model list at one execution place, and the live list comes back")
         complete = True
     finally:

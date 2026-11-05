@@ -18,6 +18,7 @@ import bash_integration as bash
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, retain_failure_state, start_ready_process
+from control_integration import raw_request
 
 
 ACCESS = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
@@ -131,6 +132,13 @@ def run():
         # Missing and uncertain credentials must never reach model transport.
         credentials(credential_file, state="refresh_pending")
         host = start(store, url)
+        head, listed_body = raw_request(host.rui_ready_fields["socket"], "/v1/model-list", json.dumps({
+            "version": host_process.WIRE_VERSION, "kind": "model_list", "store": str(store),
+        }).encode())
+        listed = json.loads(listed_body)["providers"]
+        assert b" 200 " in head and len(listed) == 1, (head, listed)
+        assert listed[0]["provider"] == "codex" and listed[0]["source"] == "catalog", listed
+        assert listed[0]["models"] and all(model["known"] for model in listed[0]["models"]), listed
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", fixture.ROOT,
@@ -164,7 +172,7 @@ def run():
         action = fixture.wait_for(lambda: bash.action_for(store, session), "managed Bash proposal")
         assert fixture.read_action(store, session, action["action"], "call-id") == b"managed-call"
         assert json.loads(fixture.read_action(store, session, action["action"], "arguments"))["cmd"] == command
-        assert json.loads(endpoint.requests[0])["reasoning"] == {"effort": "medium"}
+        assert json.loads(endpoint.requests[0])["reasoning"] == {"effort": "low"}
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-high.json", "--key", "effort-high",
@@ -187,7 +195,7 @@ def run():
         continuation = json.loads(endpoint.requests[1])
         # openai-responses/2 keeps the starting effort on top, so the prefix
         # stays cached, and writes the change into the input once.
-        assert continuation["reasoning"] == {"effort": "medium"}, continuation
+        assert continuation["reasoning"] == {"effort": "low"}, continuation
         assert [item for item in continuation["input"] if item.get("type") == "configuration_update"] == [
             {"type": "configuration_update", "reasoning": {"effort": "high"}}
         ], continuation["input"]
@@ -206,15 +214,36 @@ def run():
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
         settings = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "high", settings
+        # Keep the atomic unsupported-effort guard on a model that does not
+        # list `none`; changing this Session's immutable model is not that guard.
+        guard = fixture.command(
+            "session", "configure", "--store", store, "--record", state / "effort-guard.json",
+            "--key", "effort-guard", "--workspace", fixture.ROOT,
+            "--provider", "codex", "--model", "gpt-6.1-sol", "--tools", "bash",
+            "--reasoning-effort", "high", "--permission-mode", "ask",
+        )
+        assert guard["answer"]["status"] == "accepted", guard
+        guard_session = guard["answer"]["session"]
+        guard_settings = fixture.command("session", "inspect", "--store", store, "--session", guard_session)["session"]
         for effort in ("none",):
             rejected = fixture.command(
-                "session", "configure", "--store", store, "--session", session,
-                "--record", state / f"effort-{effort}.json", "--key", f"effort-{effort}",
+                "session", "configure", "--store", store, "--session", guard_session,
+                "--record", state / f"effort-refused-{effort}.json", "--key", f"effort-refused-{effort}",
                 "--reasoning-effort", effort, "--permission-mode", "bypass", expect=3,
             )
             assert rejected["answer"]["status"] == "rejected", rejected
-            unchanged = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            assert unchanged == settings and len(endpoint.requests) == 2, unchanged
+            assert rejected["answer"]["code"] == "unsupported_reasoning_effort", rejected
+            unchanged = fixture.command("session", "inspect", "--store", store, "--session", guard_session)["session"]
+            assert unchanged == guard_settings and len(endpoint.requests) == 2, unchanged
+        # `none` is a literal listed effort on this model, not a reset.
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--session", session,
+            "--record", state / "effort-none.json", "--key", "effort-none",
+            "--reasoning-effort", "none",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        selected = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
+        assert selected["reasoning_effort"] == selected["reasoning_effort_override"] == "none", selected
         invalid_effort = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
             "--session", session, "--reasoning-effort", "ultra"], capture_output=True, text=True, timeout=10)
         assert invalid_effort.returncode == 2 and not invalid_effort.stdout, invalid_effort
@@ -230,7 +259,7 @@ def run():
         assert fixture.read_result(store, "later") == b"later answer"
         assert len(endpoint.requests) == 3 and proof.read_text() == "once\n"
         later = json.loads(endpoint.requests[2])
-        assert later["reasoning"] == {"effort": "medium"}, later
+        assert later["reasoning"] == {"effort": "low"}, later
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" for item in later["input"])
         # Another owner commits a newer credential generation while this
         # Attempt is in flight: the rejected lease is not refreshed and the
@@ -346,10 +375,10 @@ def run():
         expected_agent = expected_user_agent()
         mismatches = []
         for index, (model, effort, trigger) in enumerate((
-            ("gpt-6-luna", "medium", "244800"), ("gpt-6.1-sol", "low", "244800"), ("gpt-6.1-terra", "low", "450000"),
-            ("gpt-6-sol", "medium", "244800"), ("gpt-6-astra", "low", "244800"),
-            ("gpt-5.6-sol", "low", "244800"), ("gpt-5.6-terra", "medium", "244800"),
-            ("gpt-5.6-luna", "medium", "244800"), ("gpt-5.5", "medium", "244800"),
+            ("gpt-6-luna", "low", "244800"), ("gpt-6.1-sol", "low", "244800"), ("gpt-6.1-terra", "low", "244800"),
+            ("gpt-6-sol", "low", "244800"), ("gpt-6-astra", "low", "244800"),
+            ("gpt-5.6-sol", "low", "244800"), ("gpt-5.6-terra", "low", "244800"),
+            ("gpt-5.6-luna", "low", "244800"), ("gpt-5.5", "low", "244800"),
         )):
             key = f"envelope-{index}"
             with endpoint.lock:
@@ -389,7 +418,36 @@ def run():
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
         assert len(endpoint.requests) == 13, endpoint.requests
         assert not mismatches, mismatches
-        print(f"codex request envelopes passed: nine exact model IDs, catalog effort defaults, 90% compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
+        # D229: every grammar effort reaches an unlisted model unchanged.
+        # A provider refusal stays final; Rui must not retry with another effort.
+        for index, effort in enumerate(("none", "low", "medium", "high", "xhigh", "max")):
+            key = f"unlisted-effort-{effort}"
+            response = (fixture.ResponseSpec(b'{"error":{"message":"unsupported effort"}}', {}, 400)
+                        if effort == "max" else fixture.sse_answer(key, key + "-r", key + "-m", key)[0])
+            with endpoint.lock:
+                endpoint.responses.append(response)
+            configured = fixture.command(
+                "session", "configure", "--store", stop_store, "--record", state / f"{key}-config.json",
+                "--key", key + "-config", "--workspace", fixture.ROOT, "--provider", "codex",
+                "--model", "unlisted-effort-model", "--tools", "none", "--reasoning-effort", effort,
+            )
+            assert configured["answer"]["status"] == "accepted", configured
+            selected = configured["answer"]["session"]
+            settings = fixture.command("session", "inspect", "--store", stop_store, "--session", selected)["session"]
+            assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == effort, settings
+            fixture.message(state, stop_store, key, selected, key)
+            observed = fixture.wait_for(
+                lambda: (value if (value := fixture.observe(stop_store, key)).get("result") else None), key)
+            if effort == "max":
+                assert observed["result"]["code"] == "provider_http_400", observed
+            else:
+                assert observed["result"]["status"] == "completed", observed
+                assert fixture.read_result(stop_store, key) == key.encode()
+            assert len(endpoint.requests) == 14 + index, endpoint.requests
+            request = json.loads(endpoint.requests[-1])
+            assert request["model"] == "unlisted-effort-model" and request["reasoning"] == {"effort": effort}, request
+        print("unlisted effort passed: all grammar values forwarded, provider refusal preserved without fallback or resend")
+        print(f"codex request envelopes passed: nine exact model IDs, client low effort, ChatGPT 244800-token compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:
@@ -704,10 +762,14 @@ def openai_journey():
             configured = fixture.command(
                 "session", "configure", "--store", store, "--record", state / f"configure-{provider}.json",
                 "--key", f"configure-{provider}", "--workspace", fixture.ROOT,
-                "--provider", provider, "--model", "gpt-6-sol", "--tools", "none",
+                "--provider", provider, "--model", "gpt-6.1-sol", "--tools", "none",
             )
             assert configured["answer"]["status"] == "accepted", configured
             sessions[provider] = configured["answer"]["session"]
+            settings = fixture.command("session", "inspect", "--store", store, "--session", sessions[provider])["session"]
+            expected_trigger = "244800" if provider == "codex" else "945000"
+            assert settings["compaction_trigger"] == settings["compaction_trigger_override"] == expected_trigger, settings
+            assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "low", settings
             fixture.message(state, store, f"same-{provider}", sessions[provider], "same turn")
             fixture.wait_for(lambda: fixture.completed_observation(store, f"same-{provider}"), f"{provider} answer")
             assert fixture.read_result(store, f"same-{provider}") == b"same answer"

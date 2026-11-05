@@ -671,7 +671,8 @@ fn runJob(self: *Self, requests: client.Requests) !void {
         },
         .start => |*start| {
             // An unreadable saved effort sends nothing, as a failed capture does.
-            const input = self.startInput(start) catch |err| {
+            var compaction_buffer: [20]u8 = undefined;
+            const input = self.startInput(start, &compaction_buffer) catch |err| {
                 self.reply = .refused(@errorName(err));
                 return;
             };
@@ -806,7 +807,7 @@ fn savedEffort(self: *const Self) !?model_capability.ReasoningEffort {
 
 /// One captured `session start`: the composer's text and start settings
 /// over the defaults a fresh Session gets.
-fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageInput {
+fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffer: *[20]u8) !client.MessageInput {
     const held = struct {
         fn at(from: *const view.OwnedStart, comptime name: []const u8) ?[]const u8 {
             inline for (view.start_options, 0..) |option, index| if (comptime std.mem.eql(u8, option, name)) return from.get(index);
@@ -837,7 +838,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
         .tools = held.at(start, "tools") orelse product_defaults.tools,
         .loaded_tools = held.at(start, "loaded-tools"),
         .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
-        .compaction_trigger = if (held.at(start, "compaction-trigger") != null and !std.mem.eql(u8, held.at(start, "compaction-trigger").?, "default")) held.policy(held.at(start, "compaction-trigger")) else .{ .present = true, .value = client.defaultCompactionTrigger(start.binding().model orelse product_defaults.recommended_model) },
+        .compaction_trigger = if (held.at(start, "compaction-trigger") != null and !std.mem.eql(u8, held.at(start, "compaction-trigger").?, "default")) held.policy(held.at(start, "compaction-trigger")) else .{ .present = true, .value = try std.fmt.bufPrint(compaction_buffer, "{d}", .{client.defaultCompactionTrigger(std.meta.stringToEnum(protocol.Provider, start.binding().provider orelse product_defaults.provider).?, start.binding().model orelse product_defaults.recommended_model)}) },
         .output_reservation = held.policy(held.at(start, "output-reservation")),
         .reasoning_effort = if (effort.present and effort.value != null) effort else client.defaultStartEffort(start.binding().model orelse product_defaults.recommended_model, if (effort.present) null else saved_effort),
         .label = label,
@@ -1460,8 +1461,9 @@ const fake_operations: Operations = .{
             var reply: std.Io.Writer.Allocating = .init(gpa);
             errdefer reply.deinit();
             try reply.writer.writeAll(protocol.model_list_reply.head);
+            // Navigation tests offer a small set, independent of catalog releases.
             try model_list.writeProviders(&reply.writer, &.{
-                .{ .provider = .codex, .list = .table },
+                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\n" } } },
                 .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nwhisper-1\n" } } },
             });
             try reply.writer.writeAll(protocol.model_list_reply.tail);
@@ -1774,7 +1776,7 @@ test "a pick made while a save runs is written before the departure, which names
     try overview.dispatch(.all);
     try std.testing.expect(overview.worker.thread != null and overview.job == .save);
     try std.testing.expect(try rig.press("/model\n") == null);
-    try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .table }}) } }) == null);
+    try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-6.1-sol\n" } } }}) } }) == null);
     try std.testing.expect(try rig.press("\x1b[B\n") == null);
     try std.testing.expectEqualStrings("gpt-6.1-sol", overview.state.default.?.model.slice());
     var buffer: [1024]u8 = undefined;
@@ -1892,7 +1894,7 @@ test "the save's notice names the effort the next start applies, as the start se
         try std.testing.expectEqualStrings(case.notice, rig.overview.state.notice.?.text());
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
-        if (case.sent) |effort| try std.testing.expectEqualStrings(effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings(@tagName(model_capability.defaultReasoningEffort(Seen.now.start.model.?.slice()).?), Seen.now.start.reasoning_effort.?.slice());
+        if (case.sent) |effort| try std.testing.expectEqualStrings(effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings(product_defaults.reasoning_effort, Seen.now.start.reasoning_effort.?.slice());
     }
 }
 
@@ -1961,7 +1963,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
-        if (explicit) try std.testing.expectEqualStrings("medium", Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
+        if (explicit) try std.testing.expectEqualStrings(product_defaults.reasoning_effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
     }
     // A launch that named everything starts even over an unreadable file.
     var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});

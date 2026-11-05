@@ -513,8 +513,8 @@ pub fn executionMain(host: *Host) void {
     } else null;
     defer if (reactor) |active| active.deinit();
     if (reactor) |active| startModelList(host, active, &workspace.model_list) else if (host.providers.modelListKey() != null) {
-        // No slot can run, so nothing is fetched: the table stands.
-        host.model_lists.set(.table);
+        // No slot can run, so nothing is fetched: the catalog stands.
+        host.model_lists.set(.catalog);
     }
     defer if (reactor) |active| endModelList(active, &workspace.model_list);
     if (reactor != null) host.scratch_budget = budget;

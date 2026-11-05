@@ -355,7 +355,7 @@ pub const Host = struct {
 /// (`Facts.model_list`): the execution owner fetches it once as the Host
 /// starts and publishes it here, where it stays until the Host stops. The
 /// key is read once at start, so the list never needs fetching again. Every
-/// other provider's list is always the table.
+/// other provider's list is always the catalog.
 pub const ModelLists = struct {
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
@@ -363,12 +363,12 @@ pub const ModelLists = struct {
     mutex: std.Io.Mutex = .init,
     /// A live list's IDs are exact length, from `allocator`.
     /// `Provider.onlyLiveList()`'s, the one provider with a live list.
-    live: model_list.List = .table,
+    live: model_list.List = .catalog,
 
     pub fn deinit(self: *ModelLists) void {
         switch (self.live) {
             .live => |ids| self.allocator.free(ids.bytes),
-            .table, .pending, .table_fallback => {},
+            .catalog, .pending, .catalog_fallback => {},
         }
         self.* = .{};
     }
@@ -385,7 +385,7 @@ pub const ModelLists = struct {
     pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
         const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
             stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ comptime protocol.Provider.onlyLiveList().shown(), @errorName(err) });
-            break :failed .table_fallback;
+            break :failed .catalog_fallback;
         };
         self.set(list);
     }
@@ -409,7 +409,7 @@ pub const ModelLists = struct {
         for (std.enums.values(protocol.Provider)) |name| {
             if (!self.providers.serves(name)) continue;
             entries[count] = .{ .provider = name, .list = switch (name.facts().model_list) {
-                .table => .table,
+                .catalog => .catalog,
                 .live => self.live,
             } };
             count += 1;
