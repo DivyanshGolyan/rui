@@ -434,12 +434,14 @@ The CLI and TUI choose the catalog default when building a new spec without a us
 The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
 All nine advertise `low`, `medium`, `high` and `xhigh`.
 All except `gpt-5.5` also advertise `max`.
-An unknown exact binding has no inferred default: an explicit null effort tells Rui to omit `reasoning` and leave the provider's effective effort unspecified.
+An unknown exact binding has no inferred default: its spec states a null effort, and Rui omits `reasoning` and leaves the provider's effective effort unspecified.
 An explicit effort on that binding rejects because Rui has no support evidence.
 This preserves exact-model syntax without guessing capabilities from model families.
 
-On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
-The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
+An explicit `null` effort is accepted only for a model the catalog does not list; for a listed model it rejects as `unsupported_reasoning_effort` on create and update (D165).
+So an update never moves a Session from an effort back to none, which the `openai-responses/2` codec cannot encode.
+A Session saved before D111 with null effort on a listed model keeps freezing the catalog default its earlier Operations froze.
+On an existing Session, omission preserves the saved effort.
 The CLI resolves `--reasoning-effort default` on the client to the model's catalog effort or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
 Current inspection reports the saved nullable `reasoning_effort` and `reasoning_effort_override`; non-null effort is the Session's explicit value, not a Host-inferred catalog default.
 Each model Operation, including compaction and continuation, freezes the resolved effort at admission.

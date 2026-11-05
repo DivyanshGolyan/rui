@@ -367,7 +367,11 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        command.configuration.reasoning_effort.state = .explicit_null;
+        // A listed model states its catalog effort; null is for unlisted ones.
+        if (@import("../model_capability.zig").defaultReasoningEffort(model)) |effort| {
+            command.configuration.reasoning_effort.state = .value;
+            try command.configuration.reasoning_effort.value.set(@tagName(effort));
+        } else command.configuration.reasoning_effort.state = .explicit_null;
     }
     return command;
 }

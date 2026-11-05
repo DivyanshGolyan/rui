@@ -4210,6 +4210,7 @@ test "compactAt enforces only known context windows on create and update" {
             try std.testing.expectEqual(@as(?u64, 272000), observed.compaction_trigger);
             try command.key.set("unlisted-window");
             try command.configuration.model.value.set("model-not-in-catalog");
+            command.configuration.reasoning_effort.state = .explicit_null;
             try command.configuration.compaction_trigger.value.set("999999999");
             try std.testing.expect(storage.configure(&command, .{}) == .accepted);
         }
@@ -10050,7 +10051,7 @@ test "core_tools start_agent persists optional borrowed spec content" {
             defer arena.deinit();
             const core_tools = @import("../core_tools.zig");
             const start = try arena.allocator().create(core_tools.StartAgent);
-            const result = try core_tools.checkStartAgent(arena.allocator(), "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"instructions\":\"Persist these instructions\",\"outputSchema\":{\"type\":\"object\"}}}", start);
+            const result = try core_tools.checkStartAgent(arena.allocator(), "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"instructions\":\"Persist these instructions\",\"outputSchema\":{\"type\":\"object\"}}}", start);
             try std.testing.expect(result == .accepted);
             const Capture = struct {
                 child: protocol.Bounded(protocol.session_id_bytes) = .{},
@@ -10167,7 +10168,7 @@ test "core_tools start_agent honors its requested Workspace and provider" {
     }.run);
 }
 
-test "effort reset refuses unrepresentable mixed updates before any changes" {
+test "a null effort on a listed model refuses a mixed update before any changes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -10181,9 +10182,6 @@ test "effort reset refuses unrepresentable mixed updates before any changes" {
             const session = storage.configure(&create, .{}).accepted.session;
             var patch: protocol.ConfigureCommand = .{};
             patch.session = session;
-            try patch.key.set("effort-null-preserve");
-            patch.configuration.reasoning_effort.state = .explicit_null;
-            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
             try patch.key.set("effort-set-low");
             patch.configuration.reasoning_effort.state = .value;
             try patch.configuration.reasoning_effort.value.set("low");
@@ -10210,12 +10208,12 @@ test "effort reset refuses unrepresentable mixed updates before any changes" {
     }.run);
 }
 
-test "effort reset admission respects the saved codec" {
-    var current: CurrentConfiguration = .{ .reasoning_effort = .low, .provider = .codex };
-    try current.model.set("gpt-6.1-sol");
+test "a null effort is admitted only for a model the catalog does not list" {
     var requested: protocol.Configuration = .{};
     requested.reasoning_effort.state = .explicit_null;
+    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
+    try current.model.set("gpt-6.1-sol");
     try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
-    current.codec = .@"openai-responses/1";
+    try current.model.set("model-a");
     try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex) == null);
 }

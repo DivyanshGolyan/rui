@@ -54,7 +54,7 @@ The repository's `zig build ts-client` runs the tests against the Rui it builds.
 
 `create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`.
 `provider` may be left out when the Host serves one provider.
-`effort: null` sends no effort, so the provider uses its own.
+`effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
 An update may leave out any setting, and an omitted setting stays as it is.
 
 ```ts

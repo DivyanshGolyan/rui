@@ -29,7 +29,7 @@ export interface SessionSpec {
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
 	tools: readonly string[];
 	permissionMode: "ask" | "bypass";
-	/** Reasoning effort. `null` sends none, so the provider uses its own (D111). */
+	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
 	effort: string | null;
 	/** Compact the conversation at this many tokens. */
 	compactAt: number;

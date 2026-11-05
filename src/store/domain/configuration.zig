@@ -120,7 +120,6 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
 pub const CurrentConfiguration = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     provider: protocol.Provider = undefined,
-    codec: protocol.Codec = .@"openai-responses/2",
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
     /// Read only: the tools of the set `tool_set_id` names, as a mask,
@@ -245,11 +244,12 @@ pub fn configurationBeforeWorkspace(
         if (tokens > known.context_window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // D111/D165: v2 cannot encode a boundary back to unspecified effort.
-    // Refuse before saving an unusable revision rather than inferring effort.
-    if (requested.reasoning_effort.state == .explicit_null) if (current) |existing| {
-        if (existing.codec == .@"openai-responses/2" and existing.reasoning_effort != null) return .unsupported_reasoning_effort;
-    };
+    // D111/D165: a null effort states "send none" and is accepted only for a
+    // model the catalog does not list; a listed model takes one of its values.
+    // So a saved null on a listed model can only predate D111 (see
+    // effectiveReasoningEffort), and no update creates a boundary from an
+    // effort back to none, which the openai-responses/2 codec cannot encode.
+    if (requested.reasoning_effort.state == .explicit_null and model_capability.find(model) != null) return .unsupported_reasoning_effort;
     if (requested.reasoning_effort.state == .value) {
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
             return .unsupported_reasoning_effort;
@@ -258,9 +258,12 @@ pub fn configurationBeforeWorkspace(
     return null;
 }
 
-/// D111: Operations freeze the spec's effort, never a catalog default.
+/// The effort a new Operation freezes: the Session's own (D111). A Session
+/// saved before D111 may hold null on a listed model, and its Operations
+/// froze the catalog default, so it keeps that default; configuration
+/// refuses null for a listed model, so no newer Session reaches it.
 pub fn effectiveReasoningEffort(current: anytype) ?protocol.ReasoningEffort {
-    return current.reasoning_effort;
+    return current.reasoning_effort orelse model_capability.defaultReasoningEffort(current.model.slice());
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -468,7 +471,7 @@ pub const ConfigurationReads = struct {
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
 /// place; `checkSaved` holds it to its types.
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,codec,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
         "reasoning_effort,label,created_at,workspace_key,parent_ref FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },

@@ -1818,7 +1818,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
             try current_model.set(input.model.value);
         } else {
             var discard: std.Io.Writer.Discarding = .init(&.{});
-            const observed = try inspectWorkTo(init, requester, input.store, named.?, &discard.writer);
+            const observed = try inspectWorkTo(init, requester, input.store, input.session.named, &discard.writer);
             defer observed.file.close(io);
             try current_model.set(observed.current.settings.model.slice());
         }
