@@ -1384,6 +1384,7 @@ test "a list row carries its Session's Label, times, first Message, work and pee
                 // Configured, never messaged: idle since its creation.
                 var listed = try testingListRow(&storage, &tmp, session.slice());
                 defer listed.deinit();
+                try std.testing.expect(listed.get(&.{"parent"}) == .null);
                 try std.testing.expectEqualStrings("Review PR 412", listed.get(&.{"label"}).string);
                 try std.testing.expectEqual(created_at, try listed.number(&.{"created_at"}));
                 try std.testing.expectEqual(@as(u64, 1), try listed.number(&.{"revision"}));

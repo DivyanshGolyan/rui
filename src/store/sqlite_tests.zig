@@ -9121,6 +9121,42 @@ test "a start_agent call creates its agent where its caller works, with the task
     // the attached one is its child.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
+    // Public list and both report profiles expose only the attached agent's
+    // parent; the standalone agent and its caller have none.
+    {
+        var used = std.atomic.Value(u64).init(0);
+        const bytes = try tests.testingSessionList(&storage, &tmp, .{}, &used, 77);
+        defer std.testing.allocator.free(bytes);
+        const listed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer listed.deinit();
+        const rows = listed.value.object.get("sessions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), rows.len);
+        var children: usize = 0;
+        for (rows) |row| {
+            const reference = row.object.get("reference").?.string;
+            const first = row.object.get("first_message").?;
+            const attached_child = !std.mem.eql(u8, reference, caller.slice()) and
+                std.mem.eql(u8, first.object.get("content").?.object.get("bytes").?.string, "14");
+            const parent = row.object.get("parent").?;
+            if (attached_child) {
+                try std.testing.expect(parent == .string);
+                try std.testing.expectEqualStrings(caller.slice(), parent.string);
+                children += 1;
+            } else try std.testing.expect(parent == .null);
+            for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+                const report = try testingSessionReportWithProfile(&storage, &tmp, reference, 1024 * 1024, profile);
+                defer std.testing.allocator.free(report);
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+                defer parsed.deinit();
+                const reported_parent = parsed.value.object.get("session").?.object.get("parent").?;
+                if (attached_child) {
+                    try std.testing.expect(reported_parent == .string);
+                    try std.testing.expectEqualStrings(caller.slice(), reported_parent.string);
+                } else try std.testing.expect(reported_parent == .null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), children);
+    }
     // Each task is its agent's first Message, from the caller, under the
     // call's own command key.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND admission_position=1 AND command_key LIKE 'rui.core/start_agent/%'", .{caller.slice()}));

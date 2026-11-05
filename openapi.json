@@ -8710,6 +8710,18 @@
               "bypass"
             ]
           },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "label": {
             "anyOf": [
               {
@@ -8755,6 +8767,7 @@
           "model",
           "tools",
           "permission_mode",
+          "parent",
           "label",
           "created_at",
           "revision",
