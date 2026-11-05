@@ -24,6 +24,7 @@ pub const StartError = enum {
     launch_frame_invalid,
     store_locked,
     runtime_dir_unusable,
+    tool_name_collision,
 };
 
 pub const Frame = struct {
