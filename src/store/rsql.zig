@@ -274,6 +274,11 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///   @distinct(a,b)       its negation: `(a IS NOT b)`
 ///   @count_where(c)      the rows where c holds: `count(*) FILTER (WHERE c)`
 ///   @max_where(x,c)      the greatest x of those rows: `max(x) FILTER (WHERE c)`
+///   @list(x)             the rows' x joined by commas, in no set order,
+///                        NULL for none: `group_concat(x,',')`. An order
+///                        would sort; MySQL cuts the text at
+///                        `group_concat_max_len`, which
+///                        `schema.mysql_session` sets
 ///   @served(x)           the opening serves provider x: `rui_served(x)`,
 ///                        the function each opening registers
 ///   @payload(t)          the bytes of content row t, which its text keeps
@@ -1924,6 +1929,7 @@ const expression_markers = [_]ExpressionMarker{
     .{ .name = "distinct", .arity = 2, .sqlite = "(" ++ arg_a ++ " IS NOT " ++ arg_b ++ ")", .mysql = "(NOT (" ++ arg_a ++ " <=> " ++ arg_b ++ "))" },
     .{ .name = "count_where", .arity = 1, .sqlite = "count(*) FILTER (WHERE " ++ arg_a ++ ")", .mysql = "count(CASE WHEN " ++ arg_a ++ " THEN 1 END)" },
     .{ .name = "max_where", .arity = 2, .sqlite = "max(" ++ arg_a ++ ") FILTER (WHERE " ++ arg_b ++ ")", .mysql = "max(CASE WHEN " ++ arg_b ++ " THEN " ++ arg_a ++ " END)" },
+    .{ .name = "list", .arity = 1, .sqlite = "group_concat(" ++ arg_a ++ ",',')", .mysql = "GROUP_CONCAT(" ++ arg_a ++ " SEPARATOR ',')" },
     .{ .name = "served", .arity = 1, .sqlite = "rui_served(" ++ arg_a ++ ")", .mysql = "(" ++ arg_a ++ " IN (" ++ served_slots ++ "))" },
     .{
         .name = "payload",
@@ -2019,6 +2025,7 @@ fn mysqlTemplate(comptime text: []const u8) Template {
 ///   @distinct(a,b)       `(NOT (a <=> b))`
 ///   @count_where(c)      `count(CASE WHEN c THEN 1 END)`
 ///   @max_where(x,c)      `max(CASE WHEN c THEN x END)`
+///   @list(x)             `GROUP_CONCAT(x SEPARATOR ',')`
 ///   ==                   `=`
 ///   /                    ` DIV `: SQLite divides two integers to an integer,
 ///                        truncated, as DIV does, where MySQL's `/` gives a
@@ -2822,6 +2829,7 @@ test "each marker renders its SQLite spelling" {
     try std.testing.expectEqualStrings("(resolution_code IS NOT 'denied')", comptime render(.sqlite, "@distinct(resolution_code,'denied')"));
     try std.testing.expectEqualStrings("count(*) FILTER (WHERE a.authorized=0 AND (x IS 1))", comptime render(.sqlite, "@count_where(a.authorized=0 AND @same(x,1))"));
     try std.testing.expectEqualStrings("max(a.decided_at) FILTER (WHERE r.permission_mode=0)", comptime render(.sqlite, "@max_where(a.decided_at,r.permission_mode=0)"));
+    try std.testing.expectEqualStrings("group_concat(tool.name,',')", comptime render(.sqlite, "@list(tool.name)"));
 }
 
 test "markers nest, and text outside them is copied" {
@@ -2840,6 +2848,7 @@ test "each marker renders its MySQL spelling" {
     try std.testing.expectEqualStrings("(NOT (resolution_code <=> 'denied'))", comptime render(.mysql, "@distinct(resolution_code,'denied')"));
     try std.testing.expectEqualStrings("count(CASE WHEN a.authorized=0 AND (x <=> 1) THEN 1 END)", comptime render(.mysql, "@count_where(a.authorized=0 AND @same(x,1))"));
     try std.testing.expectEqualStrings("max(CASE WHEN r.permission_mode=0 THEN a.decided_at END)", comptime render(.mysql, "@max_where(a.decided_at,r.permission_mode=0)"));
+    try std.testing.expectEqualStrings("GROUP_CONCAT(tool.name SEPARATOR ',')", comptime render(.mysql, "@list(tool.name)"));
     try std.testing.expectEqualStrings("GREATEST(a, b)>LEAST(c,d) AND max(e)=1 AND f='@octets(g)'", comptime render(.mysql, "max(a, b)>min(c,d) AND max(e)==1 AND f='@octets(g)'"));
 }
 

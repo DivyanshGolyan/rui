@@ -9004,6 +9004,67 @@ test "a saved catalog whose text no longer matches its digest fences the Store" 
     try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));
 }
 
+test "a Session offering an MCP server's tool is listed, reported and settled" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("mcp-config", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    // Reading and reconfiguring it neither refuses nor fences.
+    _ = try storage.inspectSessionForTesting(session.slice());
+    var reworded: protocol.ConfigureCommand = .{};
+    try reworded.key.set("mcp-reconfigure");
+    reworded.session = session;
+    reworded.configuration.tools = try .of(&.{ "bash", "fetch_page", "test_tool" });
+    try std.testing.expect(storage.configure(&reworded, .{}) == .accepted);
+    reworded = .{};
+    try reworded.key.set("mcp-reconfigure-back");
+    reworded.session = session;
+    reworded.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+    try std.testing.expect(storage.configure(&reworded, .{}) == .accepted);
+    try std.testing.expect(!storage.isFenced());
+
+    try submitTestMessage(&storage, &tmp, "mcp-message", "mcp-message", session.slice(), "fetch");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Rui runs no MCP tool yet, so its call is unknown; bash still runs.
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+        .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "mcp-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE call_ordinal=0", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool'", .{}));
+
+    const offered = "\"tools\":[\"bash\",\"fetch_page\"]";
+    for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+        const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
+        defer std.testing.allocator.free(report);
+        try std.testing.expect(std.mem.indexOf(u8, report, offered) != null);
+        // The full profile's revision lists them too.
+        if (profile == .full) try std.testing.expect(std.mem.indexOf(u8, report[std.mem.indexOf(u8, report, offered).? + 1 ..], offered) != null);
+        if (profile == .current) {
+            // A client reads the names back.
+            const file = try tmp.dir.createFile(std.testing.io, "mcp-current", .{ .read = true });
+            defer file.close(std.testing.io);
+            try file.writePositionalAll(std.testing.io, report, 0);
+            const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, file, session.slice(), .{ .report = .{ .bytes = report.len } });
+            try std.testing.expectEqualStrings("bash fetch_page", decoded.current.settings.tools.names.names.slice());
+            try std.testing.expect(decoded.current.settings.tools.set.contains(.bash) and !decoded.current.settings.tools.set.contains(.web_search));
+        }
+    }
+    var used = std.atomic.Value(u64).init(0);
+    const list = try testingSessionList(&storage, &tmp, .{}, &used, 1);
+    defer std.testing.allocator.free(list);
+    try std.testing.expect(std.mem.indexOf(u8, list, session.slice()) != null);
+}
+
 test "a record names a server exactly when an MCP server owns it" {
     try std.testing.expect(tool_catalog.validServer(&mcp_record));
     try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp }));

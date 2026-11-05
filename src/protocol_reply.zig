@@ -913,15 +913,23 @@ fn ReportNumber(comptime allow_zero: bool) type {
     };
 }
 
+/// A report's `tools`: any valid names, sorted with none repeated, as the
+/// Host lists them, MCP servers' tools included.
 const ReportTools = struct {
+    names: protocol.ToolsField = .{ .state = .value },
+    /// The built-ins among `names`.
     set: protocol.ToolSelection = .empty,
+
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ReportTools {
         if (try source.next() != .array_begin) return error.UnexpectedToken;
         var result: ReportTools = .{};
         while (try source.peekNextTokenType() != .array_end) {
-            const tool = try std.json.innerParse(JsonEnum(protocol.BuiltInTool), allocator, source, options);
-            if (result.set.contains(tool.value)) return error.DuplicateField;
-            result.set.insert(tool.value);
+            const name = try std.json.innerParse(JsonString(protocol.max_tool_name_bytes), allocator, source, options);
+            result.names.append(name.slice()) catch |err| return switch (err) {
+                error.InvalidToolName => error.InvalidCharacter,
+                error.InvalidJsonShape => error.UnexpectedToken,
+            };
+            if (protocol.builtInTool(name.slice())) |tool| result.set.insert(tool);
         }
         _ = try source.next();
         return result;
@@ -929,7 +937,8 @@ const ReportTools = struct {
 
     pub fn jsonStringify(self: ReportTools, jw: anytype) !void {
         try jw.beginArray();
-        for (std.enums.values(protocol.BuiltInTool)) |tool| if (self.set.contains(tool)) try jw.write(@tagName(tool));
+        var names = self.names.iterator();
+        while (names.next()) |name| try jw.write(name);
         try jw.endArray();
     }
 };
@@ -3211,7 +3220,6 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     const facts = &reply.current;
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
-    try std.testing.expect(!facts.settings.tools.set.contains(.bash));
     try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
     try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
@@ -3341,7 +3349,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
     inline for (.{
         .{ "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ protocol.next_wire_version ++ "\"" },
-        .{ "\"tools\":[\"bash\"]", "\"tools\":[\"edit\"]" },
+        .{ "\"tools\":[\"bash\"]", "\"tools\":[\"ba.h\"]" },
         .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
         .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
         .{ "\"selected_message\"", "\"ignored__message\"" },
