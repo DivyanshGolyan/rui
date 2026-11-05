@@ -304,7 +304,7 @@ pub const Connection = struct {
         hints.socktype = std.c.SOCK.STREAM;
         hints.flags = .{ .NUMERICSERV = true };
         var found: ?*std.c.addrinfo = null;
-        if (@intFromEnum(std.c.getaddrinfo(host_z[0..host.len :0], service, &hints, &found)) != 0) return error.HostNotFound;
+        if (@backingInt(std.c.getaddrinfo(host_z[0..host.len :0], service, &hints, &found)) != 0) return error.HostNotFound;
         defer if (found) |list| std.c.freeaddrinfo(list);
         var entry = found;
         while (entry) |info| : (entry = info.next) {
