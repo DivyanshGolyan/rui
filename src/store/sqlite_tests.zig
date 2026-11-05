@@ -1532,14 +1532,14 @@ test "a stale Action settlement leaves the Store byte-identical" {
     const Snapshot = struct {
         database: []u8,
         log: []u8,
-        ids: @TypeOf(storage.ids.next),
+        ids: @TypeOf(storage.identities().next),
         generation: u64,
 
         fn take(store: *Store, dir: std.Io.Dir) !@This() {
             return .{
                 .database = try dir.readFileAlloc(std.testing.io, "store.sqlite3", std.testing.allocator, .unlimited),
                 .log = try dir.readFileAlloc(std.testing.io, "store.sqlite3-wal", std.testing.allocator, .unlimited),
-                .ids = store.ids.next,
+                .ids = store.identities().next,
                 .generation = store.commitGeneration(),
             };
         }
@@ -1625,7 +1625,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
 
     // The open Action still settles at the position and content id the stale ones left.
     const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{});
-    const content_id = storage.ids.next.get(.content_id);
+    const content_id = storage.identities().next.get(.content_id);
     try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{}));
     try std.testing.expectEqual(position, try store_testing.sqlite_only.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE resolution_code='failed'", .{}));
     try std.testing.expectEqual(content_id, try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code='failed'", .{}));

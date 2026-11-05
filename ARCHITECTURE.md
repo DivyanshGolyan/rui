@@ -1377,7 +1377,7 @@ Once migrations keep old Stores usable across format changes, Rui should switch 
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
-The unreleased wire label is `9`: it adds public activity search after v0.53.1 shipped `8`.
+Public activity search was added to wire label `8` after v0.53.1 shipped it: an added request needs no new label, and an older Host answers it as unknown.
 Wire label `8` changed after v0.50.0 shipped `7` when the Host dropped the `proposal_page` and `proposal_field` requests, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request, which Divyansh asked for on 2026-11-03.
 The Store records the wire label it was created with in `store_meta` and opens only at the current one.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
@@ -2483,7 +2483,7 @@ Any other waits in the row, which shows only in the latest view, whenever the Ho
 It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
-Wire version 9 adds `activity_search`.
+Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
 Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
 Opening adds no configuration banner or command tutorial.

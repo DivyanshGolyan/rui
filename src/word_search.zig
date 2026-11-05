@@ -53,7 +53,7 @@ pub const Matcher = struct {
                 self.carry_len -= 1;
             }
             for (0..self.count) |i| {
-                if (!self.done[i] and self.total >= self.starts[i] + 160) self.cut(i);
+                if (!self.done[i] and self.total >= self.starts[i] + 160 + lookahead) self.cut(i);
             }
         }
     }
@@ -62,32 +62,42 @@ pub const Matcher = struct {
         for (0..self.count) |i| if (!self.done[i]) self.cut(i);
     }
 
+    /// Bytes read past a snippet's end before it is cut, so a character
+    /// crossing the end is told apart from a truncated, malformed one.
+    const lookahead = 3;
+
+    /// One rule decodes a snippet's bytes: a valid character is kept whole,
+    /// and every other byte shows as '?', so snippet bytes map one to one
+    /// onto stored bytes. Decoding starts up to three bytes before the
+    /// snippet, where a character crossing its start can begin, so only a
+    /// valid character crossing either end is left out.
     fn cut(self: *Matcher, index: usize) void {
         var bytes: [160]u8 = undefined;
-        var start = self.starts[index];
+        const start = self.starts[index];
         const end = @min(self.total, start + 160);
-        // A leading continuation belongs to a character outside the snippet.
-        while (start < end and self.raw[start % 512] & 0xc0 == 0x80) : (start += 1) {}
+        var shown: ?usize = null;
         var n: usize = 0;
-        var p = start;
+        var p = start -| 3;
         while (p < end) {
-            const b = self.raw[p % 512];
-            const size = std.unicode.utf8ByteSequenceLength(b) catch 1;
-            if (p + size > end) break;
-            for (0..size) |j| bytes[n + j] = self.raw[(p + j) % 512];
-            if (std.unicode.utf8ValidateSlice(bytes[n .. n + size])) {
-                n += size;
-                p += size;
-            } else {
-                bytes[n] = '?';
-                n += 1;
-                p += 1;
+            const size = std.unicode.utf8ByteSequenceLength(self.raw[p % 512]) catch 1;
+            var sequence: [4]u8 = undefined;
+            const seen = @min(size, self.total - p);
+            for (0..seen) |j| sequence[j] = self.raw[(p + j) % 512];
+            const valid = seen == size and std.unicode.utf8ValidateSlice(sequence[0..size]);
+            const width: usize = if (valid) size else 1;
+            if (p >= start) {
+                if (valid and p + size > end) break;
+                if (shown == null) shown = p;
+                if (valid) @memcpy(bytes[n .. n + size], sequence[0..size]) else bytes[n] = '?';
+                n += width;
             }
+            p += width;
         }
+        const first = shown orelse end;
         const hit = &self.hits[index];
         hit.snippet.set(bytes[0..n]) catch unreachable;
-        hit.offset = @min(n, hit.raw_offset -| start);
-        hit.length = @min(n - hit.offset, self.query_len -| (start -| hit.raw_offset));
+        hit.offset = @min(n, hit.raw_offset -| first);
+        hit.length = @min(n - hit.offset, self.query_len -| (first -| hit.raw_offset));
         self.done[index] = true;
     }
 };
@@ -182,5 +192,42 @@ test "word search UTF8 windows snippet boundaries and long queries" {
     m.init("x");
     m.feed("\xffx\xc3");
     m.finish();
+    // The value ends inside a sequence: that byte is malformed too.
+    try std.testing.expectEqualStrings("?x?", m.hits[0].snippet.slice());
+}
+
+test "word search shows a truncated sequence as ? and keeps the match" {
+    var m: Matcher = undefined;
+    m.init("x");
+    m.feed("\xe2x");
+    m.finish();
+    try std.testing.expectEqual(@as(usize, 1), m.count);
     try std.testing.expectEqualStrings("?x", m.hits[0].snippet.slice());
+    try std.testing.expectEqual(@as(usize, 1), m.hits[0].offset);
+    try std.testing.expectEqual(@as(usize, 1), m.hits[0].length);
+}
+
+test "word search shows malformed continuation bytes at either snippet start" {
+    var m: Matcher = undefined;
+    m.init("x");
+    m.feed("\x80x");
+    m.finish();
+    try std.testing.expectEqualStrings("?x", m.hits[0].snippet.slice());
+    try std.testing.expectEqual(@as(usize, 1), m.hits[0].offset);
+    // A snippet starting 40 bytes before the match: a stray continuation
+    // there shows as '?', while a whole character crossing the start is left out.
+    var data: [60]u8 = @splat('a');
+    data[10] = 0x80;
+    data[50] = 'x';
+    m.init("x");
+    m.feed(&data);
+    m.finish();
+    try std.testing.expectEqual(@as(u8, '?'), m.hits[0].snippet.slice()[0]);
+    try std.testing.expectEqual(@as(usize, 40), m.hits[0].offset);
+    @memcpy(data[8..11], "\xe2\x82\xac");
+    m.init("x");
+    m.feed(&data);
+    m.finish();
+    try std.testing.expectEqual(@as(u8, 'a'), m.hits[0].snippet.slice()[0]);
+    try std.testing.expectEqual(@as(usize, 39), m.hits[0].offset);
 }
