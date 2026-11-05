@@ -1341,13 +1341,18 @@ fn appendPresentation(capture: *SessionReportCapture, presentation: protocol.Too
     try capture.append(writer.buffered());
 }
 
+// `@payload` reads one MySQL chunk.
+comptime {
+    if (Quota.max_bytes > store_schema.content_chunk_bytes) @compileError("a quota diagnostic is more than one content chunk");
+}
+
 /// The Session's latest Turn and its current Operation. The quota
 /// diagnostic is read only for a failed outcome, and only while it is
 /// small enough to be one (`Quota.max_bytes`).
 const work_latest = rsql.Read(.{
     .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
         "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
-        "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
+        "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
         " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
         "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
         "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
