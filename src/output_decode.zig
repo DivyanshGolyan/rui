@@ -790,8 +790,9 @@ const Grammar = struct {
         var cursor = completed.output;
         var index: u64 = 0;
         while (codecs.nextMember(self.codec, data, &cursor)) |member| switch (member) {
-            // One item of the output list must be the streamed item at its
-            // index, byte for byte.
+            // One item of the output list must name the streamed item at its
+            // index. Its bytes may differ: the provider re-encrypts reasoning
+            // for the terminal copy, so the streamed item is the one kept.
             .terminal => |*terminal| {
                 if (!try streamedAs(&records, data, terminal, index)) return error.ContradictoryProviderOutput;
                 index += 1;
@@ -800,7 +801,7 @@ const Grammar = struct {
             .bag, .part, .part_end => unreachable,
         };
         // The managed stream can omit the repeated items from
-        // response.completed. Any nonempty terminal list must still match
+        // response.completed. Any nonempty terminal list must still name
         // every streamed done item.
         if (index != 0 and (index != self.item_count or try records.nextItem() != null)) return error.ContradictoryProviderOutput;
         switch (completed.usage) {
@@ -817,13 +818,12 @@ const Grammar = struct {
         try metadata.sealForRead();
     }
 
-    /// Whether the next streamed item is the output list's item at `index`,
-    /// byte for byte.
+    /// Whether the next streamed item is the output list's item at `index`:
+    /// same position, kind and ID.
     fn streamedAs(records: *output_format.OutputMetadataRecords, data: []const u8, terminal: *const @FieldType(codec_abi.Member, "terminal"), index: u64) !bool {
         const record = try records.nextItem() orelse return false;
         return record.ordinal == index and record.kind == outputKind(terminal.kind) and
-            std.mem.eql(u8, &record.id_digest, &Decoded.of(data, terminal.id, null, null).digest) and
-            std.mem.eql(u8, &record.content_digest, &digestOf(data, terminal.whole));
+            std.mem.eql(u8, &record.id_digest, &Decoded.of(data, terminal.id, null, null).digest);
     }
 
     /// The codec's verdict on the event, with the provider's report when it
@@ -1476,8 +1476,11 @@ test "compaction rejects missing double malformed unknown and Action candidates"
     const anchor = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"x\"}";
     const duplicate = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ anchor ++ "}\n\n";
     try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingOperation(&tmp, duplicate, 4096, .compaction));
-    const disagreement = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"different\"}]}}\n\n";
-    try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingOperation(&tmp, disagreement, 4096, .compaction));
+    const reencrypted = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"different\"}]}}\n\n";
+    const kept = try validateTestingOperation(&tmp, reencrypted, 4096, .compaction);
+    try std.testing.expectEqual(protocol.contentDigest(anchor), kept.first_item.content_digest);
+    const renamed = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"other\",\"encrypted_content\":\"x\"}]}}\n\n";
+    try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingOperation(&tmp, renamed, 4096, .compaction));
 }
 
 test "SSE line framing accepts spec fields and line endings without losing validation" {
@@ -1987,7 +1990,7 @@ test "provider reasoning validation rejects wrong types duplicates and malformed
     try std.testing.expectEqual(@as(u64, 2), (try validateTestingSse(&tmp, sse, 64 * 1024)).output.item_count);
 }
 
-test "provider added identity permits incomplete content but terminal agreement requires exact bytes" {
+test "provider added identity permits incomplete content and terminal agreement keeps the streamed bytes" {
     const done = "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"opaque\",\"future\":\"one\"}";
     const added_items = .{
         .{ "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"in_progress\",\"encrypted_content\":\"\"}", false },
@@ -2013,12 +2016,27 @@ test "provider added identity permits incomplete content but terminal agreement 
         }
     }
 
+    // gpt-6.1-terra re-encrypts reasoning for response.completed, so the
+    // terminal copy's bytes differ from the streamed one. The streamed item
+    // is kept; only position, kind and ID must agree.
     const changed_terminal = .{
         "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"different\",\"future\":\"one\"}",
         "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"o\\u0070aque\",\"future\":\"one\"}",
         "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"opaque\",\"future\":\"two\"}",
     };
     inline for (changed_terminal) |terminal| {
+        const sse = try testingReasoningSse(done, terminal);
+        defer std.testing.allocator.free(sse);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const accepted = try validateTestingSse(&tmp, sse, 64 * 1024);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(done), &accepted.first_item.content_digest);
+    }
+    const other_identity = .{
+        "{\"type\":\"reasoning\",\"id\":\"r2\",\"status\":\"completed\",\"encrypted_content\":\"opaque\",\"future\":\"one\"}",
+        "{\"type\":\"message\",\"id\":\"r1\",\"role\":\"assistant\",\"content\":[]}",
+    };
+    inline for (other_identity) |terminal| {
         const sse = try testingReasoningSse(done, terminal);
         defer std.testing.allocator.free(sse);
         var tmp = std.testing.tmpDir(.{});

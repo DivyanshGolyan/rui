@@ -901,7 +901,7 @@ Static prompt text is an adapter rule, not a copied per-Operation setting.
 Accept completed items in provider output order, not token-delta arrival order.
 `response.output_item.done` supplies complete items, including final encrypted content; an added item can still be incomplete and establishes only index/kind/ID agreement with its done item, not content agreement.
 Require successful `response.completed` before settlement.
-The managed route can send an empty `response.completed.output` after completed stream items; this does not discard those items, while any nonempty terminal output must match all of them in order, kind, ID and exact raw item bytes, including unknown open fields and JSON spelling.
+The managed route can send an empty `response.completed.output` after completed stream items; this does not discard those items, while any nonempty terminal output must name all of them in order, kind and ID. The streamed items are the ones kept: their terminal copies may differ in bytes, because the provider re-encrypts reasoning for `response.completed`.
 Failed, incomplete, disconnected or contradictory streams cannot publish a successful candidate.
 Keep response ID, provider request correlation when supplied, terminal status, usage and reported model evidence with the producing Operation/execution; none is a replay input item.
 
