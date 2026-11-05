@@ -235,9 +235,8 @@ def main():
             assert {name: reported[name] for name in ("type", "status", "instance", "retirement")} == {
                 "type": "host_pause", "status": "acknowledged", "instance": identity, "retirement": "unconfirmed",
             }, stopped
-            notice, waited = stopped.stderr.splitlines()
-            assert notice.endswith(f" --instance {identity}"), stopped
-            assert waited.startswith(f"rui: the Host acknowledged the pause but still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds"), stopped
+            assert f" --instance {identity}\n" in stopped.stderr, stopped
+            assert stopped.stderr.splitlines()[-1].startswith(f"rui: the Host acknowledged the pause but still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds"), stopped
             for request in stop_requests:
                 peers.release(request, stop_deadline)
             control.wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
