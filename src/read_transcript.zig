@@ -160,10 +160,8 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
     var note: ?protocol.Bounded(protocol.max_tool_description_bytes) = null;
     switch (item.value) {
         .admission, .user => try out.writeAll(" person"),
-        .received => |message| if (message.sender) |sender| {
-            try out.print(" {s}", .{sender.session.slice()});
-            if (sender.label.len != 0) try out.print(" ({s})", .{sender.label.slice()});
-        },
+        // A Label is display text, never model input: only the sender's ID.
+        .received => |message| if (message.sender) |sender| try out.print(" {s}", .{sender.session.slice()}),
         .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
         .send_failed => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
         .call, .tool_result => {
