@@ -8,6 +8,7 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
+const protocol_reply = @import("../protocol_reply.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const tool_catalog = @import("../tools.zig");
@@ -8720,6 +8721,15 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
         try std.testing.expect(std.mem.indexOf(u8, report, offered) != null);
         // The full profile's revision lists them too.
         if (profile == .full) try std.testing.expect(std.mem.indexOf(u8, report[std.mem.indexOf(u8, report, offered).? + 1 ..], offered) != null);
+        if (profile == .current) {
+            // A client reads the names back.
+            const file = try tmp.dir.createFile(std.testing.io, "mcp-current", .{ .read = true });
+            defer file.close(std.testing.io);
+            try file.writePositionalAll(std.testing.io, report, 0);
+            const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, file, session.slice(), .{ .report = .{ .bytes = report.len } });
+            try std.testing.expectEqualStrings("bash fetch_page", decoded.current.settings.tools.names.names.slice());
+            try std.testing.expect(decoded.current.settings.tools.has(.bash) and !decoded.current.settings.tools.has(.web_search));
+        }
     }
     var used = std.atomic.Value(u64).init(0);
     const list = try testingSessionList(&storage, &tmp, .{}, &used, 1);
