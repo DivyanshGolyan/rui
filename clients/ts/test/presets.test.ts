@@ -100,3 +100,14 @@ test("a connect preset without tools is refused by the Host", { skip }, async ()
 		presets: { review: { model: "m", effort: "low", compactAt: 1000, permissionMode: "ask" } },
 	}), (error: unknown) => error instanceof RuiStartError && error.code === "invalid_preset" && /review.*tools/.test(error.message));
 });
+
+for (const outputSchema of ["[]", "false", "not JSON"]) {
+	test(`a connect preset with outputSchema ${outputSchema} is refused by the Host`, { skip }, async () => {
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
+		await assert.rejects(Rui.connect({
+			database: join(root, "store"), binary: binary ?? "rui",
+			provider: { baseUrl: "https://api.openai.com/v1", key: "sk-ts-presets" },
+			presets: { review: { model: "m", effort: "low", compactAt: 1000, tools: [], permissionMode: "ask", outputSchema } },
+		}), (error: unknown) => error instanceof RuiStartError && error.code === "invalid_preset" && /review.*outputSchema/.test(error.message));
+	});
+}

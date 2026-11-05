@@ -40,7 +40,10 @@ test("launch presets preserve creation fields and decode output schema JSON", ()
 	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
 	const frame = launchFor(options, "/r").frame;
 	assert.deepEqual(frame.presets, { review: { ...spec, outputSchema: { type: "object" } } });
-	assert.throws(() => launchFor({ ...options, presets: { review: { ...spec, outputSchema: "[]" } } }, "/r"), TypeError);
+	for (const [text, decoded] of [["[]", []], ["false", false], ["not JSON", "not JSON"]] as const) {
+		const invalid = launchFor({ ...options, presets: { review: { ...spec, outputSchema: text } } }, "/r").frame;
+		assert.deepEqual(JSON.parse(JSON.stringify(invalid)).presets.review.outputSchema, decoded);
+	}
 });
 
 test("the refusal line becomes a RuiStartError", () => {

@@ -329,23 +329,18 @@ export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 	return { binary: resolveBinary(options.binary), frame, socketPath: join(runtimeDir, SOCKET_NAME), store, env };
 }
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Convert the public JSON-text convenience to the wire spec. */
+/** Decode the JSON-text convenience; leave preset validation to the Host. */
 function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
-	const { outputSchema, ...settings } = spec;
-	let schema = outputSchema;
-	if (typeof schema === "string") {
-		const parsed: unknown = JSON.parse(schema);
-		if (parsed !== null && !isJsonObject(parsed)) {
-			throw new TypeError("preset outputSchema must be a JSON object or null");
+	let serialized: unknown = spec;
+	if (typeof spec?.outputSchema === "string") {
+		try {
+			serialized = { ...spec, outputSchema: JSON.parse(spec.outputSchema) };
+		} catch {
+			// A raw string is not a valid wire schema; the Host will refuse it.
 		}
-		schema = parsed;
 	}
-	// JSON serialization does not mutate the readonly array; the Host validates its value.
-	return { ...settings, tools: settings.tools as string[], ...(schema === undefined ? {} : { outputSchema: schema }) };
+	// The wire type is mutable, but JSON serialization does not mutate the preset.
+	return serialized as Schemas["AgentSpec"];
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
