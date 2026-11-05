@@ -2946,7 +2946,8 @@ fn savedRejectionCode(answer: protocol_reply.MutationAnswer) caller_error.Code {
     return switch (answer.result) {
         .accepted => unreachable,
         .conflict => .idempotency_key_conflict,
-        .rejected => |code| caller_rejection.fromRejection(code.slice()) orelse unreachable,
+        // The Host may be newer than this build; its saved answer stays authoritative.
+        .rejected => |code| caller_rejection.fromRejection(code.slice()) orelse .rejection_unrecognized,
     };
 }
 
@@ -3705,6 +3706,23 @@ test "parser diagnostic hands off its complete line without a smaller format buf
     try std.testing.expect(std.mem.startsWith(u8, line, "rui host start: --active-capacity bad: "));
     try std.testing.expect(std.mem.endsWith(u8, line, "Nothing was captured or sent. [count_malformed]\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+}
+
+test "a saved rejection code this build does not know keeps the answer and says so" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .configure);
+    try reply.context.store.set("/s");
+    try reply.context.key.set("saved");
+    reply.context.kind = .configure;
+    var storage: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try writeSavedRejection(&out, reply);
+    try std.testing.expect(std.mem.startsWith(u8, out.buffered(), "rui session configure: Rui saved a rejection whose code this rui build does not know"));
+    try std.testing.expect(std.mem.endsWith(u8, out.buffered(), "[rejection_unrecognized]\n"));
+    try std.testing.expectEqual(caller_exit.Status.refused, caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer)));
+    out = .fixed(&storage);
+    try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
+    try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/s\",\"session\":\"k7m2qx\",\"key\":\"saved\",\"kind\":\"configure\"},\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"}}\n", out.buffered());
 }
 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {

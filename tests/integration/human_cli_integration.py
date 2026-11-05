@@ -3948,6 +3948,9 @@ def opaque_session_commands_case():
         for invalid in invalid_ids:
             rejected = invoke(home, "session", "configure", "--store", store, "--session", invalid, expect=2)
             assert not rejected.stdout and "InvalidSession" in rejected.stderr and "request:" not in rejected.stderr, rejected
+        for label in (" ", "two\nlines", "x" * 101):
+            rejected = invoke(home, "session", "configure", "--store", store, "--session", reference, "--label", label, expect=2)
+            assert not rejected.stdout and "--label must be one line" in rejected.stderr and "request:" not in rejected.stderr, rejected
         for route in (("session", "resume"), ("action", "allow"), ("action", "deny")):
             extra = [] if route[1] == "resume" else ["--action", "1"]
             negatives = [["--session-hex", value] for value in invalid_hex]

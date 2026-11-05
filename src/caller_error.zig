@@ -42,6 +42,7 @@ pub const Code = enum {
     identity_spelling_repeated,
     stdin_sources_conflict,
     memory_exhausted,
+    rejection_unrecognized,
     // Existing saved wire spellings; PR 5 owns splitting and renaming them.
     invalid_session_reference,
     unknown_session,
@@ -221,6 +222,7 @@ pub fn facts(code: Code) Facts {
         .store_locked => .{ .act = .operate, .input = null, .accepted = .none, .says = "Another Host owns this Store.", .next = "Use that Host, or pause it with rui host pause before starting again." },
         .reply_unconfirmed => .{ .act = .recover, .input = null, .accepted = .none, .says = "Admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
         .memory_exhausted => .{ .act = .operate, .input = null, .accepted = .none, .says = "Memory was exhausted while reading the arguments.", .next = "Free memory and try the same invocation again." },
+        .rejection_unrecognized => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui saved a rejection whose code this rui build does not know; the code is in the JSON answer on stdout.", .next = "Use a rui build that matches the Host, then recover the same saved request to read it." },
     };
 }
 

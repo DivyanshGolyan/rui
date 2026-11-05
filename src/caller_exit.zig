@@ -52,7 +52,7 @@ pub fn forCode(certainty: Certainty, code: caller_error.Code) Status {
 /// Only errors whose cause is already known, never an OS error without context.
 pub fn knownError(err: anyerror) Status {
     return switch (err) {
-        error.InvalidInvocation, error.InvalidModel, error.InvalidArguments, error.EmptyMessageInput, error.InvalidSession, error.InvalidRuiAddress, error.CrossStorePeerSend, error.InteractiveTerminalRequired, error.EnvironmentTooLarge => status(.fresh_invalid, .fix),
+        error.InvalidInvocation, error.InvalidModel, error.InvalidLabel, error.InvalidArguments, error.EmptyMessageInput, error.InvalidSession, error.InvalidRuiAddress, error.CrossStorePeerSend, error.InteractiveTerminalRequired, error.EnvironmentTooLarge => status(.fresh_invalid, .fix),
         error.HostStopped => forCode(.not_sent, .host_stopped),
         error.StoreAlreadyOwned => forCode(.not_sent, .store_locked),
         error.ApiKeyMissing => forCode(.not_sent, .sign_in_required),
@@ -60,6 +60,10 @@ pub fn knownError(err: anyerror) Status {
         error.ResultNotReady => forCode(.confirmed, .result_not_ready),
         else => .bug,
     };
+}
+
+test "an invalid label refused before capture is a fresh invocation error" {
+    try std.testing.expectEqual(Status.invalid, knownError(error.InvalidLabel));
 }
 
 test "CLI exits derive from certainty before remedy" {
