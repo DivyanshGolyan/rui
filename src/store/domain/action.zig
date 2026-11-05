@@ -771,13 +771,13 @@ const attempt_mcp = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
 });
 const mcp_input = rsql.Read(.{
-    .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,name.payload AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
+    .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
         "JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
-        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=name.payload AND tool.owner='mcp' " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp' " ++
         "JOIN content schema_content ON schema_content.content_id=tool.input_schema_content_id " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
@@ -786,6 +786,18 @@ const mcp_input = rsql.Read(.{
     .Row = struct { position: ?rsql.Positive, session: *protocol.Bounded(protocol.max_session_bytes), sender_handle: *protocol.Bounded(32), name: *protocol.Bounded(protocol.max_tool_name_bytes), server: *protocol.Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
     .cardinality = .optional,
 });
+test "MCP execution input uses each engine's tool-name content layout" {
+    const mysql = comptime mcp_input.mysql.prepared();
+    // A tool name fits one content chunk. Both its projection and catalog
+    // comparison must use that chunk on MySQL, not SQLite's payload column.
+    const name_bytes = "coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=name.content_id AND content_chunk.chunk_index=0),X'')";
+    try std.testing.expect(std.mem.indexOf(u8, mcp_input.sql, "name.payload AS name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_input.sql, "CAST(tool.name AS BLOB)=name.payload") != null);
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, mysql, "name.payload"));
+    try std.testing.expect(std.mem.indexOf(u8, mysql, name_bytes ++ " AS name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql, "CAST(tool.name AS BINARY)=" ++ name_bytes) != null);
+}
+
 const session_parent = rsql.Read(.{
     .sql = "SELECT parent_ref AS parent FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },

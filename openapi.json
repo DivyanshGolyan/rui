@@ -4767,8 +4767,7 @@
               "required": [
                 "name",
                 "url",
-                "bearerToken",
-                "callTimeoutMs"
+                "bearerToken"
               ],
               "additionalProperties": false
             }
