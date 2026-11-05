@@ -837,9 +837,9 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
         .tools = held.at(start, "tools") orelse product_defaults.tools,
         .loaded_tools = held.at(start, "loaded-tools"),
         .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
-        .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
+        .compaction_trigger = if (held.at(start, "compaction-trigger") != null and !std.mem.eql(u8, held.at(start, "compaction-trigger").?, "default")) held.policy(held.at(start, "compaction-trigger")) else .{ .present = true, .value = client.defaultCompactionTrigger(start.binding().model orelse product_defaults.recommended_model) },
         .output_reservation = held.policy(held.at(start, "output-reservation")),
-        .reasoning_effort = if (saved_effort) |chosen| .{ .present = true, .value = @tagName(chosen) } else effort,
+        .reasoning_effort = if (effort.present and effort.value != null) effort else client.defaultStartEffort(start.binding().model orelse product_defaults.recommended_model, if (effort.present) null else saved_effort),
         .label = label,
     } };
 }
@@ -1892,7 +1892,7 @@ test "the save's notice names the effort the next start applies, as the start se
         try std.testing.expectEqualStrings(case.notice, rig.overview.state.notice.?.text());
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
-        if (case.sent) |effort| try std.testing.expectEqualStrings(effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expect(Seen.now.start.reasoning_effort == null);
+        if (case.sent) |effort| try std.testing.expectEqualStrings(effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings(@tagName(model_capability.defaultReasoningEffort(Seen.now.start.model.?.slice()).?), Seen.now.start.reasoning_effort.?.slice());
     }
 }
 
@@ -1961,7 +1961,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
-        if (explicit) try std.testing.expect(Seen.now.start.reasoning_effort == null) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
+        if (explicit) try std.testing.expectEqualStrings("medium", Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
     }
     // A launch that named everything starts even over an unreadable file.
     var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});

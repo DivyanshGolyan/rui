@@ -14,6 +14,12 @@ const dialect = @import("mysql_dialect_check.zig");
 var mutex: std.Io.Mutex = .init;
 var root: wire.Connection = undefined;
 var opened = false;
+const Database = struct {
+    name: [40]u8,
+    path: []u8,
+    dirty: bool = false,
+};
+var databases: std.ArrayList(Database) = .empty;
 
 pub fn available() !bool {
     return (try dialect.rootConfig()) != null;
@@ -67,15 +73,38 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
     var path_buffer: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(io, &path_buffer);
     const path = path_buffer[0..length];
-    const hash = std.hash.Wyhash.hash(0, path);
-    var name_buffer: [40]u8 = @splat(0);
-    const name = try std.fmt.bufPrint(name_buffer[0..39], "rui_test_{x:0>16}", .{hash});
-    {
+    const name_buffer = name: {
         mutex.lockUncancelable(io);
         defer mutex.unlock(io);
         _ = try connection();
+        for (databases.items) |entry| {
+            if (std.mem.eql(u8, entry.path, path)) break :name entry.name;
+        }
+        const owned_path = try std.heap.page_allocator.dupe(u8, path);
+        errdefer std.heap.page_allocator.free(owned_path);
         var buffer: [512]u8 = undefined;
-        // IF NOT EXISTS preserves the same Store on a reopen of this tmp path.
+        for (databases.items) |*entry| {
+            if (entry.dirty) continue;
+            if (std.Io.Dir.cwd().access(io, entry.path, .{})) |_| {
+                continue;
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            }
+            const database_name = std.mem.sliceTo(&entry.name, 0);
+            try root.query(try std.fmt.bufPrint(&buffer, "SELECT IS_USED_LOCK('{s}') IS NULL", .{database_name}));
+            if (try readU64() == 0) continue;
+            entry.dirty = true;
+            try empty(database_name);
+            std.heap.page_allocator.free(entry.path);
+            entry.path = owned_path;
+            entry.dirty = false;
+            break :name entry.name;
+        }
+        try databases.ensureUnusedCapacity(std.heap.page_allocator, 1);
+        const hash = std.hash.Wyhash.hash(0, path);
+        var fresh_name: [40]u8 = @splat(0);
+        const name = try std.fmt.bufPrint(fresh_name[0..39], "rui_test_{x:0>16}", .{hash});
         try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE IF NOT EXISTS {s};USE {s}", .{ name, name }));
         try root.query("SHOW TABLES");
         var exists = false;
@@ -105,10 +134,26 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
             try run("CREATE USER IF NOT EXISTS 'rui_conformance'@'localhost' IDENTIFIED BY 'rui_conformance'");
             try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO 'rui_conformance'@'localhost'", .{name}));
         }
-    }
+        databases.appendAssumeCapacity(.{ .name = fresh_name, .path = owned_path });
+        break :name fresh_name;
+    };
+    const name = std.mem.sliceTo(&name_buffer, 0);
     const config = (try dialect.rootConfig()).?;
     try storage.openMysql(io, .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name }, options.identity orelse path, .{ .served = options.served, .catalog = options.catalog });
     storage.engine.mysql.state.testing_database = name_buffer;
+}
+
+fn empty(name: []const u8) !void {
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer text.deinit();
+    try text.writer.print("USE {s};SET foreign_key_checks=0;", .{name});
+    for (comptime schema.objects(.mysql)) |object| {
+        if (object.kind == .table) try text.writer.print("DELETE FROM {s};", .{object.name});
+    }
+    // DELETE fires the touch-oracle triggers, so clear their rows last.
+    try text.writer.print("DELETE FROM {s}_oracle.touched_oracle;SET foreign_key_checks=1", .{name});
+    errdefer run("SET foreign_key_checks=1") catch @panic("foreign keys stayed off");
+    try run(text.written());
 }
 
 fn FixtureArgs(comptime T: type) type {
@@ -156,6 +201,10 @@ pub fn queryU64(storage: *Store, comptime sql: []const u8, args: anytype) !u64 {
     defer mutex.unlock(std.testing.io);
     try use(storage);
     try send(sql, args);
+    return readU64();
+}
+
+fn readU64() !u64 {
     const Row = struct { value: u64 };
     var columns: rows.Columns(Row) = undefined;
     var result: ?u64 = null;
@@ -210,6 +259,9 @@ pub fn untouchedForTesting(storage: *Store, touched: *const change_ring.Touched)
 pub fn rawExec(storage: *Store, sql: []const u8) !void {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);
+    for (databases.items) |*entry| {
+        if (std.mem.eql(u8, std.mem.sliceTo(&entry.name, 0), database(storage))) entry.dirty = true;
+    }
     try use(storage);
     try run(sql);
 }

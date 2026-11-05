@@ -64,6 +64,48 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	await assert.rejects(hostInfo(rui), RuiUnavailableError);
 });
 
+test("closing Rui rejects a parked follower and releases its watch without aborting", { skip, timeout: 10_000 }, async (t) => {
+	const rui = await Rui.connect(options(newStore()));
+	const controller = new AbortController();
+	let follower: ReturnType<typeof rui.activity.watch> | undefined;
+	let park = () => {};
+	const parked = new Promise<void>((resolve) => { park = resolve; });
+	const watch = rui.activity.watch.bind(rui.activity);
+	t.mock.method(rui.activity, "watch", (session: string) => {
+		follower = watch(session);
+		const wait = follower.wait.bind(follower);
+		t.mock.method(follower, "wait", (...args: Parameters<typeof wait>) => {
+			const pending = wait(...args);
+			park();
+			return pending;
+		});
+		return follower;
+	});
+	// Only the idle page is synthetic; close still exercises the real Rui lifecycle.
+	t.mock.method(rui, "exchange", async () => Buffer.from(JSON.stringify({
+		items: [], more: false, end: "0", queued: { count: "0" }, work: { state: { kind: "idle" } },
+	})));
+	const feed = rui.getSession("s").listActivity({ follow: true, signal: controller.signal });
+	let failure: unknown;
+	const pending = feed.next().catch((error: unknown) => { failure = error; });
+	try {
+		await parked;
+		await rui.close();
+		assert.equal(controller.signal.aborted, false);
+		assert.ok(failure instanceof RuiUnavailableError, "close must reject the parked read before returning");
+		assert.equal(failure.message, "the Rui client is closed");
+		await pending;
+		assert.ok(follower);
+		rui.activity.notify("s");
+		assert.equal(follower.revision, 0, "the follower's subscription must be released");
+	} finally {
+		controller.abort();
+		await pending;
+		await feed.return(undefined);
+		await rui.close();
+	}
+});
+
 test("a Host opened paused holds Turns until resume, and a restarted one opens paused again", { skip }, async () => {
 	const rui = await Rui.connect(options(newStore(), { paused: true }));
 	try {

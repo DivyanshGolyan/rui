@@ -78,6 +78,7 @@ pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 test {
     _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
+    _ = @import("store/find_tools_tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/mysql_dialect_check.zig");
     _ = @import("store/mysql_literal.zig");

@@ -162,9 +162,15 @@ A supplied `--session ID` selects only an existing canonical ID.
 Unknown IDs reject as `unknown_session`, presented as `no session k7m2qx in this Store`, without creating a Session or admitting Message work.
 Noncanonical references, including old UUID and NUL-bearing references, reject rather than normalize.
 
-A creation configuration requires a closed provider identity (`codex` in V1), an exact nonempty requested model string and Workspace together.
-It atomically establishes Session, baseline, Workspace, access scope and request answer.
-Omitted tools and permission mode take the product defaults, Bash and `bypass`; later configurations never reapply them.
+A creation configuration requires an exact nonempty model, explicit effort, a token-count `compactAt`, a tools list and Permission Mode (D104, D111, D113).
+A missing required field is a missing-field request error; an empty tools list means no tools and has no Host default.
+The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider, and a Host serving several has no default, so a creation must name one (D133, D221).
+Workspace is required when tools includes Bash and is unused for execution otherwise.
+A supplied Workspace is checked like any other, and a spec without Bash that omits it saves `/`, because the Store's Workspace column is never empty.
+Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
+Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
+The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, the model's catalog effort when known or explicit null otherwise, and 90% of its known context window or a fixed 115,200 tokens when unlisted.
+Addressed configure preserves every omitted setting; the model, provider and Workspace binding remain immutable.
 
 Later configurations preserve omitted provider/model values and accept explicit equal values.
 A different provider or model rejects the whole update, without a revision or partial changes.
@@ -416,7 +422,7 @@ Every Label change is a revision like any other configuration change.
 A Label-only revision adds no Conversation entry and changes no model input.
 Configuration carries no sender, so any client that can reach the Store may relabel any Session, as it may already reconfigure it.
 
-Codex **Reasoning Effort** is an optional persistent Session override.
+Codex **Reasoning Effort** is an explicitly stated, nullable persistent Session setting (D111).
 Its closed grammar is `none`, `low`, `medium`, `high`, `xhigh` and `max`.
 Configuration accepts an explicit value only when the exact model's pinned catalog entry advertises it.
 Unsupported values reject the whole update.
@@ -424,17 +430,20 @@ Unsupported values reject the whole update.
 Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fallback.
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
-With no override, a new Session uses the catalog default.
+The CLI and TUI choose the catalog default when building a new spec without a user-selected effort; the Host never fills effort from the catalog.
 The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
 All nine advertise `low`, `medium`, `high` and `xhigh`.
 All except `gpt-5.5` also advertise `max`.
-An unknown exact binding has no inferred default: without an override, Rui omits `reasoning` and leaves the provider's effective effort unknown.
+An unknown exact binding has no inferred default: its spec states a null effort, and Rui omits `reasoning` and leaves the provider's effective effort unspecified.
 An explicit effort on that binding rejects because Rui has no support evidence.
 This preserves exact-model syntax without guessing capabilities from model families.
 
-On an existing Session, omission preserves the override and explicit `null` clears it to catalog default.
-The CLI spells the reset `--reasoning-effort default`; `--reasoning-effort VALUE` selects an override for `session configure`, initial `session start` and interactive `/configure`.
-Current inspection reports nullable effective `reasoning_effort` and `reasoning_effort_override`; `/status` identifies a Session override, catalog default or absent catalog value.
+An explicit `null` effort is accepted only for a model the catalog does not list; for a listed model it rejects as `unsupported_reasoning_effort` on create and update (D165).
+So an update never moves a Session from an effort back to none, which the `openai-responses/2` codec cannot encode.
+A Session saved before D111 with null effort on a listed model keeps freezing the catalog default its earlier Operations froze.
+On an existing Session, omission preserves the saved effort.
+The CLI resolves `--reasoning-effort default` on the client to the model's catalog effort or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
+Current inspection reports the saved nullable `reasoning_effort` and `reasoning_effort_override`; non-null effort is the Session's explicit value, not a Host-inferred catalog default.
 Each model Operation, including compaction and continuation, freezes the resolved effort at admission.
 Replacement Attempts and reopened historical views emit that stored value without consulting later Session settings or catalog policy.
 Persisted values outside the closed grammar are corruption.
@@ -560,7 +569,12 @@ An owed stop whose obligation a client's stop already settled, or a newer one re
 Every attached child Turn ending owes its parent an ordinary Message from the child, waking the parent through normal Message admission (D39, D122).
 A done ending's Message is the child's saved answer itself, so nothing is copied; any other ending is a short line naming it, which is prompt text (D161).
 An ending caused by the parent's owed stop under `rui.core/stop/` settles quietly without admitting a Message (D139).
-One Store command delivers it and deletes the owed row, so a retry cannot deliver it twice.
+One Store command delivers it and marks the retained owed row delivered, so a retry cannot deliver it twice.
+An attached child's approval request and Turn ending also appear in every ancestor's Activity feed, naming the Session whose Action or Turn it is (D135, D180).
+An approval request queues an unpositioned `session_forward` row for the direct parent in the transaction that saves it, and a Turn ending queues one in the transaction that delivers its owed ending Message (so a root Session's Turn end writes nothing extra); after owed stops and ending Messages, the Host delivers one hop per Store command before core tool calls.
+Each delivery claims a position only in the receiving ancestor, retains the delivered row and atomically queues the same child fact for that ancestor's parent, if any.
+The unique `(target_ref,kind,source_id)` key and retained rows make retries no-ops, and no transaction walks the tree or grows with its depth.
+A Permission Decision addressed to an ancestor may name the child's Action only after that ancestor received its forwarded request; it updates the child's Action and Turn, while the saved command retains the Session the client named.
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.
@@ -641,11 +655,15 @@ The Responses provider maps uniquely named top-level `input_tokens` and `output_
 A provider total is not a count.
 A missing, invalid or duplicate count, or a cache read above the input, leaves usage absent, and pressure falls back to retained-context estimates; a missing counter is not zero.
 
-Codex's nine exact [release-supported model IDs](#supported-model-ids) default to a trigger at 90% of their window and zero extra output reservation, as Codex's client derives it.
+The CLI and TUI choose a token-count trigger at 90% of the window for Codex's nine exact [release-supported model IDs](#supported-model-ids), and zero extra output reservation (D111).
 Eight have a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json), so a 244,800-token trigger.
 `gpt-6.1-terra` has a 500,000-token window in a [later Codex catalog](https://github.com/openai/codex/blob/5c0b1ac71f2f04016abdfcf43bee7e0c96867f0e/codex-rs/models-manager/models.json), so a 450,000-token trigger.
-A model Rui does not list is assumed to have a 128,000-token window (`product_defaults.unlisted_context_window`), so it compacts at 115,200 tokens: small on purpose, because an early compaction costs a summary and a late one a refused request.
-An explicit override replaces it without claiming a model capacity or entitlement.
+For a model Rui does not list, the CLI and TUI send a fixed 115,200-token trigger: small on purpose, because an early compaction costs a summary and a late one a refused request.
+Every new spec supplies a positive token count; the Host never computes a percentage trigger from the catalog.
+The catalog only bounds a requested count against the exact model's known context window; an excessive count is the request error `compact_at_too_large` on create or update, while an unlisted model has no known-window refusal (D166).
+An explicit count does not claim a model capacity or entitlement.
+A stored null threshold uses a fixed 115,200-token safety threshold independent of the catalog; new specs cannot save a null threshold.
+The CLI resolves `--compaction-trigger default` to a concrete token count before capture.
 Pressure uses valid usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without valid usage it estimates retained context.
 The threshold fires at equality.
 The assistant successor of a compaction applies pending input even if the estimate remains above the threshold.
@@ -872,7 +890,7 @@ Under `openai-responses/2` the top-level effort is the effort the Session's firs
 The history view yields an Operation element at each earlier Operation's admission position, with the effort it froze, and the request being prepared gets its own Operation item after `history_end`, where a later request's span will place it.
 At an Operation whose effort differs from the one in force, the codec writes `{"type":"configuration_update","reasoning":{"effort":…}}` and its carry takes the new effort; an unchanged effort writes nothing.
 A compaction base covers the Operation elements before its anchor with the output it covers, so effort there is the top's again.
-Every Operation is placed, whatever its outcome, because its own request carried its boundary; effort is null for a whole Session or for none of it, so a boundary never returns to no effort.
+Every Operation is placed, whatever its outcome, because its own request carried its boundary; effort may start unspecified and then acquire a supported value, but admission refuses a boundary back to unspecified effort.
 
 #### Tools inside the history
 
@@ -895,7 +913,7 @@ The [pinned evidence](research/README.md#provider-wire-contract) selects the Cha
 Freeze the requested model string and behavior-affecting request settings in the manifest.
 Rebuild the full local input recipe; neither `previous_response_id` nor a provider conversation is required.
 Explicit inclusion avoids depending on changing defaults.
-Render a non-null frozen effort, whether from a catalog default or Session override, as top-level `"reasoning":{"effort":"VALUE"}`.
+Render a non-null frozen effort from the explicit Session setting, as top-level `"reasoning":{"effort":"VALUE"}`.
 A null frozen effort omits the entire `reasoning` field, never sending `none`, `null` or `{}` as a default.
 A replacement Attempt reconstructs the originating Operation's effort even if the Session or catalog has since changed.
 Provider rejection is that Operation's visible failure, without automatic effort downgrade or model substitution.
@@ -1156,20 +1174,26 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 ### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `message_agent`, `read_transcript` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
-A fresh Session gets `bash` and `web_search`.
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `message_agent`, `read_transcript`, `start_agent`, `web_search`).
+It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+The CLI and TUI put `bash` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `start_agent`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and is the set sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
-Until that core tool is available, the Host's catalog permits only equality.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
 The Session and each revision store a nullable `loaded_tool_set_id`, interned like `tool_set_id`, with NULL denoting equality; Current and Full reports expose both sets, and a newly loaded tool follows the existing `additional_tools` history path without discarding the cache prefix.
 Who runs an accepted call is derived from its name, never stored.
 A **core tool** call runs as one core command, with no process: `message_agent(id, text)` admits `text` to Session `id` as a Message from the calling Session, with no client environment, and resolves the call `Delivered to ID.` in the same transaction; an unknown `id` resolves it failed and sends nothing.
+`find_tools(words)` searches the Session's saved, not-yet-loaded tools by name or description, ignoring ASCII case and matching any of one to eight space-separated words.
+SQL selects only unloaded candidates; the Host streams names and description windows through the shared `word_search.Matcher`, whose ASCII folding and carry give every Store engine the same answers (D216).
+It loads at most eight matches in name order, in one call-keyed command and one revision naming `loaded_tools`, committed with the call result.
+A no-match call writes no revision.
+A strict `loaded_tools` subset must include `find_tools`; NULL in the saved loaded set means all configured tools.
+Newly loaded definitions join the next request as `additional_tools`; a call to an unloaded tool still settles as `unknown_tool`.
 `read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
 It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
-`start_agent(task, attached, spec)` creates a Session in the caller's Workspace with the caller's provider, configured by `spec` (model, effort, compaction threshold, tools, Permission Mode, label), admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
-A spec that names a Workspace or provider, widens the caller's tools, or asks for `bypass` under a caller that asks resolves the call failed with a result naming the field, and starts nothing; the Host checks the arguments when it runs the call, not at admission.
+`start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, Permission Mode, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
+Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, a named provider or Workspace, unsupported effort or an excessive known-window compaction threshold (D140, D165, D166, D221).
+A spec that widens the caller's tools or asks for `bypass` under a caller that asks resolves the call failed with a result naming the field; the Host checks the arguments when it runs the call, not at admission.
 The agent's Bash starts from the caller's client environment, installed as the task commits.
 A core tool acts only on the Store, so admission authorizes its call at once under either Permission Mode, and a stop cancels it like any other unattempted Action.
 Removed `edit`, duplicates, other orders and alternate spellings reject rather than aliasing another selection.
@@ -1188,7 +1212,7 @@ Concurrent use by multiple clients is technically possible but is not an intende
 One retained policy and one application boundary keep unattended work explainable without coupling authority to connection lifetime.
 
 **Authorization** durably permits one exact validated Action.
-At applicable-Action admission select current Session Permission Mode, default `bypass`, and save descriptor plus configuration provenance.
+At applicable-Action admission select the saved Session Permission Mode and save descriptor plus configuration provenance.
 Rejected Tool Calls never consult permission policy.
 
 `ask` creates one immutable Permission Request; `bypass` directly creates Authorization.
@@ -1293,7 +1317,7 @@ Rui runs no DDL on MySQL (D203).
 Forward steps for an existing database are `schema.mysqlMigration(from)`; this command does not apply them.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
 The step to 53 records a Session's parent (D27).
-The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1885,7 +1909,11 @@ A later send failure does not undo accepted configuration.
 `session start` captures one Message mutation with fresh-Session configuration and an empty requested Session ID.
 Initial configuration accepts scalar settings but no instruction or schema content values, preserving the existing ingress content and descriptor bounds.
 Inside one Store transaction, it validates the sender and configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
-Its successful stdout is the six-character ID plus newline, an admission receipt rather than execution or completion.
+Its successful stdout is the same JSON mutation receipt as `session send`, with the allocated six-character ID in `.context.session` and the request handle in `.context.key`, followed by newline: admission rather than execution or completion.
+Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing the resolved `provider`, `model`, effective `reasoning_effort` and `effort_source`.
+The effort source is `flag` whenever `--reasoning-effort` was given (including `default`), otherwise `saved` when `model_capability.startEffort` selected the saved override, otherwise `model_default`.
+Without an override, the effective effort is the model catalog default, or null for an unlisted model.
+These values come from the CLI-resolved configuration sent with the Message, never a new Host read; rejection output and `session send` receipts are unchanged.
 Replay returns the original allocated ID, Message admission and result even after cancellation or restart; changed creation settings or Message bytes conflict with the original request key.
 Rejection creates no Session.
 Any canonical failure rolls back allocation, revision and Message together.
@@ -2366,7 +2394,7 @@ Current inspection and keyed observations are separate coherent snapshots, not a
 No reader substitutes a successor's result for the originally selected Message.
 
 Client also owns Current interpretation: validate exactly the promised offset-zero body before returning explicit unconfigured or fixed owned settings, work, selection, ten recent bindings and execution metadata.
-Effective reasoning effort and its nullable override are required fields; null effective effort means the exact binding has no catalog value and no override.
+Effective reasoning effort and its nullable override are required fields; null effective effort explicitly leaves the provider effort unspecified.
 Every unresolved/resolved Action, rejected call and actionable permission retains its identities, authorization/outcome and complete content-reference metadata through synchronous traversal of the same caller-owned immutable capture; row slices expire at callback return.
 No collection cap or resident population results.
 Supported semantic JSON discards unknown extensions, scans the capture once for validation and four more times for its grouped attention arrays, trading approximately five input traversals for fixed storage and independence from JSON object field order.
@@ -2582,7 +2610,7 @@ The read takes the Session's facts from its Current capture into one of two slot
 The saved defaults are read when the page opens and again after a command run over it finishes, not on every read.
 The page is text rendered from those facts and the selected row, so moving `›` renders it again with no read.
 Up and Down move `›` over the rows that can change from the page (the Session's model, Store and instructions cannot), while the draft is empty and no list shows; Page Up and Page Down still scroll, and each `/status` starts at the first row.
-Enter on an empty draft puts the row's own command in the draft: `/configure` or `/setup` with the option, whose list then offers a fixed choice (the compaction trigger and headroom offer `default` and take a typed number, so Enter never turns a model default into an override of the same number), or with the current value to edit.
+Enter on an empty draft puts the row's own command in the draft: `/configure` or `/setup` with the option, whose list then offers a fixed choice (the compaction trigger and headroom offer `default` and take a typed number, so Enter resolves the chosen client default into an explicit token count), or with the current value to edit.
 The page has no second way to change a setting; the command runs as typed over the page, which stays shown: a saved change replies in one line as a notice, and the page's next read shows the new value with `›` on the same row, while a longer reply, such as a failure with its usage, opens as any command's does.
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
 Approval requires every Action row to have been displayed since adoption or the last resize or width-mode change.
@@ -3030,9 +3058,11 @@ The cursor may name a row of any kind; the page lists only the asked kinds, and 
 A person's Messages alone are one seek in the index of Messages without a Session sender, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
 Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
-Only complete Tool Result groups share positions, using one-based call ordinals; an `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows use zero.
-An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
+Only complete Tool Result groups share positions, using one-based call ordinals; a Session's own `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows, including forwarded child facts, use zero.
+An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `session` (the Session whose Action it is), `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
+Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
+A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
 A `session_changed` row (D138, D218) is one setting a later revision changed, carrying `revision` and `field` (a configuration member's name: `provider`, `model`, `instructions`, `tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`).
 The revision's commit writes them to `session_change` at a position taken when it is accepted, never edited; the revision keeps the current values, and a creation and a revision that changes nothing have none.
 A `compacted` row (D217) is a compaction that succeeded, at its compaction item's position (taken at settlement, so no earlier page gains it), carrying `operation` and `dropped`: how many conversation entries its floor left out beyond the one before it, zero for a compaction that made no room.
@@ -3214,7 +3244,7 @@ An indeterminate reported outcome never implies that an effect did not run or ma
 ### Wire format and command output
 
 HTTP owns closed versioned JSON.
-Non-interactive mutation receipts and metadata reads write one final complete JSON value on stdout, without interleaved events or prose, except successful `session start`, which prints its allocated six-character ID and newline.
+Non-interactive mutation receipts and metadata reads write one final complete JSON value on stdout, without interleaved events or prose.
 Bounded streaming does not promise atomic pipe delivery or a resident result population.
 Every such JSON value, and each JSON diagnostic, spells DEL and every non-ASCII code point as a `\u` escape through one CLI output owner, so names, Action proposals and Host replies cannot reorder or hide terminal output while decoded values stay exact.
 Explicit content reads stream saved bytes only; a content reader that fails before content writes its typed diagnostic to stderr and leaves stdout empty.
