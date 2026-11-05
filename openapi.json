@@ -8698,6 +8698,7 @@
               "type": "string",
               "enum": [
                 "bash",
+                "message_agent",
                 "web_search"
               ]
             },
