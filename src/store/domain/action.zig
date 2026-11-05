@@ -126,13 +126,52 @@ pub const OwedStop = struct {
     key: protocol.Bounded(protocol.max_key_bytes),
 };
 
+/// An attached child's Turn ending its parent is owed as a Message (D39),
+/// as `Store.deliverChildEnding` delivers it: the child's saved answer
+/// itself when it is done. `quiet` when the child's parent stopping ended
+/// it, which delivers nothing (D139) and only settles the row.
+pub const OwedEnding = struct {
+    turn_id: u64,
+    child: protocol.Bounded(protocol.session_id_bytes),
+    ending: protocol.TurnEnding,
+    answer: ?ContentReference,
+    quiet: bool,
+};
+
 /// The core's next piece of work: a stop a child owes comes first, so
-/// none of its calls runs after its parent stopped.
+/// none of its calls runs after its parent stopped, then an ending a
+/// parent is owed.
 pub const CoreWork = union(enum) {
     stop: OwedStop,
+    ending: OwedEnding,
     action: CoreActionInput,
     mcp: McpAction,
 };
+
+/// Whether a stop selected the owed ending `e`'s Turn, and whether that
+/// stop is one its parent caused: an owed stop's key starts
+/// `rui.core/stop/`, and the bytewise range finds one on any engine (D139).
+pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id) AS stopped," ++
+    "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id AND st.command_key>='rui.core/stop/' AND st.command_key<'rui.core/stop0') AS quiet";
+
+/// The oldest owed ending.
+const owed_ending = rsql.Read(.{
+    .sql = "SELECT e.turn_id,t.session_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
+        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
+        "WHERE e.delivered=0 ORDER BY e.turn_id LIMIT 1",
+    .Args = struct {},
+    .Row = struct {
+        turn_id: rsql.Positive,
+        session_ref: protocol.Bounded(protocol.session_id_bytes),
+        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        byte_length: ?u64,
+        digest: ?[32]u8,
+        stopped: bool,
+        quiet: bool,
+    },
+    .cardinality = .optional,
+});
 
 const owed_stop = rsql.Read(.{
     .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed ORDER BY child_ref LIMIT 1",
@@ -153,8 +192,10 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
     var next: next_core_action.Result = undefined;
     var mcp: next_mcp_action.Result = undefined;
     const names: CoreNames = .of();
+    var ending: owed_ending.Result = undefined;
     a.read(owed_stop, .{}, &stop);
     a.read(next_mcp_action, .{}, &mcp);
+    a.read(owed_ending, .{}, &ending);
     a.read(next_core_action, .{ .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &next);
     try a.run();
     if (stop) |owed| {
@@ -163,7 +204,17 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
         try work.key.set(try owedStopKey(&buffer, owed.child_ref.slice(), owed.cause_ref.slice(), owed.cause_position));
         return .{ .stop = work };
     }
-    // After owed stops, service both slot-free runners in Action order.
+    if (ending) |owed| {
+        const outcome = try turn_domain.TurnOutcome.decode(owed.outcome_code.slice(), if (owed.outcome_content_id) |id| @intCast(id.get()) else null);
+        return .{ .ending = .{
+            .turn_id = owed.turn_id.get(),
+            .child = owed.session_ref,
+            .ending = outcome.ending(owed.stopped),
+            .answer = if (outcome == .completed) .{ .length = owed.byte_length orelse return error.CorruptStore, .digest = owed.digest orelse return error.CorruptStore } else null,
+            .quiet = owed.quiet,
+        } };
+    }
+    // After owed stops and endings, service both slot-free runners in Action order.
     if (mcp) |call| {
         if (next == null or call.action_id.get() < next.?.action_id.get())
             return .{ .mcp = .{ .action_id = call.action_id.get() } };

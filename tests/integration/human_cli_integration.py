@@ -314,7 +314,7 @@ def help_case():
 def compiled_model_cases():
     """One release list owns help; any ID with valid syntax is admitted, an unlisted one with default limits."""
     import host_launch_integration as launch
-    models = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra",
+    models = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra",
               "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
     unlisted_note = "it uses default limits"

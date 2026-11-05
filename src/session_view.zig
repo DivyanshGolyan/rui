@@ -759,7 +759,8 @@ pub const ActionTool = struct {
     }
 };
 
-fn selectedActionTool(observed: *const protocol_reply.Current, io: std.Io, scratch: std.Io.File, action: u64) !?ActionTool {
+/// Selects one frozen identity from an already verified immutable Current capture.
+pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io, scratch: std.Io.File, action: u64) !?ActionTool {
     const Selection = struct {
         action: u64,
         selected: ?ActionTool = null,
@@ -788,7 +789,7 @@ fn selectedActionTool(observed: *const protocol_reply.Current, io: std.Io, scrat
 /// A resolved or absent Action has no current approval metadata.
 pub fn actionTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File) !?ActionTool {
     const observed = try current(requests, store, session, scratch);
-    return selectedActionTool(&observed, requests.io, scratch, action);
+    return actionToolFromCapture(&observed, requests.io, scratch, action);
 }
 
 pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
@@ -812,7 +813,7 @@ pub fn permissionForTool(requests: client.Requests, store: []const u8, session: 
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
-    return requestForTool(requests.io, scratch, sink, colour, tool);
+    return renderPermissionArguments(requests.io, scratch, sink, colour, tool);
 }
 
 const ArgumentSource = struct {
@@ -828,7 +829,9 @@ const ArgumentSource = struct {
     }
 };
 
-fn requestForTool(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+/// Renders a complete captured argument file; the consent owner applies the
+/// same viewport bound to either runner before offering a decision.
+pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour),
         .mcp => mcpRequest(io, scratch, sink, colour, tool),
@@ -1730,7 +1733,7 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         try action.setLength(std.testing.io, 0);
         var sink: Sink = .{ .file = action };
-        const summary = try requestForTool(std.testing.io, scratch, &sink, false, &tool);
+        const summary = try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
         try std.testing.expectEqualStrings(case.description, summary.description.slice());
         var rendered: [2048]u8 = undefined;
         const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
@@ -1786,7 +1789,7 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     while (at < Viewport.capacity + 4096) : (at += fill.len) try scratch.writePositionalAll(std.testing.io, &fill, at);
     try scratch.writePositionalAll(std.testing.io, "\"\n}", at);
     var sink: Sink = .{ .file = action };
-    _ = try requestForTool(std.testing.io, scratch, &sink, false, &tool);
+    _ = try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
     var beginning: [512]u8 = undefined;
     const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
     const shown = beginning[0..count];
@@ -1799,84 +1802,4 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
-}
-
-test "MCP ask approval uses the frozen server after its Session offer changes" {
-    const store_module = @import("store.zig");
-    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
-        .name = "fetch_page",
-        .owner = .mcp,
-        .server = "docs",
-        .description = "Fetch a page.",
-        .input_schema = "{\"type\":\"object\"}",
-    }, tools.record(.message_agent).*, tools.record(.start_agent).*, tools.record(.web_search).* };
-    const digests = comptime blk: {
-        @setEvalBranchQuota(1_000_000);
-        var out: [records.len][32]u8 = undefined;
-        for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
-        break :blk out;
-    };
-    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: store_module.Store = undefined;
-    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
-    defer storage.close() catch unreachable;
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var command = try store_module.testingCompleteConfiguration("approval-mcp", "", try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-    command.configuration.tools = try .of(&.{"fetch_page"});
-    command.configuration.permission_mode.state = .value;
-    try command.configuration.permission_mode.value.set("ask");
-    const configured = storage.configure(&command, .{});
-    try std.testing.expect(configured == .accepted);
-    const session = configured.accepted.session;
-    try store_module.testingSubmitMessage(&storage, &tmp, "approval-input", "approval-input", session.slice(), "fetch");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try store_module.settleCallsForTesting(&storage, &tmp, model, "approval-calls", &.{
-        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-    });
-    var update: protocol.ConfigureCommand = .{};
-    try update.key.set("approval-remove");
-    update.session = session;
-    update.configuration.tools = try .of(&.{"bash"});
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-    const report = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
-    defer std.testing.allocator.free(report);
-    const scratch = try tmp.dir.createFile(std.testing.io, "approval-scratch", .{ .read = true });
-    defer scratch.close(std.testing.io);
-    try scratch.writePositionalAll(std.testing.io, report, 0);
-    const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, scratch, session.slice(), .{ .report = .{ .bytes = report.len } });
-    const observed = &decoded.current;
-    const action = observed.first_action.?;
-    const tool = (try selectedActionTool(observed, std.testing.io, scratch, action)).?;
-    try std.testing.expect(try tool.runner() == .mcp);
-    try std.testing.expectEqualStrings("fetch_page", tool.name.slice());
-    try std.testing.expectEqualStrings("docs", tool.server.?.slice());
-    const reference = try storage.actionArguments(session.slice(), action);
-    var saved_arguments: store_module.ContentReader = undefined;
-    saved_arguments.open(try storage.openContent(reference));
-    defer saved_arguments.close();
-    var arguments: [16]u8 = undefined;
-    const count = try saved_arguments.read(0, &arguments);
-    try std.testing.expectEqualStrings("{}", arguments[0..count]);
-    try scratch.setLength(std.testing.io, 0);
-    try scratch.writePositionalAll(std.testing.io, arguments[0..count], 0);
-    const Sink = struct {
-        bytes: [512]u8 = undefined,
-        len: usize = 0,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
-            self.len += bytes.len;
-        }
-    };
-    var sink: Sink = .{};
-    const summary = try requestForTool(std.testing.io, scratch, &sink, false, &tool);
-    try std.testing.expectEqualStrings("fetch_page", summary.description.slice());
-    try std.testing.expectEqualStrings("\n? fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
-    try std.testing.expect((try storage.nextCoreWork()) == null);
-    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
-    try allow.key.set("approval-allow");
-    allow.session = session;
-    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    try std.testing.expectEqual(action, (try storage.nextCoreWork()).?.mcp.action_id);
 }

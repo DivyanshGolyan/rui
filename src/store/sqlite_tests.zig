@@ -4077,6 +4077,49 @@ test "existing Store rejects a format that store_meta does not hold" {
     try storage.close();
 }
 
+/// The Store id store_meta holds in the database at `path`.
+fn storeId(path: []const u8) ![2 * store_schema.store_id_bytes]u8 {
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    const statement = try sqlite.prepare(raw, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.NoStoreId;
+    const text = c.sqlite3_column_text(statement, 0) orelse return error.NoStoreId;
+    const id = text[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
+    if (!store_schema.isStoreId(id)) return error.NoStoreId;
+    return id[0 .. 2 * store_schema.store_id_bytes].*;
+}
+
+test "a new Store draws its own Store id, keeps it, and is refused without it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var first_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const first = try std.fmt.bufPrint(&first_buffer, "{s}/first.sqlite3", .{root});
+    var second_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const second = try std.fmt.bufPrint(&second_buffer, "{s}/second.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, first, root);
+    try storage.close();
+    try storage.open(std.testing.io, second, root);
+    try storage.close();
+    const id = try storeId(first);
+    try std.testing.expect(!std.mem.eql(u8, &id, &try storeId(second)));
+    try storage.open(std.testing.io, first, root);
+    try storage.close();
+    try std.testing.expectEqualStrings(&id, &try storeId(first));
+    for ([_][:0]const u8{ "UPDATE store_meta SET meta_value=upper(meta_value) WHERE meta_key='store_id'", "DELETE FROM store_meta WHERE meta_key='store_id'" }) |damage| {
+        {
+            const raw = try openRaw(first);
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw, damage);
+        }
+        var refused: Store = undefined;
+        try std.testing.expectError(error.WrongStoreIdentity, refused.open(std.testing.io, first, root));
+    }
+}
+
 test "existing Store rejects a table rebuilt without one of its CHECKs, and stays unmodified" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6209,7 +6252,8 @@ test "a stop cancels its Actions in pages of one write each, in call order at de
         // interruption; with Actions the text's lookup and insert, then a
         // page read and a write per `cancel_chunk` (13) Actions.
         const pages = (count + 12) / 13;
-        const expected: u64 = if (count == 0) 10 else 11 + 2 * pages;
+        // Closing the Turn also writes its owed ending.
+        const expected: u64 = if (count == 0) 11 else 12 + 2 * pages;
         try std.testing.expectEqual(expected, statements.count);
         try std.testing.expectEqual(@as(u64, count), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
         // Acceptance follows call order.
@@ -8184,11 +8228,11 @@ fn openRaw(path: []const u8) !*c.sqlite3 {
     return raw.?;
 }
 
-/// Every table's rows but store_meta's, in key order: a line per row, and
-/// each value as its type and its bytes.
+/// Every SQLite table's rows but store_meta's, in key order: a line per
+/// row, and each value as its type and its bytes.
 fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
     inline for (store_schema.tables) |table| {
-        if (comptime std.mem.eql(u8, table.name, "store_meta")) continue;
+        if (comptime std.mem.eql(u8, table.name, "store_meta") or !table.engines.on(.sqlite)) continue;
         const order = comptime blk: {
             var text: []const u8 = "";
             for (table.primary_key, 0..) |column, position| text = text ++ (if (position == 0) "" else ",") ++ column;
@@ -8287,6 +8331,8 @@ test "a Store at the migration baseline with its rows takes every migration at o
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try writeRows(raw, &migrated_rows.writer);
     }
+    // Format 54 draws each migrated Store its own id.
+    try std.testing.expect(!std.mem.eql(u8, &try storeId(migrated), &try storeId(fresh)));
     {
         const raw = try openRaw(fresh);
         defer _ = c.sqlite3_close(raw);
@@ -8786,6 +8832,61 @@ test "a stop or a context full ending stops every attached child below it, each 
     try expectDenseSessionPositions(&storage, parent.slice());
 }
 
+test "child endings deliver once with their answer and sender; standalone endings owe nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const parent = try configureTestSession(&storage, "ending-parent");
+    const child = try configureTestSession(&storage, "ending-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "ending-task", "ending-task", child.slice(), "answer");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const item = "{\"type\":\"message\",\"id\":\"ending-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}";
+    try settleItemsForTesting(&storage, &tmp, model, &.{item}, "hello");
+    const ending = (try storage.nextCoreWork()).?.ending;
+    try std.testing.expectEqual(.done, ending.ending);
+    try std.testing.expect(!ending.quiet);
+    try expectContent(&storage, ending.answer.?, "hello");
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+    try std.testing.expect(!try storage.deliverChildEnding(ending.turn_id, .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2", .{ parent.slice(), child.slice() }));
+    // The Message is the saved answer itself, not a copy.
+    try std.testing.expectEqual(
+        try store_testing.sqlite_only.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{ending.turn_id}),
+        try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{parent.slice()}),
+    );
+    try std.testing.expect(try storage.nextCoreWork() == null);
+    // A standalone Turn has no parent to notify.
+    const solo = try configureTestSession(&storage, "ending-solo");
+    try submitTestMessage(&storage, &tmp, "solo-task", "solo-task", solo.slice(), "answer");
+    while (try storage.admitNextModelAttempt(.{})) |attempt| {
+        try settleItemsForTesting(&storage, &tmp, attempt.permit.binding, &.{item}, "hello");
+    }
+    try std.testing.expect(try storage.nextCoreWork() == null);
+}
+
+test "a client stopped child delivers a nonquiet stopped ending" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const parent = try configureTestSession(&storage, "client-ending-parent");
+    const child = try configureTestSession(&storage, "client-ending-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "client-ending-task", "client-ending-task", child.slice(), "work");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var stop = try completeSessionStop("client-ending-stop", child.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const ending = (try storage.nextCoreWork()).?.ending;
+    try std.testing.expectEqual(.stopped, ending.ending);
+    try std.testing.expect(!ending.quiet);
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2", .{ parent.slice(), child.slice() }));
+}
+
 test "a child's core call selected before its parent stopped runs only after the stop it owes, which cancels it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8813,6 +8914,10 @@ test "a child's core call selected before its parent stopped runs only after the
     const owed = (try storage.nextCoreWork()).?.stop;
     var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+    const ending = (try storage.nextCoreWork()).?.ending;
+    try std.testing.expect(ending.quiet);
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
     try std.testing.expect(try storage.nextCoreWork() == null);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
 }
@@ -8849,6 +8954,9 @@ test "an owed stop a client's stop already settled, or a newer one replaced, run
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
     var owed = try completeSessionStop(newer.key.slice(), newer.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
+    const ending = (try storage.nextCoreWork()).?.ending;
+    try std.testing.expect(ending.quiet);
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expect(try storage.nextCoreWork() == null);
     try std.testing.expect(!storage.isFenced());
 }
@@ -8896,7 +9004,7 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try file.writePositionalAll(io, listed, 0);
     const list = try protocol_reply.SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = listed.len } });
     try std.testing.expectEqual(@as(usize, 1), list.page.count);
-    try std.testing.expect(list.page.rows[0].tools.eql(.initOne(.message_agent)));
+    try std.testing.expect(std.mem.eql(u8, list.page.rows[0].tools.names.slice(), "message_agent"));
 
     // A call waiting to run shows as the core tool's, which needed no
     // permission decision under `ask`.
@@ -9148,6 +9256,7 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     const list = try testingSessionList(&storage, &tmp, .{}, &used, 1);
     defer std.testing.allocator.free(list);
     try std.testing.expect(std.mem.indexOf(u8, list, session.slice()) != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, offered) != null);
 }
 
 test "a record names a server exactly when an MCP server owns it" {
@@ -9437,6 +9546,9 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     const owed = (try storage.nextCoreWork()).?.stop;
     var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+    const ending = (try storage.nextCoreWork()).?.ending;
+    try std.testing.expect(ending.quiet);
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expect((try storage.nextCoreWork()) == null);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
 }
@@ -9475,4 +9587,85 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
         cost.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
     try std.testing.expectEqual(costs[0], costs[1]);
+}
+
+test "MCP ask approval uses the frozen server after its Session offer changes" {
+    const View = @import("../session_view.zig");
+    const tools = tool_catalog;
+    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
+        .name = "fetch_page",
+        .owner = .mcp,
+        .server = "docs",
+        .description = "Fetch a page.",
+        .input_schema = "{\"type\":\"object\"}",
+    }, tools.record(.message_agent).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    const digests = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        var out: [records.len][32]u8 = undefined;
+        for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
+        break :blk out;
+    };
+    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration("approval-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.tools = try .of(&.{"fetch_page"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const configured = storage.configure(&command, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session;
+    try submitTestMessage(&storage, &tmp, "approval-input", "approval-input", session.slice(), "fetch");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, model, "approval-calls", &.{
+        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("approval-remove");
+    update.session = session;
+    update.configuration.tools = try .of(&.{"bash"});
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+    defer std.testing.allocator.free(report);
+    const scratch = try tmp.dir.createFile(std.testing.io, "approval-scratch", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    try scratch.writePositionalAll(std.testing.io, report, 0);
+    const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, scratch, session.slice(), .{ .report = .{ .bytes = report.len } });
+    const observed = &decoded.current;
+    const action = observed.first_action.?;
+    const tool = (try View.actionToolFromCapture(observed, std.testing.io, scratch, action)).?;
+    try std.testing.expect(try tool.runner() == .mcp);
+    try std.testing.expectEqualStrings("fetch_page", tool.name.slice());
+    try std.testing.expectEqualStrings("docs", tool.server.?.slice());
+    const reference = try storage.actionArguments(session.slice(), action);
+    var saved_arguments: ContentReader = undefined;
+    saved_arguments.open(try storage.openContent(reference));
+    defer saved_arguments.close();
+    var arguments: [16]u8 = undefined;
+    const count = try saved_arguments.read(0, &arguments);
+    try std.testing.expectEqualStrings("{}", arguments[0..count]);
+    try scratch.setLength(std.testing.io, 0);
+    try scratch.writePositionalAll(std.testing.io, arguments[0..count], 0);
+    const Sink = struct {
+        bytes: [512]u8 = undefined,
+        len: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+        }
+    };
+    var sink: Sink = .{};
+    const summary = try View.renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+    try std.testing.expectEqualStrings("fetch_page", summary.description.slice());
+    try std.testing.expectEqualStrings("\n? fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
+    try std.testing.expect((try storage.nextCoreWork()) == null);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+    try allow.key.set("approval-allow");
+    allow.session = session;
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try std.testing.expectEqual(action, (try storage.nextCoreWork()).?.mcp.action_id);
 }

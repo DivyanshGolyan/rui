@@ -425,8 +425,8 @@ Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fal
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
 With no override, a new Session uses the catalog default.
-The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
-All eight advertise `low`, `medium`, `high` and `xhigh`.
+The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
+All nine advertise `low`, `medium`, `high` and `xhigh`.
 All except `gpt-5.5` also advertise `max`.
 An unknown exact binding has no inferred default: without an override, Rui omits `reasoning` and leaves the provider's effective effort unknown.
 An explicit effort on that binding rejects because Rui has no support evidence.
@@ -555,6 +555,10 @@ The Host runs each owed stop before any core tool call, as that child's own ordi
 A child that owes a stop runs none of its core tool calls; the stop cancels them.
 Clients cannot use keys under `rui.core/`, which Rui keeps for its own commands, so an owed stop's key is always free.
 An owed stop whose obligation a client's stop already settled, or a newer one replaced, runs nothing.
+Every attached child Turn ending owes its parent an ordinary Message from the child, waking the parent through normal Message admission (D39, D122).
+A done ending's Message is the child's saved answer itself, so nothing is copied; any other ending is a short line naming it, which is prompt text (D161).
+An ending caused by the parent's owed stop under `rui.core/stop/` settles quietly without admitting a Message (D139).
+One Store command delivers it and deletes the owed row, so a retry cannot deliver it twice.
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.
@@ -635,8 +639,9 @@ The Responses provider maps uniquely named top-level `input_tokens` and `output_
 A provider total is not a count.
 A missing, invalid or duplicate count, or a cache read above the input, leaves usage absent, and pressure falls back to retained-context estimates; a missing counter is not zero.
 
-Codex's eight exact [release-supported model IDs](#supported-model-ids) default to a 244,800-token trigger and zero extra output reservation.
-Each has a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json); its client derives the trigger at 90% of that window.
+Codex's nine exact [release-supported model IDs](#supported-model-ids) default to a trigger at 90% of their window and zero extra output reservation, as Codex's client derives it.
+Eight have a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json), so a 244,800-token trigger.
+`gpt-6.1-terra` has a 500,000-token window in a [later Codex catalog](https://github.com/openai/codex/blob/5c0b1ac71f2f04016abdfcf43bee7e0c96867f0e/codex-rs/models-manager/models.json), so a 450,000-token trigger.
 A model Rui does not list is assumed to have a 128,000-token window (`product_defaults.unlisted_context_window`), so it compacts at 115,200 tokens: small on purpose, because an early compaction costs a summary and a late one a refused request.
 An explicit override replaces it without claiming a model capacity or entitlement.
 Pressure uses valid usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without valid usage it estimates retained context.
@@ -1275,7 +1280,10 @@ The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn ou
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203): the DB team runs `schema.mysqlMigration(from)`, which PR 8's `rui store schema --engine mysql [--from N]` will print.
-No step exists yet.
+The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
+The step to 53 records a Session's parent (D27).
+The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
 Sessions store a Label and creation time.
@@ -2141,7 +2149,8 @@ No nested conversation login owner is retained.
 
 Interactive input uses the single conversation-first frontend described under [staged persistent input](#staged-persistent-input).
 It captures each exact Message before transmission and observes Host activity without a separate per-prompt follow loop or follow reminders.
-Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments. Queued chat, typeahead and marked paste authorize nothing.
+Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments.
+Queued chat, typeahead and marked paste authorize nothing.
 The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal; `/inspect-action` also prints executable `rui action allow`/`deny` commands.
 `/configure` changes settings for this Session (including its immutable Workspace check).
@@ -2673,7 +2682,7 @@ The Store assigns admission IDs in Session position order, so a page that ends b
 
 The composer uses the same `› ` marker as submitted User messages.
 The input keeps the bottom rows of the screen in a conversation and in the overview: a rule, then the draft, which grows to ten rows or a third of the screen, whichever is fewer, and then scrolls inside itself, keeping the same text first until its caret leaves the shown lines.
-The row under the draft is the overview's key hints and the conversation's Session line: `Name · model · effort · N% left`, quiet, with `asks before Bash` added when the permission mode is `ask`.
+The row under the draft is the overview's key hints and the conversation's Session line: `Name · model · effort · N% left`, quiet, with `asks before Bash/MCP` added when the permission mode is `ask`.
 The Session line shows the `ctrl+x stop` hint only while there is work to stop (Divyansh approved this on 2026-10-31, front-end plan PR 5).
 It shows while Ctrl-X would ask to stop the work the conversation shows, so not while a stop of that work is open.
 The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
@@ -2724,8 +2733,16 @@ Generated commands use printable hex Store selectors and bare six-character Sess
 Raw export streams the exact content without presentation.
 There is no history cache or new Host route.
 
-When Current exposes an actionable permission, the frontend reads the selected call's identity from that capture before its complete arguments replace scratch. The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog. Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it. Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one. MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Server` and the original `Arguments` JSON. A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse. The client extracts the label with bounded streaming scratch; it does not interpret the server's schema. `/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
-A whole Action ends right above the rule; a taller one pages from its top. Bash and MCP use the same 256 KiB viewport bound: an oversized Action file is a preview and cannot be approved.
+When Current exposes an actionable permission, the frontend reads the selected call's identity from that capture before its complete arguments replace scratch.
+The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog.
+Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
+Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
+MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Server` and the original `Arguments` JSON.
+A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse.
+The client extracts the label with bounded streaming scratch; it does not interpret the server's schema.
+`/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
+A whole Action ends right above the rule; a taller one pages from its top.
+Bash and MCP use the same 256 KiB viewport bound: an oversized Action file is a preview and cannot be approved.
 The description is the model's label, never a substitute for the command or MCP arguments.
 Every later line of the command, and every line of stdin, starts with the content mark `│`, and every row such a line, the `?` line or the `$` line wraps onto starts with `┆`, so description, command or stdin text can never pass for the `$`, `Time limit` or `stdin:` lines and a wrapped row never reads as a new line.
 Every line of MCP arguments starts with the same content mark and uses terminal escaping, so JSON cannot impersonate the Tool or Server labels.
@@ -3180,8 +3197,8 @@ Nonzero never proves noncommit.
 Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
-Bash and `bypass`, the default, stay quiet: no notice or banner announces them, and the Session line says `asks before Bash` only in `ask` mode.
-`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash runs without asking` or `ask · Bash asks first`, `session list` JSON shows it, and `/help` describes the Session line.
+Bash and `bypass`, the default, stay quiet: no notice or banner announces them, and the Session line says `asks before Bash/MCP` only in `ask` mode.
+`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it, and `/help` describes the Session line.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
@@ -3401,8 +3418,9 @@ Matching in-flight retries may receive the same acknowledgement; a replacement r
 
 Pause affects all work in the selected Store; it records no Session stop, so a later Host resumes that work from committed facts.
 Acknowledgement means a fence was requested, not that effects retired, connections drained or the lease released.
+So after acknowledgement pause probes only the lease (never the Host) for up to `product_defaults.host_shutdown_seconds` (10): a free lease reports `"retirement":"confirmed"`; a lease still held then reports `"unconfirmed"` and stderr says a new Host can start once `rui host status` reports unavailable.
+Confirmed retirement means the old Host let go of the Store; it reports nothing about cleanup progress.
 A missing/disconnected listener or timeout leaves completion unconfirmed.
-After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
 Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
 Holding new Turns is a different control, answered from Host memory like `host_info`: `POST /v1/control/host-pause` takes `kind:"host_pause"`, `store` and `paused`, sets whether this Host holds every new Turn, and replies `host_pause_reply` with the state now in force; repeating it changes nothing (D193).

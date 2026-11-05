@@ -385,15 +385,50 @@ fn shapeQueries(comptime name: []const u8) [5][]const u8 {
     };
 }
 
-/// Each table's rows in database `name`, in key order.
-fn rowQueries(comptime name: []const u8) [schema.tables.len][]const u8 {
-    var queries: [schema.tables.len][]const u8 = undefined;
-    for (schema.tables, &queries) |table, *query| {
+/// Each MySQL table's rows in database `name`, in key order.
+fn rowQueries(comptime name: []const u8) []const []const u8 {
+    var queries: []const []const u8 = &.{};
+    for (schema.tables) |table| if (table.engines.on(.mysql)) {
         var order: []const u8 = "";
         for (table.primary_key, 0..) |column, position| order = order ++ (if (position == 0) "" else ",") ++ column;
-        query.* = "SELECT * FROM " ++ name ++ "." ++ table.name ++ " ORDER BY " ++ order;
-    }
+        queries = queries ++ .{"SELECT * FROM " ++ name ++ "." ++ table.name ++ " ORDER BY " ++ order};
+    };
     return queries;
+}
+
+/// Fails unless database `name`'s catalog (`schema.catalogSql`) has the
+/// digest the schema derives, and then logs the lines each side lacks.
+fn expectCatalog(comptime name: []const u8) !void {
+    var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer lines.deinit();
+    try writeResult(comptime schema.catalogSql("'" ++ name ++ "'"), &lines.writer);
+    // writeResult writes a row as its end of line, then each value as " length:" and its bytes.
+    var sum: u64 = 0;
+    var rows = std.mem.splitScalar(u8, lines.written(), '\n');
+    while (rows.next()) |row| {
+        if (row.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, row, ':') orelse return error.MysqlCatalogRow;
+        sum +%= schema.catalogLineDigest(row[colon + 1 ..]);
+    }
+    if (sum == schema.catalogDigest()) return;
+    // stderr, which the test runner always shows.
+    const expected = comptime schema.catalogLinesForTesting();
+    rows = std.mem.splitScalar(u8, lines.written(), '\n');
+    while (rows.next()) |row| {
+        if (row.len == 0) continue;
+        const line = row[std.mem.indexOfScalar(u8, row, ':').? + 1 ..];
+        for (expected) |want| {
+            if (std.mem.eql(u8, want, line)) break;
+        } else std.debug.print("MySQL catalog check: only {s} has: {s}\n", .{ name, line });
+    }
+    for (expected) |want| {
+        rows = std.mem.splitScalar(u8, lines.written(), '\n');
+        while (rows.next()) |row| {
+            const colon = std.mem.indexOfScalar(u8, row, ':') orelse continue;
+            if (std.mem.eql(u8, row[colon + 1 ..], want)) break;
+        } else std.debug.print("MySQL catalog check: only the schema has, for {s}: {s}\n", .{ name, want });
+    }
+    return error.MysqlCatalogDiffers;
 }
 
 /// Writes each query of `migrated` and its twin of `fresh`, and fails
@@ -425,9 +460,12 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     try load(migrated_database, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| try load(migrated_database, schema.mysqlMigration(step.from), false);
     try load(fresh_database, schema.ddl(.mysql), false);
-    try load(fresh_database, store_testing.expected_rows, true);
+    try load(fresh_database, store_testing.expected_mysql_rows, true);
     try expectSameResults(comptime &shapeQueries(migrated_database), comptime &shapeQueries(fresh_database));
-    try expectSameResults(comptime &rowQueries(migrated_database), comptime &rowQueries(fresh_database));
+    try expectSameResults(comptime rowQueries(migrated_database), comptime rowQueries(fresh_database));
+    // What the engine's open compares, on a fresh and a migrated Store.
+    try expectCatalog(fresh_database);
+    try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
 }
