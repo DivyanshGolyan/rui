@@ -89,7 +89,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_prepush_leaves_server_targets_to_ci(self):
         import prepush
-        for path in ("src/store/rsql.zig", "src/store/wire/mysql_driver.zig", "src/store/wire/pg.zig"):
+        for path in ("src/store/rsql.zig", "src/store/wire/mysql_connection.zig", "src/store/wire/pg.zig"):
             with self.subTest(path=path):
                 builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
                 self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
