@@ -6312,10 +6312,10 @@ def main(selected="all"):
                 original_preferences.replace("provider=codex", "provider=")):
             invalid_bytes = invalid_saved.encode()
             saved.write_bytes(invalid_bytes)
-            for arguments in (("inspect",), ("configure", "--notifications", "on")):
-                refused_saved = invoke(preferences_home, "defaults", *arguments, expect=6)
+            for defaults_args in (("inspect",), ("configure", "--notifications", "on")):
+                refused_saved = invoke(preferences_home, "defaults", *defaults_args, expect=6)
                 assert not refused_saved.stdout and "[preferences_invalid]" in refused_saved.stderr, refused_saved
-                assert saved.read_bytes() == invalid_bytes, (arguments, "malformed saved defaults were rewritten")
+                assert saved.read_bytes() == invalid_bytes, (defaults_args, "malformed saved defaults were rewritten")
         saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=gpt-5.6-sol"))
         assert saved.read_text().endswith("provider=codex\nmodel=gpt-5.6-sol\n")
         assert defaults(preferences_home)["model"] == "gpt-5.6-sol"
