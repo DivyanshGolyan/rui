@@ -383,7 +383,7 @@ def run():
                 mismatches.append((model, "parallel_tool_calls", request.get("parallel_tool_calls")))
             if endpoint.user_agents[4 + index] != expected_agent:
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
-        assert len(endpoint.requests) == 12, endpoint.requests
+        assert len(endpoint.requests) == 13, endpoint.requests
         assert not mismatches, mismatches
         print(f"codex request envelopes passed: nine exact model IDs, catalog effort defaults, 90% compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
