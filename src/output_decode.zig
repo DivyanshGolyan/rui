@@ -790,9 +790,9 @@ const Grammar = struct {
         var cursor = completed.output;
         var index: u64 = 0;
         while (codecs.nextMember(self.codec, data, &cursor)) |member| switch (member) {
-            // One item of the output list must name the streamed item at its
-            // index. Its bytes may differ: the provider re-encrypts reasoning
-            // for the terminal copy, so the streamed item is the one kept.
+            // One item of the output list must be the streamed item at its
+            // index: byte for byte, except an encrypted item, which the
+            // provider re-encrypts for the terminal copy.
             .terminal => |*terminal| {
                 if (!try streamedAs(&records, data, terminal, index)) return error.ContradictoryProviderOutput;
                 index += 1;
@@ -801,7 +801,7 @@ const Grammar = struct {
             .bag, .part, .part_end => unreachable,
         };
         // The managed stream can omit the repeated items from
-        // response.completed. Any nonempty terminal list must still name
+        // response.completed. Any nonempty terminal list must still match
         // every streamed done item.
         if (index != 0 and (index != self.item_count or try records.nextItem() != null)) return error.ContradictoryProviderOutput;
         switch (completed.usage) {
@@ -818,12 +818,18 @@ const Grammar = struct {
         try metadata.sealForRead();
     }
 
-    /// Whether the next streamed item is the output list's item at `index`:
-    /// same position, kind and ID.
+    /// Whether the next streamed item is the output list's item at `index`.
+    /// Reasoning and compaction items carry provider-encrypted content that
+    /// is encrypted afresh for each copy, so they agree by position, kind and
+    /// ID; every other item agrees byte for byte. The streamed item is kept.
     fn streamedAs(records: *output_format.OutputMetadataRecords, data: []const u8, terminal: *const @FieldType(codec_abi.Member, "terminal"), index: u64) !bool {
         const record = try records.nextItem() orelse return false;
-        return record.ordinal == index and record.kind == outputKind(terminal.kind) and
+        const same_item = record.ordinal == index and record.kind == outputKind(terminal.kind) and
             std.mem.eql(u8, &record.id_digest, &Decoded.of(data, terminal.id, null, null).digest);
+        return same_item and switch (record.kind) {
+            .reasoning, .compaction => true,
+            .message, .function_call, .web_search_call => std.mem.eql(u8, &record.content_digest, &digestOf(data, terminal.whole)),
+        };
     }
 
     /// The codec's verdict on the event, with the provider's report when it
@@ -2069,6 +2075,16 @@ test "provider preserves ordered trustworthy function call envelopes" {
     defer invalid_tmp.cleanup();
     const mixed = try validateTestingSse(&invalid_tmp, late_invalid, 64 * 1024);
     try std.testing.expectEqual(@as(u64, 2), mixed.output.call_count);
+
+    // Only encrypted items may differ between copies: a call whose terminal
+    // copy changes its arguments under the same ID is a contradiction.
+    const changed_arguments = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call-B\",\"arguments\":\"{\\\"cmd\\\":\\\"three\\\"}\"}";
+    const contradicted = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ second ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-3\",\"status\":\"completed\",\"output\":[" ++ first ++ "," ++ changed_arguments ++ "]}}\n\n";
+    var contradicted_tmp = std.testing.tmpDir(.{});
+    defer contradicted_tmp.cleanup();
+    try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingSse(&contradicted_tmp, contradicted, 64 * 1024));
 
     const message = "{\"type\":\"message\",\"id\":\"message-1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"late\",\"annotations\":[]}]}";
     const late_message = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
