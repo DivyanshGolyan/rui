@@ -4,6 +4,8 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
+const tool_catalog = @import("../tools.zig");
+const tool_set_domain = @import("domain/tool_set.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const output_format = @import("../output_format.zig");
@@ -216,7 +218,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
                 try std.testing.expect(!storage.isFenced());
             }
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
         }
     }.run);
@@ -981,21 +983,21 @@ test "a content sink opens only a content id its Access itself took, stepping it
             // this Access's first, one other code took between its own, and one
             // past its last. A check of the range from its first id to its last
             // accepted `between`.
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1, 4));
             // The old rule took only the last id, with nothing queued: here the
             // first id opens while inserts are queued, and the pass steps them.
-            const sink = try a.contentSink(first);
+            const sink = try a.contentSink(first, 4);
             try sink.write("sink", 0);
             sink.close();
             try std.testing.expectEqual(0, a.queued);
-            const again = try a.contentSink(last);
+            const again = try a.contentSink(last, 4);
             again.close();
             // Taken but never inserted: there is no row to open.
-            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never));
+            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never, 4));
             try a.abandon(.{});
         }
     }.run);
@@ -2317,7 +2319,7 @@ test "the Store prepares only typed statements, its transaction control and test
     // Open text cannot reach SQLite beside `rsql`: the one prepare is
     // `cachedStatic`, called only by these three, and `cachedTyped` takes
     // only a type `rsql.Read` or `rsql.Write` made (`rsql.isStatement`).
-    const source = @embedFile("Store.zig");
+    const source = @embedFile("engine/Sqlite.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "sqlite3_" ++ "prepare"));
     const callers = [_][]const u8{ "controlStatement", "cachedTyped", "fixtureStatement" };
     var calls = std.mem.splitSequence(u8, source, "cachedStatic" ++ "(self, ");
@@ -2351,6 +2353,8 @@ test "Store entry points queue and fence only through canonical access" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -3936,11 +3940,34 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(current, &requested),
+            configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, current, &requested),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
         };
+    }
+}
+
+test "configure refuses a tool name the catalog lacks and a provider tool its provider does not run" {
+    const hosted: tool_catalog.Record = .{ .name = "code_interpreter", .owner = .provider };
+    const records = [_]tool_catalog.Record{ tool_catalog.bash_record, hosted, tool_catalog.web_search_record };
+    const digests = [_][32]u8{ tool_catalog.recordDigest(&records[0]), tool_catalog.recordDigest(&records[1]), tool_catalog.recordDigest(&records[2]) };
+    const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+    try std.testing.expect(catalog.valid());
+    var existing: CurrentConfiguration = .{};
+    existing.provider = .codex;
+    try existing.model.set("model-a");
+    const Case = struct { names: []const []const u8, expected: ?protocol.ConfigurationRejection };
+    for ([_]Case{
+        .{ .names = &.{ "bash", "web_search" }, .expected = null },
+        .{ .names = &.{}, .expected = null },
+        .{ .names = &.{"edit"}, .expected = .unknown_tool },
+        .{ .names = &.{ "bash", "edit" }, .expected = .unknown_tool },
+        .{ .names = &.{"code_interpreter"}, .expected = .provider_tool_missing },
+    }) |case| {
+        var requested: protocol.Configuration = .{};
+        requested.tools = try .of(case.names);
+        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&catalog, &existing, &requested));
     }
 }
 
@@ -4097,7 +4124,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         expected_rejection: ?protocol.ConfigurationRejection = null,
         expected_actions: ?Actions = null,
         expected_model: []const u8 = "model-a",
-        expected_tools: u8 = 1,
         expected_permission: u8 = 0,
         expected_revision: u64 = 8,
     };
@@ -4108,7 +4134,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .workspace = .same,
             .model = "model-a",
             .expected_actions = .{ .instructions = .default_empty, .output_schema = .clear },
-            .expected_tools = configuration_domain.default_tools_mask,
             .expected_permission = 1,
             .expected_revision = 1,
         },
@@ -4129,7 +4154,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .schema = .clear,
             .expected_actions = .{ .instructions = .import_requested, .output_schema = .clear },
             .expected_model = "model-a",
-            .expected_tools = 0,
             .expected_permission = 1,
         },
         .{
@@ -4217,7 +4241,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             try std.testing.expectEqual(expected.output_schema, plan.update.output_schema);
         }
         try std.testing.expectEqualStrings(case.expected_model, next.model.slice());
-        try std.testing.expectEqual(case.expected_tools, next.tools_mask);
         try std.testing.expectEqual(case.expected_permission, next.permission_mode);
         try std.testing.expectEqual(case.expected_revision, next.revision);
         try std.testing.expectEqual(@as(?i64, if (case.created) null else 11), next.instructions_id);
@@ -5285,7 +5308,7 @@ test "content import reads once and rolls back sources that change during readin
                 } else {
                     try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
                     try std.testing.expectError(error.StoreFenced, storage.observeCommand("read-probe"));
-                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                 }
@@ -8285,6 +8308,10 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 /// separate transition while the Store is held, by the name the source
 /// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
+    saveCatalog,
+    readCatalogSet,
+    readCatalogRecords,
+    readCatalogText,
     configure,
     submitMessageWithModel,
     stopSession,
@@ -8308,6 +8335,7 @@ const EntryPoint = enum {
     nextCoreWork,
     deliverAgentMessage,
     startAgent,
+    stopOwedSession,
     failCoreCall,
     actionSupersededByStop,
     withActionDispatchHandoff,
@@ -8364,7 +8392,8 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .revokeActionSender = 2,
     .nextCoreWork = 3,
     .deliverAgentMessage = 3,
-    .startAgent = 5,
+    .startAgent = 4,
+    .stopOwedSession = 2,
     .failCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
@@ -8392,6 +8421,11 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readDeclaredTool = 1,
     .readProviderTool = 1,
     .checkAttempt = 1,
+    // A Host's catalog is saved once; each later open finds it.
+    .saveCatalog = 1,
+    .readCatalogSet = 1,
+    .readCatalogRecords = 1,
+    .readCatalogText = 0,
 });
 
 /// Each entry point's content rounds (`readRaw` windows, counted in
@@ -8403,7 +8437,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite => switch (point) {
-            .readOwnedContent => 1,
+            .readOwnedContent, .readCatalogText => 1,
             else => 0,
         },
     };
@@ -8419,6 +8453,8 @@ test "every function that enters the Store has a round budget" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8532,6 +8568,21 @@ test "each Store entry point takes its round budget on its common path" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            try storage.saveCatalog(&tool_catalog.built_in);
+            meter.stop(.saveCatalog);
+            meter.start();
+            const saved = (try storage.readCatalogSet()).?;
+            meter.stop(.readCatalogSet);
+            var rows: [tool_catalog.built_in.records.len]tool_set_domain.catalog_records.Row = undefined;
+            meter.start();
+            try std.testing.expectEqual(rows.len, try storage.readCatalogRecords(saved.tool_set_id.get(), 0, &rows));
+            meter.stop(.readCatalogRecords);
+            var text: [tool_catalog.bash_record.description.len]u8 = undefined;
+            meter.start();
+            try storage.readCatalogText(rows[0].description_id.get(), &text);
+            meter.stop(.readCatalogText);
+            try std.testing.expectEqualStrings(tool_catalog.bash_record.description, &text);
             try plainTurn(&storage, &tmp, &meter);
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);
@@ -8638,7 +8689,8 @@ test "each Store entry point takes its round budget on its common path" {
         }
 
         /// Three core calls: a Message delivered, an agent started, and a
-        /// start whose arguments the Host refused.
+        /// start whose arguments the Host refused; then the stop the started
+        /// child owes once its parent stops.
         fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -8674,6 +8726,14 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
             meter.stop(.failCoreCall);
+            var stop = try completeSessionStop("budget-core-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            const owed = (try storage.nextCoreWork()).?.stop;
+            var owed_stop: protocol.SessionStopCommand = .{ .key = owed.key };
+            try owed_stop.session.set(owed.session.slice());
+            meter.start();
+            try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+            meter.stop(.stopOwedSession);
         }
 
         /// Two Bash calls under ask: one allowed, run and settled, one

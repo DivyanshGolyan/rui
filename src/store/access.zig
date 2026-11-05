@@ -3,9 +3,10 @@
 //! plain Zig, then queues its writes and ends with `commit`. It never
 //! writes BEGIN, COMMIT, a row-count check or a position claim itself.
 //!
-//! The engine is the Store's SQLite connection. A statement is bound when
-//! queued: fixed values are copied then, and only texts and blobs are read
-//! in place when it steps (`sqlite.bindArgs`, `Borrowed`). A round may
+//! The engine is the Store's (`engine.Engine`), today its SQLite
+//! connection. A statement is bound when queued: fixed values are copied
+//! then, and only texts and blobs are read in place when it steps
+//! (`sqlite.bindArgs`, `Borrowed`). A round may
 //! queue one statement any number of times: SQLite steps what is queued,
 //! in order (an engine pass), before it rebinds a statement already
 //! queued, when the queue's 8 slots are full, when `contentSink` opens a
@@ -22,9 +23,8 @@ const change_ring = @import("../change_ring.zig");
 const store_core = @import("Store.zig");
 const Store = store_core.Store;
 const rsql = @import("rsql.zig");
-const tool_catalog = @import("../tools.zig");
+const engine = @import("engine.zig");
 const sqlite = @import("sqlite.zig");
-const c = sqlite.c;
 
 pub const Mode = enum {
     /// Reads only, outside any transaction.
@@ -41,27 +41,7 @@ pub const Mode = enum {
 };
 
 /// What a round reports besides its guards' errors. Each one fences.
-pub const Failure = error{
-    BindFailed,
-    IntegerOutOfRange,
-    StatementPrepareFailed,
-    OutOfMemory,
-    StatementFailed,
-    CanonicalStorageFull,
-    CanonicalRollbackFailed,
-    CorruptStore,
-    ContentWriteFailed,
-    ContentReadFailed,
-    RangeOutOfBounds,
-    SqliteExecFailed,
-    ClockReadFailed,
-    SessionPositionExhausted,
-    IdentityExhausted,
-    IdentityOutsideTransaction,
-    IdentityReadFailed,
-    TooManyPositionClaims,
-    ContentNotInserted,
-};
+pub const Failure = engine.Failure;
 
 /// A Session's positions claimed by one Access, from its head as a round
 /// read it. `commit` advances `next_position` once, by a compare-and-set
@@ -91,34 +71,7 @@ const advance = rsql.Write(.{
 /// A content row an Access queued, by its identity.
 pub const InsertedContent = struct { digest: [32]u8, length: u64, private: bool, content_id: u64 };
 
-/// The read handle on a content payload, reused within one Entry: reading
-/// on through one row reuses SQLite's overflow-page index, about
-/// length/1024 bytes of its heap. `Entry.release` closes it.
-pub const ContentBlob = struct {
-    handle: ?*c.sqlite3_blob = null,
-    content_id: i64 = 0,
-
-    pub fn close(self: *ContentBlob) void {
-        // Close reports only an earlier read failure, already returned.
-        if (self.handle) |handle| _ = c.sqlite3_blob_close(handle);
-        self.* = .{};
-    }
-};
-
-/// Writes one content payload in place, at offsets the writer chooses.
-pub const ContentSink = struct {
-    blob: *c.sqlite3_blob,
-
-    pub fn write(sink: ContentSink, bytes: []const u8, offset: u64) error{ ContentWriteFailed, ContentTooLarge }!void {
-        if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
-        if (c.sqlite3_blob_write(sink.blob, bytes.ptr, @intCast(bytes.len), @intCast(offset)) != c.SQLITE_OK) return error.ContentWriteFailed;
-    }
-
-    pub fn close(sink: ContentSink) void {
-        // Close reports only an earlier write failure, already returned.
-        _ = c.sqlite3_blob_close(sink.blob);
-    }
-};
+pub const ContentSink = engine.ContentSink;
 
 /// The byte Debug and test builds fill a `read` destination with until the
 /// pass that steps it (`Access.read` says what that catches).
@@ -232,8 +185,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The first failure; every later call does nothing and every round
         /// reports it.
         failure: ?Error = null,
-        /// The statement whose step recorded `failure`, if one did.
-        failed_statement: ?*c.sqlite3_stmt = null,
+        /// The text of the statement whose step recorded `failure`, if one
+        /// did: its runner records it.
+        failed_sql: ?[*:0]const u8 = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
         /// Engine passes. Rounds, each one round trip on a network
@@ -253,9 +207,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         inserted_count: u8 = 0,
 
         /// The most content rows one Access inserts: a creating Message's
-        /// instructions, output schema, empty default and text, and a new
-        /// tool set's texts. MCP tools (M3a) must widen this.
-        const max_inserted = 4 + tool_catalog.max_new_texts;
+        /// instructions, output schema, empty default and text, or the two
+        /// texts of each record one catalog transaction saves.
+        const max_inserted = 4;
+        comptime {
+            std.debug.assert(2 * @import("domain/tool_set.zig").records_per_transaction <= max_inserted);
+        }
         /// How many of its latest content ids an Access can open a sink
         /// on. Every caller opens one right after taking its id.
         const max_taken = max_inserted;
@@ -269,7 +226,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         const Queued = struct {
             run: *const fn (*Self, *const Queued) Error!void,
             /// Null for a content payload.
-            statement: ?*c.sqlite3_stmt,
+            statement: ?engine.Statement,
             target: union {
                 /// A read's result.
                 destination: *anyopaque,
@@ -372,9 +329,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 entry.borrowed.check();
                 entry.run(a, entry) catch |err| {
                     a.failure = err;
-                    a.failed_statement = entry.statement;
                 };
-                if (entry.statement) |statement| sqlite.resetCached(statement);
+                a.store.engine.endStatement(entry.statement);
             }
             a.resetQueued();
         }
@@ -383,8 +339,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// maps a round's `StatementFailed` to the name main gave the
         /// statement that failed.
         pub fn failedOn(a: *const Self, comptime S: type) bool {
-            const statement = a.failed_statement orelse return false;
-            return a.store.statements.find(S.sql.ptr) == statement;
+            return a.failed_sql == S.sql.ptr;
         }
 
         /// Records that this Access changes `head`'s Session, and returns
@@ -464,32 +419,21 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// Reads exactly `destination.len` bytes of the content row
-        /// `content_id`'s payload at `offset`, as a round of its own,
-        /// through the Store's one reused blob handle, which the Entry
-        /// closes. Nothing may be queued, in every build. An empty
+        /// `content_id`'s payload at `offset`, as a round of its own; on
+        /// SQLite through the Store's one reused blob handle, which the
+        /// Entry closes. Nothing may be queued, in every build. An empty
         /// `destination` reads nothing and counts no round.
         pub fn readRaw(a: *Self, content_id: u64, offset: u64, destination: []u8) Error!void {
             if (a.queued != 0) @panic("readRaw is a round of its own; run what is queued first");
             if (a.failure) |err| return err;
             if (destination.len == 0) return;
             if (@import("builtin").is_test) a.store.testing_content_work.content_rounds += 1;
-            if (offset > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
-            const id: i64 = @intCast(content_id);
-            const blob = &a.store.read_blob;
-            if (blob.handle == null) {
-                // A failed open leaves the handle null.
-                if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", id, 0, &blob.handle) != c.SQLITE_OK) return error.ContentReadFailed;
-                blob.content_id = id;
-            } else if (blob.content_id != id) {
-                // A failed reopen aborts the handle; close remains its release.
-                if (c.sqlite3_blob_reopen(blob.handle, id) != c.SQLITE_OK) return error.ContentReadFailed;
-                blob.content_id = id;
-            }
-            if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(offset)) != c.SQLITE_OK) return error.ContentReadFailed;
+            try a.store.engine.readRaw(content_id, offset, destination);
             if (@import("builtin").is_test) _ = a.store.testing_content_work.blob.fetchAdd(destination.len, .monotonic);
         }
 
-        /// A sink for the payload of the content row `content_id`. It
+        /// A sink for the payload of the content row `content_id`, which
+        /// holds `length` bytes. It
         /// checks exactly that the id is one of the last `max_taken` this
         /// Access took with `identity(.content_id)`; any other, 0 and ids
         /// other code took in the same transaction included, is
@@ -500,15 +444,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// the bytes commit with the row. Streamed imports need it
         /// (`importSealed`, settlement), so a value is never held in
         /// memory whole.
-        pub fn contentSink(a: *Self, content_id: u64) Error!ContentSink {
+        pub fn contentSink(a: *Self, content_id: u64, length: u64) Error!ContentSink {
             comptime std.debug.assert(mode != .read and mode != .single);
             if (a.failure) |err| return err;
             if (content_id == 0 or std.mem.findScalar(u64, &a.taken, content_id) == null) return error.ContentNotInserted;
             a.pass();
             if (a.failure) |err| return err;
-            var blob: ?*c.sqlite3_blob = null;
-            if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
-            return .{ .blob = blob.? };
+            return a.store.engine.openSink(content_id, length);
         }
 
         /// Runs the queued writes and one compare-and-set per Session that
@@ -606,16 +548,16 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// Binds and queues `S`, after an engine pass when `S` is already
         /// queued or the queue is full. True when it queued.
-        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: *const fn (*Self, *const Queued) Error!void, target: @FieldType(Queued, "target")) bool {
+        fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: Runner, target: @FieldType(Queued, "target")) bool {
             a.ensureOpen();
             if (a.failure != null) return false;
-            const statement = store_core.cachedTyped(a.store, S) catch |err| {
+            const statement = a.store.engine.statementFor(S) catch |err| {
                 a.failure = err;
                 return false;
             };
             // Binding a queued statement would replace the arguments it
             // has not stepped with yet.
-            for (a.queue[0..a.queued]) |entry| if (entry.statement == statement) {
+            if (statement != null) for (a.queue[0..a.queued]) |entry| if (entry.statement == statement) {
                 a.pass();
                 break;
             };
@@ -625,8 +567,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             } else 0;
             const slot = a.reserve() orelse return false;
             slot.* = .{ .statement = statement, .run = runner, .target = target };
-            sqlite.bindArgs(statement, S, args, now) catch |err| {
-                sqlite.resetCached(statement);
+            a.store.engine.bind(statement, S, args, now) catch |err| {
+                a.store.engine.discard(statement);
                 a.failure = err;
                 return false;
             };
@@ -652,42 +594,58 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (poisons) @memset(std.mem.asBytes(destination), poison_byte);
         }
 
-        /// Empties the queue. A pass reset each statement it stepped, and
-        /// checked it (`sqlite.resetCached`), as it stepped; what is left
-        /// was never stepped since its bind (`sqlite.resetUnstepped`).
+        /// Empties the queue. A pass ended each statement it stepped
+        /// (`Engine.endStatement`), as it stepped; what is left was never
+        /// stepped since its bind (`Engine.discard`).
         fn resetQueued(a: *Self) void {
-            for (a.queue[0..a.queued]) |entry| if (entry.statement) |statement| sqlite.resetUnstepped(statement);
+            for (a.queue[0..a.queued]) |entry| a.store.engine.discard(entry.statement);
             a.queued = 0;
         }
 
-        fn runRead(comptime S: type) *const fn (*Self, *const Queued) Error!void {
+        const Runner = *const fn (*Self, *const Queued) Error!void;
+
+        /// `step`, recording `S` as the statement whose step failed
+        /// (`failedOn`) when it fails.
+        fn named(comptime S: type, comptime step: fn (*Self, *const Queued) Error!void) Runner {
             return &struct {
-                fn run(_: *Self, entry: *const Queued) Error!void {
-                    const statement = entry.statement.?;
+                fn run(a: *Self, entry: *const Queued) Error!void {
+                    step(a, entry) catch |err| {
+                        a.failed_sql = S.sql.ptr;
+                        return err;
+                    };
+                }
+            }.run;
+        }
+
+        fn runRead(comptime S: type) Runner {
+            return named(S, struct {
+                fn run(a: *Self, entry: *const Queued) Error!void {
+                    const e = &a.store.engine;
+                    const statement = entry.statement;
                     const destination: *S.Result = @ptrCast(@alignCast(entry.target.destination));
                     // A read whose text allows one row takes no step to look for a second.
                     switch (S.cardinality) {
                         .one => {
-                            if (!try nextRow(statement)) return error.CorruptStore;
-                            try sqlite.decodeRow(S.Row, statement, destination);
-                            if (!S.single_row and try nextRow(statement)) return error.CorruptStore;
+                            if (!try e.nextRow(statement)) return error.CorruptStore;
+                            try e.decodeRow(S.Row, statement, destination);
+                            if (!S.single_row and try e.nextRow(statement)) return error.CorruptStore;
                         },
                         .optional => {
-                            if (!try nextRow(statement)) {
+                            if (!try e.nextRow(statement)) {
                                 destination.* = null;
                                 return;
                             }
                             // At most 1 KiB, holding no pointer (`Access.read`), so the copy is small.
                             var row: S.Row = undefined;
-                            try sqlite.decodeRow(S.Row, statement, &row);
+                            try e.decodeRow(S.Row, statement, &row);
                             destination.* = row;
-                            if (!S.single_row and try nextRow(statement)) return error.CorruptStore;
+                            if (!S.single_row and try e.nextRow(statement)) return error.CorruptStore;
                         },
                         .at_most => |max| {
                             destination.len = 0;
-                            while (try nextRow(statement)) {
+                            while (try e.nextRow(statement)) {
                                 if (destination.len == max) return error.CorruptStore;
-                                try sqlite.decodeRow(S.Row, statement, &destination.items[destination.len]);
+                                try e.decodeRow(S.Row, statement, &destination.items[destination.len]);
                                 destination.len += 1;
                                 if (S.single_row) break;
                             }
@@ -695,29 +653,31 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                         .each => @compileError("readEach runs an .each read"),
                     }
                 }
-            }.run;
+            }.run);
         }
 
-        fn runInto(comptime S: type) *const fn (*Self, *const Queued) Error!void {
-            return &struct {
-                fn run(_: *Self, entry: *const Queued) Error!void {
-                    const statement = entry.statement.?;
+        fn runInto(comptime S: type) Runner {
+            return named(S, struct {
+                fn run(a: *Self, entry: *const Queued) Error!void {
+                    const e = &a.store.engine;
+                    const statement = entry.statement;
                     const into = entry.target.into;
-                    if (!try nextRow(statement)) {
+                    if (!try e.nextRow(statement)) {
                         into.found.* = .missing;
                         return;
                     }
                     into.found.* = .found;
-                    try sqlite.decodeRow(S.Row, statement, @ptrCast(@alignCast(into.row)));
-                    if (!S.single_row and try nextRow(statement)) return error.CorruptStore;
+                    try e.decodeRow(S.Row, statement, @ptrCast(@alignCast(into.row)));
+                    if (!S.single_row and try e.nextRow(statement)) return error.CorruptStore;
                 }
-            }.run;
+            }.run);
         }
 
-        fn runEach(comptime S: type, comptime Visitor: type) *const fn (*Self, *const Queued) Error!void {
-            return &struct {
-                fn run(_: *Self, entry: *const Queued) Error!void {
-                    const statement = entry.statement.?;
+        fn runEach(comptime S: type, comptime Visitor: type) Runner {
+            return named(S, struct {
+                fn run(a: *Self, entry: *const Queued) Error!void {
+                    const e = &a.store.engine;
+                    const statement = entry.statement;
                     const each = entry.target.each;
                     const visitor: *Visitor = @ptrCast(@alignCast(each.visitor));
                     // At most 1 KiB, unless the visitor owns its row (`eachVisitorError`).
@@ -725,39 +685,31 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     var local: if (owned) void else S.Row = undefined;
                     const row: *S.Row = if (owned) &visitor.decoded else &local;
                     var stepped: u64 = 0;
-                    while (stepped < each.limit and try nextRow(statement)) : (stepped += 1) {
-                        try sqlite.decodeRow(S.Row, statement, row);
+                    while (stepped < each.limit and try e.nextRow(statement)) : (stepped += 1) {
+                        try e.decodeRow(S.Row, statement, row);
                         if (!visitor.visit(row)) break;
                     }
                 }
-            }.run;
+            }.run);
         }
 
-        fn runWrite(comptime S: type) *const fn (*Self, *const Queued) Error!void {
-            return &struct {
+        fn runWrite(comptime S: type) Runner {
+            return named(S, struct {
                 fn run(a: *Self, entry: *const Queued) Error!void {
-                    switch (c.sqlite3_step(entry.statement.?)) {
-                        c.SQLITE_DONE => {},
-                        c.SQLITE_FULL => return error.CanonicalStorageFull,
-                        else => return error.StatementFailed,
-                    }
-                    const changed = c.sqlite3_changes64(a.store.database);
+                    const changed = try a.store.engine.stepWrite(entry.statement);
                     switch (S.expect) {
                         .exact => |guard| if (changed != guard.rows) return comptime @as(Error, @errorCast(guard.otherwise)),
                         .at_most => |rows| if (changed > rows) return error.CorruptStore,
                         .counted => |guard| if (changed != entry.target.counted) return comptime @as(Error, @errorCast(guard.otherwise)),
                     }
                 }
-            }.run;
+            }.run);
         }
 
         fn runPayload(a: *Self, entry: *const Queued) Error!void {
             const payload = entry.target.payload;
             if (payload.bytes.len == 0) return;
-            var blob: ?*c.sqlite3_blob = null;
-            if (c.sqlite3_blob_open(a.store.database, "main", "content", "payload", @intCast(payload.content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
-            defer _ = c.sqlite3_blob_close(blob);
-            if (c.sqlite3_blob_write(blob, payload.bytes.ptr, @intCast(payload.bytes.len), 0) != c.SQLITE_OK) return error.ContentWriteFailed;
+            try a.store.engine.writePayload(payload.content_id, payload.bytes);
         }
     };
 }
@@ -800,13 +752,4 @@ fn NamedErrors(comptime named: anytype) type {
     comptime var set: type = error{};
     inline for (named) |pair| set = set || @TypeOf(pair[1]);
     return set;
-}
-
-/// Steps `statement`: true at a row, false at its end.
-fn nextRow(statement: *c.sqlite3_stmt) Failure!bool {
-    return switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => true,
-        c.SQLITE_DONE => false,
-        else => error.StatementFailed,
-    };
 }

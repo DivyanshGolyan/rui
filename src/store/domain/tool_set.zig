@@ -5,12 +5,12 @@
 //! and a request renders the saved text, so a reworded built-in changes
 //! only the sets saved after it.
 const std = @import("std");
+const protocol = @import("../../protocol.zig");
 const tool_catalog = @import("../../tools.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
 
 const Tool = tool_catalog.Tool;
-const tool_count = std.enums.values(Tool).len;
 
 const lookup_set = rsql.Read(.{
     .sql = "SELECT tool_set_id FROM tool_set WHERE digest=?1",
@@ -20,15 +20,15 @@ const lookup_set = rsql.Read(.{
 });
 
 const lookup_record = rsql.Read(.{
-    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND owner=?2 AND description_content_id=?3 AND input_schema_content_id=?4",
-    .Args = struct { name: []const u8, owner: tool_catalog.Owner, description: u64, input_schema: u64 },
+    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND owner=?2 AND server=?3 AND description_content_id=?4 AND input_schema_content_id=?5",
+    .Args = struct { name: []const u8, owner: tool_catalog.Owner, server: []const u8, description: u64, input_schema: u64 },
     .Row = struct { tool_record_id: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_record = rsql.Write(.{
-    .sql = "INSERT INTO tool_record(tool_record_id,name,owner,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5)",
-    .Args = struct { id: u64, name: []const u8, owner: tool_catalog.Owner, description: u64, input_schema: u64 },
+    .sql = "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6)",
+    .Args = struct { id: u64, name: []const u8, owner: tool_catalog.Owner, server: []const u8, description: u64, input_schema: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -72,86 +72,240 @@ pub fn everMaskSql(comptime session: []const u8, comptime revision: []const u8) 
     }
 }
 
-/// The records of `set`, in `Tool` order.
-pub const Members = struct {
-    records: [tool_count]*const tool_catalog.Record = undefined,
-    len: usize = 0,
+/// A Session's member named `name` in the catalog set `catalog`, as
+/// member `ordinal` of `set`. One row, or the catalog lacks it.
+const insert_selected_member = rsql.Write(.{
+    .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT ?1,?2,member.tool_record_id " ++
+        "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?3 AND tool.name=?4",
+    .Args = struct { set: u64, ordinal: u64, catalog: u64, name: []const u8 },
+    .expect = .{ .counted = .{ .otherwise = error.CorruptStore } },
+});
 
-    pub fn of(set: tool_catalog.ToolSet) Members {
-        var out: Members = .{};
-        for (std.enums.values(Tool)) |tool| if (set.contains(tool)) {
-            out.records[out.len] = tool_catalog.record(tool);
-            out.len += 1;
-        };
-        return out;
-    }
+/// The record with these name, owner and texts, as member `ordinal` of
+/// `set`. One row, or the record was never saved.
+const insert_catalog_member = rsql.Write(.{
+    .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT ?1,?2,tool.tool_record_id FROM tool_record tool " ++
+        "JOIN content description ON description.content_id=tool.description_content_id " ++
+        "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
+        "WHERE tool.name=?3 AND tool.owner=?4 AND tool.server=?5 AND description.digest=?6 AND description.byte_length=?7 AND description.private=0 " ++
+        "AND input_schema.digest=?8 AND input_schema.byte_length=?9 AND input_schema.private=0",
+    .Args = struct {
+        set: u64,
+        ordinal: u64,
+        name: []const u8,
+        owner: tool_catalog.Owner,
+        server: []const u8,
+        description: [32]u8,
+        description_bytes: u64,
+        input_schema: [32]u8,
+        input_schema_bytes: u64,
+    },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
 
-    pub fn slice(self: *const Members) []const *const tool_catalog.Record {
-        return self.records[0..self.len];
-    }
-};
-
-/// What `ensure` reads and keeps across its rounds; the caller holds it.
-pub const Ensure = struct {
-    members: Members,
-    digest: [32]u8,
-    set: lookup_set.Result = null,
-    pairs: [tool_count]content_domain.Pair = undefined,
-    descriptions: [tool_count]content_domain.Import = undefined,
-    schemas: [tool_count]content_domain.Import = undefined,
-    existing: [tool_count]lookup_record.Result = undefined,
-    content_ids: [tool_count][2]u64 = undefined,
-
-    pub fn init(set: tool_catalog.ToolSet) Ensure {
-        const members = Members.of(set);
-        return .{ .members = members, .digest = tool_catalog.setDigest(members.slice()) };
-    }
-};
-
-/// Queues the reads `finish` follows: the set by its digest, and each
-/// member's two texts. A configure queues them in its own first round.
-pub fn lookup(a: anytype, state: *Ensure) void {
-    a.read(lookup_set, .{ .digest = state.digest }, &state.set);
-    for (state.members.slice(), 0..) |record, index| {
-        state.descriptions[index] = .ofBytes(record.description, false);
-        state.schemas[index] = .ofBytes(record.input_schema, false);
-        content_domain.lookupPair(a, &state.descriptions[index], &state.schemas[index], &state.pairs[index]);
-    }
+/// The digest of `catalog`'s set: its records, in order.
+pub fn catalogDigest(catalog: *const tool_catalog.Catalog) [32]u8 {
+    var digest: tool_catalog.SetDigest = .init();
+    for (catalog.digests) |*each| digest.add(each);
+    return digest.final();
 }
 
-/// After `lookup`'s round: the id of the set `state` names, the saved one
-/// or one queued now with whatever records and content it needs. A new set
-/// runs one more round on `a`, a write Access, when some record may exist.
-pub fn finish(a: anytype, state: *Ensure) !u64 {
-    if (state.set) |row| return row.tool_set_id.get();
-    const records = state.members.slice();
+/// How many records one transaction of `ensureRecords` saves: each
+/// imports at most its two texts, within an Access's `max_inserted`.
+pub const records_per_transaction = 2;
 
+/// What `ensureRecords` reads for one transaction's records.
+pub const RecordReads = struct {
+    pairs: [records_per_transaction]content_domain.Pair = undefined,
+    descriptions: [records_per_transaction]content_domain.Import = undefined,
+    schemas: [records_per_transaction]content_domain.Import = undefined,
+    existing: [records_per_transaction]lookup_record.Result = undefined,
+};
+
+/// Saves each of `records` and its texts that no row holds yet, on `a`, a
+/// write Access the caller commits. A record that exists is left as it is.
+pub fn ensureRecords(a: anytype, records: []const tool_catalog.Record, reads: *RecordReads) !void {
+    std.debug.assert(records.len <= records_per_transaction);
+    for (records, 0..) |*each, index| {
+        reads.descriptions[index] = .ofBytes(each.description, false);
+        reads.schemas[index] = .ofBytes(each.input_schema, false);
+        content_domain.lookupPair(a, &reads.descriptions[index], &reads.schemas[index], &reads.pairs[index]);
+    }
+    try a.run();
     // A record can exist only when both its texts already do.
+    var content_ids: [records_per_transaction][2]u64 = undefined;
     var known = false;
-    for (records, 0..) |record, index| {
-        content_domain.foundPair(&state.pairs[index], &state.descriptions[index], &state.schemas[index]);
-        const both = state.descriptions[index].found != null and state.schemas[index].found != null;
-        state.content_ids[index] = .{
-            try content_domain.importBytes(a, &state.descriptions[index], record.description),
-            try content_domain.importBytes(a, &state.schemas[index], record.input_schema),
+    for (records, 0..) |*each, index| {
+        content_domain.foundPair(&reads.pairs[index], &reads.descriptions[index], &reads.schemas[index]);
+        const both = reads.descriptions[index].found != null and reads.schemas[index].found != null;
+        content_ids[index] = .{
+            try content_domain.importBytes(a, &reads.descriptions[index], each.description),
+            try content_domain.importBytes(a, &reads.schemas[index], each.input_schema),
         };
-        state.existing[index] = null;
+        reads.existing[index] = null;
         if (both) {
             known = true;
-            a.read(lookup_record, .{ .name = record.name, .owner = record.owner, .description = state.content_ids[index][0], .input_schema = state.content_ids[index][1] }, &state.existing[index]);
+            a.read(lookup_record, .{ .name = each.name, .owner = each.owner, .server = each.server, .description = content_ids[index][0], .input_schema = content_ids[index][1] }, &reads.existing[index]);
         }
     }
     if (known) try a.run();
+    for (records, 0..) |*each, index| if (reads.existing[index] == null) {
+        const id = try a.identity(.tool_record_id);
+        a.write(insert_record, .{ .id = id, .name = each.name, .owner = each.owner, .server = each.server, .description = content_ids[index][0], .input_schema = content_ids[index][1] });
+    };
+}
 
-    const set_id = try a.identity(.tool_set_id);
-    a.write(insert_set, .{ .id = set_id, .digest = state.digest, .count = records.len });
-    for (records, 0..) |record, index| {
-        const record_id = if (state.existing[index]) |row| row.tool_record_id.get() else id: {
-            const id = try a.identity(.tool_record_id);
-            a.write(insert_record, .{ .id = id, .name = record.name, .owner = record.owner, .description = state.content_ids[index][0], .input_schema = state.content_ids[index][1] });
-            break :id id;
-        };
-        a.write(insert_member, .{ .set = set_id, .ordinal = index, .record = record_id });
+/// The catalog's saved set, by its digest, and whether host_catalog
+/// names it already.
+const lookup_catalog = rsql.Read(.{
+    .sql = "SELECT tool_set_id,EXISTS(SELECT 1 FROM host_catalog host WHERE host.tool_set_id=tool_set.tool_set_id) AS current FROM tool_set WHERE digest=?1",
+    .Args = struct { digest: [32]u8 },
+    .Row = struct { tool_set_id: rsql.Positive, current: bool },
+    .cardinality = .optional,
+});
+
+/// host_catalog's one row, on the first save.
+const start_host_catalog = rsql.Write(.{
+    .sql = "INSERT INTO host_catalog(slot,tool_set_id) SELECT 1,?1 WHERE NOT EXISTS(SELECT 1 FROM host_catalog)",
+    .Args = struct { set: u64 },
+    .expect = .{ .at_most = 1 },
+});
+
+const update_host_catalog = rsql.Write(.{
+    .sql = "UPDATE host_catalog SET tool_set_id=?1 WHERE slot=1",
+    .Args = struct { set: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Queues reading the catalog's saved set, by `digest`.
+pub fn lookupCatalog(a: anytype, digest: *const [32]u8, set: *lookup_catalog.Result) void {
+    a.read(lookup_catalog, .{ .digest = digest.* }, set);
+}
+
+pub const CatalogSet = lookup_catalog.Result;
+
+/// Queues making `set_id` the Host's catalog, the one the next start
+/// reads back.
+pub fn pointCatalog(a: anytype, set_id: u64) void {
+    a.write(start_host_catalog, .{ .set = set_id });
+    a.write(update_host_catalog, .{ .set = set_id });
+}
+
+/// The Host's catalog set and its record count; none before the first
+/// catalog is saved.
+const saved_catalog = rsql.Read(.{
+    .sql = "SELECT host.tool_set_id,tool_set.member_count FROM host_catalog host JOIN tool_set ON tool_set.tool_set_id=host.tool_set_id",
+    .Args = struct {},
+    .Row = struct { tool_set_id: rsql.Positive, member_count: u64 },
+    .cardinality = .optional,
+});
+
+pub const SavedCatalog = saved_catalog.Result;
+
+/// One round: the Host's catalog set.
+pub fn savedCatalogOf(a: anytype) !SavedCatalog {
+    var set: SavedCatalog = null;
+    a.read(saved_catalog, .{}, &set);
+    try a.run();
+    return set;
+}
+
+/// One round: the catalog set `set`'s records from `ordinal`, at most a
+/// batch and `rows.len`, in order; how many it read.
+pub fn catalogRecordsOf(a: anytype, set: u64, ordinal: usize, rows: []catalog_records.Row) !usize {
+    var batch: RecordBatch = .{ .rows = rows };
+    a.readEach(catalog_records, .{ .set = set, .ordinal = ordinal }, @min(rows.len, catalog_record_batch), &batch);
+    try a.run();
+    return batch.count;
+}
+
+const RecordBatch = struct {
+    rows: []catalog_records.Row,
+    count: usize = 0,
+
+    pub fn visit(batch: *RecordBatch, row: *const catalog_records.Row) bool {
+        batch.rows[batch.count] = row.*;
+        batch.count += 1;
+        return true;
     }
+};
+
+/// A catalog set's members from ordinal ?2 on: each record and where
+/// its texts are.
+pub const catalog_records = rsql.Read(.{
+    .sql = "SELECT member.ordinal,tool.name,tool.owner,tool.server,description.content_id AS description_id,description.byte_length AS description_length," ++
+        "description.digest AS description_digest,description.private AS description_private,input_schema.content_id AS schema_id," ++
+        "input_schema.byte_length AS schema_length,input_schema.digest AS schema_digest,input_schema.private AS schema_private " ++
+        "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "JOIN content description ON description.content_id=tool.description_content_id " ++
+        "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
+        std.fmt.comptimePrint("WHERE member.tool_set_id=?1 AND member.ordinal>=?2 ORDER BY member.ordinal LIMIT {d}", .{catalog_record_batch}),
+    .Args = struct { set: u64, ordinal: u64 },
+    .Row = struct {
+        ordinal: u64,
+        name: protocol.Bounded(tool_catalog.max_name_bytes),
+        owner: tool_catalog.Owner,
+        server: protocol.Bounded(tool_catalog.max_server_bytes),
+        description_id: rsql.Positive,
+        description_length: u64,
+        description_digest: [32]u8,
+        description_private: bool,
+        schema_id: rsql.Positive,
+        schema_length: u64,
+        schema_digest: [32]u8,
+        schema_private: bool,
+    },
+    .cardinality = .each,
+});
+
+/// How many records one round of `catalog_records` reads.
+pub const catalog_record_batch = 16;
+
+/// Queues saving `catalog`'s set, whose every record is saved, as `set_id`.
+pub fn insertCatalog(a: anytype, catalog: *const tool_catalog.Catalog, digest: *const [32]u8, set_id: u64) void {
+    a.write(insert_set, .{ .id = set_id, .digest = digest.*, .count = catalog.records.len });
+    for (catalog.records, 0..) |*each, ordinal| a.write(insert_catalog_member, .{
+        .set = set_id,
+        .ordinal = ordinal,
+        .name = each.name,
+        .owner = each.owner,
+        .server = each.server,
+        .description = protocol.contentDigest(each.description),
+        .description_bytes = each.description.len,
+        .input_schema = protocol.contentDigest(each.input_schema),
+        .input_schema_bytes = each.input_schema.len,
+    });
+}
+
+/// The set a configure saves: the catalog's records `names` names, in
+/// name order, and the digest it is saved under.
+pub const Selection = struct {
+    names: *const protocol.ToolsField,
+    digest: [32]u8,
+    set: lookup_set.Result = null,
+
+    /// Null when the catalog lacks one of `names`.
+    pub fn of(catalog: *const tool_catalog.Catalog, names: *const protocol.ToolsField) ?Selection {
+        var digest: tool_catalog.SetDigest = .init();
+        var each = names.iterator();
+        while (each.next()) |name| digest.add(&catalog.digests[catalog.find(name) orelse return null]);
+        return .{ .names = names, .digest = digest.final() };
+    }
+};
+
+/// Queues the read `finishSelection` follows: the set by its digest.
+pub fn lookupSelection(a: anytype, selection: *Selection) void {
+    a.read(lookup_set, .{ .digest = selection.digest }, &selection.set);
+}
+
+/// After `lookupSelection`'s round: the id of the set `selection` names,
+/// the saved one or one queued now from the catalog set `catalog_set`.
+pub fn finishSelection(a: anytype, selection: *const Selection, catalog_set: u64) !u64 {
+    if (selection.set) |row| return row.tool_set_id.get();
+    const set_id = try a.identity(.tool_set_id);
+    a.write(insert_set, .{ .id = set_id, .digest = selection.digest, .count = selection.names.count });
+    var names = selection.names.iterator();
+    var ordinal: u64 = 0;
+    while (names.next()) |name| : (ordinal += 1) a.writeCount(insert_selected_member, .{ .set = set_id, .ordinal = ordinal, .catalog = catalog_set, .name = name }, 1);
     return set_id;
 }
