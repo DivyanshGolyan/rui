@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli_value = @import("cli_value.zig");
 const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
@@ -429,24 +430,7 @@ pub const MessageRejection = enum {
     model_is_immutable,
     revision_exhausted,
 };
-pub const CommandKind = enum {
-    configure,
-    message,
-    session_stop,
-    model_interruption,
-    permission_decision,
-
-    /// The route a command's request is sent to and served from.
-    pub fn route(self: CommandKind) []const u8 {
-        return switch (self) {
-            .configure => "/v1/configure",
-            .message => "/v1/message",
-            .session_stop => "/v1/control/session-stop",
-            .model_interruption => "/v1/control/model-interruption",
-            .permission_decision => "/v1/control/permission-decision",
-        };
-    }
-};
+pub const CommandKind = cli_value.CommandKind;
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
 pub const SessionStopCompletion = enum { pending, completed };
 
@@ -523,9 +507,9 @@ pub const ReadResult = struct {
     key: Bounded(max_key_bytes) = .{},
 };
 
-pub const ReportProfile = enum { current, full };
+pub const ReportProfile = cli_value.ReportProfile;
 
-pub const FailedResponsePart = enum { body, metadata };
+pub const FailedResponsePart = cli_value.FailedResponsePart;
 pub const FailedResponseExport = struct {
     operation: u64,
     attempt: u64,
@@ -1010,7 +994,7 @@ pub const FirstMessage = struct {
     }
 };
 
-pub const PermissionMode = enum { ask, bypass };
+pub const PermissionMode = cli_value.PermissionMode;
 
 /// One `list-sessions` row. Every fact comes from the Store read that
 /// produced its page.

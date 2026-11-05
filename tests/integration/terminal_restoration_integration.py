@@ -1819,8 +1819,8 @@ def fatal_reporting_cases(state):
         missing_session = "000000" if session != "000000" else "000001"
         diagnostics = [
             (["session", "resume", "--store", str(store), missing_session], b"SessionNotConfigured"),
-            (["defaults", "configure", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
-            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"UnsupportedSelectionProvider"),
+            (["defaults", "configure", "--provider", "unsupported"], b"--provider unsupported: That value is not supported."),
+            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = open_pty()
