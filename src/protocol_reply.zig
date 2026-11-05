@@ -1561,6 +1561,17 @@ pub const MutationReply = struct {
     target: MutationTarget,
     answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch }!MutationAnswer,
 
+    /// Preserve the existing machine-readable unconfirmed reason vocabulary.
+    /// Human presentation classifies these failures separately as caller codes.
+    pub fn failureReason(err: @typeInfo(@FieldType(MutationReply, "answer")).error_union.error_set) []const u8 {
+        return switch (err) {
+            error.CanonicalStoreFailure => "CanonicalStoreFailure",
+            error.HostInvocationFailed => "HostInvocationFailed",
+            error.InvalidResponse => "InvalidResponse",
+            error.RequestBindingMismatch => "RequestBindingMismatch",
+        };
+    }
+
     pub fn isAccepted(self: MutationReply) bool {
         const answer = self.answer catch return false;
         return answer.result == .accepted;

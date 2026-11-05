@@ -77,7 +77,7 @@ def main():
                     assert json.loads(result.stderr.splitlines()[0]) == {"status": 503, "type": "busy", "code": "ordinary_capacity_exhausted"}, result
                     assert "discard-me" not in result.stderr, result
                 else:
-                    assert result.returncode != 0 and "InvalidSessionPage" in result.stderr, (mode, result)
+                    assert result.returncode == 1 and "[internal_unexpected]" in result.stderr, (mode, result)
                     assert result.stdout == "", ("invalid first page reached output", mode, result)
             failure = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
                 b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
@@ -98,7 +98,7 @@ def main():
             # fails prints nothing.
             result, pages, _ = paged(replies=(None, failure))
             assert len(pages) == 2 and pages[0]["next"] is not None, pages
-            assert result.returncode != 0 and "CanonicalStoreFailure" in result.stderr and result.stdout == "", result
+            assert result.returncode == 1 and "[internal_unexpected]" in result.stderr and result.stdout == "", result
             token = json.loads(paged()[0].stdout)["since"]
             for index, reference in enumerate(allocated):
                 relabelled = invoke("session", "configure", "--store", store, "--session", reference, "--label", f"Watched {index}")
@@ -112,7 +112,7 @@ def main():
                 assert len(pages) == len(replies) + (replies[-1] is not failure), (replies, pages)
                 assert pages[0]["delta"] == "changed" and len(pages[0]["sessions"]) == 8 and "through" in pages[0]["next"], pages
                 if replies[-1] is failure:
-                    assert result.returncode != 0 and "CanonicalStoreFailure" in result.stderr and result.stdout == "", result
+                    assert result.returncode == 1 and "[internal_unexpected]" in result.stderr and result.stdout == "", result
                     continue
                 assert result.returncode == 0, result
                 listed = json.loads(result.stdout)

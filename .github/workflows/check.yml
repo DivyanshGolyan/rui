@@ -99,10 +99,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Import-cycle allowances may only shrink from trusted main history.
+          # Import-cycle and caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
       - name: Install the pinned packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
+      - name: Determine whether caller inventory needs its pinned-stdlib bootstrap
+        id: caller-bootstrap
+        run: |
+          needed=$(python3 -B tests/ci/caller_errors.py --bootstrap-needed)
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup
+        if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}
+        with:
+          # Install only the existing pinned compiler: no build/package caches,
+          # selected fixture dependencies or native compilation in policy.
+          targets: '[]'
+          compiled: 'true'
+          cold: 'true'
+          publish-caches: 'false'
+      - name: Check caller error coverage and shrink-only pending causes
+        run: python3 -B tests/ci/caller_errors.py
       - run: python3 -B -m unittest discover -s tests/ci -v
       - name: Warn when a change touches a held fixture without citing its stable-red issue
         if: ${{ github.event_name == 'pull_request' }}

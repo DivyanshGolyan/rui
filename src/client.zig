@@ -536,7 +536,27 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         else => .access_failure,
     };
     if (paths.database.len == 0) return readHostInfo(io, &paths, deadline);
-    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
+    return switch (lockState(io, &paths)) {
+        .free => .unavailable,
+        .held => readHostInfo(io, &paths, deadline),
+        .failure => .access_failure,
+    };
+}
+
+pub const HostLockState = enum { free, held, failure };
+
+/// Probe without contacting the Host; a failed probe proves neither absence
+/// nor ownership and must not be treated as a held lock by diagnostic callers.
+pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
+    // MySQL owns its Store through GET_LOCK, not the runtime's socket lease.
+    // No filesystem result, including a missing runtime, proves its ownership.
+    if (platform.mysqlRuntimeDirectory(store_path) != null) return .failure;
+    const paths = platform.resolveClientPaths(io, store_path) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    return lockState(io, &paths);
+}
+
+fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .failure;
     defer store_dir.close(io);
     // A replaced lock node may be a FIFO: open must not wait for a writer
     // before the nonblocking lock probe can classify the selected Store.
@@ -546,18 +566,80 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0) catch |err| return switch (err) {
-        error.FileNotFound => .unavailable,
-        else => .access_failure,
+        error.FileNotFound => .free,
+        else => .failure,
     };
     const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer lock_file.close(io);
-    const stat = lock_file.stat(io) catch return .access_failure;
-    if (stat.kind != .file) return .access_failure;
+    const stat = lock_file.stat(io) catch return .failure;
+    if (stat.kind != .file) return .failure;
     return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
-        .SUCCESS => .unavailable,
-        .AGAIN => readHostInfo(io, &paths, deadline),
-        else => .access_failure,
+        .SUCCESS => .free,
+        .AGAIN => .held,
+        else => .failure,
     };
+}
+
+test "MySQL Host status bypasses filesystem locks and lock ownership stays unknown" {
+    const RuntimeHint = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+    const io = std.testing.io;
+    const previous = if (std.c.getenv("RUI_RUNTIME_DIR")) |value|
+        try std.testing.allocator.dupeSentinel(u8, std.mem.span(value), 0)
+    else
+        null;
+    defer if (previous) |value| std.testing.allocator.free(value);
+    defer {
+        // Only remove a variable this test added; inherited entries must not
+        // shift the environment view Zig kept at process startup.
+        const result = if (previous) |value|
+            RuntimeHint.setenv("RUI_RUNTIME_DIR", value, 1)
+        else
+            RuntimeHint.unsetenv("RUI_RUNTIME_DIR");
+        if (result != 0) @panic("runtime hint restoration failed");
+    }
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var runtime_buffer: [@import("socket_fixture.zig").max_path_bytes:0]u8 = undefined;
+    const runtime = try std.fmt.bufPrintSentinel(&runtime_buffer, "{s}/runtime", .{tmp.root[0..tmp.root_len]}, 0);
+    var socket_buffer: [platform.max_launch_socket_path_bytes]u8 = undefined;
+    const socket = try std.fmt.bufPrint(&socket_buffer, "{s}/rui.sock", .{runtime});
+    var lease: platform.StoreLease = undefined;
+    try lease.acquireMysql(io, runtime, socket);
+    var leased = true;
+    defer if (leased) lease.release();
+    try std.testing.expectEqual(@as(c_int, 0), RuntimeHint.setenv("RUI_RUNTIME_DIR", runtime, 1));
+    const store_id = "0123456789abcdef0123456789abcdef";
+    // The runtime's rui.lock reserves an endpoint, not MySQL's GET_LOCK.
+    try std.testing.expectEqual(HostLockState.failure, hostLockState(io, store_id));
+    try std.testing.expectEqual(std.meta.Tag(protocol_reply.HostStatus).owned_unavailable, std.meta.activeTag(hostStatusUntil(io, store_id, null)));
+    lease.release();
+    leased = false;
+    try tmp.dir.deleteTree(io, "runtime");
+    // A missing runtime directory also proves nothing about Store ownership.
+    try std.testing.expectEqual(HostLockState.failure, hostLockState(io, store_id));
+}
+
+test "SQLite Host lock evidence preserves free held and failed probes" {
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    try std.testing.expectEqual(HostLockState.free, hostLockState(io, root));
+    try std.testing.expect(hostStatusUntil(io, root, null) == .unavailable);
+    var lease = try platform.StoreLease.acquire(io, root);
+    var leased = true;
+    defer if (leased) lease.release();
+    try std.testing.expectEqual(HostLockState.held, hostLockState(io, root));
+    lease.release();
+    leased = false;
+    try std.testing.expectEqual(HostLockState.free, hostLockState(io, root));
+    try tmp.dir.deleteFile(io, "host.lock");
+    try tmp.dir.createDir(io, "host.lock", .fromMode(0o700));
+    try std.testing.expectEqual(HostLockState.failure, hostLockState(io, root));
+    try std.testing.expect(hostStatusUntil(io, root, null) == .access_failure);
 }
 
 fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {

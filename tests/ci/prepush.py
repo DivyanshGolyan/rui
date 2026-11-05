@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run the mechanical pre-push checks of CODING_STANDARDS.md#evidence in one step.
 
-Whitespace, formatting, the CI policy tests, undefined fixture names, the development
-selection and the macOS type check whenever CI's review selection would
-run it. The selection covers committed changes since the merge base with
+Whitespace, formatting, caller-error coverage, the CI policy tests, undefined fixture
+names, the development selection and the macOS type check whenever CI's
+review selection would run it. The selection covers committed changes since the merge base with
 --base; formatting and the tests read the working tree. Focused
 `-Dtest-filter` runs and fix mutations stay the author's. Run it before
 every push, including after merging main.
@@ -29,6 +29,7 @@ def checks(paths, available, base):
     # The plan job runs this first; a failure there turns every check red.
     yield "whitespace", ["git", "diff", "--check", base, "HEAD"]
     yield "zig fmt", ["zig", "fmt", "--check", "--ast-check", "build.zig", "src"]
+    yield "caller errors", [sys.executable, "-B", "tests/ci/caller_errors.py"]
     yield "tests/ci", [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci"]
     yield "undefined fixture names", [sys.executable, "-m", "ruff", "check", "--select", "F821", "tests"]
     if targets:

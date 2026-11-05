@@ -17,6 +17,7 @@ pub const Code = enum {
     id_malformed,
     count_malformed,
     choice_unsupported,
+    invocation_invalid,
     instructions_source,
     handle_names_store_and_key,
     handle_names_store_record_and_kind,
@@ -43,6 +44,29 @@ pub const Code = enum {
     stdin_sources_conflict,
     memory_exhausted,
     rejection_unrecognized,
+    model_id_malformed,
+    terminal_required,
+    terminal_input_incomplete,
+    message_empty,
+    environment_too_large,
+    internal_unexpected,
+    host_not_serving,
+    host_stopping,
+    mysql_host_unavailable,
+    store_path_malformed,
+    store_unavailable,
+    peer_context_invalid,
+    selection_provider_unsupported,
+    selection_model_unsupported,
+    preferences_invalid,
+    preferences_unavailable,
+    preference_store_invalid,
+    preference_provider_invalid,
+    preference_model_invalid,
+    preference_provider_required,
+    home_unavailable,
+    session_id_needs_to,
+    session_id_needs_session,
     // Existing saved wire spellings; PR 5 owns splitting and renaming them.
     invalid_session_reference,
     unknown_session,
@@ -85,6 +109,216 @@ pub const Code = enum {
     store_locked,
     reply_unconfirmed,
 };
+
+/// Transitional inventory. An entry is an unclassified internal failure,
+/// never advice guessed from an OS error name. CI permits deletion, not growth.
+pub const pending = .{
+    "AccessDenied",
+    "ActionReadFailed",
+    "BadPathName",
+    "BrokenPipe",
+    "Canceled",
+    "Cancelled",
+    "CanonicalStoreFailure",
+    "ConflictingArguments",
+    "ConnectionClosed",
+    "ConnectionRefused",
+    "ConnectionResetByPeer",
+    "ContentBindingMismatch",
+    "ContentTooLarge",
+    "DuplicateArgument",
+    "DuplicateToolName",
+    "EffectAwareShutdown",
+    "EndOfStream",
+    "ExecutablePathTooLong",
+    "ExpectedRefusal",
+    "FileNotFound",
+    "FixtureCredentialPathRequired",
+    "HomeRequired",
+    "HostInstanceChanged",
+    "HostInvocationFailed",
+    "HostLaunchFailed",
+    "HostModelUnavailable",
+    "HostReadinessUnconfirmed",
+    "HostStartupFailed",
+    "HostStopUnconfirmed",
+    "IncompatibleHost",
+    "IncompleteControlGate",
+    "IncompletePostCommandHold",
+    "IncompleteTestTransitionGate",
+    "InputOutput",
+    "InsecureRecordDirectory",
+    "InvalidApiKey",
+    "InvalidBaseUrl",
+    "InvalidBashPath",
+    "InvalidBashTimeout",
+    "InvalidCharacter",
+    "InvalidClientSendBuffer",
+    "InvalidCredentialPath",
+    "InvalidHexIdentity",
+    "InvalidHostStopResponse",
+    "InvalidInspectionReplyDelay",
+    "InvalidInstructionsSource",
+    "InvalidInteractiveArguments",
+    "InvalidKey",
+    "InvalidLaunchDelay",
+    "InvalidObservation",
+    "InvalidOptionValue",
+    "InvalidProviderInactivity",
+    "InvalidRecordPath",
+    "InvalidRequestHandle",
+    "InvalidRequestPreparationAllowance",
+    "InvalidRequestPreparationDelay",
+    "InvalidRequestRecord",
+    "InvalidResponse",
+    "InvalidResultDelay",
+    "InvalidRetentionEntryCapacity",
+    "InvalidRetryWaits",
+    "InvalidSince",
+    "InvalidSqliteCacheSize",
+    "InvalidTarget",
+    "InvalidTemporaryDirectory",
+    "InvalidTerminalInput",
+    "InvalidTestObservationPlan",
+    "InvalidToolName",
+    "InvalidUtf8",
+    "IsDir",
+    "LaunchFrameInvalid",
+    "LoginDenied",
+    "LoginExpired",
+    "LoginInterrupted",
+    "MissingArgumentValue",
+    "MutationNotAccepted",
+    "NameTooLong",
+    "NoSpaceLeft",
+    "NotDir",
+    "NullNotAllowed",
+    "Overflow",
+    "PathAlreadyExists",
+    "PermissionDenied",
+    "PollFailed",
+    "PostCommandHoldClosed",
+    "PostCommandHoldSignalFailed",
+    "ReadOnlyFileSystem",
+    "RecordAlreadyExists",
+    "RecordCaptureBusy",
+    "RecordChangedDuringSend",
+    "RecordDirectorySyncFailed",
+    "RenderScratchCleanupFailed",
+    "Reported",
+    "RequestBindingMismatch",
+    "ResponseHeaderTooLarge",
+    "ResponseInactive",
+    "ResponseTooLarge",
+    "RuntimeDirectoryInUse",
+    "RuntimeDirectoryUnusable",
+    "SecretEntryInterrupted",
+    "SessionNotConfigured",
+    "SocketPairFailed",
+    "SocketUnconnected",
+    "StreamTooLong",
+    "SymLinkLoop",
+    "SystemResources",
+    "TestPipeFailed",
+    "TooManyInteractiveArguments",
+    "TooManyTools",
+    "TransferInactive",
+    "TruncatedResponse",
+    "TruncatedResult",
+    "Unexpected",
+    "UnexpectedToken",
+    "UnixConnectFailed",
+    "UnknownArgument",
+    "UnknownReportProfile",
+    "UnknownTestTransition",
+    "UnsupportedProvider",
+    "ValueTooLong",
+    "WouldBlock",
+    "WriteFailed",
+    "WrongWireVersion",
+};
+
+fn mapped(err: anyerror) ?Code {
+    return switch (err) {
+        error.OutOfMemory => .memory_exhausted,
+        error.HostNotServing => .host_not_serving,
+        error.HostStopping => .host_stopping,
+        error.MysqlHostUnavailable => .mysql_host_unavailable,
+        error.InvalidStore => .store_path_malformed,
+        error.InvalidStorePath => .store_path_malformed,
+        error.StorePathTooLong => .store_path_malformed,
+        error.StoreUnavailable => .store_unavailable,
+        error.StoreAccessFailed => .store_unavailable,
+        error.InvalidRuiAddress => .peer_context_invalid,
+        error.InvalidSenderHandle => .invalid_sender_handle,
+        error.InvalidWorkspace => .invalid_workspace,
+        error.InvalidLabel => .invalid_label,
+        error.UnsupportedSelectionProvider => .selection_provider_unsupported,
+        error.UnsupportedSelectionModel => .selection_model_unsupported,
+        error.InvalidPreferences => .preferences_invalid,
+        error.SavedPreferenceStoreInvalid => .preferences_invalid,
+        error.SavedPreferenceProviderInvalid => .preferences_invalid,
+        error.SavedPreferenceModelInvalid => .preferences_invalid,
+        error.SavedPreferenceProviderRequired => .preferences_invalid,
+        error.UnsupportedPreferencesVersion => .preferences_invalid,
+        error.PreferencesUnavailable => .preferences_unavailable,
+        error.InsecurePreferenceDirectory => .preferences_unavailable,
+        error.InsecurePreferenceFile => .preferences_unavailable,
+        error.UnownedPreferences => .preferences_unavailable,
+        error.PreferencePermissionsFailed => .preferences_unavailable,
+        error.PreferenceDirectorySyncFailed => .preferences_unavailable,
+        error.PreferenceStatFailed => .preferences_unavailable,
+        error.PreferencePathTooLong => .preferences_unavailable,
+        error.InvalidPreferenceStore => .preference_store_invalid,
+        error.UnsupportedPreferenceProvider => .preference_provider_invalid,
+        error.InvalidPreferenceProvider => .preference_provider_invalid,
+        error.InvalidPreferenceModel => .preference_model_invalid,
+        error.UnsupportedPreferenceModel => .preference_model_invalid,
+        error.PreferenceProviderRequired => .preference_provider_required,
+        error.HomeUnavailable => .home_unavailable,
+        error.InvalidHome => .home_unavailable,
+        error.InvalidSession => .invalid_session_reference,
+        error.InvalidModel => .model_id_malformed,
+        error.InteractiveTerminalRequired => .terminal_required,
+        error.IncompleteTerminalInput => .terminal_input_incomplete,
+        error.EmptyMessageInput => .message_empty,
+        error.InvalidArguments => .invocation_invalid,
+        error.InvalidInvocation => .invocation_invalid,
+        error.CallerFailure => .internal_unexpected,
+        // Directory owners translate this to a contextual Store/preference
+        // cause. An escape without that context retains the internal fallback.
+        error.InsecureDirectoryPermissions => .internal_unexpected,
+        error.ApiKeyMissing => .sign_in_required,
+        error.HostStopped => .host_stopped,
+        error.StoreAlreadyOwned => .store_locked,
+        error.HostBusy => .host_busy,
+        error.ResultNotReady => .result_not_ready,
+        error.EnvironmentTooLarge => .environment_too_large,
+        else => null,
+    };
+}
+
+/// Closed inferred error sets are checked at their use site. Some legacy CLI
+/// owners still widen to anyerror; the shrink-only source gate inventories
+/// those names until those owners can be narrowed in their own lane.
+pub fn of(err: anytype) Code {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        if (@typeInfo(@TypeOf(err)).error_set.error_names) |error_names| {
+            var missing: []const u8 = "";
+            for (error_names) |name| {
+                if (mapped(@field(anyerror, name)) == null and !isPending(name)) missing = missing ++ name ++ ", ";
+            }
+            if (missing.len != 0) @compileError("caller errors need codes or pending entries: " ++ missing);
+        }
+    }
+    return mapped(err) orelse .internal_unexpected;
+}
+
+fn isPending(comptime name: []const u8) bool {
+    inline for (pending) |entry| if (std.mem.eql(u8, name, entry)) return true;
+    return false;
+}
 
 pub const Act = enum { fix, wait, operate, recover, report };
 pub const Remedy = Act;
@@ -160,6 +394,29 @@ pub const Facts = struct {
 
 pub fn facts(code: Code) Facts {
     return switch (code) {
+        .model_id_malformed => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a model ID of 1-256 printable non-space ASCII bytes" }, .says = "The model ID has invalid syntax.", .next = "Supply --model MODEL using a supported ID or a valid unlisted ID with default limits." },
+        .terminal_required => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "terminal input and output with cursor addressing" }, .says = "This interactive command needs a terminal.", .next = "Run in a terminal, or use rui session start or rui session send --to ID with Message text on stdin." },
+        .terminal_input_incomplete => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "complete key, UTF-8 and bracketed-paste sequences within two seconds" }, .says = "The terminal sent an incomplete key, character or paste sequence, and it expired; nothing was sent.", .next = "Type the Message again; if this repeats, check the terminal's keyboard and paste settings." },
+        .message_empty => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "nonempty Message text on stdin" }, .says = "Standard input was empty; provide Message text.", .next = "Pipe or redirect a nonempty Message into this command." },
+        .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
+        .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
+        .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
+        .host_stopping => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host for this Store is shutting down and no longer accepts requests.", .next = "Wait for it to exit, then start it again with rui host start --store PATH and retry." },
+        .mysql_host_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The launched MySQL Host for this Store is unavailable.", .next = "Check this Store's launch-frame Host and RUI_RUNTIME_DIR, then retry unchanged." },
+        .store_path_malformed => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "a nonempty UTF-8 filesystem path without controls, whose canonical form is at most 492 bytes" }, .says = "The Store path is malformed.", .next = "Supply --store PATH naming a private Store directory." },
+        .store_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Store directory is missing, inaccessible or not private.", .next = "Create the directory if missing, give your user access, and restrict its permissions to 0700; then retry unchanged." },
+        .peer_context_invalid => .{ .act = .fix, .input = .sender_handle, .accepted = .{ .grammar = "RUI_STORE, RUI_ADDRESS (six lowercase Crockford characters) and nonempty RUI_SENDER_HANDLE together, or none" }, .says = "The inherited peer context is incomplete or malformed.", .next = "Restore all three variables from the Session Bash, or unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE to make an operator call." },
+        .selection_provider_unsupported => .{ .act = .operate, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The selected provider, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect, then rui defaults configure --provider codex --clear-model, or supply --provider explicitly." },
+        .selection_model_unsupported => .{ .act = .operate, .input = .model, .accepted = .{ .grammar = "a model supported by the selected provider" }, .says = "The selected model, possibly from saved preferences, is unsupported.", .next = "Run rui defaults inspect; select a supported --provider and --model, or run rui defaults configure --clear-model." },
+        .preferences_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "The saved preferences are malformed or use an unsupported version.", .next = "Inspect HOME/.config/rui/preferences; repair or remove that file, then run rui defaults configure." },
+        .preferences_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui cannot read or save private preferences.", .next = "Check ownership and access to HOME/.config/rui (0700) and its preferences file (0600), then run rui defaults inspect." },
+        .preference_store_invalid => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "an existing private absolute Store directory" }, .says = "The default Store path is invalid.", .next = "Run rui defaults configure --store PATH with an existing private absolute directory." },
+        .preference_provider_invalid => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The default provider is unsupported.", .next = "Run rui defaults configure --provider codex or --provider openai." },
+        .preference_model_invalid => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a supported model ID of 1-256 printable non-space ASCII bytes" }, .says = "The default model is invalid or unsupported.", .next = "Run rui defaults configure --clear-model, or set --provider and a supported --model." },
+        .preference_provider_required => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Saving a default model requires a provider.", .next = "Run rui defaults configure --provider codex --model MODEL, or --provider openai --model MODEL." },
+        .home_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "HOME is missing or is not an absolute directory.", .next = "Set HOME to your absolute home directory, or supply --store PATH when only a Store is needed." },
+        .session_id_needs_to => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--to ID, with Message text on stdin" }, .says = "A positional Session ID is not a destination selector.", .next = "Move the Session ID to --to ID and pipe or redirect the Message into stdin." },
+        .session_id_needs_session => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--session ID" }, .says = "A positional Session ID is not a Session selector for this command.", .next = "Move the Session ID to --session ID." },
         .option_unknown => .{ .act = .fix, .input = .option, .accepted = .{ .read = .command_help }, .says = "That option is not supported by this command.", .next = "Use an option listed by this command's help." },
         .option_repeated => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "one occurrence of this option" }, .says = "That option was given more than once.", .next = "Keep one occurrence." },
         .option_repeat_limit => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "at most 16 repeated option values in total" }, .says = "The invocation exceeds the repeat limit.", .next = "Remove repeated values until the invocation fits the limit." },
@@ -226,6 +483,7 @@ pub fn facts(code: Code) Facts {
         .operation_resolved => .{ .act = .fix, .input = .operation, .accepted = .{ .grammar = "a currently unresolved Operation in this Session" }, .says = "That Operation has already resolved.", .next = "Inspect this Session; interrupt only an Operation that is still running." },
         .unknown_action => .{ .act = .fix, .input = .action, .accepted = .{ .grammar = "an Action ID belonging to this Session, from rui session inspect" }, .says = "That Action does not exist in this Session.", .next = "Select the Session and pending --action shown by rui session inspect." },
         .action_not_pending => .{ .act = .fix, .input = .action, .accepted = .{ .grammar = "an Action currently awaiting permission in this Session" }, .says = "That Action is not awaiting a permission decision.", .next = "Inspect this Session and decide only an Action currently awaiting permission." },
+        .invocation_invalid => .{ .act = .fix, .input = .arguments, .accepted = .{ .read = .command_help }, .says = "The command arguments are invalid.", .next = "Correct the invocation using this command's help." },
         .invalid_arguments => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "arguments satisfying the selected tool schema" }, .says = "The tool arguments are invalid.", .next = "Correct the arguments to match the selected tool schema." },
         .idempotency_key_conflict => .{ .act = .fix, .input = .key, .accepted = .{ .grammar = "one immutable captured request per key" }, .says = "This key already belongs to a different request.", .next = "Recover the original capture to inspect it; use a new key only for intentionally different work." },
         .host_busy => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host is busy.", .next = "Retry the same request unchanged later." },
@@ -273,6 +531,9 @@ pub const Held = struct {
     option: bool = true,
     accepted: ?Accepted = null,
     unchanged: ?[]const u8 = null,
+    store: ?[]const u8 = null,
+    // The boundary may run after capture; only the detection owner knows that.
+    not_sent: bool = true,
 };
 
 /// Display copies are bounded; the parser's original argv is never changed.
@@ -368,8 +629,19 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
             },
         },
     }
+    if (!saved) if (held.store) |store| {
+        try out.writeAll(" Store: ");
+        try out.writeByte('"');
+        try writeHeld(out, store);
+        try out.writeAll("\".");
+    };
     try out.print(" Next: {s}", .{f.next});
-    try out.writeAll(if (saved) " This rejection was saved and replays as saved; a resend needs a new key." else " Nothing was captured or sent.");
+    if (!saved and code == .host_not_serving) {
+        try out.writeAll(" rui host start --store ");
+        try TerminalText.writeShellWord(out, held.store orelse "PATH");
+        try out.writeByte('.');
+    }
+    try out.writeAll(if (saved) " This rejection was saved and replays as saved; a resend needs a new key." else if (held.not_sent) " Nothing was captured or sent." else "");
     if (held.unchanged) |unchanged| try writeHeld(out, unchanged);
     try out.print(" [{s}]\n", .{@tagName(code)});
 }
@@ -450,4 +722,17 @@ test "saved ambiguous causes do not invent missing flags or model restrictions" 
     try std.testing.expectEqualStrings("default or a decimal from 0 to 9223372036854775807", facts(.invalid_output_reservation).accepted.grammar);
     try std.testing.expectEqualSlices([]const u8, names(cli_value.PermissionMode), facts(.unsupported_permission_mode).accepted.closed);
     try std.testing.expectEqualSlices([]const u8, names(cli_value.ReasoningChoice), facts(.unsupported_reasoning_effort).accepted.closed);
+}
+
+test "fresh CLI argument errors are distinct from saved tool refusals" {
+    inline for (.{ error.InvalidArguments, error.InvalidInvocation }) |err| {
+        const code = of(err);
+        try std.testing.expectEqualStrings("invocation_invalid", @tagName(code));
+        try std.testing.expectEqual(Read.command_help, facts(code).accepted.read);
+        try std.testing.expectEqual(Act.fix, facts(code).act);
+    }
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try writeSavedLine(&out, .invalid_arguments, .{ .resource = "session", .operation = "send" });
+    try std.testing.expectEqualStrings("rui session send: arguments: The tool arguments are invalid. Accepted: arguments satisfying the selected tool schema. Next: Correct the arguments to match the selected tool schema. This rejection was saved and replays as saved; a resend needs a new key. [invalid_arguments]\n", out.buffered());
 }

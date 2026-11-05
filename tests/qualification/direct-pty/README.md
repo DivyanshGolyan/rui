@@ -84,7 +84,7 @@ The provider hold is released and the original answer observed before recovery
 input; a failing recovery wait therefore cannot expire that hold and trigger a
 confounding provider retry.
 
-The `expiry` scenario requires `IncompleteTerminalInput`, nonzero exit,
+The `expiry` scenario requires `[terminal_input_incomplete]`, nonzero exit,
 restoration, no new capture, and no provider request. The `rejection` scenario
 requires a visible refusal with no capture or request, then successful fresh
 `valid` input. Fixture Configure's pre-existing capture is the baseline.
