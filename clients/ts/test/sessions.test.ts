@@ -101,7 +101,10 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 		await session.send(long, { idempotencyKey: "msg:b" });
 
 		const all = [];
-		for await (const entry of session.listActivity({ kinds: ["admission"] })) all.push(entry);
+		for await (const entry of session.listActivity({ kinds: ["admission"] })) {
+			assert.equal(entry.kind, "admission");
+			if (entry.kind === "admission") all.push(entry);
+		}
 		assert.equal(all.length, 2);
 		assert.equal(all[0]?.kind, "admission");
 		assert.equal(all[0]?.text, "first");
@@ -115,11 +118,13 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 		for await (const entry of session.listActivity({ kinds: ["admission"], after: all[0]?.cursor as string })) rest.push(entry);
 		assert.deepEqual(rest.map((entry) => entry.cursor), [all[1]?.cursor]);
 
-		// Following never ends: it yields what arrives and stops when the consumer does.
+		// Following waits for local writes when idle and ends when the consumer stops.
 		const followed = session.listActivity({ kinds: ["admission"], after: all[1]?.cursor as string, follow: true });
 		const next = followed.next();
 		await session.send("third", { idempotencyKey: "msg:c" });
-		assert.equal((await next).value?.text, "third");
+		const third = (await next).value;
+		assert.ok(third && third.kind === "admission");
+		assert.equal(third.text, "third");
 		await followed.return(undefined);
 	} finally {
 		await rui.close();

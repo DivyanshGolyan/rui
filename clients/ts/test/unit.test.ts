@@ -129,7 +129,7 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 		exchange: async (_path, build) => {
 			bodies.push(build("/s"));
 			if (bodies.length === 2) controller.abort();
-			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9" }));
+			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } }));
 		},
 	};
 	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
