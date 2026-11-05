@@ -771,7 +771,8 @@ def store_read_cases(state):
         session = fixture.configure(home, store, "store-read-configure", None, "gpt-6-sol")
         fixture.message(home, store, "store-read-message", session, "queued work")
         before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
-        assert content_failure(before)["error"]["code"] == "result_not_ready", before
+        assert before.returncode == 5 and before.stdout == "", before
+        assert json.loads(before.stderr.splitlines()[0])["error"]["code"] == "result_not_ready", before
         # The Host holds its Store exclusively, so corrupt the stopped file:
         # startup reads core_command only for its greatest command_seq, its
         # rowid, never its command_key index, and the keyed read then fails

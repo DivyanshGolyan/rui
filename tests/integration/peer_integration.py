@@ -238,13 +238,13 @@ def main(report_source):
             refused = subprocess.run([str(installed), "session", "send", "--to", address,
                 "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
-            assert refused.returncode == 1 and b"six lowercase Crockford" in refused.stderr, refused
+            assert refused.returncode == 2 and b"six lowercase Crockford" in refused.stderr, refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         for old_flag in ("--session", "--session-hex"):
             refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
                 "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
-            assert refused.returncode == 1 and refused.stderr == (b"rui session send: " + old_flag.encode() +
+            assert refused.returncode == 2 and refused.stderr == (b"rui session send: " + old_flag.encode() +
                 b": That option is not supported by this command. Accepted: options and values listed by rui session send --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]\n"), refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         foreign_store = state / "foreign-store"
@@ -265,7 +265,7 @@ def main(report_source):
                 flag, invalid, "--workspace", str(workspace),
                 "--provider", "codex", "--model", "gpt-6-sol", "--record", str(refused_record), "--key", "invalid-config"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=15)
-            assert rejected.returncode == 1 and diagnostic in rejected.stderr, rejected
+            assert rejected.returncode == 2 and diagnostic in rejected.stderr, rejected
             assert rejected.stdout == b"" and not refused_record.exists(), rejected
             assert run(installed, "session", "list", "--store", foreign_store, "--all", home=home) == foreign_listing
         # An anonymous explicit Store beats conflicting HOME defaults without
@@ -335,7 +335,7 @@ def main(report_source):
         assert not (state / ".conflicting-store.json.capture.lock").exists(), "conflicting override opened a capture"
         foreign = json.loads((workspace / "foreign-send.out").read_text())
         assert foreign["answer"]["status"] == "rejected" and foreign["answer"]["code"] == "invalid_sender_handle", foreign
-        replay = run(installed, "request", "recover", "--store", foreign_store, "--record", state / "foreign-send.json", "--kind", "message", home=home, expect=1)
+        replay = run(installed, "request", "recover", "--store", foreign_store, "--record", state / "foreign-send.json", "--kind", "message", home=home, expect=3)
         assert replay["answer"]["code"] == "invalid_sender_handle" and replay["answer"]["replayed"] is True, replay
         undelivered = run(installed, "session", "inspect", "--store", foreign_store, "--session", foreign_session, home=home)
         assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
@@ -575,8 +575,8 @@ def stdin_start_contract():
                 env={**environment, **(extra or {})}, capture_output=True, timeout=15,
                 **({"input": input} if "stdin" not in kwargs else {}), **kwargs)
 
-        def failed(result, stage, cause):
-            assert result.returncode == 1 and result.stdout == b"", result
+        def failed(result, stage, cause, status=1):
+            assert result.returncode == status and result.stdout == b"", result
             assert f"failure during {stage}:".encode() in result.stderr and cause in result.stderr, result
             line = next(line for line in result.stderr.splitlines() if f"failure during {stage}:".encode() in line)
             assert line.split(f"failure during {stage}: ".encode(), 1)[1].rstrip(b"."), result
@@ -590,11 +590,11 @@ def stdin_start_contract():
                      ("configure", "--instructions", "input"),
                      ("start", "--instructions", "-")):
             result = invoke("session", *args, "--store", store)
-            assert result.returncode == 1 and result.stdout == b"" and b"request:" not in result.stderr, result
+            assert result.returncode == 2 and result.stdout == b"" and b"request:" not in result.stderr, result
         for data, cause in ((b"", b"Nothing was sent"), (b"bad\xff", b"InvalidUtf8")):
             record = state / "invalid.json"
             result = invoke("session", "start", "--store", store, "--record", record, "--key", "invalid", input=data)
-            failed(result, "input_parse", cause)
+            failed(result, "input_parse", cause, status=2 if not data else 1)
             assert not record.exists(), result
         directory = os.open(state, os.O_RDONLY)
         try:
@@ -606,14 +606,14 @@ def stdin_start_contract():
         for peer in ({"RUI_ADDRESS": "k7m2qx"}, {"RUI_STORE": str(store)},
                      {"RUI_ADDRESS": "broken", "RUI_STORE": str(store), "RUI_SENDER_HANDLE": "x"}):
             rejected = invoke("session", "start", "--store", store, extra=peer, input=b"must not run")
-            assert rejected.returncode == 1 and b"invalid peer context; nothing was sent" in rejected.stderr and b"request:" not in rejected.stderr, rejected
+            assert rejected.returncode == 2 and b"invalid peer context; nothing was sent" in rejected.stderr and b"request:" not in rejected.stderr, rejected
         assert fixture.command("session", "list", "--store", store, "--all")["sessions"] == []
 
         text = "initial\x00雪\n`literal` $(data)\r\n\n".encode()
         record = state / "start.json"
         lost = invoke("session", "start", "--store", store, "--record", record, "--key", "first",
             "--workspace", state, "--test-drop-reply", "after-commit", input=text)
-        failed(lost, "admission_response", b"admission outcome is unconfirmed")
+        assert lost.returncode == 4 and not lost.stdout and b"[reply_unconfirmed]" in lost.stderr, lost
         saved = record.read_bytes()
         capture = json.loads(saved)
         assert capture["session"] == "" and capture["kind"] == "message", capture
@@ -647,12 +647,12 @@ def stdin_start_contract():
         fixture.stop_host(host)
         host = None
         assert socket.is_socket(), socket
-        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"ConnectionRefused")
+        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"ConnectionRefused", status=6)
         socket.unlink()
-        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"FileNotFound")
+        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"FileNotFound", status=6)
         offline_record = state / "offline-start.json"
         failed(invoke("session", "start", "--store", store, "--record", offline_record, "--key", "offline-start",
-            input=b"admit once after reconnect"), "connect", b"FileNotFound")
+            input=b"admit once after reconnect"), "connect", b"FileNotFound", status=6)
         host = fixture.start_host(store, None)
         assert fixture.command("request", "recover", "--store", store, "--record", record, "--kind", "message") == receipt
         assert record.read_bytes() == saved
@@ -754,7 +754,7 @@ def concurrent_peers():
             args = (("session", "send", "--to", unknown) if kind == "send" else
                     ("session", "configure", "--store", store, "--session", unknown,
                      "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol"))
-            refused = run(installed, *args, home=home, expect=1, input="must not run" if kind == "send" else None)
+            refused = run(installed, *args, home=home, expect=3, input="must not run" if kind == "send" else None)
             assert refused["answer"]["status"] == "rejected" and refused["answer"]["code"] == "unknown_session", refused
             assert run(installed, "session", "inspect", "--store", store, "--session", unknown, home=home) == missing_before
             # The saved refusal is a commit, so only the listing's token moves.

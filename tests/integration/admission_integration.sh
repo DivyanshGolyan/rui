@@ -140,12 +140,12 @@ contains() {
     esac
 }
 
-# A saved rejection or conflict is delivered on stdout but exits 1.
+# A saved rejection or conflict is delivered on stdout but exits 3.
 not_accepted() {
     status=0
     reply=$("$@") || status=$?
-    if [ "$status" -ne 1 ]; then
-        echo "expected a saved non-acceptance with exit 1, got $status: $*" >&2
+    if [ "$status" -ne 3 ]; then
+        echo "expected a saved non-acceptance with exit 3, got $status: $*" >&2
         printf '%s\n' "$reply" >&2
         return 1
     fi

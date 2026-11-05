@@ -1308,7 +1308,7 @@ def main():
             session,
             "--action",
             success_action["action"],
-            expect=1,
+            expect=3,
         )
         assert conflict["answer"]["status"] == "conflict", conflict
         bash_cleanup_started = success_milestones.wait(
@@ -1498,10 +1498,10 @@ def main():
         dropped = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store), "--test-drop-reply", "after-commit"],
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
         # The second Session is still stopped after the first reply was lost.
-        assert dropped.returncode == 1 and dropped.stdout == "", dropped
+        assert dropped.returncode == 4 and dropped.stdout == "", dropped
         unconfirmed = re.findall(r"^rui: stopping (\S+)\n+request: (\S+) ", dropped.stderr, re.M)
         assert {waiter for waiter, _ in unconfirmed} == set(lost) and len(unconfirmed) == 2, dropped
-        assert {waiter for waiter in re.findall(r"^rui: stopping (\S+) failed \(\w+\)\.$", dropped.stderr, re.M)} == set(lost), dropped
+        assert dropped.stderr.count("[reply_unconfirmed]") == 2, dropped
         assert "rui: 2 of 2 stops failed." in dropped.stderr, dropped
         for (waiter, handle) in unconfirmed:
             fixture.wait_for(lambda: resolution(store, waiter) == "cancelled", "saved stop of a lost reply")
