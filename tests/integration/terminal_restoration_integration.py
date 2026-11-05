@@ -26,6 +26,7 @@ import human_cli_integration as human
 import host_process
 from host_process import HostDiagnostics, HostStartError, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
 import os_semantics
+from product_defaults import DEFAULTS
 
 
 def assert_file_flags(actual, expected):
@@ -1722,11 +1723,13 @@ def command_interruption_cases(state, library, only=None):
                     assert "replayed-into-scratch" not in marks, (case, marks)
                     assert caller.returncode == 1, (case, caller.returncode, output, errors)
                     if case.endswith("stdout"):
-                        assert "replayed-to-safe-sink" in marks and b"error: TerminalCleanupFailed" in errors, (case, marks, errors)
+                        assert "replayed-to-safe-sink" in marks and b"Configuration accepted; do not resubmit it" in errors, (case, marks, errors)
+                        assert b"error: TerminalCleanupFailed" not in errors, errors
                     else:
                         assert b"rui: Interrupted command output:" not in errors, (case, errors)
                 elif case == "configure-canonical":
-                    assert caller.returncode == 1 and b"error: CanonicalStoreFailure" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert caller.returncode == 1 and b"Configuration not confirmed; do not replace uncertain work (CanonicalStoreFailure)" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert b"error: CanonicalStoreFailure" not in errors, errors
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
                 if case == "requests" or case.startswith("inspect-"):
@@ -2162,7 +2165,7 @@ def detach_reporting_cases(state, library):
                     assert caller.returncode == 0 and not errors, (output, errors)
                     assert b"Detached. Host work continues." in output and session.encode() in output, output
                 else:
-                    assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
+                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" not in errors, (output, errors)
                     assert guide in errors and request["key"].encode() in errors, errors
                     assert (b"rui request read-result " if kind == "message" else b"rui request inspect ") + request["key"].encode() in errors
                 assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
@@ -2406,7 +2409,8 @@ def visible_stream_handoff_cases(state, library):
                     tail, errors = human.terminal_exit(caller, master)
                     # Without output credit, cleanup cannot claim delivery: an
                     # explicit failure that still names exact recovery.
-                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" in errors, (phase, tail, errors)
+                    assert caller.returncode == 1 and b"Message accepted; do not resubmit it" in errors, (phase, tail, errors)
+                    assert b"error: TerminalCleanupFailed" not in errors, errors
                     assert b"Use rui request read-result " in errors and b"Resume: rui session resume --store " in errors, errors
                     assert f" Status · {session}".encode() not in tail, "interrupted pending command ran"
                 else:
@@ -2836,8 +2840,10 @@ def host_diagnostic_cases(state, library):
                     # file before provider launch, so its correct charge is 0.
                     assert int(resources["scratch_used_bytes"]) == leftovers[0].stat().st_size == 0, resources
                     assert not endpoint.requests, endpoint.requests
+                    # Retained cleanup keeps the lease, so pause waits out its
+                    # whole retirement bound and reports it unconfirmed.
                     stopped = subprocess.run([str(fixture.RUI), "host", "pause", "--store", str(store), "--instance", instance],
-                        capture_output=True, text=True, timeout=8)
+                        capture_output=True, text=True, timeout=30)
                     (root / "host-stop.stdout").write_text(stopped.stdout)
                     (root / "host-stop.stderr").write_text(stopped.stderr)
                     assert stopped.returncode == 0, stopped
@@ -2845,6 +2851,7 @@ def host_diagnostic_cases(state, library):
                     assert {key: stop_reply[key] for key in ("type", "status", "instance", "retirement")} == {
                         "type": "host_pause", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
                     assert "pause interrupts all work in this Store" in stopped.stderr, stopped
+                    assert f"still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
                     # A stop acknowledgement is not cleanup completion: the
                     # injected unlink refusal remains active during shutdown.

@@ -2245,7 +2245,8 @@ fn configure(state: *State, arguments: []const u8) bool {
         return false;
     };
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = cli_args.live_configure.parse(tokens[0..count], nothing.allocator()) catch {
+    var problem: cli_args.Problem = undefined;
+    const parsed = cli_args.live_configure.parse(tokens[0..count], nothing.allocator(), &problem) catch {
         state.say(.attention, configure_usage, .{});
         return false;
     };

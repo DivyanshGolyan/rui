@@ -499,6 +499,96 @@ pub fn deliverAgentMessage(
     return if (delivered) .delivered else .failed;
 }
 
+fn childEndingKey(buffer: *[protocol.max_key_bytes]u8, turn_id: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/ending/{d}", .{turn_id}) catch unreachable;
+}
+
+/// The owed ending of `turn_id`: its child's Session, its parent, and how
+/// its Turn ended, with the answer's digest when it is done.
+const owed_ending_facts = rsql.Read(.{
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest," ++
+        action_domain.ending_stop_sql ++ " FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id " ++
+        "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.turn_id=?1 AND e.delivered=0",
+    .Args = struct { turn_id: u64 },
+    .Row = struct {
+        child: rsql.SessionHead,
+        parent: protocol.Bounded(protocol.session_id_bytes),
+        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        digest: ?[32]u8,
+        stopped: bool,
+        quiet: bool,
+    },
+    .cardinality = .optional,
+});
+
+const settle_owed_ending = rsql.Write(.{
+    .sql = "UPDATE session_ending_owed SET delivered=1 WHERE turn_id=?1 AND delivered=0",
+    .Args = struct { turn_id: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// What the parent of a child that ended without an answer reads, as a
+/// Message from the child (D161).
+fn endingText(buffer: []u8, ending: protocol.TurnEnding) []const u8 {
+    return std.fmt.bufPrint(buffer, "[Rui: this agent's Turn ended without an answer: {s}.]", .{@tagName(ending)}) catch unreachable;
+}
+
+/// Delivers the ending of an attached child's Turn `turn_id` to its parent
+/// as a Message from the child (D39), which wakes the parent, and settles
+/// what was owed, in one transaction. A done Turn's Message is its saved
+/// answer itself, so nothing is copied; any other ending is a short line
+/// naming it. An ending its parent's own stop caused only settles (D139).
+/// False when nothing was owed any more. Its `rui.core/` key is free:
+/// clients cannot use one, and settling marks the row with the admission.
+pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
+    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const key = childEndingKey(&key_buffer, turn_id);
+    var owed: owed_ending_facts.Result = undefined;
+    a.read(owed_ending_facts, .{ .turn_id = turn_id }, &owed);
+    try a.run();
+    const found = owed orelse {
+        try a.abandon(.{});
+        return false;
+    };
+    a.write(settle_owed_ending, .{ .turn_id = turn_id });
+    if (found.quiet) {
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try a.commit();
+        return true;
+    }
+    const outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
+    var text_buffer: [96]u8 = undefined;
+    const text = endingText(&text_buffer, outcome.ending(found.stopped));
+    var receiver: target_session.Result = null;
+    readTarget(a, found.parent.slice(), &receiver);
+    var message: content_domain.Import = .ofBytes(text, false);
+    if (outcome != .completed) content_domain.lookup(a, &message);
+    try a.run();
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    const head = (receiver orelse return error.CorruptStore).session;
+    const content_id: u64, const content_digest: [32]u8 = switch (outcome) {
+        .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
+        else => .{ try content_domain.importBytes(a, &message, text), protocol.contentDigest(text) },
+    };
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update("rui/core/child_ending/v1");
+    digest.update(&content_digest);
+    try queueCommand(a, key, .message, found.parent.slice(), &digest.finalResult(), content_id, null, &.{ .accepted = true });
+    a.write(admit_sent_message, .{
+        .admission_id = try a.identity(.admission_id),
+        .session = head,
+        .key = key,
+        .content_id = content_id,
+        .position = try (try a.positions(head)).take(1),
+        .sender = found.child,
+        .sender_position = try (try a.positions(found.child)).take(1),
+    });
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return true;
+}
+
 /// What running a `start_agent` call did.
 pub const AgentStart = enum {
     /// The agent's Session was created with the task as its first Message,

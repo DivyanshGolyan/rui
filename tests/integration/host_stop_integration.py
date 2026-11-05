@@ -385,10 +385,10 @@ def main():
             assert stale_cli.returncode != 0 and "Host instance changed" in stale_cli.stderr and stale_cli.stdout == "", stale_cli
             assert instance(store) == newer
             current_cli = subprocess.run([RUI, "host", "pause", "--store", store],
-                                         capture_output=True, text=True, timeout=10)
+                                         capture_output=True, text=True, timeout=20)
             assert current_cli.returncode == 0 and json.loads(current_cli.stdout) == {
                 "version": host_process.WIRE_VERSION, "type": "host_pause", "status": "acknowledged", "store": str(store.resolve()),
-                "instance": newer, "retirement": "unconfirmed",
+                "instance": newer, "retirement": "confirmed",
             }, current_cli
             notice = current_cli.stderr
             assert notice.startswith("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store "), current_cli

@@ -39,6 +39,9 @@ pub const Model = struct {
 pub const models = [_]Model{
     .{ .id = "gpt-6-luna", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
     .{ .id = "gpt-6.1-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    // From Codex 5c0b1ac71f2f04016abdfcf43bee7e0c96867f0e models-manager/models.json,
+    // until the shipped catalog (C1) replaces this table.
+    .{ .id = "gpt-6.1-terra", .default_effort = .low, .max_effort = true, .context_window = 500000 },
     .{ .id = "gpt-6-sol", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
     .{ .id = "gpt-6-astra", .default_effort = .low, .max_effort = true, .context_window = 272000 },
     .{ .id = "gpt-5.6-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
@@ -141,7 +144,9 @@ pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_
 test "supported model compaction defaults and exact identifier boundary" {
     for (models) |row| {
         const policy = compactionPolicy(row.id, null, null);
-        try std.testing.expectEqual(@as(u64, 244800), policy.compaction_trigger);
+        // 90% of each listed window: 500000 for gpt-6.1-terra, 272000 for the rest.
+        const expected: u64 = if (std.mem.eql(u8, row.id, "gpt-6.1-terra")) 450000 else 244800;
+        try std.testing.expectEqual(expected, policy.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 0), policy.output_reservation);
         const overridden = compactionPolicy(row.id, 7, 3);
         try std.testing.expectEqual(@as(u64, 7), overridden.compaction_trigger);
@@ -159,6 +164,7 @@ test "reasoning effort uses exact catalog defaults and model support without exp
     for ([_]struct { model: []const u8, default: ReasoningEffort, max: bool }{
         .{ .model = "gpt-6-luna", .default = .medium, .max = true },
         .{ .model = "gpt-6.1-sol", .default = .low, .max = true },
+        .{ .model = "gpt-6.1-terra", .default = .low, .max = true },
         .{ .model = "gpt-6-sol", .default = .medium, .max = true },
         .{ .model = "gpt-6-astra", .default = .low, .max = true },
         .{ .model = "gpt-5.6-sol", .default = .low, .max = true },
@@ -181,7 +187,7 @@ test "reasoning effort uses exact catalog defaults and model support without exp
     }
     try std.testing.expect(std.meta.stringToEnum(ReasoningEffort, "ultra") == null);
     try std.testing.expectEqualStrings("gpt-5.5", ids_without_max_effort);
-    try std.testing.expectEqualStrings("Supported model IDs: gpt-6-luna, gpt-6.1-sol, gpt-6-sol, gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5\n", model_help);
+    try std.testing.expectEqualStrings("Supported model IDs: gpt-6-luna, gpt-6.1-sol, gpt-6.1-terra, gpt-6-sol, gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5\n", model_help);
 }
 
 test "a new Session starts at the saved effort only when its model offers it" {

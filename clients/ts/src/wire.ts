@@ -2213,8 +2213,8 @@ export interface components {
             /** @enum {string} */
             provider: "codex" | "openai";
             model: string;
-            /** @description Each at most once, in the order the enum lists them. */
-            tools: ("bash" | "message_agent" | "start_agent" | "web_search")[];
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             label: string | null;

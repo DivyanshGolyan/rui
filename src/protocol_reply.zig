@@ -1108,7 +1108,7 @@ pub const SessionListPage = struct {
                 .workspace = wire.workspace.value,
                 .provider = wire.provider.value,
                 .model = wire.model.value,
-                .tools = wire.tools.set,
+                .tools = wire.tools.names,
                 .permission_mode = wire.permission_mode.value,
                 .label = if (wire.label) |label| label.value else null,
                 .created_at = try ActivityPage.id(wire.created_at, false),
@@ -2880,6 +2880,22 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
     try std.testing.expectEqual(@as(?SessionListCursor, null), reply.page.next);
 }
 
+test "Session list rows retain host tool names" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "tools", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[\"bash\",\"fetch_page\"],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
+    try file.writePositionalAll(io, wire, 0);
+    const page = try SessionListPage.read(io, file, wire.len, null, .{});
+    try std.testing.expectEqualStrings("bash fetch_page", page.rows[0].tools.names.slice());
+    var buffer: [protocol.session_list_reply.max_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try page.writeRowsJson(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"tools\":[\"bash\",\"fetch_page\"]") != null);
+}
+
 test "Session list facts attain eight maximum escaped rows and bind the continuation cohort" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2896,7 +2912,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     // Every row escapes every byte of its longest texts.
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .provider = .codex, .tools = .initOne(.bash), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
     try maximal.workspace.set(&workspace);
     try maximal.model.set(&model);
     try maximal.label.?.set(&text);
@@ -2929,7 +2945,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try std.testing.expectEqual(protocol.session_id_bytes, row.reference.len);
         try std.testing.expectEqualStrings(&workspace, row.workspace.slice());
         try std.testing.expectEqualStrings(&model, row.model.slice());
-        try std.testing.expect(row.tools.contains(.bash) and row.permission_mode == .bypass);
+        try std.testing.expect(std.mem.eql(u8, row.tools.names.slice(), "bash") and row.permission_mode == .bypass);
         try std.testing.expectEqualStrings(&text, row.label.?.slice());
         try std.testing.expectEqualStrings(&text, row.work.state.bash.description.?.slice());
     }
