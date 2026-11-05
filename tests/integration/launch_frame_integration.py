@@ -218,6 +218,22 @@ def main():
     wait_for_socket(mcp_root / "rui.sock", host)
     host.stdin.close()
     assert host.wait(timeout=30) == 0, output(host)
+
+    # A launcher that goes away while a server withholds its answer stops the
+    # Host at once, not after the listing's own deadline.
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(8)
+    hang_root = root / "hang"
+    hang_root.mkdir(mode=0o700)
+    entry = {"name": "slow", "url": f"http://127.0.0.1:{silent.getsockname()[1]}/mcp", "bearerToken": "t", "callTimeoutMs": 1000}
+    host = launch(frame(dict(good, store=str(root / "store6"), runtimeDir=str(hang_root), mcpServers=[entry])))
+    time.sleep(1)
+    started = time.monotonic()
+    host.stdin.close()
+    assert host.wait(timeout=5) == 0, output(host)
+    assert time.monotonic() - started < 3
+    silent.close()
     print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, four refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 

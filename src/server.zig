@@ -864,11 +864,13 @@ pub const launch_shutdown_seconds = 10;
 /// Lists each MCP server and saves the Host's catalog: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
 /// (D147). A name two sources share refuses the start (D142).
-noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer) !void {
+noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) !void {
     var saved = try storage.readCatalog(arena);
     const kept: ?tools.Catalog = if (saved) |*found| found.catalog() else null;
     var collision: mcp_offered.Collision = .{};
-    const catalog = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision) catch |err| switch (err) {
+    const catalog = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision, stop) catch |err| switch (err) {
+        // The launcher closed stdin: stop as a closed stdin does later.
+        error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
             var message: [256]u8 = undefined;
             launch_frame.writeRefusal(io, .{
@@ -1012,7 +1014,7 @@ pub fn serve(
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, &storage, mcp_servers);
+    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, &storage, mcp_servers, if (launch) |value| value.stdin else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 

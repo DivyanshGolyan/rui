@@ -43,7 +43,8 @@ pub const Collision = struct {
 
 pub const built_in_source = "Rui";
 
-pub const Error = error{ OutOfMemory, ToolNameCollision, TooManyTools };
+/// `Stopped`: the launcher's stdin ended while a server was being listed.
+pub const Error = error{ OutOfMemory, ToolNameCollision, TooManyTools, Stopped };
 
 const Item = struct { record: tools.Record, source: []const u8 };
 
@@ -106,7 +107,7 @@ pub const Fetched = union(enum) {
 
 /// Lists one server's tools within `list_timeout_ms`, copying them into
 /// `arena`. Anything but a complete listing leaves the server unreachable.
-pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: launch_frame.Frame.McpServer) Error!Fetched {
+pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) Error!Fetched {
     const target = http1.parseTarget(server.url.slice()) catch return .unreachable_;
     const entries = try scratch.alloc(Listing.Entry, entries_per_server);
     defer scratch.free(entries);
@@ -137,8 +138,14 @@ pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.All
             .waiting => {},
         }
         if (deadline.reached(std.Io.Clock.Timestamp.now(io, .awake), limit)) return .unreachable_;
-        var fds = [_]std.posix.pollfd{.{ .fd = listing.fd(), .events = listing.events(), .revents = 0 }};
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = listing.fd(), .events = listing.events(), .revents = 0 },
+            .{ .fd = stop orelse -1, .events = std.posix.POLL.IN, .revents = 0 },
+        };
         _ = std.posix.poll(&fds, 100) catch return .unreachable_;
+        // A launched Host's stdin carries nothing after its frame: any event
+        // on it is the launcher going away.
+        if (fds[1].revents != 0) return error.Stopped;
     }
     const copies = try arena.alloc(Listing.Entry, listing.entries().len);
     for (listing.entries(), copies) |entry, *copy| copy.* = .{
@@ -151,7 +158,9 @@ pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.All
     return .{ .listed = copies };
 }
 
-/// Lists every server and merges the result with `saved`. On a collision
+/// Lists every server and merges the result with `saved`. `stop` is a
+/// descriptor that becomes readable or hung up when the Host should stop
+/// listing (the launcher's stdin). On a collision
 /// the error is `ToolNameCollision` and `collision` says between which.
 pub noinline fn collect(
     io: std.Io,
@@ -160,12 +169,13 @@ pub noinline fn collect(
     servers: []const launch_frame.Frame.McpServer,
     saved: ?*const tools.Catalog,
     collision: *Collision,
+    stop: ?std.posix.fd_t,
 ) Error!tools.Catalog {
     const sources = try arena.alloc(Source, servers.len);
     for (servers, sources) |server, *source| {
         const name = try arena.dupe(u8, server.name.slice());
         source.* = .{ .server = name, .listed = null };
-        switch (try fetch(io, arena, scratch, server)) {
+        switch (try fetch(io, arena, scratch, server, stop)) {
             .listed => |entries| source.listed = entries,
             .unreachable_ => stderr.diagnostic("rui: MCP server {s} did not list its tools; keeping its saved tools\n", .{name}),
             .collision => |tool| {
