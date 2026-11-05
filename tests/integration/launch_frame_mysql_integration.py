@@ -55,6 +55,12 @@ def main():
         child.stdin.flush()
         return child
 
+    def released():
+        # MySQL ends an exited Host's session, and its GET_LOCK, a little
+        # after the socket closes, so a relaunch waits for the lock to free.
+        host_process.wait_for(lambda: sql(f"SELECT IS_FREE_LOCK('{database}')") == "1",
+                              "the exited Host's Store lock", timeout=20)
+
     def ready(child):
         try:
             frame_host.wait_for_socket(sock, child)
@@ -89,12 +95,14 @@ def main():
         sql(f"CREATE DATABASE {database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
         missing = launch(good)
         assert frame_host.refusal(missing)["code"] == "store_schema_missing"
+        released()
         ddl = subprocess.run([rui, "store", "schema", "--engine", "mysql"], check=True, capture_output=True, text=True).stdout
         assert "CREATE TABLE store_meta" in ddl
         sql(f"USE {database};" + ddl)
         sql(f"INSERT INTO {database}.store_meta VALUES('format','0')")
         assert frame_host.refusal(launch(good))["code"] == "store_schema_behind"
         sql(f"DELETE FROM {database}.store_meta")
+        released()
         host = launch(good)
         store_id = ready(host)
         assert store_id == sql(f"SELECT meta_value FROM {database}.store_meta WHERE meta_key='store_id'")
@@ -126,6 +134,7 @@ def main():
         assert status["diagnostics"] == str(runtime / "diagnostics")
         private(host)
         close(host)
+        released()
         host = launch(good)
         assert ready(host) == store_id, "the Store id changed across a Host restart"
         assert frame_host.post(sock, "inspect-session", request)["session"]["reference"] == session
