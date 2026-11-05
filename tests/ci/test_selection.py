@@ -727,7 +727,32 @@ class SelectionTest(unittest.TestCase):
                                  workflow.count('uses: ./.github/actions/setup'))
         for path in Path('.github/workflows').glob('*.yml'):
             if path.name not in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
-                self.assertNotIn('publish-caches', path.read_text(), f'{path.name} must keep publishing')
+                workflow = path.read_text()
+                if path.name == 'check.yml':
+                    # Policy only needs a compiler for the first caller-error
+                    # inventory. Its conditional setup must not consume or
+                    # publish native build caches; every native setup still
+                    # uses the default publishing behavior below.
+                    policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)
+                    bootstrap_steps = re.findall(
+                        r'(?m)^      - uses: \./\.github/actions/setup\n(?:        .*\n)*', policy)
+                    self.assertEqual(len(bootstrap_steps), 1)
+                    self.assertEqual(policy.count('uses: ./.github/actions/setup'), 1)
+                    bootstrap = bootstrap_steps[0]
+                    self.assertEqual([line.strip() for line in bootstrap.splitlines()
+                                      if line.strip() and not line.lstrip().startswith('#')], [
+                        '- uses: ./.github/actions/setup',
+                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}",
+                        'with:',
+                        "targets: '[]'",
+                        "compiled: 'true'",
+                        "cold: 'true'",
+                        "publish-caches: 'false'",
+                    ])
+                    self.assertIn('id: caller-bootstrap', policy)
+                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', policy)
+                    workflow = workflow.replace(bootstrap, '', 1)
+                self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         setup = Path('.github/actions/setup/action.yml').read_text()
         self.assertNotIn('actions/cache/save@', setup)
         steps = re.findall(r'(?m)^    - uses: actions/cache(/restore)?@.*\n((?:      .*\n)+)', setup)

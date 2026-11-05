@@ -164,8 +164,8 @@ class PeerModel(TestHTTPServer):
             f'rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label {shlex.quote(A_LABEL)} '
             "> a-label.out 2> a-label.err || exit 89; "
             f"rui session start --workspace {shlex.quote(str(self.workspace))} --label {shlex.quote(B_LABEL)} "
-            "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.id 2> b-send.err; "
-            "status=$?; cat b-start.id; exit $status"
+            "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.json 2> b-send.err; "
+            "status=$?; cat b-start.json; exit $status"
         ), stdin=message)
 
 
@@ -257,7 +257,7 @@ def main(report_source):
         foreign_listing = run(installed, "session", "list", "--store", foreign_store, "--all", home=home)
         # Old caller names and noncanonical IDs fail at capture. The removed
         # hex flag must not revive NUL-bearing arbitrary references either.
-        invalid_selectors = [("--session", value, b"Session ID must be exactly six lowercase Crockford characters") for value in
+        invalid_selectors = [("--session", value, b"[invalid_session_reference]") for value in
                              ('peer/a "quoted" \\ 雪', 'ABC123', 'k7m2qi', 'rui/k7m2qx')]
         invalid_selectors.append(("--session-hex", 'peer/nul\x00雪'.encode().hex(), b"rui session configure: --session-hex: That option is not supported by this command. Accepted: options and values listed by rui session configure --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]"))
         for flag, invalid, diagnostic in invalid_selectors:
@@ -340,11 +340,16 @@ def main(report_source):
         assert replay["answer"]["code"] == "invalid_sender_handle" and replay["answer"]["replayed"] is True, replay
         undelivered = run(installed, "session", "inspect", "--store", foreign_store, "--session", foreign_session, home=home)
         assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
-        assert (workspace / "b-start.id").read_text() == session_b + "\n"
+        start_receipt = json.loads((workspace / "b-start.json").read_text())
+        assert allocated(start_receipt) == session_b, start_receipt
+        # C1b's client product default is low, not the removed table's medium.
+        assert start_receipt["configuration"] == {"provider": "codex", "model": "gpt-6-sol",
+            "reasoning_effort": "low", "effort_source": "model_default"}, start_receipt
         announcement = (workspace / "b-send.err").read_text()
         handle = re.fullmatch(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n", announcement)
         assert handle, announcement
         handle = handle.group(1)
+        assert start_receipt["context"]["key"] == handle, start_receipt
         receipt = run(installed, "request", "recover", handle, home=home)
         assert receipt["answer"]["status"] == "accepted" and receipt["context"]["session"] == session_b, receipt
         assert receipt["answer"]["replayed"] is True, receipt
@@ -554,7 +559,7 @@ class CohortModel(TestHTTPServer):
             f"printf %s 'Report to parent ID {self.parent}' | rui session start --workspace {shlex.quote(str(self.workspace))} "
             "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass "
             f'--record {shlex.quote(str(self.workspace.parent))}/cohort-$i.json --key cohort-$i '
-            '> "cohort-$i-start.id" 2> "cohort-$i-start.err" '
+            '> "cohort-$i-start.json" 2> "cohort-$i-start.err" '
             ') & pids="$pids $!"; done; touch cohort-create; '
             'status=0; for pid in $pids; do wait "$pid" || status=1; done; exit "$status"'
         ))
@@ -576,14 +581,14 @@ def stdin_start_contract():
                 env={**environment, **(extra or {})}, capture_output=True, timeout=15,
                 **({"input": input} if "stdin" not in kwargs else {}), **kwargs)
 
-        def failed(result, stage, cause, status=1):
+        def failed(result, code, status=1):
             assert result.returncode == status and result.stdout == b"", result
-            assert f"failure during {stage}:".encode() in result.stderr and cause in result.stderr, result
-            line = next(line for line in result.stderr.splitlines() if f"failure during {stage}:".encode() in line)
-            assert line.split(f"failure during {stage}: ".encode(), 1)[1].rstrip(b"."), result
-            assert b"error:" not in result.stderr and b"no Host serving" not in result.stderr, result
+            assert f"[{code}]".encode() in result.stderr, result
+            assert b"error:" not in result.stderr, result
+            if code == "host_not_serving":
+                assert f"rui host start --store $'{store}'.".encode() in result.stderr, result
 
-        failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store", b"FileNotFound")
+        failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store_unavailable", status=6)
         host = fixture.start_host(store, None)
         # File-valued and literal forms have no compatibility route.
         for args in (("send", "--to", "k7m2qx", "--text", "input"),
@@ -592,22 +597,22 @@ def stdin_start_contract():
                      ("start", "--instructions", "-")):
             result = invoke("session", *args, "--store", store)
             assert result.returncode == 2 and result.stdout == b"" and b"request:" not in result.stderr, result
-        for data, cause in ((b"", b"Nothing was sent"), (b"bad\xff", b"InvalidUtf8")):
+        for data, code in ((b"", "message_empty"), (b"bad\xff", "internal_unexpected")):
             record = state / "invalid.json"
             result = invoke("session", "start", "--store", store, "--record", record, "--key", "invalid", input=data)
-            failed(result, "input_parse", cause, status=2 if not data else 1)
+            failed(result, code, status=2 if not data else 1)
             assert not record.exists(), result
         directory = os.open(state, os.O_RDONLY)
         try:
-            failed(invoke("session", "start", "--store", store, stdin=directory), "stdin_read", b"failure during stdin_read:")
+            failed(invoke("session", "start", "--store", store, stdin=directory), "internal_unexpected")
         finally:
             os.close(directory)
         failed(invoke("session", "configure", "--store", store,
-            "--output-schema", state / "missing-schema"), "input_file_read", b"FileNotFound")
+            "--output-schema", state / "missing-schema"), "internal_unexpected")
         for peer in ({"RUI_ADDRESS": "k7m2qx"}, {"RUI_STORE": str(store)},
                      {"RUI_ADDRESS": "broken", "RUI_STORE": str(store), "RUI_SENDER_HANDLE": "x"}):
             rejected = invoke("session", "start", "--store", store, extra=peer, input=b"must not run")
-            assert rejected.returncode == 2 and b"invalid peer context; nothing was sent" in rejected.stderr and b"request:" not in rejected.stderr, rejected
+            assert rejected.returncode == 2 and b"[peer_context_invalid]" in rejected.stderr and b"request:" not in rejected.stderr, rejected
         assert fixture.command("session", "list", "--store", store, "--all")["sessions"] == []
 
         text = "initial\x00雪\n`literal` $(data)\r\n\n".encode()
@@ -648,12 +653,19 @@ def stdin_start_contract():
         fixture.stop_host(host)
         host = None
         assert socket.is_socket(), socket
-        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"ConnectionRefused", status=6)
+        for arguments in (
+                ("request", "inspect", "--key", "first"),
+                ("request", "read-result", "--key", "first"),
+                ("session", "list"),
+                ("session", "read-conversation", "--session", session, "--position", "1", "--ordinal", "1"),
+                ("action", "inspect", "--session", session, "--action", "1")):
+            failed(invoke(*arguments, "--store", store), "host_not_serving", status=6)
+        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "host_not_serving", status=6)
         socket.unlink()
-        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"FileNotFound", status=6)
+        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "host_not_serving", status=6)
         offline_record = state / "offline-start.json"
         failed(invoke("session", "start", "--store", store, "--record", offline_record, "--key", "offline-start",
-            input=b"admit once after reconnect"), "connect", b"FileNotFound", status=6)
+            input=b"admit once after reconnect"), "host_not_serving", status=6)
         host = fixture.start_host(store, None)
         assert fixture.command("request", "recover", "--store", store, "--record", record, "--kind", "message") == receipt
         assert record.read_bytes() == saved
@@ -668,8 +680,36 @@ def stdin_start_contract():
         second = destinations.pop()
         assert [row["reference"] for row in fixture.command("session", "list", "--store", store, "--all")["sessions"]] == [session, second]
         assert fixture.command("session", "inspect", "--store", store, "--session", second)["pending_messages"] == "1"
+        defaults_reply = invoke("defaults", "configure", "--provider", "codex", "--model", "gpt-6.1-sol",
+            "--reasoning-effort", "high")
+        assert defaults_reply.returncode == 0, defaults_reply
+        for arguments, model, effort, source in (
+            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", "low", "model_default"),
+            (("--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
+            (("--model", "gpt-6.1-sol", "--reasoning-effort", "xhigh"), "gpt-6.1-sol", "xhigh", "flag"),
+            (("--model", "gpt-6.1-sol", "--reasoning-effort", "default"), "gpt-6.1-sol", "low", "flag"),
+            # D229: an unlisted exact binding still admits the saved effort.
+            (("--model", "unlisted-model"), "unlisted-model", "high", "saved"),
+        ):
+            started = invoke("session", "start", "--store", store, "--workspace", state, *arguments,
+                input=b"report configuration")
+            assert started.returncode == 0, started
+            start_receipt = json.loads(started.stdout)
+            new_session = allocated(start_receipt)
+            assert list(start_receipt) == ["context", "configuration", "answer", "input", "queue"], start_receipt
+            assert start_receipt["configuration"] == {"provider": "codex", "model": model,
+                "reasoning_effort": effort, "effort_source": source}, start_receipt
+            observed = fixture.command("session", "inspect", "--store", store, "--session", new_session)["session"]
+            assert observed["model"] == model and observed["reasoning_effort"] == effort, observed
+            handle = start_receipt["context"]["key"]
+            assert f"request: {handle} (inspect: rui request inspect {handle}; if unconfirmed: rui request recover {handle})\n".encode() in started.stderr, started
+            replay = json.loads(invoke("request", "recover", handle).stdout)
+            assert replay["context"] == start_receipt["context"] and "configuration" not in replay, replay
+            assert replay["answer"]["replayed"] is True, replay
+            assert fixture.command("session", "stop", "--store", store, "--session", new_session)["answer"]["status"] == "accepted"
         print("stdin/start: exact NUL/UTF-8/newline bytes, lost admission, four concurrent original replays, one allocated Session, "
-              "queued-not-completed receipt, cancellation/reopen, stdin-only grammar and precise read/parse/store/connect errors passed")
+              "queued-not-completed receipt, effective configuration and effort sources, cancellation/reopen, stdin-only grammar "
+              "and precise read/parse/store/connect errors passed")
     except BaseException:
         retain_failure_state("stdin/start failure state", state)
         state = None
@@ -717,7 +757,8 @@ def concurrent_peers():
         fixture.wait_for(lambda: len(endpoint.reports) == 10, "all ten recorded report senders", deadline=deadline)
         peers = []
         for index in range(10):
-            peer = (workspace / f"cohort-{index}-start.id").read_text().removesuffix("\n")
+            start_receipt = json.loads((workspace / f"cohort-{index}-start.json").read_text())
+            peer = allocated(start_receipt)
             assert SESSION_ID.fullmatch(peer) and peer != parent and peer not in peers, peers
             peers.append(peer)
             admission = run(installed, "request", "recover", "--store", store,

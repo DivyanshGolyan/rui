@@ -274,6 +274,13 @@ pub fn setLoadedToolsForTesting(storage: *Store, session: []const u8, source: []
     try exec(storage, "UPDATE session_revision SET loaded_tool_set_id=(SELECT loaded_tool_set_id FROM session WHERE session_ref=?1) WHERE session_ref=?1", .{session});
 }
 
+/// Pre-D111 population: null Session settings while earlier Operations retain
+/// the concrete effort they froze. Only the fixture bypasses fresh-spec admission.
+pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void {
+    try exec(storage, "UPDATE session SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
+    try exec(storage, "UPDATE session_revision SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
+}
+
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
 /// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
@@ -380,6 +387,19 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set(model);
+    if (session_ref.len == 0) {
+        // D104/D111/D113: test creations supply a complete agent spec.
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        // Listed test bindings use the client choice; unlisted ones state null.
+        if (if (@import("../model_capability.zig").supportsModel(model)) @import("../client_defaults.zig").startEffort(model, null) else null) |effort| {
+            command.configuration.reasoning_effort.state = .value;
+            try command.configuration.reasoning_effort.value.set(@tagName(effort));
+        } else command.configuration.reasoning_effort.state = .explicit_null;
+    }
     return command;
 }
 

@@ -576,6 +576,9 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         listed = {"providers": [{"provider": "openai", "source": "live", "models": [
             {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}]}
         pending = {"providers": [{"provider": "openai", "source": "pending", "models": []}]}
+        fallback = {"providers": [{"provider": "openai", "source": "catalog_fallback", "models": [
+            {"id": "gpt-6-sol", "known": True}]}]}
+        host_models = {}
 
         def shutdown():
             calls.append("shutdown")
@@ -591,7 +594,21 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         def start(*args, **kwargs):
             if fail_start:
                 raise primary
-            return SimpleNamespace(pid=1), {"socket": "/fixture/socket"}
+            # Each Host fetches once. The fallback leg changes the endpoint
+            # payload and starts a new Host, not the first Host's cached list.
+            host = SimpleNamespace(pid=len(host_models) + 1)
+            socket = f"/fixture/socket/{host.pid}"
+            payload = json.loads(endpoint.models)
+            if "error" in payload:
+                self.assertEqual(payload, {"error": "model list unavailable"})
+                host_models[socket] = fallback
+            else:
+                self.assertIn("data", payload)
+                host_models[socket] = listed
+            return host, {"socket": socket}
+
+        def model_list(socket, *args):
+            return host_models[socket] if endpoint.models_release.is_set() else pending
 
         def message(*args):
             if fail_body:
@@ -623,7 +640,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     (codex_h2.fixture, "message", message),
                     (codex_h2.fixture, "wait_for_result_release", lambda *a: (
                         {"result": {"status": "completed"}}, b"answer-custom-base", None)),
-                    (codex_h2.fixture, "stop_host", lambda host: calls.append("stop_host")),
+                    (codex_h2.fixture, "stop_host", lambda host: calls.append(("stop_host", host.pid))),
                     (codex_h2, "retain_failure_state", lambda label, state: retained.append(state)),
                     (codex_h2.shutil, "rmtree", lambda path: removed.append(path))):
                 stack.enter_context(patch.object(owner, name, value))
@@ -636,7 +653,9 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     codex_h2.openai_base_url_run()
                 self.assertIs(raised.exception, expected)
             disposals = ["shutdown", "close", "join"]
-            self.assertEqual(calls, disposals if fail_start else ["stop_host", *disposals])
+            hosts = [] if fail_start else [1] if fail_body else [1, 2]
+            self.assertEqual(list(host_models), [f"/fixture/socket/{pid}" for pid in hosts])
+            self.assertEqual(calls, [("stop_host", pid) for pid in hosts] + disposals)
             if expected is None:
                 self.assertEqual((retained, removed), ([], [root]))
             else:

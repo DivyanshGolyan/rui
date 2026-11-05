@@ -206,26 +206,20 @@ pub const SessionReportCapture = struct {
     }
 
     fn appendContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
-        try self.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
-        try self.append(&std.fmt.bytesToHex(reference.digest, .lower));
-        try self.append("\"}");
+        try self.appendShape(protocol.content_reference_shape, .{ reference.length, reference.digest });
     }
 
     fn appendBareContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
-        try self.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
-        try self.append(&std.fmt.bytesToHex(reference.digest, .lower));
-        try self.append("\"}");
+        try self.appendShape(protocol.ActivityItem.Content.json_shape, .{ reference.length, reference.digest });
     }
 
     fn appendOwnedContentReference(
         self: *SessionReportCapture,
         reference: ContentReference,
-        owner_revision: i64,
+        owner_revision: u64,
         owner_field: RevisionContentField,
     ) !void {
-        try self.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
-        try self.append(&std.fmt.bytesToHex(reference.digest, .lower));
-        try self.appendFmt("\",\"owner\":{{\"revision\":\"{d}\",\"field\":\"{s}\"}}}}", .{ owner_revision, @tagName(owner_field) });
+        try self.appendShape(@import("report_full_shape.zig").Full.OwnedReference.json_shape, .{ reference.length, reference.digest, owner_revision, owner_field });
     }
 
     /// A set's names as `tool_set.namesSql` joins them, as a JSON array in
@@ -741,12 +735,35 @@ pub fn renderSessionReport(
 ) !void {
     if (!try renderHead(a, session_ref, profile, capture)) return;
     if (profile == .full) try renderFull(a, session_ref, capture);
-    try capture.appendFmt(",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\"]}}}}", .{
-        if (execution.dispatch_fenced) "true" else "false",
-        execution.custody_occupied,
-        execution.scratch_used_bytes,
-    });
+    try capture.append(",\"execution\":");
+    try capture.appendShape(ExecutionJson.json_shape, .{ execution.dispatch_fenced, execution.custody_occupied, execution.scratch_used_bytes });
+    try capture.append("}");
 }
+
+/// Wire shapes for the report envelope written by `renderHead` and
+/// `renderSessionReport`. Full history is present only for the full profile.
+pub const json_shapes = struct {
+    const H = protocol.Hole;
+    const head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
+    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = protocol.max_key_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
+    const tail = .{ ",\"execution\":", H{ .json = ExecutionJson }, "}" };
+    const missing = "\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
+    pub const current = head ++ .{"current"} ++ facts ++ tail;
+    pub const full = head ++ .{"full"} ++ facts ++ .{ ",\"full\":", H{ .json = @import("report_full_shape.zig").Full } } ++ tail;
+    pub const missing_current = head ++ .{"current" ++ missing};
+    pub const missing_full = head ++ .{"full" ++ missing};
+};
+
+fn ListOf(comptime T: type) type {
+    return struct {
+        pub const openapi_list = T;
+    };
+}
+
+/// Execution counters are supplied by the Host, not read from the Store.
+pub const ExecutionJson = struct {
+    pub const json_shape = .{ "{\"status\":\"partial\",\"dispatch_fenced\":", protocol.Hole.boolean, ",\"custody_occupied\":\"", protocol.Hole.decimal, "\",\"scratch_used_bytes\":\"", protocol.Hole.decimal, "\",\"unavailable\":[\"structured_output\"]}" };
+};
 
 /// A report's head, whose rounds tests count: round 1 reads the saved
 /// Session, and a missing one ends the report there, with its execution
@@ -914,10 +931,11 @@ const recent_messages = rsql.Read(.{
 /// The active Turn's current Operation's unresolved Actions, with each
 /// call's line for its presentation.
 const unresolved_actions = rsql.Read(.{
-    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode," ++
+    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,@payload(call_name) AS tool_name," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "call_name.digest AS name_digest,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
+        "call_name.digest AS name_digest," ++ action_domain.mcpServerSql("a", "operation") ++ " AS server,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
+        "CROSS JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
@@ -932,11 +950,13 @@ const unresolved_actions = rsql.Read(.{
         permission_revision: rsql.Positive,
         authorized: bool,
         permission_mode: u1,
+        tool_name: protocol.Bounded(tool_catalog.max_name_bytes),
         call_id_length: u64,
         call_id_digest: [32]u8,
         arguments_length: u64,
         arguments_digest: [32]u8,
         name_digest: [32]u8,
+        server: ?protocol.Bounded(64),
         description: ?Description,
     },
     .cardinality = .each,
@@ -1218,6 +1238,72 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     try capture.append("]");
 }
 
+/// Markers for the parts `renderCurrent` and its row renderers write by
+/// hand. Shared work, peer, Message and presentation fields use their wire
+/// types' shapes rather than a second description here.
+pub const CurrentJson = struct {
+    const H = protocol.Hole;
+    pub const ToolNames = struct {
+        pub const openapi_tools = true;
+    };
+    pub const Reference = protocol.ActivityItem.Content;
+    pub const TextReference = struct {
+        pub const json_shape = protocol.content_reference_shape;
+    };
+    pub const Settings = struct {
+        pub const json_shape = .{
+            "{\"reference\":",                     H{ .string = protocol.max_session_bytes },
+            ",\"parent\":",                        H{ .optional_string = protocol.session_id_bytes },
+            ",\"workspace\":",                     H{ .string = protocol.max_workspace_bytes },
+            ",\"provider\":\"",                    H{ .tag = protocol.Provider },
+            "\",\"model\":",                       H{ .string = protocol.max_model_bytes },
+            ",\"compaction_trigger\":\"",          H.decimal,
+            "\",\"context_estimate\":",            H.optional_id,
+            ",\"output_reservation\":\"",          H.decimal,
+            "\",\"compaction_trigger_override\":", H.optional_id,
+            ",\"output_reservation_override\":",   H.optional_id,
+            ",\"reasoning_effort\":",              H{ .optional_tag = protocol.ReasoningEffort },
+            ",\"reasoning_effort_override\":",     H{ .optional_tag = protocol.ReasoningEffort },
+            ",\"revision\":\"",                    H.decimal,
+            "\",\"tools\":",                       ToolNames,
+            ",\"loaded_tools\":",                  ToolNames,
+            ",\"permission_mode\":\"",             H{ .tag = protocol.PermissionMode },
+            "\",\"instructions\":",                H{ .json = Reference },
+            ",\"output_schema\":",                 H{ .optional_json = Reference },
+            ",\"label\":",                         H{ .optional_string = protocol.max_label_bytes },
+            ",\"created_at\":\"",                  H.decimal,
+            "\"}",
+        };
+    };
+    pub const Outcome = struct {
+        pub const json_shape = .{ "{\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
+    };
+    pub const Work = struct {
+        pub const json_shape = .{"{"} ++ protocol.SessionWork.fields ++ .{ ",\"latest_outcome\":", H{ .optional_json = Outcome }, "}" };
+    };
+    pub const Recent = struct {
+        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = protocol.max_key_bytes }, ",\"outcome\":", H{ .string = protocol.max_code_bytes }, "}" };
+    };
+    pub const Unresolved = struct {
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = protocol.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+    };
+    pub const Resolved = struct {
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_action_resolution_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+    };
+    pub const Rejected = struct {
+        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"name\":", H{ .json = TextReference }, ",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentation }, "}" };
+    };
+    pub const Actions = struct {
+        pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"unresolved\":", ListOf(Unresolved), ",\"resolved\":", ListOf(Resolved), "}" };
+    };
+    pub const RejectedCalls = struct {
+        pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"items\":", ListOf(Rejected), "}" };
+    };
+    pub const Actionable = struct {
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"permission_revision\":\"", H.decimal, "\"}" };
+    };
+};
+
 /// One list of the Current report, in a round of its own, rendered as it
 /// steps, so it keeps no row: `limit` bounds only a list whose text does.
 /// A row that failed to render did before any later row's step failed,
@@ -1257,29 +1343,37 @@ fn ListRender(comptime Row: type, comptime renderRow: anytype) type {
 }
 
 fn renderRecent(capture: *SessionReportCapture, row: *const recent_messages.Row) !void {
-    try capture.appendFmt("{{\"turn\":\"{d}\",\"message\":", .{row.turn_id.get()});
-    try capture.appendJsonString(row.command_key.slice());
-    try capture.append(",\"outcome\":");
-    try capture.appendJsonString(row.outcome_code.slice());
-    try capture.append("}");
+    try capture.appendShape(CurrentJson.Recent.json_shape, .{ row.turn_id.get(), row.command_key.slice(), row.outcome_code.slice() });
 }
 
 fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actions.Row) !void {
     // The insert authorizes every Action proposed under `bypass`.
     if (row.permission_mode == 1 and !row.authorized) return error.CorruptStore;
-    const tool = actionTool(&row.name_digest) orelse return error.CorruptStore;
-    const core = tool_catalog.Runner.of(tool_catalog.record(tool)) == .core;
+    const built_in = actionTool(&row.name_digest);
+    const mcp = row.server != null;
+    if (row.server) |server| {
+        if (!protocol.validToolName(server.slice()) or built_in != null) return error.CorruptStore;
+    }
+    // A non-built-in Action must name an MCP member of its frozen offer.
+    // Built-in checks remain strict; provider tools never create Actions.
+    const name = if (mcp) row.tool_name.slice() else @tagName(built_in orelse return error.CorruptStore);
+    if (mcp and !protocol.validToolName(name)) return error.CorruptStore;
+    const core = !mcp and tool_catalog.Runner.of(tool_catalog.record(built_in.?)) == .core;
     // Settlement authorizes a core call at once, with no decision.
     if (core and !row.authorized) return error.CorruptStore;
     try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
         row.action_id.get(),
         row.parent_operation_id.get(),
         row.call_ordinal,
-        @tagName(tool),
+        name,
         row.permission_revision.get(),
         if (core) "core" else if (!row.authorized) "pending" else if (row.permission_mode == 1) "bypass" else "allow_once",
     });
     try capture.appendContentReference(.{ .length = row.call_id_length, .digest = row.call_id_digest });
+    if (row.server) |server| {
+        try capture.append(",\"server\":");
+        try capture.appendJsonString(server.slice());
+    }
     try capture.append(",\"arguments\":");
     try capture.appendContentReference(.{ .length = row.arguments_length, .digest = row.arguments_digest });
     // Unresolved, and not rejected: the rule proved a call with an Action
@@ -1330,7 +1424,7 @@ fn renderRejected(capture: *SessionReportCapture, row: *const rejected_calls.Row
 }
 
 fn renderActionable(capture: *SessionReportCapture, row: *const actionable_permissions.Row) !void {
-    try capture.appendFmt("{{\"action\":\"{d}\",\"permission_revision\":\"{d}\"}}", .{ row.action_id.get(), row.permission_revision.get() });
+    try capture.appendShape(CurrentJson.Actionable.json_shape, .{ row.action_id.get(), row.permission_revision.get() });
 }
 
 /// A stored outcome code as a presentation's: one it does not name is
@@ -2164,7 +2258,7 @@ const RevisionContent = struct {
 
     /// Not inlined: its formatting takes no frame on the streaming chain.
     noinline fn renderReference(content: *const RevisionContent, capture: *SessionReportCapture) !void {
-        try capture.appendOwnedContentReference(.{ .length = content.value.length, .digest = content.value.digest }, @intCast(content.owner.revision), content.owner.field);
+        try capture.appendOwnedContentReference(.{ .length = content.value.length, .digest = content.value.digest }, content.owner.revision, content.owner.field);
     }
 };
 

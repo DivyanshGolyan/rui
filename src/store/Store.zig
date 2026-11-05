@@ -32,6 +32,7 @@ const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const AgentDelivery = command_domain.AgentDelivery;
 const AgentStart = command_domain.AgentStart;
 const CoreActionInput = action_domain.CoreActionInput;
+const forward_domain = @import("domain/forward.zig");
 const CoreWork = action_domain.CoreWork;
 const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
@@ -547,19 +548,32 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, faults });
+        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, null), faults });
+    }
+
+    /// A Host-resolved preset or its refusal uses the same key lookup,
+    /// rejection persistence and transaction as every other configure.
+    /// Borrows `preset` until the synchronous queued write returns.
+    pub fn configureWithPreset(
+        self: *Store,
+        command: *const protocol.ConfigureCommand,
+        preset: *const configuration_domain.PresetDecision,
+        faults: Faults,
+    ) ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, preset), faults });
     }
 
     fn configureHeld(
         self: *Store,
         command: *const protocol.ConfigureCommand,
+        preset: ?*const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, faults))) catch .infrastructure_failure;
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, faults))) catch .infrastructure_failure;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -1016,8 +1030,6 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
-    /// The core's next work, or null: a stop an attached child owes
-    /// (D38), else the next core tool call to run (D24).
     /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
     /// settles one its parent's stop caused (D139).
     pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
@@ -1032,6 +1044,20 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, faults)));
     }
 
+    /// Positions one ancestor feed row and durably queues its next hop.
+    pub fn deliverSessionForward(self: *Store, forward_id: u64, faults: Faults) !bool {
+        return self.queue().write(deliverSessionForwardHeld, .{ self, forward_id, faults });
+    }
+
+    fn deliverSessionForwardHeld(self: *Store, forward_id: u64, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, forward_domain.deliver(&access, forward_id, faults)));
+    }
+
+    /// Owed stops, ending Messages and ancestor feed hops precede calls.
     pub fn nextCoreWork(self: *Store) !?CoreWork {
         return self.queue().run(nextCoreWorkHeld, .{self});
     }
@@ -1073,6 +1099,19 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, faults)));
     }
 
+    /// Loads matching saved tools and resolves the call in one transaction.
+    pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+        return self.queue().write(findToolsHeld, .{ self, binding, arena, words, refusal, faults });
+    }
+
+    fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, @import("domain/find_tools.zig").run(&access, binding, arena, words, refusal, faults)));
+    }
+
     /// Fails the core tool call `binding` names with `result`, in one
     /// transaction; false when a stop selected its Turn first.
     pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
@@ -1090,6 +1129,28 @@ pub const Store = struct {
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
+    }
+
+    pub fn nextMcpAction(self: *Store) !?action_domain.McpAction {
+        return self.queue().run(nextMcpActionHeld, .{self});
+    }
+    fn nextMcpActionHeld(self: *Store) !?action_domain.McpAction {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.nextMcpAction(&access));
+    }
+    pub fn resolveMcpAction(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+        return self.queue().write(resolveMcpActionHeld, .{ self, action_id, code, text, faults });
+    }
+    fn resolveMcpActionHeld(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+        if (text.len == 0) return error.InvalidActionResult;
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.resolveMcpAction(&access, action_id, code, text, faults)));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
@@ -1406,15 +1467,16 @@ const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @si
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
 /// The resident bytes the owner accepted for a settlement batch of 64
-/// items, beyond the configure reads' 4888.
-const accepted_settlement_growth = 10240;
+/// items and 64 call-name lookups, beyond the configure reads' 4888.
+const accepted_settlement_growth = 14352;
 
 comptime {
-    // The settlement batch is the larger use: 14480 bytes. The configure
-    // reads use 13552, including the saved parent reference and the saved
-    // tool and loaded names a subset update reads. Exact, so a change to
-    // either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 13552 or scratch_bytes != 14480)
+    // The settlement batch is the larger use: 19240 bytes, the original
+    // 14480 plus 4760 for per-batch call names, membership flags and their
+    // lookup visitor. The configure reads use 13552, including the saved
+    // parent reference and the saved tool and loaded names a subset update
+    // reads. Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 13552 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1423,8 +1485,8 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 14480 bytes, a settlement
-/// batch's size; a configure uses 4992.
+/// resident for the Store's life: at most 19240 bytes, a settlement
+/// batch's size; a configure uses 13552.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -1776,7 +1838,7 @@ pub fn publicConversationPageForTesting(self: *Store, request: protocol.Conversa
 
 /// A column whose values the Host hands out: a row's id, or its place in
 /// a Store-wide order.
-pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id };
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
 
 /// What the Host hands to transactions. The next value of each `Identity`
 /// is the Store's maximum plus one, read at open and again for each column
@@ -1884,6 +1946,7 @@ fn IdentityCeiling(comptime column: Identity) type {
         .admission_id => "message_admission",
         .tool_record_id => "tool_record",
         .tool_set_id => "tool_set",
+        .forward_id => "session_forward",
     };
     return rsql.Read(.{
         .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,

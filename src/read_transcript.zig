@@ -214,7 +214,12 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
             try out.writeAll(" web_search");
             note = presentation.description;
         },
-        .turn_ended => |ended| try out.print(" {s}", .{@tagName(ended.ending)}),
+        .turn_ended => |ended| {
+            try out.print(" {s}", .{@tagName(ended.ending)});
+            // A descendant's ending: name the agent whose Turn it was.
+            if (!std.mem.eql(u8, ended.session.slice(), session)) try out.print(" agent {s}", .{ended.session.slice()});
+        },
+        .approval_requested => |requested| if (!std.mem.eql(u8, requested.session.slice(), session)) try out.print(" agent {s}", .{requested.session.slice()}),
         else => {},
     }
     if (contentOf(item)) |content| {

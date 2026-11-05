@@ -23,7 +23,7 @@ const Self = @This();
 pub const ViewKind = enum { live, transcript, inspection, action, message };
 
 /// What a reason's line under the input says, as its hint or a notice.
-pub const deny_words = "enter denies the command and sends this";
+pub const deny_words = "enter denies the call and sends this";
 
 /// A delivered frame's choice, offered to the next input.
 pub const Offer = struct { frame: u64, scope: u64, decision: ConsentPolicy.Decision };
@@ -1598,7 +1598,9 @@ test "prepared Action preserves selected inspection until explicit return" {
 }
 
 fn rowText(screen: *Self, row: u16, storage: []u8) []const u8 {
-    const window = screen.vx.window();
+    // The drawing grid borrows render's scratch. Inspect the owned copy of
+    // the rendered cells, which remains valid after render returns.
+    const window = &screen.vx.screen_last;
     var length: usize = 0;
     for (0..window.width) |column| {
         const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;

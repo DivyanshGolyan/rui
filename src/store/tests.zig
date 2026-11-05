@@ -571,6 +571,56 @@ pub fn testingSessionReportWithProfile(
     return bytes;
 }
 
+/// Visits real Current and Full captures, including absent, idle, terminal
+/// and active approval work. The caller supplies the schema checker.
+pub fn checkSessionReportsForTesting(context: anytype) !void {
+    const Fixture = struct {
+        fn run(engine: *store_testing.Case, checker: @TypeOf(context)) !void {
+            const Profiles = struct {
+                fn check(sink: @TypeOf(context), storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !void {
+                    inline for (.{ protocol.ReportProfile.current, protocol.ReportProfile.full }) |profile| {
+                        const bytes = try testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, profile);
+                        defer std.testing.allocator.free(bytes);
+                        try sink.report(bytes);
+                    }
+                }
+            };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try Profiles.check(checker, &storage, &tmp, "aaaaaa");
+            const session = try configureTestSessionAsk(&storage, "schema-config");
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+            try store_testing.answerTestTurn(&storage, &tmp, session.slice(), "schema-answer", &.{.{ .encoded = "done", .decoded = "done" }});
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+            try store_testing.submitTestMessage(&storage, &tmp, "schema-message", "schema-message", session.slice(), "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "schema-calls");
+            const active = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+            defer std.testing.allocator.free(active);
+            const active_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, active, .{});
+            defer active_json.deinit();
+            const unresolved = active_json.value.object.get("actions").?.object.get("unresolved").?.array.items;
+            try std.testing.expectEqual(@as(usize, 2), unresolved.len);
+            try std.testing.expectEqualStrings("approval", active_json.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+            // Keep one unresolved Action while the other supplies a resolved row,
+            // permission decision and ordered Tool Result to both profiles.
+            var deny: protocol.PermissionDecisionCommand = .{ .action_id = try std.fmt.parseInt(u64, unresolved[0].object.get("action").?.string, 10), .decision = .deny };
+            try deny.key.set("schema-deny");
+            try deny.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+            try Profiles.check(checker, &storage, &tmp, session.slice());
+        }
+    };
+    inline for (comptime std.enums.values(store_testing.Engine)) |engine| {
+        var case: store_testing.Case = .{ .engine = engine };
+        try Fixture.run(&case, context);
+    }
+}
+
 pub fn testingSessionList(storage: *Store, tmp: *std.testing.TmpDir, request: protocol.ListSessions, used: *std.atomic.Value(u64), request_number: u64) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
@@ -2367,9 +2417,11 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("engine/mysql_open.zig"),
         @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
+        @embedFile("domain/forward.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
         @embedFile("domain/content.zig"),
+        @embedFile("domain/find_tools.zig"),
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
@@ -2377,8 +2429,10 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -2484,7 +2538,7 @@ test "a Bash call the Operation did not offer is rejected and keeps its descript
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
             command.configuration.tools.state = .value;
-            command.configuration.tools.count = 0;
+            command.configuration.tools = try .of(&.{});
             const reply = storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const session = reply.accepted.session;
@@ -3889,12 +3943,12 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
             .expected = .incomplete_initial_configuration,
         },
         .{
-            .name = "new request missing provider",
+            .name = "new request uses Host provider",
             .has_current = false,
             .workspace_requested = true,
             .provider_requested = null,
             .model_requested = "model-a",
-            .expected = .incomplete_initial_configuration,
+            .expected = null,
         },
         .{
             .name = "new complete request",
@@ -3939,6 +3993,14 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
     existing.revision = 1;
     for (cases) |case| {
         var requested: protocol.Configuration = .{};
+        if (!case.has_current) {
+            requested.tools = try .of(&.{"bash"});
+            requested.permission_mode.state = .value;
+            try requested.permission_mode.value.set("bypass");
+            requested.reasoning_effort.state = .explicit_null;
+            requested.compaction_trigger.state = .value;
+            try requested.compaction_trigger.value.set("115200");
+        }
         if (case.workspace_requested) {
             requested.workspace.state = .value;
             try requested.workspace.value.set("relative-or-different-workspace");
@@ -3954,7 +4016,7 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, current, &requested),
+            configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, current, &requested, .codex),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
@@ -3981,11 +4043,11 @@ test "configure refuses a tool name the catalog lacks and a provider tool its pr
     }) |case| {
         var requested: protocol.Configuration = .{};
         requested.tools = try .of(case.names);
-        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&catalog, &existing, &requested));
+        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&catalog, &existing, &requested, .codex));
     }
 }
 
-test "Store configuration requires and freezes provider model and workspace" {
+test "Store configuration requires model, Bash workspace and, on a Host serving several, a provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -4008,6 +4070,7 @@ test "Store configuration requires and freezes provider model and workspace" {
                 if (mask & 2 == 0) command.configuration.provider.state = .omitted;
                 if (mask & 4 == 0) command.configuration.model.state = .omitted;
                 const reply = storage.configure(&command, .{});
+                // The test Store serves every provider, so none is the default (D221).
                 if (mask == 7) {
                     try std.testing.expect(reply == .accepted);
                 } else {
@@ -4081,7 +4144,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             const current = try storage.inspectSessionForTesting(created_session_0.slice());
             try std.testing.expectEqual(@as(u64, 1), current.revision);
-            try std.testing.expectEqual(configuration_domain.default_tools_mask, current.tools_mask);
+            try std.testing.expectEqual(tool_catalog.toolBit(.bash) | tool_catalog.toolBit(.web_search), current.tools_mask);
             try std.testing.expectEqualStrings("bypass", current.permission_mode.slice());
             const replay = storage.configure(&update, .{});
             try std.testing.expect(replay == .rejected and replay.rejected.replayed);
@@ -4101,7 +4164,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
     }.run);
 }
 
-test "loaded tools configure defaults equality membership and reachability" {
+test "creation requires every agent setting and accepts an unused Workspace" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -4111,73 +4174,96 @@ test "loaded tools configure defaults equality membership and reachability" {
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-
-            var initial = try completeConfiguration("loaded-default", "", workspace, "model-a");
-            const created = storage.configure(&initial, .{});
-            try std.testing.expect(created == .accepted);
-            const session = created.accepted.session;
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
-
-            var update: protocol.ConfigureCommand = .{};
-            try update.session.set(session.slice());
-            try update.key.set("loaded-equal");
-            update.configuration.tools = try .of(&.{"bash"});
-            update.configuration.loaded_tools = try .of(&.{"bash"});
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expect(storage.configure(&update, .{}).accepted.replayed);
-            var conflict = update;
-            conflict.configuration.loaded_tools.state = .omitted;
-            try std.testing.expect(storage.configure(&conflict, .{}) == .conflict);
-
-            try update.key.set("loaded-not-in-tools");
-            update.configuration.loaded_tools = try .of(&.{"web_search"});
-            const outside = storage.configure(&update, .{});
-            try std.testing.expect(outside == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, outside.rejected.code);
-            try std.testing.expect(storage.configure(&update, .{}).rejected.replayed);
-
-            try update.key.set("loaded-unreachable");
-            update.configuration.loaded_tools = try .of(&.{});
-            const unreachable_set = storage.configure(&update, .{});
-            try std.testing.expect(unreachable_set == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
-
-            // Membership is checked against saved tools if tools is omitted.
-            try update.key.set("loaded-saved-tools");
-            update.configuration.tools.state = .omitted;
-            update.configuration.loaded_tools = try .of(&.{"web_search"});
-            const saved_outside = storage.configure(&update, .{});
-            try std.testing.expect(saved_outside == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, saved_outside.rejected.code);
-
-            // An omitted loaded list continues to follow tools after equality.
-            try update.key.set("loaded-follow-tools");
-            update.configuration.tools = try .of(&.{ "bash", "web_search" });
-            update.configuration.loaded_tools.state = .omitted;
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=3", .{session.slice()}));
-
-            // Explicit equality is also accepted on create, including empty sets.
-            var equal = try completeConfiguration("loaded-create-equal", "", workspace, "model-a");
-            equal.configuration.tools = try .of(&.{"bash"});
-            equal.configuration.loaded_tools = try .of(&.{"bash"});
-            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
-            try equal.key.set("loaded-create-empty");
-            equal.configuration.tools = try .of(&.{});
-            equal.configuration.loaded_tools = try .of(&.{});
-            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
-            try equal.key.set("loaded-create-unreachable");
-            equal.configuration.tools = try .of(&.{"bash"});
-            const rejected_create = storage.configure(&equal, .{});
-            try std.testing.expect(rejected_create == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, rejected_create.rejected.code);
+            inline for (.{ "model", "reasoning_effort", "compaction_trigger", "tools", "permission_mode" }) |field| {
+                var command = try completeConfiguration("missing-" ++ field, "", workspace, "model-a");
+                @field(command.configuration, field).state = .omitted;
+                const reply = storage.configure(&command, .{});
+                try std.testing.expect(reply == .rejected);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+            }
+            // A supplied Workspace is checked even when no tool uses it.
+            var missing = try completeConfiguration("unused-missing", "", "/does-not-exist/rui-unused-workspace", "model-a");
+            missing.configuration.tools = try .of(&.{});
+            const refused = storage.configure(&missing, .{});
+            try std.testing.expect(refused == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_workspace, refused.rejected.code);
+            {
+                var key: [32]u8 = undefined;
+                const index: usize = 0;
+                var command = try completeConfiguration("unused-omitted", "", workspace, "model-a");
+                command.configuration.tools = try .of(&.{});
+                command.configuration.workspace.state = .omitted;
+                const reply = storage.configure(&command, .{});
+                try std.testing.expect(reply == .accepted);
+                const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+                try std.testing.expectEqual(@as(u8, 0), observed.tools_mask);
+                try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+                var enable: protocol.ConfigureCommand = .{};
+                try enable.key.set(try std.fmt.bufPrint(&key, "enable-{d}", .{index}));
+                enable.session = reply.accepted.session;
+                enable.configuration.tools = try .of(&.{"bash"});
+                try std.testing.expect(storage.configure(&enable, .{}) == .accepted);
+                const enabled = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+                try std.testing.expectEqualStrings(observed.workspace.slice(), enabled.workspace.slice());
+                try std.testing.expectEqualStrings("/", enabled.workspace.slice());
+                try std.testing.expectEqual(@as(u8, tool_catalog.toolBit(.bash)), enabled.tools_mask);
+            }
         }
     }.run);
 }
 
-test "loaded tools preserve and intersect a saved subset through the catalog" {
+test "an omitted provider selects the Host's sole served provider" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var routes = protocol.routesAll(.unserved);
+            routes.openai = .endpoint;
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
+            defer storage.close() catch unreachable;
+            var command = try completeConfiguration("host-provider", "", "/", "model-a");
+            command.configuration.provider.state = .omitted;
+            command.configuration.workspace.state = .omitted;
+            command.configuration.tools = try .of(&.{});
+            command.require_model = true;
+            const reply = storage.configure(&command, .{});
+            try std.testing.expect(reply == .accepted);
+            const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+            try std.testing.expectEqual(protocol.Provider.openai, observed.provider.?);
+            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort);
+        }
+    }.run);
+}
+
+test "an omitted provider is refused on a Host serving several" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var routes = protocol.routesAll(.unserved);
+            routes.openai = .endpoint;
+            routes.codex = .endpoint;
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
+            defer storage.close() catch unreachable;
+            // D221: no provider is preferred, so the creation must name one.
+            var command = try completeConfiguration("several-providers", "", "/", "model-a");
+            command.configuration.provider.state = .omitted;
+            command.configuration.workspace.state = .omitted;
+            command.configuration.tools = try .of(&.{});
+            const reply = storage.configure(&command, .{});
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+            try command.key.set("several-providers-named");
+            command.configuration.provider.state = .value;
+            try command.configuration.provider.value.set("openai");
+            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+        }
+    }.run);
+}
+
+test "compactAt enforces only known context windows on create and update" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -4185,73 +4271,42 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // A synthetic catalog entry exercises the rule without implementing
-            // find_tools or adding it to the Host's production catalog.
-            var records: [tool_catalog.built_in.records.len + 1]tool_catalog.Record = undefined;
-            records[0] = tool_catalog.built_in.records[0];
-            records[1] = .{ .name = "find_tools", .owner = .rui };
-            @memcpy(records[2..], tool_catalog.built_in.records[1..]);
-            var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            try storage.saveCatalog(&catalog);
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");
-            initial.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
-            initial.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
-            const created = storage.configure(&initial, .{});
-            try std.testing.expect(created == .accepted);
-            const session = created.accepted.session;
-            const loaded_id = try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()});
-            try std.testing.expect(loaded_id > 0);
-
-            // An unrelated update must preserve the saved set id.
-            var update: protocol.ConfigureCommand = .{};
-            try update.session.set(session.slice());
-            try update.key.set("loaded-subset-label");
-            update.configuration.label.state = .value;
-            try update.configuration.label.value.set("same loaded subset");
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expectEqual(loaded_id, try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()}));
-
-            try update.key.set("loaded-subset-intersect");
-            update.configuration.tools = try .of(&.{ "find_tools", "web_search" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
-                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='find_tools'", .{session.slice()}));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
-
-            // Re-adding a configured tool does not implicitly load it.
-            try update.key.set("loaded-subset-grow-tools");
-            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
-
-            try update.key.set("loaded-subset-unreachable");
-            update.configuration.tools = try .of(&.{"bash"});
-            const unreachable_set = storage.configure(&update, .{});
-            try std.testing.expect(unreachable_set == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
-
-            // Intersection with an empty tools set is equality, not an
-            // unreachable subset, and normalizes to NULL.
-            try update.key.set("loaded-subset-clear");
-            update.configuration.tools = try .of(&.{});
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
-
-            // Explicit equality uses NULL, including when clearing both sets.
-            try update.key.set("loaded-subset-equal");
-            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
-            update.configuration.loaded_tools = try .of(&.{ "bash", "find_tools", "web_search" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
-            try update.key.set("loaded-subset-empty");
-            update.configuration.tools = try .of(&.{});
-            update.configuration.loaded_tools.state = .omitted;
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            const window: u64 = @import("../model_catalog.zig").find(@import("../model_catalog.zig").shipped, "gpt-6.1-sol").?.context_window.?;
+            var buffer: [20]u8 = undefined;
+            var command = try completeConfiguration("too-large-create", "", workspace, "gpt-6.1-sol");
+            try command.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window + 1}));
+            var reply = storage.configure(&command, .{});
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, reply.rejected.code);
+            try std.testing.expect(storage.configure(&command, .{}).rejected.replayed);
+            try command.key.set("u64-too-large-create");
+            try command.configuration.compaction_trigger.value.set("18446744073709551615");
+            const huge = storage.configure(&command, .{});
+            try std.testing.expect(huge == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, huge.rejected.code);
+            try command.key.set("window-boundary");
+            try command.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window}));
+            reply = storage.configure(&command, .{});
+            try std.testing.expect(reply == .accepted);
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("too-large-update");
+            patch.session = reply.accepted.session;
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window + 1}));
+            const refused = storage.configure(&patch, .{});
+            try std.testing.expect(refused == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, refused.rejected.code);
+            try std.testing.expect(storage.configure(&patch, .{}).rejected.replayed);
+            const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+            try std.testing.expectEqual(@as(u64, 1), observed.revision);
+            try std.testing.expectEqual(@as(?u64, window), observed.compaction_trigger);
+            try command.key.set("unlisted-window");
+            try command.configuration.model.value.set("model-not-in-catalog");
+            command.configuration.reasoning_effort.state = .explicit_null;
+            try command.configuration.compaction_trigger.value.set("999999999");
+            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
         }
     }.run);
 }
@@ -4267,7 +4322,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
             var records = [_]tool_catalog.Record{
                 tool_catalog.bash_record,
                 .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
-                .{ .name = "find_tools", .owner = .rui },
+                tool_catalog.find_tools_record,
                 tool_catalog.message_agent_record,
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
                 tool_catalog.read_transcript_record,
@@ -4322,22 +4377,6 @@ test "loaded tools select saved records even after the Host catalog changes or r
     }.run);
 }
 
-test "created Session tools and permission resolve to product defaults" {
-    // Decode the persisted encoding independently of toolBit/permissionModeCode.
-    const created: CurrentConfiguration = .{};
-    var tools: [16]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&tools);
-    if (created.tools_mask & 1 != 0) try writer.writeAll("bash");
-    if (created.tools_mask & 2 != 0) try writer.writeAll(if (created.tools_mask & 1 != 0) ",web_search" else "web_search");
-    try std.testing.expect(created.tools_mask & ~@as(u8, 3) == 0);
-    try std.testing.expectEqualStrings(product_defaults.tools, writer.buffered());
-    try std.testing.expectEqualStrings(product_defaults.permission_mode, switch (created.permission_mode) {
-        0 => "ask",
-        1 => "bypass",
-        else => return error.TestUnexpectedResult,
-    });
-}
-
 test "configuration planning preserves sparse defaults and rejection precedence" {
     const WorkspaceRequest = enum { omitted, same, different };
     const InstructionsRequest = enum { omitted, value };
@@ -4364,10 +4403,11 @@ test "configuration planning preserves sparse defaults and rejection precedence"
     };
     const cases = [_]Case{
         .{
-            .name = "new defaults",
+            .name = "new explicit permission",
             .created = true,
             .workspace = .same,
             .model = "model-a",
+            .permission = "bypass",
             .expected_actions = .{ .instructions = .default_empty, .output_schema = .clear },
             .expected_permission = 1,
             .expected_revision = 1,
@@ -6954,15 +6994,12 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     }.run);
 }
 
-test "compaction defaults nullable overrides and frozen retry survive reopen" {
+test "explicit compaction thresholds and frozen retry survive reopen" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const supported_ids = comptime blk: {
-                var ids: [model_capability.models.len][]const u8 = undefined;
-                for (model_capability.models, &ids) |row, *id| id.* = row.id;
-                break :blk ids;
-            };
-            for (supported_ids ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }, 0..) |model, model_index| {
+            // Representative reasoning models, plus unlisted bindings below.
+            const supported_ids = [_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" };
+            for (supported_ids ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }) |model| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
@@ -6971,15 +7008,17 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var configure = try completeConfiguration("config", "", workspace, model);
+                // D111: the client supplies tokens even when it chooses 90%.
+                const expected: ?u64 = model_capability.contextWindow(model) * product_defaults.compaction_trigger_percent / 100;
+                var threshold: [20]u8 = undefined;
+                try configure.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&threshold, "{d}", .{expected.?}));
                 const created_session_0_reply = storage.configure(&configure, .{});
                 try std.testing.expect(created_session_0_reply == .accepted);
                 const created_session_0 = created_session_0_reply.accepted.session;
-                // An unlisted model compacts at 90% of the window Rui assumes for it.
-                const expected: ?u64 = if (model_index >= supported_ids.len) 115200 else if (std.mem.eql(u8, model, "gpt-6.1-terra")) 450000 else 244800;
                 const initial = try storage.inspectSessionForTesting(created_session_0.slice());
                 try std.testing.expectEqual(expected, initial.compaction_trigger);
                 try std.testing.expectEqual(@as(u64, 0), initial.output_reservation);
-                try std.testing.expect(initial.compaction_trigger_override == null and initial.output_reservation_override == null);
+                try std.testing.expect(initial.compaction_trigger_override == expected and initial.output_reservation_override == null);
                 try submitTestMessage(&storage, &tmp, "one", "one", created_session_0.slice(), "original");
                 const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 var patch: protocol.ConfigureCommand = .{};
@@ -7009,17 +7048,22 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
                 try patch.key.set("inherit");
                 patch.configuration.compaction_trigger.state = .explicit_null;
                 patch.configuration.output_reservation.state = .explicit_null;
+                const refused_clear = storage.configure(&patch, .{});
+                try std.testing.expect(refused_clear == .rejected);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused_clear.rejected.code);
+                try patch.key.set("explicit-threshold");
+                patch.configuration.compaction_trigger = configure.configuration.compaction_trigger;
                 try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
                 const reset = try storage.inspectSessionForTesting(created_session_0.slice());
                 try std.testing.expectEqual(expected, reset.compaction_trigger);
                 try std.testing.expectEqual(@as(u64, 0), reset.output_reservation);
-                try std.testing.expect(reset.compaction_trigger_override == null and reset.output_reservation_override == null);
+                try std.testing.expect(reset.compaction_trigger_override == expected and reset.output_reservation_override == null);
                 {
                     const report = try testingSessionReportWithProfile(&storage, &tmp, created_session_0.slice(), 1024 * 1024, .full);
                     defer std.testing.allocator.free(report);
-                    try std.testing.expect(std.mem.indexOf(u8, report, "\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null") != null);
-                    // Revision one records inheritance, not today's effective default.
-                    try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":null,\"output_reservation\":null") != null);
+                    try std.testing.expect(std.mem.indexOf(u8, report, "\"output_reservation_override\":null") != null);
+                    // D111: revision one records the client's explicit threshold.
+                    try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":null") == null);
                     try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"10\",\"output_reservation\":\"8\"") != null);
                 }
                 try storage.settleModelAttemptFailure(retry, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
@@ -8575,9 +8619,13 @@ const EntryPoint = enum {
     readBashExecutionInput,
     revokeActionSender,
     nextCoreWork,
+    nextMcpAction,
+    resolveMcpAction,
     deliverAgentMessage,
     deliverChildEnding,
+    deliverSessionForward,
     startAgent,
+    findTools,
     stopOwedSession,
     resolveCoreCall,
     actionSupersededByStop,
@@ -8636,9 +8684,13 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readBashExecutionInput = 2,
     .revokeActionSender = 2,
     .nextCoreWork = 3,
+    .nextMcpAction = 1,
+    .resolveMcpAction = 2,
     .deliverAgentMessage = 3,
     .deliverChildEnding = 2,
+    .deliverSessionForward = 2,
     .startAgent = 4,
+    .findTools = 5,
     .stopOwedSession = 2,
     .resolveCoreCall = 2,
     .actionSupersededByStop = 1,
@@ -8687,7 +8739,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite, .mysql => switch (point) {
-            .readOwnedContent, .readCatalogText, .searchActivity => 1,
+            .readOwnedContent, .readCatalogText, .searchActivity, .findTools => 1,
             else => 0,
         },
     };
@@ -8710,9 +8762,11 @@ test "every function that enters the Store has a round budget" {
         @embedFile("engine/mysql_open.zig"),
         @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
+        @embedFile("domain/forward.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
         @embedFile("domain/content.zig"),
+        @embedFile("domain/find_tools.zig"),
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
@@ -8720,8 +8774,10 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
+        @embedFile("domain/report_full_shape.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -8914,6 +8970,8 @@ test "each Store entry point takes its round budget on its common path" {
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);
             try coreTurn(&storage, &tmp, &meter);
+            try mcpTurn(case, &meter);
+            try findTurn(&storage, &tmp, &meter);
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
                 const measured = meter.measured.get(point) orelse {
@@ -9041,6 +9099,78 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.stopSession);
         }
 
+        /// Drive MCP through an actual frozen catalog offer, without changing
+        /// the built-in catalog used by the other entry points' fixtures.
+        fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+            const records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.find_tools_record,
+                tool_catalog.message_agent_record,
+                tool_catalog.read_transcript_record,
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+            defer storage.close() catch unreachable;
+            const previous_storage = meter.storage;
+            meter.storage = &storage;
+            defer meter.storage = previous_storage;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("budget-mcp", "", workspace, "model-a");
+            command.configuration.tools = try .of(&.{"fetch_page"});
+            command.configuration.permission_mode.state = .value;
+            try command.configuration.permission_mode.value.set("bypass");
+            const configured = storage.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "budget-mcp-input", "budget-mcp-key", session.slice(), "fetch a page");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "budget-mcp-calls", &.{
+                .{ .item_id = "mcp-item", .name = "fetch_page", .encoded_call_id = "mcp-call", .decoded_call_id = "mcp-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            });
+            meter.start();
+            const action = (try storage.nextMcpAction()).?;
+            meter.stop(.nextMcpAction);
+            meter.start();
+            try storage.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+            meter.stop(.resolveMcpAction);
+            try std.testing.expect((try storage.nextMcpAction()) == null);
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+        }
+
+        /// SQL narrows one unloaded tool; eight matchers share one description
+        /// window. A no-match call still writes no revision.
+        fn findTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var configuration = try completeConfiguration("budget-find", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            configuration.configuration.tools = try .of(&.{ "bash", "find_tools" });
+            configuration.configuration.loaded_tools = try .of(&.{"find_tools"});
+            const session = storage.configure(&configuration, .{}).accepted.session;
+            try submitTestMessage(storage, tmp, "budget-find-input", "budget-find-key", session.slice(), "find tools");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\\\"}", .decoded_arguments = "{\"words\":\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\"}" }};
+            try settleCallsForTesting(storage, tmp, model, "budget-find-calls", &calls);
+            const input = (try storage.nextCoreWork()).?.action;
+            const words: @import("../core_tools.zig").FindTools = .{ .words = .{ "absent0", "absent1", "absent2", "absent3", "absent4", "absent5", "absent6", "absent7" }, .count = 8 };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            meter.start();
+            try std.testing.expect(try storage.findTools(input.binding, arena.allocator(), &words, null, .{}));
+            meter.stop(.findTools);
+        }
+
         /// Three core calls: a Message delivered, an agent started, and a
         /// start whose arguments the Host refused; then the stop the started
         /// child owes once its parent stops.
@@ -9103,6 +9233,10 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
             meter.stop(.deliverChildEnding);
+            const forward = (try storage.nextCoreWork()).?.forward;
+            meter.start();
+            try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
+            meter.stop(.deliverSessionForward);
         }
 
         /// Two Bash calls under ask: one allowed, run and settled, one
@@ -10254,6 +10388,636 @@ test "each compaction that succeeds is one compacted row, with the entries its f
     }.run);
 }
 
+test "core_tools start_agent persists optional borrowed spec content" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("optional-agent-parent", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            const parent = storage.configure(&create, .{}).accepted.session;
+            try submitTestMessage(&storage, &tmp, "optional-agent-message", "optional-agent-key", parent.slice(), "start a child");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "optional-agent-call", &.{.{
+                .item_id = "optional-item",
+                .name = "start_agent",
+                .encoded_call_id = "optional-call",
+                .decoded_call_id = "optional-call",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            const action = (try storage.nextCoreWork()).?.action;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const core_tools = @import("../core_tools.zig");
+            const start = try arena.allocator().create(core_tools.StartAgent);
+            const result = try core_tools.checkStartAgent(arena.allocator(), "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"instructions\":\"Persist these instructions\",\"outputSchema\":{\"type\":\"object\"}}}", start);
+            try std.testing.expect(result == .accepted);
+            const Capture = struct {
+                child: protocol.Bounded(protocol.session_id_bytes) = .{},
+                fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
+                    const self: *@This() = @ptrCast(@alignCast(context));
+                    self.child.set(admission.session) catch unreachable;
+                }
+            };
+            var capture: Capture = .{};
+            try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), start.task, start.attached, &start.configuration, .{ .context = &capture, .call = Capture.call }, .{}) == .started);
+            const child = (try store_core.readSessionForTesting(&storage, capture.child.slice())).?;
+            const instructions = try testingContentReference(&storage, @intCast(child.instructions_id.?));
+            const schema = try testingContentReference(&storage, @intCast(child.output_schema_id.?));
+            try std.testing.expectEqual(@as(u64, "Persist these instructions".len), instructions.length);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Persist these instructions"), &instructions.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("{\"type\":\"object\"}"), &schema.digest);
+        }
+    }.run);
+}
+
+test "core_tools start_agent spec refusals fail calls and name the refused setting" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("refused-agent-parent", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            const parent = storage.configure(&create, .{}).accepted.session;
+            try submitTestMessage(&storage, &tmp, "refused-agent-message", "refused-agent-key", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const cases = .{
+                .{ "\"effort\":null,\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"", "model" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"", "effort" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"tools\":[],\"permissionMode\":\"ask\"", "compactAt" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"compactAt\":1,\"permissionMode\":\"ask\"", "tools" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"compactAt\":1,\"tools\":[]", "permissionMode" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":1050001,\"tools\":[],\"permissionMode\":\"ask\"", "compact_at_too_large" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":\"none\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"", "unsupported_reasoning_effort" },
+            };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var calls: [cases.len]TestingCall = undefined;
+            var arguments: [cases.len][]const u8 = undefined;
+            inline for (cases, 0..) |entry, index| {
+                const id = std.fmt.comptimePrint("refused-{d}", .{index});
+                const bytes = "{\"task\":\"read\",\"attached\":false,\"spec\":{" ++ entry[0] ++ "}}";
+                const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), bytes, .{});
+                arguments[index] = bytes;
+                calls[index] = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = bytes };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "refused-agent-calls", &calls);
+            const core_tools = @import("../core_tools.zig");
+            const start = try arena.allocator().create(core_tools.StartAgent);
+            inline for (cases, 0..) |entry, index| {
+                const action = (try storage.nextCoreWork()).?.action;
+                const check = try core_tools.checkStartAgent(arena.allocator(), arguments[index], start);
+                const expected_reason = switch (check) {
+                    .accepted => accepted: {
+                        try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{}) == .failed);
+                        break :accepted "Rui could not start the agent (" ++ entry[1] ++ "). Nothing was started.";
+                    },
+                    .rejected => |reason| refused: {
+                        try std.testing.expect(std.mem.indexOf(u8, reason, entry[1]) != null);
+                        try std.testing.expect(try storage.failCoreCall(action.binding, reason, .{}));
+                        break :refused reason;
+                    },
+                };
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(expected_reason) } }));
+            }
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+        }
+    }.run);
+}
+
+test "a start_agent child works in its caller's Workspace with its provider" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("binding-agent-parent", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{ "bash", "start_agent" });
+            const parent = storage.configure(&create, .{}).accepted.session;
+            try submitTestMessage(&storage, &tmp, "binding-agent-message", "binding-agent-key", parent.slice(), "start a child");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "binding-agent-call", &.{.{
+                .item_id = "binding-item",
+                .name = "start_agent",
+                .encoded_call_id = "binding-call",
+                .decoded_call_id = "binding-call",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            const action = (try storage.nextCoreWork()).?.action;
+            // D122/D221: a Bash spec names no Workspace; the child inherits both.
+            var spec = try testingAgentSpec(&.{"bash"}, "ask");
+            try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "work here", true, &spec, null, .{}) == .started);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND workspace=?2 AND provider='codex'", .{ parent.slice(), workspace }));
+        }
+    }.run);
+}
+
+test "a null effort on a listed model refuses a mixed update before any changes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("effort-null-spec", "", workspace, "gpt-6.1-sol");
+            const session = storage.configure(&create, .{}).accepted.session;
+            var patch: protocol.ConfigureCommand = .{};
+            patch.session = session;
+            try patch.key.set("effort-set-low");
+            patch.configuration.reasoning_effort.state = .value;
+            try patch.configuration.reasoning_effort.value.set("low");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            const before = try storage.inspectSessionForTesting(session.slice());
+            try patch.key.set("effort-clear-mixed");
+            patch.configuration.reasoning_effort.state = .explicit_null;
+            patch.configuration.tools = try .of(&.{});
+            patch.configuration.label.state = .value;
+            try patch.configuration.label.value.set("must not apply");
+            const bytes = "must not import these instructions";
+            patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+            const refused = storage.configure(&patch, .{});
+            try std.testing.expect(refused == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
+            const after = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(before.revision, after.revision);
+            try std.testing.expectEqual(before.tools_mask, after.tools_mask);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
+            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), after.reasoning_effort);
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+        }
+    }.run);
+}
+
+test "a null effort is refused for listed reasoning models and admitted for unlisted models" {
+    var requested: protocol.Configuration = .{};
+    requested.reasoning_effort.state = .explicit_null;
+    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
+    try current.model.set("gpt-6.1-sol");
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
+    try current.model.set("model-a");
+    try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex) == null);
+}
+
+test "null effort supports nonreasoning catalog entries but never clears assigned effort" {
+    var requested: protocol.Configuration = .{};
+    requested.reasoning_effort.state = .explicit_null;
+    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
+    for ([_][]const u8{ "openai/whisper-1", "unlisted-model" }) |model| {
+        try current.model.set(model);
+        current.reasoning_effort = null;
+        try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex) == null);
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
+        current.reasoning_effort = .low;
+        try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
+    }
+    try current.model.set("gpt-6.1-sol");
+    current.reasoning_effort = null;
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
+}
+
+test "effective effort carries legacy history without inferring a fresh default" {
+    var current: CurrentConfiguration = .{ .provider = .codex };
+    try current.model.set("unlisted-model");
+    try std.testing.expect(configuration_domain.effectiveReasoningEffort(&current) == null);
+    current.previous_reasoning_effort = .high;
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), configuration_domain.effectiveReasoningEffort(&current));
+    var requested: protocol.Configuration = .{};
+    requested.reasoning_effort.state = .explicit_null;
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
+    current.reasoning_effort = .low;
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), configuration_domain.effectiveReasoningEffort(&current));
+}
+
+test "loaded tools configure defaults equality membership and reachability" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+            var initial = try completeConfiguration("loaded-default", "", workspace, "model-a");
+            const created = storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+
+            var update: protocol.ConfigureCommand = .{};
+            try update.session.set(session.slice());
+            try update.key.set("loaded-equal");
+            update.configuration.tools = try .of(&.{"bash"});
+            update.configuration.loaded_tools = try .of(&.{"bash"});
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(storage.configure(&update, .{}).accepted.replayed);
+            var conflict = update;
+            conflict.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&conflict, .{}) == .conflict);
+
+            try update.key.set("loaded-not-in-tools");
+            update.configuration.loaded_tools = try .of(&.{"web_search"});
+            const outside = storage.configure(&update, .{});
+            try std.testing.expect(outside == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, outside.rejected.code);
+            try std.testing.expect(storage.configure(&update, .{}).rejected.replayed);
+
+            try update.key.set("loaded-unreachable");
+            update.configuration.loaded_tools = try .of(&.{});
+            const unreachable_set = storage.configure(&update, .{});
+            try std.testing.expect(unreachable_set == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
+
+            // Membership is checked against saved tools if tools is omitted.
+            try update.key.set("loaded-saved-tools");
+            update.configuration.tools.state = .omitted;
+            update.configuration.loaded_tools = try .of(&.{"web_search"});
+            const saved_outside = storage.configure(&update, .{});
+            try std.testing.expect(saved_outside == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_not_in_tools, saved_outside.rejected.code);
+
+            // An omitted loaded list continues to follow tools after equality.
+            try update.key.set("loaded-follow-tools");
+            update.configuration.tools = try .of(&.{ "bash", "web_search" });
+            update.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=3", .{session.slice()}));
+
+            // Explicit equality is also accepted on create, including empty sets.
+            var equal = try completeConfiguration("loaded-create-equal", "", workspace, "model-a");
+            equal.configuration.tools = try .of(&.{"bash"});
+            equal.configuration.loaded_tools = try .of(&.{"bash"});
+            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try equal.key.set("loaded-create-empty");
+            equal.configuration.tools = try .of(&.{});
+            equal.configuration.loaded_tools = try .of(&.{});
+            try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+            try equal.key.set("loaded-create-unreachable");
+            equal.configuration.tools = try .of(&.{"bash"});
+            const rejected_create = storage.configure(&equal, .{});
+            try std.testing.expect(rejected_create == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, rejected_create.rejected.code);
+        }
+    }.run);
+}
+
+test "loaded tools preserve and intersect a saved subset through the catalog" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // The production catalog now makes strict loaded subsets reachable.
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");
+            initial.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            initial.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
+            const created = storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            const loaded_id = try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()});
+            try std.testing.expect(loaded_id > 0);
+
+            // An unrelated update must preserve the saved set id.
+            var update: protocol.ConfigureCommand = .{};
+            try update.session.set(session.slice());
+            try update.key.set("loaded-subset-label");
+            update.configuration.label.state = .value;
+            try update.configuration.label.value.set("same loaded subset");
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(loaded_id, try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session WHERE session_ref=?1", .{session.slice()}));
+
+            try update.key.set("loaded-subset-intersect");
+            update.configuration.tools = try .of(&.{ "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='find_tools'", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
+
+            // Re-adding a configured tool does not implicitly load it.
+            try update.key.set("loaded-subset-grow-tools");
+            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT member_count FROM session s JOIN tool_set t ON t.tool_set_id=s.loaded_tool_set_id WHERE s.session_ref=?1", .{session.slice()}));
+
+            try update.key.set("loaded-subset-unreachable");
+            update.configuration.tools = try .of(&.{"bash"});
+            const unreachable_set = storage.configure(&update, .{});
+            try std.testing.expect(unreachable_set == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.loaded_tools_unreachable, unreachable_set.rejected.code);
+
+            // Intersection with an empty tools set is equality, not an
+            // unreachable subset, and normalizes to NULL.
+            try update.key.set("loaded-subset-clear");
+            update.configuration.tools = try .of(&.{});
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+
+            // Explicit equality uses NULL, including when clearing both sets.
+            try update.key.set("loaded-subset-equal");
+            update.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            update.configuration.loaded_tools = try .of(&.{ "bash", "find_tools", "web_search" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+            try update.key.set("loaded-subset-empty");
+            update.configuration.tools = try .of(&.{});
+            update.configuration.loaded_tools.state = .omitted;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
+        }
+    }.run);
+}
+
+// Engine transcripts and content boundary tests remain part of the native suite.
+test {
+    _ = @import("engine/Mysql.zig");
+    _ = @import("engine/mysql_content.zig");
+    _ = @import("mysql_testing.zig");
+}
+
+test "core_tools presets retain caller narrowing after overrides resolve" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("preset-agent-parent", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            try create.configuration.permission_mode.value.set("ask");
+            const parent = storage.configure(&create, .{}).accepted.session;
+            try submitTestMessage(&storage, &tmp, "preset-agent-message", "preset-agent-key", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            const core_tools = @import("../core_tools.zig");
+            const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
+                \\{"model":"gpt-6.1-sol","effort":"low","compactAt":1000,"tools":["bash"],"permissionMode":"bypass"}
+            , .{})).object;
+            const presets = [_]core_tools.Preset{.{ .name = "worker", .spec = spec }};
+            const arguments = [_][]const u8{
+                "{\"task\":\"read\",\"attached\":false,\"preset\":\"worker\",\"spec\":{\"tools\":[],\"permissionMode\":\"ask\"}}",
+                "{\"task\":\"read\",\"attached\":false,\"preset\":\"worker\"}",
+                "{\"task\":\"read\",\"attached\":false,\"preset\":\"worker\",\"spec\":{\"tools\":[]}}",
+            };
+            var calls: [arguments.len]TestingCall = undefined;
+            for (arguments, &calls, 0..) |bytes, *call, at| {
+                const id = try std.fmt.allocPrint(arena, "preset-{d}", .{at});
+                const encoded = try std.json.Stringify.valueAlloc(arena, bytes, .{});
+                call.* = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = bytes };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "preset-agent-calls", &calls);
+            const start = try arena.create(core_tools.StartAgent);
+            for (arguments, 0..) |bytes, at| {
+                const action = (try storage.nextCoreWork()).?.action;
+                try std.testing.expect(try core_tools.checkStartAgentWithPresets(arena, bytes, &presets, start) == .accepted);
+                const result = try storage.startAgent(action.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{});
+                if (at == 0) {
+                    try std.testing.expect(result == .started);
+                } else {
+                    try std.testing.expect(result == .failed);
+                    const reason = if (at == 1)
+                        "spec.tools: bash is not one of your tools. Nothing was started."
+                    else
+                        "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started.";
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(reason) } }));
+                }
+            }
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+        }
+    }.run);
+}
+
+test "launch presets resolve MCP tools through the same catalog as configure" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const launch_frame = @import("../launch_frame.zig");
+            const core_tools = @import("../core_tools.zig");
+            var frame: launch_frame.Frame = .{};
+            defer frame.deinit();
+            var refusal: launch_frame.Refusal = undefined;
+            try launch_frame.parse(std.testing.allocator,
+                \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
+            , &frame, &refusal);
+            var records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.find_tools_record,
+                tool_catalog.message_agent_record,
+                tool_catalog.read_transcript_record,
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const offered: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            var routes = protocol.routesAll(.unserved);
+            routes.openai = .endpoint;
+            for ([_]bool{ false, true }) |available| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{
+                    .served = routes,
+                    .catalog = if (available) &offered else &tool_catalog.built_in,
+                });
+                defer storage.close() catch unreachable;
+
+                var direct: protocol.ConfigureCommand = .{};
+                try direct.key.set("mcp-direct");
+                direct.configuration.model.state = .value;
+                try direct.configuration.model.value.set("model-a");
+                direct.configuration.reasoning_effort.state = .explicit_null;
+                direct.configuration.compaction_trigger.state = .value;
+                try direct.configuration.compaction_trigger.value.set("1000");
+                direct.configuration.tools = try .of(&.{"fetch_page"});
+                direct.configuration.permission_mode.state = .value;
+                try direct.configuration.permission_mode.value.set("ask");
+                const ordinary = storage.configure(&direct, .{});
+
+                var request: protocol.ConfigureCommand = .{ .preset = .{} };
+                try request.key.set("mcp-preset");
+                try request.preset.?.set("reader");
+                var resolved: protocol.ConfigureCommand = .{ .key = request.key };
+                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer memory.deinit();
+                try std.testing.expect(try core_tools.parseAgentSpec(memory.allocator(), frame.presets[0].spec, &resolved.configuration) == .accepted);
+                const preset = storage.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
+                if (available) {
+                    try std.testing.expect(ordinary == .accepted);
+                    try std.testing.expect(preset == .accepted);
+                    for ([_]@TypeOf(ordinary.accepted.session){ ordinary.accepted.session, preset.accepted.session }) |session| {
+                        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
+                            "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{session.slice()}));
+                    }
+                } else {
+                    try std.testing.expect(ordinary == .rejected);
+                    try std.testing.expect(preset == .rejected);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, ordinary.rejected.code);
+                    try std.testing.expectEqual(ordinary.rejected.code, preset.rejected.code);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                }
+            }
+        }
+    }.run);
+}
+
+test "preset unknown rejection survives reopen and later resolution" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            try request.key.set("preset-unknown-replay");
+            try request.preset.?.set("review");
+            request.configuration.label.state = .value;
+            try request.configuration.label.value.set("Review");
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const refused = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+                try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused.rejected.code);
+                const saved = try storage.observeCommand(request.key.slice());
+                try std.testing.expectEqual(protocol.CommandObservationStatus.rejected, saved.status);
+                try std.testing.expectEqualStrings("unknown_preset", saved.code.slice());
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            }
+            {
+                var reopened: Store = undefined;
+                try store_testing.testingStore(case, &reopened, &tmp, std.testing.io);
+                defer reopened.close() catch unreachable;
+                // The restarted Host now knows review, but the same original
+                // request must replay its rejection, not admit this full spec.
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var resolved = try completeConfiguration(request.key.slice(), "", workspace, "model-a");
+                resolved.configuration.label = request.configuration.label;
+                const replay = reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
+                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, replay.rejected.code);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session", .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM core_command", .{}));
+                // Neither a different name nor different overrides share that
+                // rejection's identity, even if they resolve to the same spec.
+                try request.preset.?.set("other");
+                try std.testing.expect(reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
+                try request.preset.?.set("review");
+                try request.configuration.label.value.set("Changed");
+                try std.testing.expect(reopened.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
+                try std.testing.expect(reopened.configure(&resolved, .{}) == .conflict);
+            }
+        }
+    }.run);
+}
+
+test "preset refusal cannot replace an accepted configure key" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("preset-bound-key", "", workspace, "model-a");
+            const first = storage.configure(&create, .{});
+            try std.testing.expect(first == .accepted);
+            var request = create;
+            request.preset = .{};
+            try request.preset.?.set("missing");
+            const result = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+            try std.testing.expect(result == .conflict);
+            const saved = try storage.observeCommand(create.key.slice());
+            try std.testing.expectEqual(protocol.CommandObservationStatus.accepted, saved.status);
+            try std.testing.expectEqualStrings(first.accepted.session.slice(), saved.target.slice());
+            const replay = storage.configure(&create, .{});
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expectEqualStrings(first.accepted.session.slice(), replay.accepted.session.slice());
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+        }
+    }.run);
+}
+
+test "preset on update rejection is durable and replayed before applying fields" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            try request.key.set("preset-update-replay");
+            try request.preset.?.set("review");
+            request.configuration.label.state = .value;
+            try request.configuration.label.value.set("Must not apply");
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("preset-update-parent", "", workspace, "model-a");
+                const first = storage.configure(&create, .{});
+                try std.testing.expect(first == .accepted);
+                request.session = first.accepted.session;
+                const refused = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
+                try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, refused.rejected.code);
+                const saved = try storage.observeCommand(request.key.slice());
+                try std.testing.expectEqual(protocol.CommandObservationStatus.rejected, saved.status);
+                try std.testing.expectEqualStrings("preset_on_update", saved.code.slice());
+                try std.testing.expectEqualStrings(request.session.slice(), saved.target.slice());
+                try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(request.session.slice())).revision);
+            }
+            {
+                var reopened: Store = undefined;
+                try store_testing.testingStore(case, &reopened, &tmp, std.testing.io);
+                defer reopened.close() catch unreachable;
+                const replay = reopened.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
+                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, replay.rejected.code);
+                try request.preset.?.set("other");
+                try std.testing.expect(reopened.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{}) == .conflict);
+                request.preset = null;
+                try std.testing.expect(reopened.configure(&request, .{}) == .conflict);
+                try std.testing.expectEqual(@as(u64, 1), (try reopened.inspectSessionForTesting(request.session.slice())).revision);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session WHERE label IS NULL", .{}));
+            }
+        }
+    }.run);
+}
+
 test "saved model facts replace generations and hide removed ids" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -10304,13 +11068,6 @@ test "saved model facts replace generations and hide removed ids" {
             try std.testing.expectEqualStrings("b", current_ids[0]);
         }
     }.run);
-}
-
-// Engine transcripts and content boundary tests remain part of the native suite.
-test {
-    _ = @import("engine/Mysql.zig");
-    _ = @import("engine/mysql_content.zig");
-    _ = @import("mysql_testing.zig");
 }
 
 test "model fact effort masks are format-defined on every engine" {

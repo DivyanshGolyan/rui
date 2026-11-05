@@ -292,6 +292,20 @@ def openai_base_url_run(*, catalog_available=False):
                     assert headers[b"accept-encoding"] == b"identity", headers
         print("openai base URL passed: a message completes beside held discovery GETs; repeated model-list requests refresh again; "
               + ("models.dev saves its ETag and revalidates without credentials" if catalog_available else "unreachable models.dev does not block Host readiness or the model list"))
+        # A new Host whose list response is invalid publishes the catalog fallback.
+        fixture.stop_host(host)
+        host = None
+        endpoint.models = b'{"error":"model list unavailable"}'
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1"], env={
+            **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
+            "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
+        })
+        fallback = fixture.wait_for(
+            lambda: (value if (value := model_list())[0]["source"] != "pending" else None),
+            "the OpenAI catalog fallback", timeout=20)
+        assert fallback[0]["source"] == "catalog_fallback", fallback
+        assert fallback[0]["models"] and all(model["known"] for model in fallback[0]["models"]), fallback
+        print("openai catalog fallback passed: failed live list exposes catalog_fallback with known catalog models")
         complete = True
     finally:
         def retire():

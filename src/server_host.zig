@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_tools = @import("core_tools.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
@@ -265,7 +266,10 @@ pub const Host = struct {
     limits: Limits = .{},
     /// What this Host serves, owned by its caller for the Host's life.
     providers: *const providers_module.Providers = &providers_module.none,
-    /// The OpenAI API key's model list, fetched once at start.
+    /// Named creation specs, borrowed from the launch frame for the Host's life.
+    /// Never part of the Store or any Session after resolution (D22).
+    presets: []const core_tools.Preset = &.{},
+    /// The OpenAI API key's model list, refreshed by the execution owner.
     model_lists: ModelLists = .{},
     listings_requested: std.atomic.Value(bool) = .init(false),
     auth_worker: ?*AuthWorker = null,
@@ -352,6 +356,7 @@ pub const Host = struct {
 /// The live model list of the provider whose list is live
 /// (`Facts.model_list`): execution refreshes at Host start and on each
 /// model-list request. Intake only signals refresh and renders known IDs.
+/// Every other provider uses the shipped catalog.
 pub const ModelLists = struct {
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
@@ -359,12 +364,12 @@ pub const ModelLists = struct {
     mutex: std.Io.Mutex = .init,
     /// A live list's IDs are exact length, from `allocator`.
     /// `Provider.onlyLiveList()`'s, the one provider with a live list.
-    live: model_list.List = .table,
+    live: model_list.List = .catalog,
 
     pub fn deinit(self: *ModelLists) void {
         switch (self.live) {
             .live => |ids| self.allocator.free(ids.bytes),
-            .table, .pending, .table_fallback => {},
+            .catalog, .pending, .catalog_fallback => {},
         }
         self.* = .{};
     }
@@ -384,7 +389,7 @@ pub const ModelLists = struct {
     pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
         const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
             stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ comptime protocol.Provider.onlyLiveList().shown(), @errorName(err) });
-            break :failed .table_fallback;
+            break :failed .catalog_fallback;
         };
         self.set(list);
     }
@@ -408,7 +413,7 @@ pub const ModelLists = struct {
         for (std.enums.values(protocol.Provider)) |name| {
             if (!self.providers.serves(name)) continue;
             entries[count] = .{ .provider = name, .list = switch (name.facts().model_list) {
-                .table => .table,
+                .catalog => .catalog,
                 .live => self.live,
             } };
             count += 1;

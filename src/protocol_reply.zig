@@ -3,7 +3,6 @@
 //! client.zig owns transport and request capture.
 const std = @import("std");
 const protocol = @import("protocol.zig");
-const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const transport_policy = @import("transport_policy.zig");
@@ -148,8 +147,8 @@ pub const ActivityPage = struct {
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
-        const TurnEnded = struct { turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
-        const ApprovalRequested = struct { action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
+        const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
+        const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
@@ -202,10 +201,10 @@ pub const ActivityPage = struct {
             const after = fact.position > position or (ordinal != null and fact.position == position and fact.ordinal > ordinal.?);
             const before = fact.position < position or (ordinal != null and fact.position == position and fact.ordinal < ordinal.?);
             if (fact.position > page.facts.end or (position != 0 and !(if (cursor.direction == .forward) after else before)) or
-                // Only a Tool Result has an ordinal of its own; an approval
-                // request follows its call at ordinal 1.
+                // Tool Results have call ordinals; an own approval follows
+                // its call at ordinal 1, while a forwarded approval uses 0.
                 (switch (item.value) {
-                    .approval_requested => fact.ordinal != 1,
+                    .approval_requested => fact.ordinal > 1,
                     // A revision's changes share its position, one ordinal each.
                     .session_changed => false,
                     else => (item.value == .tool_result) != (fact.ordinal != 0),
@@ -223,7 +222,10 @@ pub const ActivityPage = struct {
                     fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } };
                     if (fact.at != fact.value.sent.admitted_at) return error.InvalidActivityPage;
                 },
-                .approval_requested => |request| fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .call_ordinal = try id(request.call_ordinal, true) } },
+                .approval_requested => |request| {
+                    if (!protocol.validSessionId(request.session.slice())) return error.InvalidActivityPage;
+                    fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .session = request.session.value, .call_ordinal = try id(request.call_ordinal, true) } };
+                },
                 .session_changed => |change| fact.value = .{ .session_changed = .{ .revision = try id(change.revision, false), .field = change.field } },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .send_failed => |failed| {
@@ -249,6 +251,7 @@ pub const ActivityPage = struct {
                     fact.value = .{ .call = value };
                 },
                 .turn_ended => |ended| {
+                    if (!protocol.validSessionId(ended.session.slice())) return error.InvalidActivityPage;
                     // A done Turn has its answer and a failed one may have
                     // its report; a stopped or interrupted one has neither,
                     // and each was judged from its own saved code.
@@ -257,7 +260,7 @@ pub const ActivityPage = struct {
                     const cancelled = ending == .stopped or ending == .interrupted;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
                         (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .turn_ended = .{ .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
+                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
                 },
                 .stop => |stop| {
                     if (stop.turn == null and stop.completion.value == .pending) return error.InvalidActivityPage;
@@ -368,16 +371,16 @@ test "a model list reply reads as what the Host writes" {
     var out = std.Io.Writer.fixed(&bytes);
     try out.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out, &.{
-        .{ .provider = .codex, .list = .table },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nwhisper-1\n" } } },
+        .{ .provider = .codex, .list = .catalog },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nunlisted-model\n" } } },
     });
     try out.writeAll(protocol.model_list_reply.tail);
     var menu = try model_picker.read(std.testing.allocator, try modelListProviders(out.buffered()));
     defer menu.deinit(std.testing.allocator);
-    try std.testing.expectEqual(model_capability.models.len + 1, menu.entries.len);
-    try std.testing.expectEqual(@as(?model_list.Source, .table), menu.sources.get(.codex));
+    try std.testing.expectEqual(@import("model_catalog.zig").openai_ids.len + 1, menu.entries.len);
+    try std.testing.expectEqual(@as(?model_list.Source, .catalog), menu.sources.get(.codex));
     try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(.openai));
-    try std.testing.expectEqualStrings("whisper-1", menu.entries[menu.others].id);
+    try std.testing.expectEqualStrings("unlisted-model", menu.entries[menu.others].id);
     for ([_][]const u8{ "", protocol.model_list_reply.head, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"providers\":[]}" }) |body|
         try std.testing.expectError(error.InvalidModelList, modelListProviders(body));
 }
@@ -679,13 +682,18 @@ pub const Current = struct {
             action: Id,
             parent_operation: Id,
             call_ordinal: Count,
-            tool: JsonEnum(protocol.BuiltInTool),
+            tool: JsonString(protocol.max_tool_name_bytes),
+            server: OmittableJson(JsonString(64)) = .{},
             permission_revision: Id,
             /// `core`: a core tool's call, which settlement authorizes at
             /// once with no permission decision.
             authorization: JsonEnum(enum { pending, bypass, allow_once, core }),
             call_id: Reference,
             arguments: Reference,
+
+            pub fn jsonStringify(self: @This(), jw: anytype) !void {
+                try Current.writeObject(self, jw);
+            }
         },
         resolved: struct {
             presentation: JsonToolPresentation,
@@ -984,6 +992,10 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
                 }
                 if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
                 if (tag == .unresolved) {
+                    if (!protocol.validToolName(row.tool.slice())) return error.InvalidObservation;
+                    if (row.server.value) |server| {
+                        if (!protocol.validToolName(server.slice()) or std.meta.stringToEnum(protocol.BuiltInTool, row.tool.slice()) != null) return error.InvalidObservation;
+                    }
                     const p = row.presentation.value;
                     if (p.publication_position != null or p.code != (if (row.authorization.value == .pending) protocol.ToolPresentation.Code.pending_permission else .unresolved)) return error.InvalidObservation;
                 }
@@ -1550,6 +1562,17 @@ pub const MutationReply = struct {
     target: MutationTarget,
     answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch }!MutationAnswer,
 
+    /// Preserve the existing machine-readable unconfirmed reason vocabulary.
+    /// Human presentation classifies these failures separately as caller codes.
+    pub fn failureReason(err: @typeInfo(@FieldType(MutationReply, "answer")).error_union.error_set) []const u8 {
+        return switch (err) {
+            error.CanonicalStoreFailure => "CanonicalStoreFailure",
+            error.HostInvocationFailed => "HostInvocationFailed",
+            error.InvalidResponse => "InvalidResponse",
+            error.RequestBindingMismatch => "RequestBindingMismatch",
+        };
+    }
+
     pub fn isAccepted(self: MutationReply) bool {
         const answer = self.answer catch return false;
         return answer.result == .accepted;
@@ -1884,7 +1907,7 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
         try code.set(case.code);
         var facts: protocol.ActivityFacts = .{ .end = 2, .count = 2, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .assistant = .{ .content = content, .final = case.ending == .done } } };
-        facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
+        facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
         try facts.work.workspace.set("/w");
         var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
@@ -3300,7 +3323,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
-        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
+        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",{s}\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i, if (i == 0) "fetch_page" else "bash", if (i == 0) "\"server\":\"docs\"," else "" });
         try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"pending_permission\",\"publication_position\":null}}");
     }
     try writer.writeAll("],\"resolved\":[");
@@ -3338,6 +3361,10 @@ test "Current facts traverse every attention row and preserve metadata with fixe
             const i = self.counts[kind];
             switch (attention) {
                 .unresolved => |row| {
+                    if (i == 0) {
+                        try std.testing.expectEqualStrings("fetch_page", row.tool.slice());
+                        try std.testing.expectEqualStrings("docs", row.server.value.?.slice());
+                    } else try std.testing.expect(row.server.value == null);
                     try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
                     try std.testing.expectEqual(@as(u64, 19), row.parent_operation.value);
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
@@ -3389,6 +3416,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     inline for (.{
         .{ "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ protocol.next_wire_version ++ "\"" },
         .{ "\"tools\":[\"bash\"]", "\"tools\":[\"ba.h\"]" },
+        .{ "\"tool\":\"bash\"", "\"tool\":\"ba.h\"" },
         .{ "\"loaded_tools\":[\"bash\"]", "\"loaded_tools\":[\"ba.h\"]" },
         .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
         .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
@@ -3437,4 +3465,44 @@ test "a hosted call travels as its presentation alone, in the conversation and t
     try facts.writeJson(&writer);
     const activity = try ActivityPage.parse(writer.buffered(), .{});
     try std.testing.expectEqualDeep(presentation, activity.facts.items[0].value.hosted_call);
+}
+
+test "approval activity accepts own and forwarded ordinals and validates child session" {
+    for ([_]u64{ 0, 1, 2 }) |ordinal| {
+        for ([_][]const u8{ "k7m2qx", "BAD" }) |session| {
+            var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+            facts.items[0] = .{ .position = 1, .ordinal = ordinal, .at = 1, .value = .{ .approval_requested = .{ .session = .{}, .action = 1, .operation = 1, .call_ordinal = 0 } } };
+            try facts.items[0].value.approval_requested.session.set(session);
+            try facts.work.workspace.set("/w");
+            var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try facts.writeJson(&writer);
+            if (ordinal < 2 and protocol.validSessionId(session)) {
+                const page = try ActivityPage.parse(writer.buffered(), .{});
+                try std.testing.expectEqualStrings(session, page.facts.items[0].value.approval_requested.session.slice());
+            } else {
+                try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+            }
+        }
+    }
+}
+
+test "approval and ending activity require a valid explicit child session" {
+    for ([_]protocol.ActivityItem.Value{
+        .{ .approval_requested = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .action = 1, .operation = 1, .call_ordinal = 0 } },
+        .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .stopped, .code = .{ .bytes = "cancelled".* ++ @as([protocol.max_code_bytes - 9]u8, undefined), .len = 9 }, .content = null } },
+    }) |value| {
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 1, .value = value };
+        try facts.work.workspace.set("/w");
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        _ = try ActivityPage.parse(writer.buffered(), .{});
+        for ([_][]const u8{ "", "\"session\":\"BAD\",", "\"session\":null," }) |replacement| {
+            const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, writer.buffered(), "\"session\":\"k7m2qx\",", replacement);
+            defer std.testing.allocator.free(malformed);
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(malformed, .{}));
+        }
+    }
 }

@@ -6,6 +6,7 @@ const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
+const forward_domain = @import("forward.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -449,7 +450,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -552,6 +553,9 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
         return false;
     };
     a.write(settle_owed_ending, .{ .turn_id = turn_id });
+    // The ending's feed row climbs the tree from here (D180): queued with
+    // the owed Message, so a root Session's Turn end writes nothing more.
+    try forward_domain.queue(a, &found.child.ref, &found.child.ref, .ending, turn_id);
     if (found.quiet) {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try a.commit();
@@ -612,11 +616,11 @@ const parent_settings = rsql.Read(.{
 
 /// Runs a `start_agent` call as one core command (D24, D122): creates a
 /// Session with `configuration` in the caller's Workspace and with its
-/// provider, as its child when `attached`, admits `task` to it from the
-/// caller, and resolves the call with what happened, in one transaction.
-/// The spec may only narrow the caller's tools and permission mode.
-/// `configuration` is the caller's; its Workspace and provider are filled
-/// here. `committed` runs once the task's admission commits.
+/// provider (D122, D221), as its child when `attached`, admits `task` to it
+/// from the caller, and resolves the call with what happened, in one
+/// transaction. The spec may only narrow the caller's tools and permission
+/// mode. `configuration` is the caller's; its Workspace and provider are
+/// filled here. `committed` runs once the task's admission commits.
 pub fn startAgent(
     a: anytype,
     io: std.Io,
@@ -632,7 +636,7 @@ pub fn startAgent(
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
@@ -721,7 +725,7 @@ pub fn startAgent(
 pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();
@@ -1228,10 +1232,12 @@ pub fn interruptModel(a: anytype, command: *const protocol.ModelInterruptionComm
 
 /// The Action a permission decision names, with its Turn.
 const decision_action = rsql.Read(.{
-    .sql = "SELECT a.session_ref,a.authorized,a.resolution_code IS NULL AS unresolved,t.outcome_code IS NULL AS turn_open,t.turn_id FROM action_operation a " ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.resolution_code IS NULL AS unresolved,t.outcome_code IS NULL AS turn_open,t.turn_id," ++
+        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
+        "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
-    .Args = struct { action_id: u64 },
-    .Row = struct { session_ref: protocol.Bounded(protocol.max_session_bytes), authorized: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive },
+    .Args = struct { action_id: u64, target: []const u8 },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
     .cardinality = .optional,
 });
 
@@ -1273,7 +1279,7 @@ fn decisionRejection(
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
-    if (!found.session_ref.eql(command.session.slice())) return .target_mismatch;
+    if (!std.mem.eql(u8, &found.session.ref, command.session.slice()) and !found.forwarded) return .target_mismatch;
     if (found.authorized or !found.unresolved or !found.turn_open) return .action_not_pending;
     return null;
 }
@@ -1292,7 +1298,7 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     var content = denial;
     if (validId(command.action_id)) {
         readTarget(a, session, &target);
-        if (protocol.validSessionId(session)) a.read(decision_action, .{ .action_id = command.action_id }, &action);
+        if (protocol.validSessionId(session)) a.read(decision_action, .{ .action_id = command.action_id, .target = session }, &action);
     }
     if (command.decision == .deny) content_domain.lookup(a, &content);
     try a.run();
@@ -1319,7 +1325,7 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     var action_buffer: [20]u8 = undefined;
     a.write(save_decision, .{ .key = command.key.slice(), .action_id = try std.fmt.bufPrint(&action_buffer, "{d}", .{command.action_id}), .decision = command.decision });
     if (rejection == null) {
-        const head = target.?.session;
+        const head = action.?.session;
         switch (command.decision) {
             .allow_once => a.write(allow_action, .{ .action_id = command.action_id, .session = head }),
             .deny => {

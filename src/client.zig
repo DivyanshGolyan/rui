@@ -2,6 +2,7 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const client_defaults = @import("client_defaults.zig");
 const environment_rule = @import("environment.zig");
 const TerminalText = @import("TerminalText.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
@@ -402,6 +403,26 @@ pub const OptionalFile = struct {
     path: []const u8 = "",
 };
 
+/// Concrete client-side defaults for a fresh Session, never sparse updates.
+pub const defaultCompactionTrigger = client_defaults.compactionTrigger;
+
+pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
+    const effort = client_defaults.startEffort(model, saved);
+    return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
+}
+
+test "client default effort policy is explicit including null" {
+    for ([_]struct { model: []const u8, effort: ?[]const u8 }{
+        .{ .model = "gpt-6.1-sol", .effort = "low" },
+        .{ .model = "openai/whisper-1", .effort = null },
+        .{ .model = "unlisted-model", .effort = "low" },
+    }) |case| {
+        const actual = defaultStartEffort(case.model, null);
+        try std.testing.expect(actual.present);
+        if (case.effort) |effort| try std.testing.expectEqualStrings(effort, actual.value.?) else try std.testing.expect(actual.value == null);
+    }
+}
+
 pub const ConfigureInput = struct {
     store: []const u8,
     session: union(enum) {
@@ -519,7 +540,24 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };
-    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
+    return switch (lockState(io, &paths)) {
+        .free => .unavailable,
+        .held => readHostInfo(io, &paths, deadline),
+        .failure => .access_failure,
+    };
+}
+
+pub const HostLockState = enum { free, held, failure };
+
+/// Probe without contacting the Host; a failed probe proves neither absence
+/// nor ownership and must not be treated as a held lock by diagnostic callers.
+pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
+    const paths = platform.resolveClientPaths(io, store_path) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    return lockState(io, &paths);
+}
+
+fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .failure;
     defer store_dir.close(io);
     // A replaced lock node may be a FIFO: open must not wait for a writer
     // before the nonblocking lock probe can classify the selected Store.
@@ -529,17 +567,17 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0) catch |err| return switch (err) {
-        error.FileNotFound => .unavailable,
-        else => .access_failure,
+        error.FileNotFound => .free,
+        else => .failure,
     };
     const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer lock_file.close(io);
-    const stat = lock_file.stat(io) catch return .access_failure;
-    if (stat.kind != .file) return .access_failure;
+    const stat = lock_file.stat(io) catch return .failure;
+    if (stat.kind != .file) return .failure;
     return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
-        .SUCCESS => .unavailable,
-        .AGAIN => readHostInfo(io, &paths, deadline),
-        else => .access_failure,
+        .SUCCESS => .free,
+        .AGAIN => .held,
+        else => .failure,
     };
 }
 

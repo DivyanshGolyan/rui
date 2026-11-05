@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
                 if change == "extension":
                     assert result.returncode == 0 and json.loads(result.stdout) == produced[0], result
                 else:
-                    assert result.returncode != 0 and "InvalidObservation" in result.stderr and not result.stdout, (change, result)
+                    assert result.returncode == 1 and "[internal_unexpected]" in result.stderr and not result.stdout, (change, result)
             finally:
                 proxy.close()
         full = fixture.command("session", "inspect", "--store", store, "--session", session, "--profile", "full")

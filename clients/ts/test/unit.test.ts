@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { encodeFrame, startError } from "../src/client.ts";
+import { encodeFrame, launchFor, startError } from "../src/client.ts";
 import { RuiStartError } from "../src/errors.ts";
 import { FEED_KINDS, listActivity } from "../src/feed.ts";
 import { environmentBytes, Sessions, type Link } from "../src/sessions.ts";
@@ -17,10 +17,33 @@ test("the wire version is the one openapi.json describes", () => {
 });
 
 test("a launch frame is a big-endian length and the JSON", () => {
-	const frame = encodeFrame({ v: 1, store: "/s" });
-	const json = '{"v":1,"store":"/s"}';
+	const launch = { v: 1, store: "/s", runtimeDir: "/r", provider: { kind: "openai_key", baseUrl: "https://example.com/v1", key: "test" } } satisfies import("../src/wire.ts").components["schemas"]["LaunchFrame"];
+	const frame = encodeFrame(launch);
+	const json = JSON.stringify(launch);
 	assert.equal(frame.readUInt32BE(0), json.length);
 	assert.equal(frame.subarray(4).toString("utf8"), json);
+});
+
+test("launch frame carries the MCP servers, an empty list when none are given", () => {
+	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" } };
+	const tools = [
+		{ name: "drift", url: "http://127.0.0.1:3000/mcp", bearerToken: "secret", callTimeoutMs: 42 },
+		{ name: "other", url: "http://127.0.0.1:3001/mcp", bearerToken: "secret2", callTimeoutMs: 99 },
+	];
+	const frame = (extra: object) => launchFor({ ...options, ...extra }, "/r").frame as { mcpServers: unknown };
+	assert.deepEqual(frame({}).mcpServers, []);
+	assert.deepEqual(frame({ tools: [{ ...tools[0], extra: true }, tools[1]] }).mcpServers, tools);
+});
+
+test("launch presets preserve creation fields and decode output schema JSON", () => {
+	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: '{"type":"object"}' };
+	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
+	const frame = launchFor(options, "/r").frame;
+	assert.deepEqual(frame.presets, { review: { ...spec, outputSchema: { type: "object" } } });
+	for (const [text, decoded] of [["[]", []], ["false", false], ["not JSON", "not JSON"]] as const) {
+		const invalid = launchFor({ ...options, presets: { review: { ...spec, outputSchema: text } } }, "/r").frame;
+		assert.deepEqual(JSON.parse(JSON.stringify(invalid)).presets.review.outputSchema, decoded);
+	}
 });
 
 test("the refusal line becomes a RuiStartError", () => {
@@ -30,6 +53,10 @@ test("the refusal line becomes a RuiStartError", () => {
 	assert.equal(refusal.message, "another Host holds this Store");
 	assert.equal(startError(""), undefined);
 	assert.equal(startError("not json\n"), undefined);
+	assert.equal(startError("null\n{}\n"), undefined);
+	for (const code of ["runtime_dir_unusable", "tool_name_collision", "invalid_preset"] satisfies RuiStartError["code"][]) {
+		assert.equal(startError(JSON.stringify({ rui_start_error: { code, message: "refused" } }))?.code, code);
+	}
 });
 
 test("environment entries the Host would refuse are left out, never split", () => {
@@ -64,7 +91,7 @@ test("an aborted feed drops the page its pending read returns", async () => {
 
 test("the feed asks for every kind by default and keeps approval requests when asked for them alone", async () => {
 	const bodies: string[] = [];
-	const row = { position: "1", ordinal: "1", at: "t", value: { approval_requested: { action: "7", operation: "2", call_ordinal: "0" } } };
+	const row = { position: "1", ordinal: "1", at: "t", value: { approval_requested: { session: "ch1ld1", action: "7", operation: "2", call_ordinal: "0" } } };
 	const link: Link = {
 		exchange: async (_path, body) => {
 			bodies.push(body("store"));
@@ -73,7 +100,8 @@ test("the feed asks for every kind by default and keeps approval requests when a
 	};
 	assert.equal((await listActivity(link, "s").next()).value?.kind, "approval_requested");
 	const only = await listActivity(link, "s", { kinds: ["approval_requested"] }).next();
-	assert.equal(only.value?.kind, "approval_requested");
+	assert.ok(only.value && only.value.kind === "approval_requested");
+	assert.equal(only.value.sessionId, "ch1ld1");
 	assert.deepEqual(JSON.parse(bodies[0] ?? "{}").kinds, [...FEED_KINDS]);
 	assert.deepEqual(JSON.parse(bodies[1] ?? "{}").kinds, ["approval_requested"]);
 });
@@ -118,13 +146,21 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 		exchange: async (_path, build) => {
 			bodies.push(build("/s"));
 			if (bodies.length === 2) controller.abort();
-			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9" }));
+			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } }));
 		},
 	};
 	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
 	assert.equal(bodies.length, 2);
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });
+
+// These checks are compiled by `npm run check`, but never execute invalid input.
+function launchTypeChecks() {
+	// @ts-expect-error The Host requires every non-defaulted launch field.
+	encodeFrame({ v: 1, store: "/s" });
+	// @ts-expect-error store_fenced is not a launch refusal in the Host enum.
+	new RuiStartError("store_fenced", "refused");
+}
 
 test("activity search follows an empty budget page's next and preserves snippets", async () => {
 	const { searchActivity, encodeCursor } = await import("../src/feed.ts");
@@ -176,4 +212,19 @@ test("session summaries preserve both parent references and top-level nulls", as
 		{ id: "k7m2qx", label: "child", state: "pending", parent: "p33rs1" },
 		{ id: "p33rs1", label: "caller", state: "idle", parent: null },
 	]);
+});
+
+
+test("approval and ending feed entries expose the child sessionId", async () => {
+	for (const value of [
+		{ approval_requested: { session: "ch1ld1", action: "7", operation: "2", call_ordinal: "0" } },
+		{ turn_ended: { session: "ch1ld1", turn: "3", operation: "2", ending: "stopped", code: "cancelled", content: null } },
+	]) {
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ items: [{ position: "1", ordinal: "0", at: "1", value }], more: false, end: "1" })) };
+		const entry = (await listActivity(link, "p4rent").next()).value;
+		assert.ok(entry && (entry.kind === "approval_requested" || entry.kind === "turn_ended"));
+		const sessionId: string = entry.sessionId;
+		assert.equal(sessionId, "ch1ld1");
+		assert.equal("session" in entry, false);
+	}
 });

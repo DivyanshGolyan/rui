@@ -31,8 +31,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0x1f3b85a479932ea5 },
-    .{ .schema_version = 55, .digest = 0x2d6efd2d2fda44be },
+    .{ .schema_version = 54, .digest = 0xae916e0373329df9 },
+    .{ .schema_version = 55, .digest = 0x4acf921dca365b6e },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -162,6 +162,9 @@ pub const migrations = [_]Migration{
             "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
             "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1)\n) STRICT, WITHOUT ROWID",
             "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+            "CREATE TABLE session_forward(\n forward_id INTEGER PRIMARY KEY NOT NULL CHECK(forward_id>0),\n target_ref TEXT NOT NULL REFERENCES session(session_ref),\n child_ref TEXT NOT NULL REFERENCES session(session_ref),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 2),\n source_id INTEGER NOT NULL CHECK(source_id>0),\n position INTEGER CHECK(position IS NULL OR position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal=0),\n delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>0),\n UNIQUE(target_ref,kind,source_id),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) STRICT",
+            "CREATE INDEX session_forward_open ON session_forward(forward_id) WHERE position IS NULL",
+            "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
         },
         .mysql = &.{
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n settled BIGINT NOT NULL,\n PRIMARY KEY(child_ref,cause_ref,cause_position),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0),\n CHECK(settled BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -186,6 +189,9 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session DROP INDEX session_parent, ADD INDEX session_parent(session_parent_lead)",
             "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n delivered BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0),\n CHECK(delivered BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+            "CREATE TABLE session_forward(\n forward_id BIGINT NOT NULL,\n target_ref VARCHAR(6) NOT NULL,\n child_ref VARCHAR(6) NOT NULL,\n kind BIGINT NOT NULL,\n source_id BIGINT NOT NULL,\n position BIGINT,\n ordinal BIGINT NOT NULL,\n delivered_at BIGINT,\n session_forward_open_lead BIGINT GENERATED ALWAYS AS (CASE WHEN position IS NULL THEN forward_id END) STORED,\n PRIMARY KEY(forward_id),\n UNIQUE(target_ref,kind,source_id),\n FOREIGN KEY(target_ref) REFERENCES session(session_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n CHECK(forward_id>0),\n CHECK(kind BETWEEN 1 AND 2),\n CHECK(source_id>0),\n CHECK(position IS NULL OR position>0),\n CHECK(ordinal=0),\n CHECK(delivered_at IS NULL OR delivered_at>0),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_forward_open ON session_forward(session_forward_open_lead)",
+            "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
         },
     },
     // Schema 55 (C2a, D226): saved model facts and their publication source.
@@ -770,6 +776,28 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
+        // Owed ancestor feed work claims no position until delivery. Like
+        // session_stop_owed, enqueueing it does not change a Session head.
+        .name = "session_forward",
+        .columns = &.{
+            .{ .name = "forward_id", .type = .int, .check = "forward_id>0" },
+            .{ .name = "target_ref", .type = .{ .text = null } },
+            .{ .name = "child_ref", .type = .{ .text = null } },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 2" },
+            .{ .name = "source_id", .type = .int, .check = "source_id>0" },
+            .{ .name = "position", .type = .int, .nullable = true, .check = "position IS NULL OR position>0" },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal=0" },
+            .{ .name = "delivered_at", .type = .int, .nullable = true, .check = "delivered_at IS NULL OR delivered_at>0" },
+        },
+        .primary_key = &.{"forward_id"},
+        .uniques = &.{&.{ "target_ref", "kind", "source_id" }},
+        .checks = &.{ "(position IS NULL)=(delivered_at IS NULL)", "target_ref<>child_ref" },
+        .foreign_keys = &.{
+            references("target_ref", "session", session_reference),
+            references("child_ref", "session", session_reference),
+        },
+    },
+    .{
         .name = "model_interruption_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
@@ -1064,6 +1092,8 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_open", .table = "session_stop_owed", .columns = &.{ "settled", "child_ref" } },
     // The Host's next owed ending, among the delivered ones.
     .{ .name = "session_ending_open", .table = "session_ending_owed", .columns = &.{ "delivered", "turn_id" } },
+    .{ .name = "session_forward_open", .table = "session_forward", .columns = &.{"forward_id"}, .where = "position IS NULL" },
+    .{ .name = "session_forward_feed", .table = "session_forward", .columns = &.{ "target_ref", "position" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },

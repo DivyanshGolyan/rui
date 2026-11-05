@@ -570,6 +570,8 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                             "instructions": {"state": "omitted"},
                             "tools": {"state": "value", "value": ["bash"]},
                             "permission_mode": {"state": "value", "value": "ask"},
+                            "compaction_trigger": {"state": "value", "value": "244800"},
+                            "reasoning_effort": {"state": "value", "value": "medium"},
                             "output_schema": {"state": "omitted"},
                         },
                     )
@@ -724,6 +726,8 @@ def held_population(root):
                             "instructions": {"state": "omitted"},
                             "tools": {"state": "value", "value": ["bash"]},
                             "permission_mode": {"state": "value", "value": "ask"},
+                            "compaction_trigger": {"state": "value", "value": "244800"},
+                            "reasoning_effort": {"state": "value", "value": "medium"},
                             "output_schema": {"state": "omitted"},
                         },
                     )

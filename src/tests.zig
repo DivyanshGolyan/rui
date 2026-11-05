@@ -35,6 +35,7 @@ test {
     _ = @import("server_execution.zig");
     _ = @import("server_host.zig");
     _ = @import("SessionEnvironments.zig");
+    _ = @import("client_defaults.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
     _ = @import("bash.zig");
@@ -52,6 +53,7 @@ test {
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     _ = @import("read_transcript.zig");
+    _ = @import("find_tools.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");

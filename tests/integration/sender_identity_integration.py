@@ -94,7 +94,7 @@ def main():
                 refused = subprocess.run([str(installed), "session", "send", "--to", endpoint.receiver,
                     "--record", str(record), "--key", key], env=env,
                     text=True, capture_output=True, timeout=15, input="report")
-                assert refused.returncode == 2 and "invalid peer context" in refused.stderr, refused
+                assert refused.returncode == 2 and "[peer_context_invalid]" in refused.stderr, refused
                 assert refused.stdout == "" and not record.exists(), refused
                 return None
             response = run("session", "send", "--to", endpoint.receiver,
@@ -156,7 +156,7 @@ def main():
                     refused = subprocess.run([str(installed), "session", "send", *options, "--to", endpoint.receiver,
                         "--record", str(record), "--key", key],
                         env={**environment, **fields}, text=True, capture_output=True, timeout=15, input="report")
-                    assert refused.returncode == 2 and "invalid peer context" in refused.stderr, refused
+                    assert refused.returncode == 2 and "[peer_context_invalid]" in refused.stderr, refused
                     assert refused.stdout == "" and not record.exists(), refused
                     assert not (state / f".{key}.json.capture.lock").exists(), "invalid context opened a capture"
             snapshot = inspect(endpoint.receiver)

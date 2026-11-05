@@ -643,15 +643,15 @@ test "frontend answers local and unknown commands in place and keeps Host comman
 test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init();
-    for (model_capability.models) |row| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
+    for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |id| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
         self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
-        try self.line.model.set(row.id);
+        try self.line.model.set(id);
         self.notice = null;
         self.slashCommand("/model");
         const said = self.notice.?;
         // The model, then the sign-in, lead the line.
-        try std.testing.expect(std.mem.startsWith(u8, said, row.id));
-        const rest = said[row.id.len..];
+        try std.testing.expect(std.mem.startsWith(u8, said, id));
+        const rest = said[id.len..];
         if (provider) |known| {
             try std.testing.expect(std.mem.indexOf(u8, rest, known.signIn()) != null);
             try std.testing.expect(std.unicode.utf8CountCodepoints(said) catch unreachable <= 60);
@@ -659,7 +659,7 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
         // A sign-in is never dropped silently: something stands in its place.
         try std.testing.expect(!std.mem.startsWith(u8, std.mem.trimStart(u8, rest[" · ".len..], " "), "new Session"));
         try std.testing.expect(self.input.queuedCommand() == null);
-        try std.testing.expectEqualStrings(row.id, self.line.model.slice());
+        try std.testing.expectEqualStrings(id, self.line.model.slice());
     };
 }
 
@@ -672,10 +672,11 @@ test "frontend lists the efforts of the Session's model once it is read, the one
     self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .medium };
     try self.line.model.set("gpt-5.5");
     var shown = self.nextCommands(null).?;
-    try std.testing.expectEqualStrings("low", shown.list.shown()[0].word);
-    try std.testing.expectEqualStrings("current", shown.list.shown()[1].description);
+    try std.testing.expectEqualStrings("none", shown.list.shown()[0].word);
+    try std.testing.expectEqualStrings("current", shown.list.shown()[2].description);
     // Down moves the highlight, which the next frame keeps and Tab puts in
     // the draft.
+    shown.move(true);
     shown.move(true);
     shown = self.nextCommands(shown).?;
     try std.testing.expectEqualStrings("medium", shown.completion());
@@ -1490,7 +1491,7 @@ const reason_not_ready = "! Not ready; nothing denied · " ++ Screen.deny_words;
 /// Why Enter in the draft beside an Action sent nothing.
 fn reasonNotice(self: *const Self, letter: bool) []const u8 {
     if (self.terminal.screen.liveApproval(self.commandActive()) != .reason) return self.decisionNotice();
-    return if (letter) "! Use ←→ and Enter to choose; a message denies the command." else reason_not_ready;
+    return if (letter) "! Use ←→ and Enter to choose; a message denies the call." else reason_not_ready;
 }
 
 /// One input in the draft, with the offer this input spent. Beside an Action
@@ -2268,7 +2269,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         } else {
             try std.testing.expect(self.input.queuedCommand() == null);
             try std.testing.expectEqualStrings("a", self.input.composition().bytes);
-            try std.testing.expectEqualStrings(if (change == .none) "! Use ←→ and Enter to choose; a message denies the command." else "! Action needs a decision; Esc returns to it. Draft retained.", self.notice.?);
+            try std.testing.expectEqualStrings(if (change == .none) "! Use ←→ and Enter to choose; a message denies the call." else "! Action needs a decision; Esc returns to it. Draft retained.", self.notice.?);
         }
         // Esc returns to the choice, which needs fresh input again.
         try sendKeys(&self, "\x07");
@@ -2579,7 +2580,7 @@ test "the draft beside an offered Action sends its line first and denies only th
     try std.testing.expectEqual(ConsentPolicy.Projection{ .approval = .reason }, held.screen.selected);
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .deny }, held.screen.offered().?);
     var storage: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("enter denies the command and sends this · esc back to the choice", lastRow(held.screen, &storage));
+    try std.testing.expectEqualStrings("enter denies the call and sends this · esc back to the choice", lastRow(held.screen, &storage));
     try sendKeys(&held.self, "\r");
     // The Action is consumed and left, and the Message is the original; its
     // acceptance begins the denial.
@@ -2737,7 +2738,7 @@ test "a draft of one choice letter or a slash command beside an offered Action d
             try std.testing.expectEqualStrings("Work continues while you compose.", held.self.notice.?);
             try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
         } else {
-            try std.testing.expectEqualStrings("! Use ←→ and Enter to choose; a message denies the command.", held.self.notice.?);
+            try std.testing.expectEqualStrings("! Use ←→ and Enter to choose; a message denies the call.", held.self.notice.?);
             try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
         }
     }
@@ -3258,6 +3259,113 @@ test "a transition inside a held frame leaves its remaining input with the frame
     try std.testing.expectEqualStrings("a", self.input.composition().bytes);
 }
 
+test "permission resolved between the activity scan and Current keeps the frontend open without approval" {
+    const Host = struct {
+        fn respond(listener: *std.Io.net.Server, route: []const u8, body: []const u8) !void {
+            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
+            const peer = try listener.accept(std.testing.io);
+            defer peer.close(std.testing.io);
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const count = try std.posix.read(peer.socket.handle, request[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOf(u8, request[start..end], "\r\n").? + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                }
+            }
+            var prefix: [96]u8 = undefined;
+            try std.testing.expectStringStartsWith(request[0..used], try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
+            var header: [256]u8 = undefined;
+            var writer = peer.writer(std.testing.io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
+            try writer.interface.writeAll(body);
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    const scratch = try held.tmp.dir.createFile(io, "scratch", .{ .read = true });
+    defer scratch.close(io);
+    const action = try held.tmp.dir.createFile(io, "action", .{ .read = true });
+    defer action.close(io);
+    const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
+    defer inspection.close(io);
+    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.store = root;
+    self.session = "k7m2qx";
+    self.line.read = .{ .revision = 1, .end = 0 };
+    try sendKeys(self, "draft retained");
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch |err| switch (err) {
+            error.Cancelled => {},
+            else => @panic(@errorName(err)),
+        };
+    }
+    try self.launch(self.freeze(.permission), reads.permission);
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .approval = .{ .since = 1 } }, .turn = 1, .operation = 1, .first_action = 7 } } };
+    try facts.work.workspace.set("/w");
+    var page_buffer: [4096]u8 = undefined;
+    var page = std.Io.Writer.fixed(&page_buffer);
+    try facts.writeJson(&page);
+    try Host.respond(&listener, "/v1/activity-page", page.buffered());
+    // Another client denies the selected Action (or its Turn stops/finishes)
+    // before the next read: Current no longer has that unresolved row.
+    const resolved =
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    try Host.respond(&listener, "/v1/inspect-session", resolved);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
+        fn completed(frontend: *Self) !bool {
+            return frontend.reader.completed();
+        }
+    }.completed);
+    try self.settleReader();
+    try std.testing.expect(self.leaving == null);
+    try std.testing.expect(self.reading.pending_diagnostic == null);
+    try std.testing.expect(self.reading.prepared_action == null);
+    try std.testing.expect(self.job.result.action == null);
+    try std.testing.expectEqual(ReadPhase.activity, self.reading.phase);
+    try std.testing.expect(held.screen.consent == null);
+    try std.testing.expectEqual(@as(u64, 0), try action.length(io));
+    try std.testing.expectEqualStrings("draft retained", self.input.composition().bytes);
+    // The ordinary refresh takes the newer work; the conversation stays usable.
+    try self.launch(self.freeze(.activity), reads.scan);
+    facts.work.work = .{ .state = .{ .idle = .{ .since = 1 } } };
+    page = std.Io.Writer.fixed(&page_buffer);
+    try facts.writeJson(&page);
+    try Host.respond(&listener, "/v1/activity-page", page.buffered());
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
+        fn completed(frontend: *Self) !bool {
+            return frontend.reader.completed();
+        }
+    }.completed);
+    try self.settleReader();
+    try held.settle();
+    try std.testing.expect(self.leaving == null);
+    try std.testing.expect(self.live.work.first_action == null);
+    try std.testing.expect(held.screen.consent == null);
+    try sendKeys(self, "!");
+    try std.testing.expectEqualStrings("draft retained!", self.input.composition().bytes);
+}
+
 test "a details page read before a Message was sent never covers it" {
     const Worker = struct {
         var release: std.atomic.Value(bool) = .init(false);
@@ -3595,8 +3703,8 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     try held.self.line.model.set("gpt-5.5");
     try showStatus(held, true, "fix-safari-export");
     var storage: [512]u8 = undefined;
-    try std.testing.expectEqualStrings(" › Effort          high  model default", rowWith(held.screen, "Effort ", &storage).?);
-    try std.testing.expectEqualStrings("   Permissions     bypass · Bash runs without asking", rowWith(held.screen, "Permissions", &storage).?);
+    try std.testing.expectEqualStrings(" › Effort          high  Session override", rowWith(held.screen, "Effort ", &storage).?);
+    try std.testing.expectEqualStrings("   Permissions     bypass · Bash and MCP run without asking", rowWith(held.screen, "Permissions", &storage).?);
     // Shift-Down scrolls as before; the mark stays.
     try sendKeys(&held.self, "\x1b[1;2B");
     try held.settle();

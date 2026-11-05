@@ -15,7 +15,7 @@ def _load():
     values = {}
     for name, text, number in _DECLARATION.findall(_SOURCE.read_text()):
         values[name] = text if number == "" else int(number)
-    expected = {"active_capacity", "intake_capacity", "tools", "permission_mode", "recommended_model",
+    expected = {"active_capacity", "intake_capacity", "tools", "permission_mode", "recommended_model", "reasoning_effort",
                 "compaction_trigger_percent", "unlisted_context_window", "output_reservation", "provider", "host_shutdown_seconds"}
     assert set(values) == expected, f"{_SOURCE} declarations changed: {sorted(values)}"
     return SimpleNamespace(**values)

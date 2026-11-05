@@ -31,6 +31,10 @@ pub const Record = struct {
     owner: Owner,
     /// The MCP server that serves the tool, for an `.mcp` record only.
     server: []const u8 = "",
+
+    pub fn runner(self: *const Record) Runner {
+        return Runner.of(self);
+    }
 };
 
 /// The longest function name a provider accepts (OpenAI: 64 characters);
@@ -158,6 +162,13 @@ pub const bash_record: Record = .{
         "\"required\":[\"cmd\",\"description\"],\"additionalProperties\":false}",
 };
 
+pub const find_tools_record: Record = .{
+    .name = "find_tools",
+    .owner = .rui,
+    .description = core_tools.find_tools_description,
+    .input_schema = core_tools.find_tools_schema,
+};
+
 pub const message_agent_record: Record = .{
     .name = "message_agent",
     .owner = .rui,
@@ -187,9 +198,14 @@ pub const web_search_record: Record = .{ .name = "web_search", .owner = .provide
 pub const Runner = enum {
     bash,
     core,
+    mcp,
+    provider,
 
     pub fn of(tool: *const Record) Runner {
-        return if (tool == &message_agent_record or tool == &read_transcript_record or tool == &start_agent_record) .core else .bash;
+        if (tool.owner == .mcp) return .mcp;
+        if (tool.owner == .provider) return .provider;
+        const core = std.mem.eql(u8, tool.name, find_tools_record.name) or std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name);
+        return if (core) .core else .bash;
     }
 };
 
@@ -199,6 +215,7 @@ pub const Runner = enum {
 pub fn record(tool: Tool) *const Record {
     return switch (tool) {
         .bash => &bash_record,
+        .find_tools => &find_tools_record,
         .message_agent => &message_agent_record,
         .read_transcript => &read_transcript_record,
         .start_agent => &start_agent_record,
@@ -238,6 +255,9 @@ comptime {
 
 /// The records a request offers, in a fixed order.
 pub const Offered = struct {
+    /// Borrowed batch names and membership flags, filled by the Store lookup.
+    mcp_names: []const protocol.Bounded(max_name_bytes) = &.{},
+    mcp_offered: []const bool = &.{},
     records: [std.enums.values(Tool).len]*const Record = undefined,
     len: usize = 0,
     /// The tools the Session offered at an earlier revision and this
@@ -285,8 +305,9 @@ pub const Description = protocol.Bounded(protocol.max_tool_description_bytes);
 pub const Call = union(Tool) {
     /// Arguments the parser accepted, whose description it required.
     bash: *const BashArguments,
-    message_agent: *const core_tools.MessageAgentArguments,
     /// The core checks its arguments when it runs the call.
+    find_tools,
+    message_agent: *const core_tools.MessageAgentArguments,
     read_transcript: ?protocol.Bounded(protocol.session_id_bytes),
     start_agent,
     web_search: WebSearchCall,
@@ -310,6 +331,11 @@ pub fn describe(call: Call) Description {
         .message_agent => |arguments| blk: {
             var out: Description = .{};
             compose(&out, &.{ "Message ", "" }, &.{arguments.id.slice()});
+            break :blk out;
+        },
+        .find_tools => blk: {
+            var out: Description = .{};
+            out.set("Find tools") catch unreachable;
             break :blk out;
         },
         .read_transcript => |id| blk: {
@@ -512,6 +538,7 @@ pub fn toolBit(tool: Tool) u8 {
         .message_agent => 4,
         .start_agent => 8,
         .read_transcript => 16,
+        .find_tools => 32,
     };
 }
 
@@ -525,7 +552,9 @@ pub const all_tools_mask: u8 = blk: {
 pub const CallFacts = struct {
     /// The offered record the call names; null when it names none that
     /// Rui runs, so it is an unknown tool.
-    tool: ?*const Record,
+    // A small value: MCP calls synthesize only the matched name and owner,
+    // borrowing the name from Offered instead of retaining full records.
+    tool: ?Record,
     /// A call named bash's checked arguments, offered or not; null for any
     /// other name.
     bash: ?BashCheck,
@@ -534,6 +563,8 @@ pub const CallFacts = struct {
     message_agent: ?core_tools.MessageAgentCheck = null,
     /// Whether an unknown call names a tool the Session withdrew.
     removed: bool = false,
+    invalid_mcp_arguments: bool = false,
+    find_tools: bool = false,
     read_transcript: bool = false,
     transcript_id: ?protocol.Bounded(protocol.session_id_bytes) = null,
 
@@ -561,8 +592,9 @@ pub const CallFacts = struct {
     pub fn description(self: *const CallFacts) ?Description {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
+        if (self.find_tools) return describe(.find_tools);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
-        if (self.tool == &start_agent_record) return describe(.start_agent);
+        if (self.tool) |*selected| if (selected.runner() == .core and std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
         return null;
     }
 };
@@ -607,21 +639,59 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
+    const finding = complete and std.mem.eql(u8, name[0..length], find_tools_record.name);
     const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
     const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
-    const tool = if (complete) offeredFunction(offered.slice(), name[0..length]) else null;
+    var tool: ?Record = if (complete) if (offeredFunction(offered.slice(), name[0..length])) |candidate| candidate.* else null else null;
+    if (complete) for (offered.mcp_names, offered.mcp_offered) |*candidate, was_offered| {
+        if (was_offered and std.mem.eql(u8, candidate.slice(), name[0..length])) {
+            tool = .{ .name = candidate.slice(), .owner = .mcp };
+            break;
+        }
+    };
     const removed = tool == null and complete and withdrawnFunction(offered.withdrawn, name[0..length]);
     // A call's arguments are read whether or not it was offered, so a
     // rejected call keeps its description for presentation.
     var discard: Discard = .{};
+    const runner = if (tool) |*selected| selected.runner() else null;
     return .{
         .tool = tool,
-        .bash = if (named) try checkBashArguments(arguments) else null,
-        .message_agent = if (messaging) try core_tools.checkMessageAgent(arguments, &discard) else null,
+        .bash = if (named and (runner == null or runner == .bash)) try checkBashArguments(arguments) else null,
+        .message_agent = if (messaging and (runner == null or runner == .core)) try core_tools.checkMessageAgent(arguments, &discard) else null,
         .removed = removed,
-        .read_transcript = transcript,
-        .transcript_id = if (transcript) try transcriptDescriptionId(arguments) else null,
+        .invalid_mcp_arguments = if (runner == .mcp) !try checkMcpArguments(arguments) else false,
+        .read_transcript = transcript and (runner == null or runner == .core),
+        .transcript_id = if (transcript and (runner == null or runner == .core)) try transcriptDescriptionId(arguments) else null,
+        .find_tools = finding and (runner == null or runner == .core),
     };
+}
+
+fn checkMcpArguments(source: anytype) !bool {
+    const Json = @import("codecs/json.zig");
+    const Ignore = struct {
+        pub fn key(_: @This(), _: *Json.Reader, _: u8) void {}
+        pub fn begin(_: @This(), _: *Json.Reader, _: Json.Kind, _: u8) void {}
+        pub fn end(_: @This(), _: *Json.Reader, _: Json.Kind, _: u8) void {}
+    };
+    const Source = struct {
+        inner: @TypeOf(source),
+        pub fn peek(self: *@This()) !?u8 {
+            return self.inner.peek();
+        }
+        pub fn take(self: *@This()) !u8 {
+            return self.inner.take();
+        }
+    };
+    var input: Source = .{ .inner = source };
+    var reader: Json.Reader = undefined;
+    reader.readSource(&input, Ignore{}) catch |err| {
+        if (isBashDescriptorError(err)) return false;
+        inline for (@typeInfo(Json.Error).error_set.error_names.?) |each| {
+            if (err == @field(anyerror, each)) return false;
+        }
+        return err;
+    };
+    return true;
 }
 
 /// Presentation only, not settlement validation. Oversized, malformed or
@@ -754,10 +824,14 @@ pub const removed_tool_result = "This tool was removed.";
 /// A rejected call's result text, from `classifyCall`'s code for `facts`.
 pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
-        .invalid_arguments => if (facts.message_agent) |check| return switch (check.rejected) {
-            inline else => |value| "Invalid arguments for tool 'message_agent': " ++ comptime value.text() ++ ".",
-        } else return switch (facts.bash.?.rejected) {
-            inline else => |value| "Invalid arguments for tool 'bash': " ++ comptime value.text() ++ ".",
+        .invalid_arguments => {
+            if (facts.invalid_mcp_arguments) return std.fmt.bufPrint(buffer, "Invalid arguments for tool '{s}': the arguments are not one well-formed JSON object.", .{facts.tool.?.name});
+            if (facts.message_agent) |check| return switch (check.rejected) {
+                inline else => |value| "Invalid arguments for tool 'message_agent': " ++ comptime value.text() ++ ".",
+            };
+            return switch (facts.bash.?.rejected) {
+                inline else => |value| "Invalid arguments for tool 'bash': " ++ comptime value.text() ++ ".",
+            };
         },
         .unknown_tool => {
             if (facts.removed) return removed_tool_result;
@@ -780,6 +854,7 @@ pub fn rejectionResult(code: protocol.ProposalRejection, facts: *const CallFacts
 /// (D49), before its arguments are judged.
 pub fn classifyCall(facts: *const CallFacts) ?protocol.ProposalRejection {
     if (facts.tool == null) return .unknown_tool;
+    if (facts.invalid_mcp_arguments) return .invalid_arguments;
     if (facts.bash) |check| if (check == .rejected) return .invalid_arguments;
     if (facts.message_agent) |check| if (check == .rejected) return .invalid_arguments;
     return null;
@@ -1363,7 +1438,7 @@ test "an invalid-arguments result tells the model what was wrong" {
     };
     comptime std.debug.assert(cases.len == std.enums.values(BashProblem).len);
     for (cases) |case| {
-        const facts: CallFacts = .{ .tool = &bash_record, .bash = .{ .rejected = case[0] } };
+        const facts: CallFacts = .{ .tool = bash_record, .bash = .{ .rejected = case[0] } };
         try std.testing.expectEqualStrings(case[1], try rejectionResult(.invalid_arguments, &facts, &name, 4, @splat(0), &buffer));
     }
 }
@@ -1400,4 +1475,107 @@ test "every provider-run tool the Host offers is run by some provider" {
         for (std.enums.values(protocol.Provider)) |provider| run = run or provider.runsTool(offered.name);
         try std.testing.expect(run);
     }
+}
+
+test "MCP calls check only one JSON object and derive their runner" {
+    const Source = struct {
+        bytes: []const u8,
+        position: usize = 0,
+        fn next(self: *@This()) !?u8 {
+            if (self.position == self.bytes.len) return null;
+            defer self.position += 1;
+            return self.bytes[self.position];
+        }
+    };
+    const records = [_]Record{.{ .name = "fetch_page", .owner = .mcp, .server = "docs" }};
+    var offered: Offered = .of(.initOne(.bash));
+    var names: [1]protocol.Bounded(max_name_bytes) = .{.{ .len = 0 }};
+    try names[0].set("fetch_page");
+    offered.mcp_names = &names;
+    offered.mcp_offered = &.{true};
+    // Ownership, not a built-in spelling, chooses argument validation.
+    for ([_][]const u8{ "bash", "find_tools", "message_agent", "read_transcript", "start_agent" }) |spelling| {
+        var named: [1]protocol.Bounded(max_name_bytes) = .{.{ .len = 0 }};
+        try named[0].set(spelling);
+        var shadowed = offered;
+        shadowed.mcp_names = &named;
+        var name: Source = .{ .bytes = spelling };
+        var empty_arguments: TestSource = .{ .bytes = "{}" };
+        const owned = try inspectCall(&name, spelling.len, &empty_arguments, &shadowed);
+        try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&owned));
+        try std.testing.expect(owned.bash == null and owned.message_agent == null);
+        try std.testing.expect(!owned.find_tools and !owned.read_transcript);
+        try std.testing.expect(owned.description() == null);
+        try std.testing.expectEqual(Runner.mcp, owned.tool.?.runner());
+    }
+    try std.testing.expectEqual(Runner.mcp, records[0].runner());
+    try std.testing.expectEqual(Runner.bash, record(.bash).runner());
+    const Case = struct { arguments: []const u8, valid: bool };
+    for ([_]Case{
+        .{ .arguments = "{}", .valid = true },
+        .{ .arguments = " {\"anything\":[true,false,null,-1.2e+3,{},[]],\"text\":\"é\\uD83D\\uDE00\"} \n", .valid = true },
+        .{ .arguments = "{\"rui_call_description\":42,\"duplicate\":1,\"duplicate\":2}", .valid = true },
+        .{ .arguments = "", .valid = false },
+        .{ .arguments = "{", .valid = false },
+        .{ .arguments = "[]", .valid = false },
+        .{ .arguments = "{}{}", .valid = false },
+        .{ .arguments = "{\"x\":01}", .valid = false },
+        .{ .arguments = "{\"x\":1,}", .valid = false },
+        .{ .arguments = "{\"x\":\"\\uD800\"}", .valid = false },
+        .{ .arguments = "{\"x\":\"\\uDC00\"}", .valid = false },
+        .{ .arguments = "{\"x\":\"\xff\"}", .valid = false },
+    }) |case| {
+        var name: Source = .{ .bytes = "fetch_page" };
+        var arguments: TestSource = .{ .bytes = case.arguments };
+        const facts = try inspectCall(&name, name.bytes.len, &arguments, &offered);
+        try std.testing.expectEqual(if (case.valid) @as(?protocol.ProposalRejection, null) else .invalid_arguments, classifyCall(&facts));
+        if (!case.valid) {
+            var buffer: [192]u8 = undefined;
+            try std.testing.expectEqualStrings("Invalid arguments for tool 'fetch_page': the arguments are not one well-formed JSON object.", try rejectionResult(.invalid_arguments, &facts, &name, name.bytes.len, undefined, &buffer));
+        }
+    }
+}
+
+test "MCP argument validation preserves source read failures" {
+    const Source = struct {
+        fn next(_: *@This()) !?u8 {
+            return null;
+        }
+        fn peek(_: *@This()) error{InjectedReadFailure}!?u8 {
+            return error.InjectedReadFailure;
+        }
+        fn take(_: *@This()) error{InjectedReadFailure}!u8 {
+            return error.InjectedReadFailure;
+        }
+    };
+    var source: Source = .{};
+    try std.testing.expectError(error.InjectedReadFailure, checkMcpArguments(&source));
+}
+
+test "find_tools is a core tool and settlement defers its words check" {
+    const Name = struct {
+        at: usize = 0,
+        pub fn next(self: *@This()) !?u8 {
+            const bytes = "find_tools";
+            if (self.at == bytes.len) return null;
+            defer self.at += 1;
+            return bytes[self.at];
+        }
+    };
+    for ([_][]const u8{ "{}", "{", "[]", "{\"words\":false}", "{\"words\":\"bash\"}" }) |bytes| {
+        var name: Name = .{};
+        var arguments: core_tools.SliceSource = .{ .bytes = bytes };
+        const offered = Offered.of(ToolSet.initOne(.find_tools));
+        const facts = try inspectCall(&name, "find_tools".len, &arguments, &offered);
+        try std.testing.expectEqualStrings(find_tools_record.name, facts.tool.?.name);
+        try std.testing.expectEqual(Runner.core, facts.tool.?.runner());
+        try std.testing.expect(facts.find_tools and facts.bash == null and facts.message_agent == null);
+        try std.testing.expect(protocol.ToolPresentation.validDescription(facts.description().?.slice()));
+        name = .{};
+        arguments = .{ .bytes = bytes };
+        const hidden = Offered.of(.empty);
+        const unknown = try inspectCall(&name, "find_tools".len, &arguments, &hidden);
+        try std.testing.expect(unknown.tool == null and unknown.find_tools);
+    }
+    try std.testing.expectEqual(Runner.core, Runner.of(&find_tools_record));
 }

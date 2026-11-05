@@ -264,6 +264,7 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 /// portable or on an unknown or malformed marker. SQLite's spelling of
 /// each marker:
 ///
+///   @bytes(x)            exact bytes: CAST to BLOB (SQLite) or BINARY (MySQL)
 ///   @octets(x)           bytes in x: `length(CAST(x AS BLOB))`
 ///   @charset(c,'set')    only these characters: `(c NOT GLOB '*[^set]*' AND
 ///                        length(c)=length(CAST(c AS BLOB)))`. GLOB stops
@@ -281,7 +282,7 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///                        `schema.mysql_session` sets
 ///   @served(x)           the opening serves provider x: `rui_served(x)`,
 ///                        the function each opening registers
-///   @payload(t)          the bytes of content row t, which its text keeps
+///   @payload(t)          `t.payload`: the bytes of content row t, which its text keeps
 ///                        to one MySQL chunk (`schema.content_chunk_bytes`)
 ///                        by bounding byte_length: `payload`
 ///   @after(c1,..,ck,?a1,..,?ak)  the key (c1..ck) after (?a1..?ak), in
@@ -1917,6 +1918,7 @@ const arg_b = "\x02";
 const arg_set = "\x03";
 const served_slots = "\x04";
 const expression_markers = [_]ExpressionMarker{
+    .{ .name = "bytes", .arity = 1, .sqlite = "CAST(" ++ arg_a ++ " AS BLOB)", .mysql = "CAST(" ++ arg_a ++ " AS BINARY)" },
     .{ .name = "octets", .arity = 1, .sqlite = "length(CAST(" ++ arg_a ++ " AS BLOB))", .mysql = "OCTET_LENGTH(" ++ arg_a ++ ")" },
     .{
         .name = "charset",
@@ -1934,7 +1936,7 @@ const expression_markers = [_]ExpressionMarker{
     .{
         .name = "payload",
         .arity = 1,
-        .sqlite = "payload",
+        .sqlite = arg_a ++ ".payload",
         .mysql = "coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=" ++ arg_a ++ ".content_id AND content_chunk.chunk_index=0),X'')",
     },
 };
@@ -2895,7 +2897,7 @@ test "@payload is content's payload on SQLite and its one chunk on MySQL" {
         .Row = struct { bytes: ?Blob(512) },
         .cardinality = .optional,
     });
-    try std.testing.expectEqualStrings("SELECT (SELECT payload FROM content WHERE content_id=t.outcome_content_id AND byte_length<=512) AS bytes FROM turn t WHERE t.turn_id=?1", S.sql);
+    try std.testing.expectEqualStrings("SELECT (SELECT content.payload FROM content WHERE content_id=t.outcome_content_id AND byte_length<=512) AS bytes FROM turn t WHERE t.turn_id=?1", S.sql);
     try std.testing.expectEqualStrings(
         "SELECT (SELECT coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=content.content_id AND content_chunk.chunk_index=0),X'') " ++
             "FROM content WHERE content_id=t.outcome_content_id AND byte_length<=512) AS bytes FROM turn t WHERE t.turn_id=?",
@@ -3764,4 +3766,12 @@ test "SQLite-only spellings MySQL would refuse at PREPARE are refused at build t
     inline for (.{ "printf('%d',1)", "randomblob(8)", "strftime('%s','now')", "julianday('now')", "iif(1,2,3)" }) |call| {
         try std.testing.expect(comptime std.mem.indexOf(u8, portabilityError("SELECT " ++ call, false).?, "is not portable") != null);
     }
+}
+
+test "bytes marker compares text with content payload across dialects" {
+    try std.testing.expectEqualStrings("CAST(tool.name AS BLOB)=name.payload", comptime render(.sqlite, "@bytes(tool.name)=@payload(name)"));
+    try std.testing.expectEqualStrings(
+        "CAST(tool.name AS BINARY)=coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=name.content_id AND content_chunk.chunk_index=0),X'')",
+        comptime render(.mysql, "@bytes(tool.name)=@payload(name)"),
+    );
 }

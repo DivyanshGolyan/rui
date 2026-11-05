@@ -136,13 +136,13 @@ def failed_response_export_case(state, processes, endpoints):
     def fd256():
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
 
-    def export(operation, part, *, target=session, attempt="1", extra=(), error=None):
+    def export(operation, part, *, target=session, attempt="1", extra=(), error=None, status=1):
         result = subprocess.run([str(RUI), "session", "inspect", "--store", str(store),
                                  "--session", target, "--operation", str(operation), "--attempt", attempt,
                                  "--failed-response", part, *extra], capture_output=True, timeout=15,
                                 preexec_fn=fd256)
         if error is not None:
-            assert result.returncode != 0 and result.stdout == b"" and error.encode() in result.stderr, result
+            assert result.returncode == status and result.stdout == b"" and error.encode() in result.stderr, result
         else:
             assert result.returncode == 0 and result.stderr == b"", result
         return result.stdout
@@ -168,9 +168,9 @@ def failed_response_export_case(state, processes, endpoints):
         export(operation, "body", target=other_session, error="ContentNotFound")
         export(operation, "body", attempt="2", error="ContentNotFound")
     export("999999", "metadata", error="ContentNotFound")
-    export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="[profile_excludes_failed_response]")
-    export(records[0][0]["operation"], "unknown", error="Accepted: body, metadata.")
-    export("0", "body", error="--operation 0: That is not an ID.")
+    export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="[profile_excludes_failed_response]", status=2)
+    export(records[0][0]["operation"], "unknown", error="Accepted: body, metadata.", status=2)
+    export("0", "body", error="--operation 0: That is not an ID.", status=2)
     stop_host(host)
     processes.remove(host)
     assert snapshot() == before, "export mutated canonical data, retained bytes or write timestamps"
@@ -253,7 +253,7 @@ def failed_response_export_case(state, processes, endpoints):
     assert observe(store, "export-incomplete")["result"]["code"] == "malformed_provider_output"
     stop_host(host)
     processes.remove(host)
-    export(operation, "body", error="ConnectionRefused")
+    export(operation, "body", error="[host_not_serving]", status=6)
     stop_endpoint(endpoint, endpoints)
     print(f"failed-response export: IncompleteProviderOutput {len(incomplete)} bytes and binary {len(binary)} bytes exact; "
           "metadata exact; fd256; read-only; partial/omitted/missing/identity/symlink/corruption errors empty stdout; "
@@ -487,7 +487,7 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.append(host)
         patch(store, session, f"{route}-reset", "--compaction-trigger", "default", "--output-reservation", "default")
         current = command("session", "inspect", "--store", store, "--session", session)["session"]
-        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] is None, current
+        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] == "244800", current
         assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
         overflowed = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
         assert overflowed["request_id"] == (overflow_request_id if route == "http" else "request-1"), overflowed
@@ -3558,7 +3558,7 @@ def main(mode="all", correlation_case="all"):
             "stream": True,
             "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
-            "reasoning": {"effort": "medium"},
+            "reasoning": {"effort": "low"},
             "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
             "input": [
                 {
@@ -5106,7 +5106,7 @@ def main(mode="all", correlation_case="all"):
         )
         # The already-spawned client may finish while the listener owner is
         # beginning shutdown; its reply does not determine Host lifecycle.
-        assert shutdown_trigger.returncode in (0, 1), shutdown_trigger
+        assert shutdown_trigger.returncode in (0, 1, 6), shutdown_trigger
         assert preparation_shutdown_host.wait(timeout=10) != 0
         stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
