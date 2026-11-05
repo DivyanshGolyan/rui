@@ -2164,7 +2164,7 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
         " Status · lane four · k7m2qx\n",
         "Folder          ~/w\n",
         "Tools           bash\n",
-        "Permissions     ask · Bash asks first\n",
+        "Permissions     ask · Bash and MCP ask first\n",
         "Effort          high  \x1b[90mSession override",
         "Compact at      1,000 tokens · now 310",
         "Model           gpt-6.1-sol · API key  \x1b[90mfixed",
@@ -3663,6 +3663,21 @@ fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]c
     const selected = try selectedStore(init, store, &selected_buffer);
     const file = try renderScratch(init);
     defer file.close(io);
+    if (interactive) {
+        if (try session_view.actionTool(requester, selected, reference, target, file)) |tool| {
+            if (try tool.runner() == .mcp) {
+                var output_buffer: [256]u8 = undefined;
+                var output = std.Io.File.stdout().writerStreaming(io, &output_buffer);
+                var sink: JsonOutput.Sink = .{ .writer = &output.interface };
+                try output.interface.print("Action {d}\n", .{target});
+                _ = try session_view.permissionForTool(requester, selected, reference, target, file, &sink, false, &tool);
+                return output.flush();
+            }
+        }
+        // The metadata lookup used scratch; the raw inspection starts empty.
+        try io.vtable.fileSeekTo(io.userdata, file, 0);
+        try file.setLength(io, 0);
+    }
     var buffer: client.ReplyBuffer = .{};
     var call_bytes: u64 = 0;
     if (!interactive) {
@@ -3692,7 +3707,7 @@ fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]c
     // Quote provider-controlled fields so control and bidi bytes cannot alter the
     // proposal visible next to the human approval prompt.
     try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\n", .{target}));
-    try std.Io.File.stdout().writeStreamingAll(io, "Bash arguments: \"");
+    try std.Io.File.stdout().writeStreamingAll(io, "Arguments: \"");
     try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
     try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
 }

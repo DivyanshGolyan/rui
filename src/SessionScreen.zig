@@ -23,7 +23,7 @@ const Self = @This();
 pub const ViewKind = enum { live, transcript, inspection, action, message };
 
 /// What a reason's line under the input says, as its hint or a notice.
-pub const deny_words = "enter denies the command and sends this";
+pub const deny_words = "enter denies the call and sends this";
 
 /// A delivered frame's choice, offered to the next input.
 pub const Offer = struct { frame: u64, scope: u64, decision: ConsentPolicy.Decision };

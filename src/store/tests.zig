@@ -8615,6 +8615,8 @@ const EntryPoint = enum {
     readBashExecutionInput,
     revokeActionSender,
     nextCoreWork,
+    nextMcpAction,
+    resolveMcpAction,
     deliverAgentMessage,
     deliverChildEnding,
     deliverSessionForward,
@@ -8678,6 +8680,8 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readBashExecutionInput = 2,
     .revokeActionSender = 2,
     .nextCoreWork = 3,
+    .nextMcpAction = 1,
+    .resolveMcpAction = 2,
     .deliverAgentMessage = 3,
     .deliverChildEnding = 2,
     .deliverSessionForward = 2,
@@ -8941,6 +8945,7 @@ test "each Store entry point takes its round budget on its common path" {
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);
             try coreTurn(&storage, &tmp, &meter);
+            try mcpTurn(case, &meter);
             try findTurn(&storage, &tmp, &meter);
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
@@ -9067,6 +9072,57 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             meter.stop(.stopSession);
+        }
+
+        /// Drive MCP through an actual frozen catalog offer, without changing
+        /// the built-in catalog used by the other entry points' fixtures.
+        fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+            const records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.find_tools_record,
+                tool_catalog.message_agent_record,
+                tool_catalog.read_transcript_record,
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                break :blk out;
+            };
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+            defer storage.close() catch unreachable;
+            const previous_storage = meter.storage;
+            meter.storage = &storage;
+            defer meter.storage = previous_storage;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("budget-mcp", "", workspace, "model-a");
+            command.configuration.tools = try .of(&.{"fetch_page"});
+            command.configuration.permission_mode.state = .value;
+            try command.configuration.permission_mode.value.set("bypass");
+            const configured = storage.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "budget-mcp-input", "budget-mcp-key", session.slice(), "fetch a page");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "budget-mcp-calls", &.{
+                .{ .item_id = "mcp-item", .name = "fetch_page", .encoded_call_id = "mcp-call", .decoded_call_id = "mcp-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            });
+            meter.start();
+            const action = (try storage.nextMcpAction()).?;
+            meter.stop(.nextMcpAction);
+            meter.start();
+            try storage.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+            meter.stop(.resolveMcpAction);
+            try std.testing.expect((try storage.nextMcpAction()) == null);
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
         }
 
         /// SQL narrows one unloaded tool; eight matchers share one description

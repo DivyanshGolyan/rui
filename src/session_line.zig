@@ -1,5 +1,5 @@
 //! The line under the conversation's input: the Session's name, model,
-//! effort, the context left before automatic compaction, when Bash asks
+//! effort, the context left before automatic compaction, when Bash or MCP asks
 //! first, that, and while Ctrl-X would stop work, the key. Narrow lines drop
 //! effort first, then shorten the name, then drop it, then the key. This
 //! core takes the facts its shell read and the terminal's width method, and
@@ -18,7 +18,7 @@ pub const max_line_bytes = 256;
 
 pub const separator = " · ";
 pub const ellipsis = "…";
-const asks_text = "asks before Bash";
+const asks_text = "asks before Bash/MCP";
 const left_text = "100% left";
 /// The key that stops a Session, as both screens hint it.
 pub const stop_hint = "ctrl+x stop";
@@ -246,7 +246,7 @@ test "the mock's line at its widths" {
     var asks = facts;
     asks.asks = true;
     asks.left = null;
-    try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · asks before Bash", write(&buffer, asks, 80, .unicode));
+    try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · asks before Bash/MCP", write(&buffer, asks, 80, .unicode));
     var working = facts;
     working.stop = true;
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left · ctrl+x stop", write(&buffer, working, 80, .unicode));

@@ -1307,7 +1307,9 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
     };
     try settleCallsForTesting(&storage, &tmp, binding, "check-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool'", .{}));
+    // This built-in-only Session never offered `other`; it is a rejection,
+    // not an MCP Action. Keep that witness for the rejection CHECK below.
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool' AND action_kind IS NULL", .{}));
 
     // Each pair changes only one field, the null-valued one where a NULL could
     // pass the CHECK. The valid witness shows the row satisfies every
@@ -9192,7 +9194,8 @@ test "a Session with message_agent keeps it through its list row and report, as 
         pub fn visit(self: *@This(), attention: protocol_reply.Current.Attention) !void {
             switch (attention) {
                 .unresolved => |row| {
-                    try std.testing.expect(row.tool.value == .message_agent and row.authorization.value == .core);
+                    try std.testing.expectEqualStrings("message_agent", row.tool.slice());
+                    try std.testing.expect(row.authorization.value == .core);
                     self.core_calls += 1;
                 },
                 else => {},
@@ -9647,14 +9650,14 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
 
     try submitTestMessage(&storage, &tmp, "mcp-message", "mcp-message", session.slice(), "fetch");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    // Rui runs no MCP tool yet, so its call is unknown; bash still runs.
+    // MCP calls settle as Actions beside Bash, even before the runner lands.
     const calls = [_]TestingCall{
         .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
         .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "mcp-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE call_ordinal=0", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code IS NULL AND action_kind=1", .{}));
 
     const offered = "\"tools\":[\"bash\",\"fetch_page\"]";
     for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
@@ -9689,6 +9692,449 @@ test "a record names a server exactly when an MCP server owns it" {
     var moved = mcp_record;
     moved.server = "wiki";
     try std.testing.expect(!std.mem.eql(u8, &tool_catalog.recordDigest(&mcp_record), &tool_catalog.recordDigest(&moved)));
+}
+
+test "MCP Actions follow ask and bypass permission and continue after resolution" {
+    for ([_][]const u8{ "ask", "bypass" }) |mode| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+        var command = try completeConfiguration("mcp-permission-config", "", workspace, "model-a");
+        command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set(mode);
+        const reply = storage.configure(&command, .{});
+        try std.testing.expect(reply == .accepted);
+        const session = reply.accepted.session;
+        try submitTestMessage(&storage, &tmp, "mcp-permission-message", "mcp-permission-message", session.slice(), "fetch");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // The Operation's offer, not a later Session revision, owns this call.
+        var update: protocol.ConfigureCommand = .{};
+        try update.key.set("mcp-permission-remove");
+        update.session = session;
+        update.configuration.tools = try .of(&.{"bash"});
+        try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+        const calls = [_]TestingCall{
+            .{ .item_id = "item-1", .name = "fetch_page", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{", .decoded_arguments = "{" },
+        };
+        try settleCallsForTesting(&storage, &tmp, binding, "mcp-permission-metadata", &calls);
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code IS NULL AND action_kind=1", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='invalid_arguments' AND action_kind IS NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE tool_kind=1 AND bash_timeout_override_ms IS NULL AND attempt_ordinal=0 AND resolution_code IS NULL", .{}));
+        const pending_report = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+        defer std.testing.allocator.free(pending_report);
+        try std.testing.expect(std.mem.indexOf(u8, pending_report, "\"tool\":\"fetch_page\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, pending_report, "\"server\":\"docs\"") != null);
+
+        try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+        try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+        if (std.mem.eql(u8, mode, "ask")) {
+            try std.testing.expect((try storage.nextMcpAction()) == null);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND approval_position IS NOT NULL", .{}));
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation", .{}), .decision = .allow_once };
+            try allow.key.set("mcp-permission-allow");
+            allow.session = session;
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+        }
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1", .{}));
+        const action = (try storage.nextMcpAction()).?;
+        try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+        try storage.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+        try std.testing.expect((try storage.nextMcpAction()) == null);
+        // A selected Action that was resolved before dispatch is a harmless no-op.
+        try storage.resolveMcpAction(action.action_id, .spawn_failed, "not used", .{});
+        try std.testing.expect(!storage.isFenced());
+        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
+        try std.testing.expectEqual(binding.operation_id + 1, continuation.operation_id);
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='spawn_failed' AND attempt_ordinal=0", .{}));
+    }
+}
+
+test "an MCP tool outside the loaded tools gets the unknown-tool result instead of an Action" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var empty = try completeConfiguration("mcp-loaded-empty", "", workspace, "model-a");
+    empty.configuration.tools = try .of(&.{});
+    const empty_reply = storage.configure(&empty, .{});
+    try std.testing.expect(empty_reply == .accepted);
+    var command = try completeConfiguration("mcp-loaded-hidden", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"fetch_page"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    try store_testing.setLoadedToolsForTesting(&storage, session.slice(), empty_reply.accepted.session.slice());
+    try submitTestMessage(&storage, &tmp, "mcp-loaded-message", "mcp-loaded-message", session.slice(), "fetch");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, binding, "mcp-loaded-calls", &.{
+        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code='unknown_tool'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+}
+
+test "a removed MCP tool gets the removed-tool result instead of an Action" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration("mcp-removed-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("mcp-remove");
+    update.session = session;
+    update.configuration.tools = try .of(&.{"bash"});
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "mcp-removed-message", "mcp-removed-message", session.slice(), "fetch");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{ .item_id = "removed-item", .name = "fetch_page", .encoded_call_id = "removed-call", .decoded_call_id = "removed-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&storage, &tmp, binding, "mcp-removed-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var view: HistoricalView = undefined;
+    try storage.openHistoricalView(continuation, &view);
+    defer view.close();
+    var position: u64 = 0;
+    while (try view.nextEntry(position)) |entry| {
+        position = entry.position;
+        if (entry.kind == .tool_results) break;
+    } else return error.MissingToolResults;
+    const result = (try view.nextToolResult()).?;
+    var output: HistoricalReader = undefined;
+    try view.openContent(result.output, &output);
+    defer output.close();
+    var buffer: [128]u8 = undefined;
+    const count = try output.read(0, &buffer);
+    try std.testing.expectEqualStrings(tool_catalog.removed_tool_result, buffer[0..count]);
+}
+
+test "MCP and Bash admission seek each Action's call without scanning calls" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    inline for ([_][:0]const u8{ next_action_attempt_sql, action_domain.next_mcp_action_sql }, 0..) |sql, index| {
+        const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ sql);
+        defer _ = c.sqlite3_finalize(statement);
+        var seeks_call = false;
+        var executable_index = false;
+        var seeks_action = false;
+        while (true) switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {
+                const pointer = c.sqlite3_column_text(statement, 3) orelse return error.InvalidQueryPlan;
+                const length = c.sqlite3_column_bytes(statement, 3);
+                if (length < 0) return error.InvalidQueryPlan;
+                const detail = pointer[0..@intCast(length)];
+                seeks_call = seeks_call or std.mem.indexOf(u8, detail, "SEARCH tool_call") != null;
+                executable_index = executable_index or std.mem.indexOf(u8, detail, "action_operation_executable") != null;
+                try std.testing.expect(std.mem.indexOf(u8, detail, "SCAN tool_call") == null);
+                seeks_action = seeks_action or std.mem.indexOf(u8, detail, "SEARCH action USING INDEX sqlite_autoindex_action_operation_") != null;
+                if (index == 0) try std.testing.expect(std.mem.indexOf(u8, detail, "TEMP B-TREE") == null);
+                if (index == 1) {
+                    try std.testing.expect(std.mem.indexOf(u8, detail, "SCAN action") == null);
+                    try std.testing.expect(std.mem.indexOf(u8, detail, "action_operation_executable") == null);
+                }
+            },
+            c.SQLITE_DONE => break,
+            else => return error.InvalidQueryPlan,
+        };
+        try std.testing.expect(seeks_call);
+        if (index == 0) try std.testing.expect(executable_index) else try std.testing.expect(seeks_action);
+    }
+}
+
+test "MCP invalid and removed calls share their batch rejection lookup rounds" {
+    for ([_]bool{ false, true }) |removed| {
+        var rounds: [2]u16 = undefined;
+        for ([_]usize{ 1, 64 }, &rounds) |count, *cost| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var command = try completeConfiguration("mcp-rounds-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            command.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+            const configured = storage.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            if (removed) {
+                var update: protocol.ConfigureCommand = .{};
+                try update.key.set("mcp-rounds-remove");
+                update.session = session;
+                update.configuration.tools = try .of(&.{"bash"});
+                try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            }
+            try submitTestMessage(&storage, &tmp, "mcp-rounds-message", "mcp-rounds-message", session.slice(), "fetch");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = try std.testing.allocator.alloc(TestingCall, count);
+            defer std.testing.allocator.free(calls);
+            const names = try std.testing.allocator.alloc([2][32]u8, count);
+            defer std.testing.allocator.free(names);
+            for (calls, names, 0..) |*call, *name, index| {
+                const id = try std.fmt.bufPrint(&name[1], "call-{d}", .{index});
+                call.* = .{
+                    .item_id = try std.fmt.bufPrint(&name[0], "item-{d}", .{index}),
+                    .name = "fetch_page",
+                    .encoded_call_id = id,
+                    .decoded_call_id = id,
+                    .encoded_arguments = if (removed) "{}" else "{",
+                    .decoded_arguments = if (removed) "{}" else "{",
+                };
+            }
+            const before = storage.testing_content_work.rounds;
+            try settleCallsForTesting(&storage, &tmp, model, "mcp-rounds-metadata", calls);
+            cost.* = storage.testing_content_work.rounds - before;
+            try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code=?1", .{if (removed) @as([]const u8, "unknown_tool") else "invalid_arguments"}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call", .{}));
+        }
+        // Cold rejection content is looked up once per batch, not per call.
+        try std.testing.expect(rounds[1] <= rounds[0] + 1);
+        try std.testing.expect(rounds[1] <= 5);
+    }
+}
+
+test "MCP permission and core authorization coexist in one Turn" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration("mixed-core-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.tools = try .of(&.{ "bash", "fetch_page", "message_agent", "start_agent" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const configured = storage.configure(&command, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session;
+    try submitTestMessage(&storage, &tmp, "mixed-input", "mixed-key", session.slice(), "fetch and delegate");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var decoded_buffer: [96]u8 = undefined;
+    const decoded = try std.fmt.bufPrint(&decoded_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
+    var encoded_buffer: [128]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
+    const calls = [_]TestingCall{
+        .{ .item_id = "mcp-item", .name = "fetch_page", .encoded_call_id = "mcp-call", .decoded_call_id = "mcp-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "message-item", .name = "message_agent", .encoded_call_id = "message-call", .decoded_call_id = "message-call", .encoded_arguments = encoded, .decoded_arguments = decoded },
+        .{ .item_id = "start-item", .name = "start_agent", .encoded_call_id = "start-call", .decoded_call_id = "start-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, model, "mixed-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1", .{}));
+    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try std.testing.expect((try storage.nextMcpAction()) == null);
+    const report = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, "\"tool\":\"fetch_page\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "\"tool\":\"message_agent\",\"permission_revision\":\"1\",\"authorization\":\"core\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "\"tool\":\"start_agent\",\"permission_revision\":\"1\",\"authorization\":\"core\"") != null);
+    const message = (try storage.nextCoreWork()).?.action;
+    try std.testing.expect(message.tool == .message_agent);
+    try std.testing.expect(try storage.deliverAgentMessage(message.binding, session.slice(), "hi", .{}) == .delivered);
+    const start = (try storage.nextCoreWork()).?.action;
+    try std.testing.expect(start.tool == .start_agent);
+    try std.testing.expect(try storage.failCoreCall(start.binding, "Nothing was started.", .{}));
+    try std.testing.expect((try storage.nextCoreWork()) == null);
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+    const action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE call_ordinal=0", .{});
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+    try allow.key.set("mixed-allow");
+    allow.session = session;
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const mcp = (try storage.nextMcpAction()).?;
+    try std.testing.expectEqual(action_id, mcp.action_id);
+    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try storage.resolveMcpAction(mcp.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(model.turn_id, continuation.turn_id);
+}
+
+test "MCP work selected before its parent stops yields to the owed child stop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    const parent = try configureTestSession(&storage, "mcp-parent");
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var configuration = try completeConfiguration("mcp-child", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    configuration.configuration.tools = try .of(&.{"fetch_page"});
+    configuration.configuration.permission_mode.state = .value;
+    try configuration.configuration.permission_mode.value.set("bypass");
+    const configured = storage.configure(&configuration, .{});
+    try std.testing.expect(configured == .accepted);
+    const child = configured.accepted.session;
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "mcp-child-input", "mcp-child-input", child.slice(), "fetch");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, model, "mcp-child-calls", &.{
+        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    const selected = (try storage.nextCoreWork()).?.mcp;
+    var stop = try completeSessionStop("mcp-parent-stop", parent.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    // A selection is not authority: the parent's stop committed first.
+    try storage.resolveMcpAction(selected.action_id, .spawn_failed, "must not resolve", .{});
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NOT NULL", .{}));
+    try std.testing.expect((try storage.nextMcpAction()) == null);
+    const owed = (try storage.nextCoreWork()).?.stop;
+    var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
+    try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+    const ending = (try storage.nextCoreWork()).?.ending;
+    try std.testing.expect(ending.quiet);
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+    // Even a quiet ending is forwarded to the ancestor Activity feed.
+    const forward = (try storage.nextCoreWork()).?.forward;
+    try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
+    try std.testing.expect((try storage.nextCoreWork()) == null);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
+    // The settled stop stays as history; the resumed child's MCP work runs.
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+    try submitTestMessage(&storage, &tmp, "mcp-child-again", "mcp-child-again", child.slice(), "fetch again");
+    const resumed = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, resumed, "mcp-child-calls-again", &.{
+        .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    const again = (try storage.nextCoreWork()).?.mcp;
+    try storage.resolveMcpAction(again.action_id, .spawn_failed, "interim", .{});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{again.action_id}));
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+}
+
+test "an empty MCP selection does not visit queued Bash Actions from a Bash-only offer" {
+    var costs: [2]c_int = undefined;
+    for ([_]usize{ 1, 1000 }, &costs) |count, *cost| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var configuration = try completeConfiguration("bash-population", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+        configuration.configuration.tools = try .of(&.{"bash"});
+        configuration.configuration.permission_mode.state = .value;
+        try configuration.configuration.permission_mode.value.set("bypass");
+        const configured = storage.configure(&configuration, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        try submitTestMessage(&storage, &tmp, "bash-population-input", "bash-population-input", session.slice(), "propose");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = try allocator.alloc(TestingCall, count);
+        for (calls, 0..) |*call, index| {
+            const id = try allocator.print("call-{d}", .{index});
+            call.* = .{ .item_id = id, .name = "bash", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"true\",\"timeout_ms\":null}" };
+        }
+        try settleCallsForTesting(&storage, &tmp, model, "bash-population-calls", calls);
+        try std.testing.expectEqual(count, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND resolution_code IS NULL", .{}));
+        const statement = try sqlite.prepare(storage.sqliteDatabase(), action_domain.next_mcp_action_sql);
+        defer _ = c.sqlite3_finalize(statement);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
+        cost.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    try std.testing.expectEqual(costs[0], costs[1]);
+}
+
+test "MCP ask approval uses the frozen server after its Session offer changes" {
+    const View = @import("../session_view.zig");
+    const tools = tool_catalog;
+    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
+        .name = "fetch_page",
+        .owner = .mcp,
+        .server = "docs",
+        .description = "Fetch a page.",
+        .input_schema = "{\"type\":\"object\"}",
+    }, tools.record(.find_tools).*, tools.record(.message_agent).*, tools.record(.read_transcript).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    const digests = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        var out: [records.len][32]u8 = undefined;
+        for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
+        break :blk out;
+    };
+    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try completeConfiguration("approval-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.tools = try .of(&.{"fetch_page"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const configured = storage.configure(&command, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session;
+    try submitTestMessage(&storage, &tmp, "approval-input", "approval-input", session.slice(), "fetch");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, model, "approval-calls", &.{
+        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("approval-remove");
+    update.session = session;
+    update.configuration.tools = try .of(&.{"bash"});
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+    defer std.testing.allocator.free(report);
+    const scratch = try tmp.dir.createFile(std.testing.io, "approval-scratch", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    try scratch.writePositionalAll(std.testing.io, report, 0);
+    const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, scratch, session.slice(), .{ .report = .{ .bytes = report.len } });
+    const observed = &decoded.current;
+    const action = observed.first_action.?;
+    const tool = (try View.actionToolFromCapture(observed, std.testing.io, scratch, action)).?;
+    try std.testing.expect(try tool.runner() == .mcp);
+    try std.testing.expectEqualStrings("fetch_page", tool.name.slice());
+    try std.testing.expectEqualStrings("docs", tool.server.?.slice());
+    const reference = try storage.actionArguments(session.slice(), action);
+    var saved_arguments: ContentReader = undefined;
+    saved_arguments.open(try storage.openContent(reference));
+    defer saved_arguments.close();
+    var arguments: [16]u8 = undefined;
+    const count = try saved_arguments.read(0, &arguments);
+    try std.testing.expectEqualStrings("{}", arguments[0..count]);
+    try scratch.setLength(std.testing.io, 0);
+    try scratch.writePositionalAll(std.testing.io, arguments[0..count], 0);
+    const Sink = struct {
+        bytes: [512]u8 = undefined,
+        len: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+        }
+    };
+    var sink: Sink = .{};
+    const summary = try View.renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+    try std.testing.expectEqualStrings("fetch_page", summary.description.slice());
+    try std.testing.expectEqualStrings("\n? fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
+    try std.testing.expect((try storage.nextCoreWork()) == null);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+    try allow.key.set("approval-allow");
+    allow.session = session;
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try std.testing.expectEqual(action, (try storage.nextCoreWork()).?.mcp.action_id);
 }
 
 test "searchActivity streams window edges filters kinds and pages newest first" {

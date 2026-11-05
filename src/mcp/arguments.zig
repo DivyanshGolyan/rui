@@ -7,6 +7,8 @@
 const std = @import("std");
 const document = @import("document.zig");
 const shape = @import("shape.zig");
+const json = @import("../codecs/json.zig");
+const codec_abi = @import("../codec_abi.zig");
 
 pub const Split = struct {
     /// The `rui_call_description` string's contents as written, or null
@@ -40,10 +42,46 @@ pub fn writeForServer(writer: *std.Io.Writer, input_schema: []const u8, argument
     return split;
 }
 
+/// Finds the first valid root description without retaining the arguments.
+/// The range names raw string contents; at most 200 decoded bytes (and
+/// therefore at most 1200 raw bytes). Source and JSON errors propagate even
+/// after a description has been found.
+pub fn descriptionRange(source: anytype) !?codec_abi.Range {
+    var reader: json.Reader = undefined;
+    var capture: DescriptionCapture = .{};
+    try reader.readSource(source, &capture);
+    return capture.range;
+}
+
+const DescriptionCapture = struct {
+    range: ?codec_abi.Range = null,
+    description_key: bool = false,
+
+    pub fn key(self: *DescriptionCapture, reader: *const json.Reader, depth: u8) void {
+        if (depth != 1) return;
+        const text = reader.text() orelse {
+            self.description_key = false;
+            return;
+        };
+        self.description_key = std.mem.eql(u8, text, shape.description_property);
+    }
+
+    pub fn begin(_: *DescriptionCapture, _: *const json.Reader, _: json.Kind, _: u8) void {}
+
+    pub fn end(self: *DescriptionCapture, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
+        if (depth != 1 or !self.description_key or self.range != null) return;
+        if (kind == .string and descriptionFits(reader.decoded)) self.range = reader.string();
+    }
+};
+
+fn descriptionFits(decoded: u64) bool {
+    return decoded <= shape.description_max_bytes;
+}
+
 fn description(value: []const u8) ?[]const u8 {
     if (document.kind(value) != .string) return null;
     const text = document.contents(value);
-    if (document.decodedLength(text) > shape.description_max_bytes) return null;
+    if (!descriptionFits(document.decodedLength(text))) return null;
     return text;
 }
 
@@ -105,4 +143,74 @@ test "escaped names longer than any fixed buffer still match" {
     try std.testing.expectEqualStrings("{\"" ++ escaped ++ "\":1}", out.text);
     const other = "{\"properties\":{\"" ++ a[1..] ++ "b\":{}}}";
     try std.testing.expectEqualStrings("{}", (try forServer(&buffer, other, "{\"" ++ escaped ++ "\":1}")).text);
+}
+
+// A source with no argument-sized allocation, also able to fail after a
+// valid description to check that extraction still consumes the document.
+const DescriptionSource = struct {
+    bytes: []const u8,
+    at: usize = 0,
+    fail_at: ?usize = null,
+
+    pub fn peek(self: *DescriptionSource) error{SourceFailed}!?u8 {
+        if (self.fail_at) |at| if (self.at >= at) return error.SourceFailed;
+        return if (self.at < self.bytes.len) self.bytes[self.at] else null;
+    }
+
+    pub fn take(self: *DescriptionSource) error{SourceFailed}!?u8 {
+        const byte = try self.peek();
+        if (byte != null) self.at += 1;
+        return byte;
+    }
+};
+
+fn expectDescriptionParity(arguments: []const u8) !void {
+    var buffer: [2048]u8 = undefined;
+    const split = (try forServer(&buffer, schema, arguments)).split;
+    var source: DescriptionSource = .{ .bytes = arguments };
+    const range = try descriptionRange(&source);
+    if (split.description) |expected| {
+        const found = range orelse return error.TestUnexpectedResult;
+        const start: usize = @intCast(found.start);
+        const length: usize = @intCast(found.length);
+        try std.testing.expectEqualStrings(expected, arguments[start..][0..length]);
+        try std.testing.expect(length <= 6 * shape.description_max_bytes);
+    } else try std.testing.expect(range == null);
+}
+
+test "streamed description matches server split for absent invalid nested and duplicate fields" {
+    for ([_][]const u8{
+        "{}",
+        "{\"rui_call_description\":5}",
+        "{\"rui_call_description\":null}",
+        "{\"nested\":{\"rui_call_description\":\"hidden\"}}",
+        "{\"rui_call_description\":{\"rui_call_description\":\"hidden\"}}",
+        "{\"rui_call_description\":false,\"rui_call_description\":\"valid\",\"rui_call_description\":\"later\"}",
+        "{\"rui_call_\\u0064escription\":\"escaped key\"}",
+        "{\"" ++ @as([65]u8, @splat('x')) ++ "\":\"not a description\"}",
+        "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\"}",
+        "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\",\"rui_call_description\":\"valid\"}",
+    }) |arguments| try expectDescriptionParity(arguments);
+}
+
+fn repeatedDescriptionText(comptime text: []const u8, comptime count: usize) [text.len * count]u8 {
+    var result: [text.len * count]u8 = undefined;
+    for (0..count) |index| {
+        @memcpy(result[index * text.len ..][0..text.len], text);
+    }
+    return result;
+}
+
+test "streamed description accepts 200 decoded bytes including 1200 raw escaped bytes and UTF-8" {
+    try expectDescriptionParity("{\"rui_call_description\":\"" ++ repeatedDescriptionText("\\u0061", 200) ++ "\"}");
+    try expectDescriptionParity("{\"rui_call_description\":\"" ++ repeatedDescriptionText("é", 100) ++ "\"}");
+    try expectDescriptionParity("{\"rui_call_description\":\"" ++ repeatedDescriptionText("é", 101) ++ "\"}");
+}
+
+test "streamed description propagates source errors before and after a match" {
+    const arguments = "{\"rui_call_description\":\"valid\",\"q\":1}";
+    for ([_]usize{ 0, arguments.len - 1 }) |fail_at| {
+        var source: DescriptionSource = .{ .bytes = arguments, .fail_at = fail_at };
+        try std.testing.expectError(error.SourceFailed, descriptionRange(&source));
+    }
 }
