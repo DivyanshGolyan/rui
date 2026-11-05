@@ -244,7 +244,8 @@ def main(report_source):
             refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
                 "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
-            assert refused.returncode == 1 and b"unknown option " + old_flag.encode() in refused.stderr, refused
+            assert refused.returncode == 1 and refused.stderr == (b"rui session send: " + old_flag.encode() +
+                b": That option is not supported by this command. Accepted: options and values listed by rui session send --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]\n"), refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         foreign_store = state / "foreign-store"
         foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
@@ -258,7 +259,7 @@ def main(report_source):
         # hex flag must not revive NUL-bearing arbitrary references either.
         invalid_selectors = [("--session", value, b"Session ID must be exactly six lowercase Crockford characters") for value in
                              ('peer/a "quoted" \\ 雪', 'ABC123', 'k7m2qi', 'rui/k7m2qx')]
-        invalid_selectors.append(("--session-hex", 'peer/nul\x00雪'.encode().hex(), b"unknown option --session-hex"))
+        invalid_selectors.append(("--session-hex", 'peer/nul\x00雪'.encode().hex(), b"rui session configure: --session-hex: That option is not supported by this command. Accepted: options and values listed by rui session configure --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]"))
         for flag, invalid, diagnostic in invalid_selectors:
             rejected = subprocess.run([str(installed), "session", "configure", "--store", str(foreign_store),
                 flag, invalid, "--workspace", str(workspace),
