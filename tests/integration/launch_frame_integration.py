@@ -6,6 +6,9 @@ stdin closes (D5, D112, D118, D130, D136)."""
 import http.server
 import json
 import pathlib
+import os
+import selectors
+import shutil
 import socket
 import struct
 import subprocess
@@ -111,7 +114,78 @@ def mcp_entry(name, server):
     return {"name": name, "url": f"http://127.0.0.1:{server.server_port}/mcp", "bearerToken": "t", "callTimeoutMs": 1000}
 
 
-def main():
+def sdk_catalog(root, good, network, ci):
+    """Prove every real SDK tool entered the Host catalog, with its owner.
+
+    There is no public catalog-list route yet. A collision refusal is the
+    existing public boundary that reports a catalog name and both sources.
+    """
+    if not shutil.which("node") or not shutil.which("npm"):
+        assert not ci, "CI requires Node and npm for the real MCP SDK fixture"
+        print("SKIP real MCP SDK: node/npm not installed locally")
+        return
+    fixture = pathlib.Path(__file__).with_name("mcp_sdk")
+    subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+                   cwd=fixture, env=dict(os.environ, **network), check=True, timeout=120)
+    with tempfile.TemporaryFile() as errors:
+        server = subprocess.Popen(["node", str(fixture / "server.mjs"), "sdk-test-token"],
+                                  stdout=subprocess.PIPE, stderr=errors)
+        host = None
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(server.stdout, selectors.EVENT_READ)
+                host_process.wait_for(lambda: bool(selector.select(timeout=0)),
+                                      "the real MCP SDK server port", timeout=20)
+            port = server.stdout.readline().decode().strip()
+            assert port.isdecimal(), port
+            entry = {"name": "drift-sdk", "url": f"http://127.0.0.1:{port}/mcp",
+                     "bearerToken": "sdk-test-token", "callTimeoutMs": 1000}
+            runtime = root / "sdk"
+            runtime.mkdir(mode=0o700)
+            base = dict(good, runtimeDir=str(runtime), store=str(root / "sdk-store"))
+            host = launch(frame(dict(base, mcpServers=[entry])))
+            wait_for_socket(runtime / "rui.sock", host)
+            host.stdin.close()
+            assert host.wait(timeout=30) == 0, output(host)
+            for name in ("echo", "fail", "slow", "progress"):
+                collision = mcp_server([name])
+                try:
+                    host = launch(frame(dict(base, mcpServers=[entry, mcp_entry("collision", collision)])))
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(host.stdout, selectors.EVENT_READ)
+                        host_process.wait_for(lambda: bool(selector.select(timeout=0)),
+                                              "the SDK catalog collision refusal", timeout=30)
+                    line = host.stdout.readline()
+                    assert line.startswith(b"{"), (name, "expected a drift-sdk catalog collision refusal", line)
+                    refused = json.loads(line)["rui_start_error"]
+                    assert host.wait(timeout=20) != 0
+                    assert refused["code"] == "tool_name_collision", refused
+                    assert all(value in refused["message"] for value in
+                               (name, "drift-sdk", "collision")), refused
+                finally:
+                    if host.poll() is None:
+                        host.kill()
+                        host.wait(timeout=10)
+                    collision.shutdown()
+                    collision.server_close()
+            print("real MCP SDK: Host catalog contains drift-sdk echo, fail, slow, progress")
+        finally:
+            if host is not None and host.poll() is None:
+                host.kill()
+                host.wait(timeout=10)
+            server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=10)
+            errors.seek(0)
+            diagnostic = errors.read().decode()
+            if diagnostic:
+                print(diagnostic, file=sys.stderr)
+
+
+def main(network, ci):
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-launch-"))
     store = root / "store"
     runtime = root / "run"
@@ -242,9 +316,12 @@ def main():
     assert time.monotonic() - started < 3
     held.close()
     silent.close()
+    sdk_catalog(root, good, network, ci)
     print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, four refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 
 if __name__ == "__main__":
-    host_process.enter()
-    main()
+    ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS") or
+              "--require-mcp-sdk" in sys.argv[2:])
+    network = host_process.enter()
+    main(network, ci)
