@@ -7,6 +7,8 @@ const Overview = @import("Overview.zig");
 const session_reads = @import("session_reads.zig");
 const overview_view = @import("overview_view.zig");
 const TestObservation = @import("TestObservation.zig");
+const caller_error = @import("caller_error.zig");
+const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
@@ -92,13 +94,22 @@ fn run(init: std.process.Init) !void {
     };
     const definition = command.definition();
     // The arena outlives this invocation, so decoded identities do too.
-    var problem: cli_args.Problem = undefined;
-    const parsed = definition.parse(args[3..], init.arena.allocator(), &problem) catch |err| {
+    var problem: cli_args.Refusal = undefined;
+    const parsed = definition.parseSyntax(args[3..], init.arena.allocator(), &problem) catch |err| {
         reportParseProblem(problem, @tagName(resource), definition.name, null);
         return err;
     };
     if (parsed.help) return printHelp(init.io, .{ .command = definition });
     if (parsed.missing()) |group| return reportMissing(resource, definition, group);
+    // Fresh argv is checked before capture. A saved explicit capture instead
+    // belongs to its original validator and answer, even after enum changes.
+    validateFreshInvocation(init.io, &parsed, &problem) catch |err| {
+        switch (err) {
+            error.InvalidOptionValue, error.InvalidInstructionsSource, error.ConflictingArguments => reportParseProblem(problem, @tagName(resource), definition.name, null),
+            else => {},
+        }
+        return err;
+    };
     dispatching = true;
     dispatch(init, command, &parsed, args) catch |err| {
         if (err == error.InvalidArguments) {
@@ -149,110 +160,38 @@ fn writeArgument(writer: *std.Io.Writer, text: []const u8) !void {
     try safe.finish(writer);
 }
 
-fn writeProblem(writer: *std.Io.Writer, problem: cli_args.Problem) !void {
-    switch (problem) {
-        .unknown => |value| {
-            try writer.writeAll("unknown option ");
-            try writeArgument(writer, value.token);
-            if (value.suggestion) |suggestion| {
-                try writer.writeAll("; did you mean --");
-                try writeArgument(writer, suggestion);
-                try writer.writeByte('?');
-            }
-        },
-        .duplicate => |value| {
-            try writer.writeAll("--");
-            try writeArgument(writer, value.name);
-            if (value.bound) |bound| {
-                try writer.print(" was given more than {d} times", .{bound});
-            } else try writer.writeAll(" was given twice");
-        },
-        .missing_value => |value| {
-            try writer.writeAll("--");
-            try writeArgument(writer, value.name);
-            try writer.writeAll(" is missing its value (");
-            try writeArgument(writer, value.argument);
-            try writer.writeByte(')');
-        },
-        .conflict => |value| {
-            try writer.writeAll("--");
-            try writeArgument(writer, value.first);
-            try writer.writeAll(if (value.positional) " can't be used with " else " can't be used with --");
-            try writeArgument(writer, value.second);
-            if (value.reason) |reason| {
-                try writer.writeAll(", because ");
-                try writeArgument(writer, reason);
-            }
-        },
-        .unexpected => |token| {
-            try writer.writeAll("unexpected argument \"");
-            try writeArgument(writer, token);
-            try writer.writeByte('"');
-        },
-        .hex => |value| {
-            try writer.writeAll("--");
-            try writeArgument(writer, value.name);
-            try writer.print(" is not even-length hex of at most {d} bytes", .{value.bound});
-        },
-        .instructions_source => try writer.writeAll("use --instructions - to read instructions from stdin"),
-        .allocation => try writer.writeAll("out of memory while reading arguments"),
-    }
-}
-
-test "argument problem rendering names exact repairs and escapes terminal controls" {
-    const Case = struct { problem: cli_args.Problem, expected: []const u8 };
-    const cases = [_]Case{
-        .{ .problem = .{ .unknown = .{ .token = "--sesion", .suggestion = "session" } }, .expected = "unknown option --sesion; did you mean --session?" },
-        .{ .problem = .{ .unknown = .{ .token = "--bad\x1b[31m\n\xff", .suggestion = null } }, .expected = "unknown option --bad\\x1b[31m\\n\\xff" },
-        .{ .problem = .{ .duplicate = .{ .name = "store" } }, .expected = "--store was given twice" },
-        .{ .problem = .{ .duplicate = .{ .name = "provider", .bound = 8 } }, .expected = "--provider was given more than 8 times" },
-        .{ .problem = .{ .missing_value = .{ .name = "model", .argument = "MODEL" } }, .expected = "--model is missing its value (MODEL)" },
-        .{ .problem = .{ .conflict = .{ .first = "model", .second = "clear-model" } }, .expected = "--model can't be used with --clear-model" },
-        .{ .problem = .{ .conflict = .{ .first = "store", .second = "HANDLE", .positional = true, .reason = "HANDLE already names its Store and key" } }, .expected = "--store can't be used with HANDLE, because HANDLE already names its Store and key" },
-        .{ .problem = .{ .conflict = .{ .first = "store", .second = "bad\r\x1b", .positional = true, .reason = "untrusted\nreason" } }, .expected = "--store can't be used with bad\\r\\x1b, because untrusted\\nreason" },
-        .{ .problem = .{ .unexpected = "text\n\"quoted\"" }, .expected = "unexpected argument \"text\\n\\\"quoted\\\"\"" },
-        .{ .problem = .{ .hex = .{ .name = "store-hex", .bound = 492 } }, .expected = "--store-hex is not even-length hex of at most 492 bytes" },
-        .{ .problem = .instructions_source, .expected = "use --instructions - to read instructions from stdin" },
-        .{ .problem = .allocation, .expected = "out of memory while reading arguments" },
-    };
-    for (cases) |case| {
-        var buffer: [512]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buffer);
-        try writeProblem(&writer, case.problem);
-        try std.testing.expectEqualStrings(case.expected, writer.buffered());
-    }
-}
-
-noinline fn reportParseProblem(problem: cli_args.Problem, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) void {
-    var buffer: [512]u8 = undefined;
+noinline fn reportParseProblem(problem: cli_args.Refusal, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) void {
+    var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    writeProblem(&writer, problem) catch {
-        // Oversized hostile argv must not swallow the repair or emit a prefix
-        // of a UTF-8 escape. Fall back to a complete bounded explanation.
-        writer = .fixed(&buffer);
-        writer.writeAll("invalid arguments (details exceed the diagnostic display bound)") catch unreachable;
-    };
-    if (resource) |name| {
-        if (problem == .unexpected and std.mem.eql(u8, name, "session") and
-            (std.mem.eql(u8, operation.?, "start") or std.mem.eql(u8, operation.?, "send")))
-        {
-            stderr.diagnostic("rui: {s} {s}: {s}; Message text must come from stdin, not positional arguments. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ name, operation.?, writer.buffered(), name, operation.? });
-            return;
-        }
-        stderr.diagnostic("rui: {s} {s}: {s}{s} Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ name, operation.?, writer.buffered(), if (problem == .unknown and problem.unknown.suggestion != null) "" else ".", name, operation.? });
-    } else if (operation) |name| {
-        stderr.diagnostic("rui: {s}: {s}{s}\n", .{ name, writer.buffered(), unchanged orelse "" });
-    } else {
-        stderr.diagnostic("rui: {s}. Nothing was captured or sent. Usage: rui --help\n", .{writer.buffered()});
-    }
+    var held = problem.held(resource, operation);
+    held.unchanged = unchanged;
+    caller_error.writeLine(&writer, problem.code, held) catch unreachable;
+    stderr.diagnosticBytes(writer.buffered());
 }
 
 noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
-    var buffer: [256]u8 = undefined;
+    var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try definition.writeGroup(&writer, group);
-    stderr.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, writer.buffered(), @tagName(resource), definition.name });
+    reportParseProblem(.{ .code = .option_required, .token = writer.buffered(), .option = false, .accepted = .{ .grammar = writer.buffered() } }, @tagName(resource), definition.name, null);
     return error.InvalidArguments;
+}
+
+/// Existence only chooses the validation authority; Capture still opens,
+/// compares and sends the original record and owns any race or mismatch.
+fn validateFreshInvocation(io: std.Io, parsed: *const cli_args.Parsed, refusal: *cli_args.Refusal) !void {
+    if (!try existingCapture(io, parsed)) try parsed.validateValues(refusal);
+}
+
+fn existingCapture(io: std.Io, parsed: *const cli_args.Parsed) !bool {
+    // --kind selects how to open a capture; it does not revalidate its intent.
+    if (!parsed.definition.mutation or std.mem.eql(u8, parsed.definition.name, "recover")) return false;
+    const record = parsed.get("record") orelse return false;
+    _ = std.Io.Dir.cwd().statFile(io, record, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
 }
 
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
@@ -1269,7 +1208,7 @@ const NewSessionOptions = struct {
     fn parse(args: []const []const u8) !?NewSessionOptions {
         // The fresh-session grammar has no hex spellings to allocate.
         var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        var problem: cli_args.Problem = undefined;
+        var problem: cli_args.Refusal = undefined;
         const parsed = cli_args.fresh_session.parse(args, nothing.allocator(), &problem) catch |err| {
             reportParseProblem(problem, null, null, null);
             return err;
@@ -2223,7 +2162,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             // there to leave alone.
             const reader: SetupReader = if (reference.len == 0) .overview else .conversation;
             const unchanged = if (reader == .conversation) "; active Session unchanged" else "";
-            var problem: cli_args.Problem = undefined;
+            var problem: cli_args.Refusal = undefined;
             const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator(), &problem) catch {
                 reportParseProblem(problem, null, "/setup", unchanged);
                 return;
@@ -2304,7 +2243,7 @@ test "/effort and /rename give what their /configure spelling gives" {
             const command = slash_commands.parse(line[0..text.len]).command;
             const argument = line[@intFromPtr(command.argument.ptr) - @intFromPtr(line) ..][0..command.argument.len];
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
-            var problem: cli_args.Problem = undefined;
+            var problem: cli_args.Refusal = undefined;
             const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator(), &problem);
             value.* = parsed.get(case.option).?;
         }
@@ -2361,7 +2300,7 @@ test "the CLI refuses a line the table does not admit, which the frontend never 
 /// Host accepted it.
 fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !bool {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    var problem: cli_args.Problem = undefined;
+    var problem: cli_args.Refusal = undefined;
     const parsed = cli_args.live_configure.parse(arguments, nothing.allocator(), &problem) catch {
         reportParseProblem(problem, null, "/configure", null);
         try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
@@ -2424,7 +2363,7 @@ test "/setup takes every option in one line" {
     const count = try interactiveTokens(&line, &tokens);
     try std.testing.expectEqual(@as(usize, 10), count);
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    var problem: cli_args.Problem = undefined;
+    var problem: cli_args.Refusal = undefined;
     const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator(), &problem);
     try std.testing.expectEqualStrings("high", parsed.get("reasoning-effort").?);
     try std.testing.expectEqualStrings("/path/to/store", parsed.get("store").?);
@@ -3281,11 +3220,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } }
     else blk: {
         const store = parsed.get("store").?;
-        const kind = parseRetryName(parsed.get("kind").?) orelse {
-            // The Store is resolved before the kind is read, so its failure stays first.
-            _ = try platform.resolveClientPaths(init.io, store);
-            return error.InvalidRetryKind;
-        };
+        const kind = parseRetryName(parsed.get("kind").?) orelse return error.InvalidOptionValue;
         break :blk .{ .explicit = .{ .store = store, .record = parsed.get("record").?, .kind = kind } };
     };
     var captured = try client.openCaptured(init.io, saved);
@@ -3300,19 +3235,14 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 
 /// A command kind in its `rui request recover --kind` spelling.
 fn parseRetryName(name: []const u8) ?protocol.CommandKind {
-    inline for (comptime std.enums.values(protocol.CommandKind)) |kind| {
-        if (std.mem.eql(u8, name, comptime retryName(kind))) return kind;
-    }
-    return null;
+    return cli_value.commandKind(std.meta.stringToEnum(cli_value.RecoveryKind, name) orelse return null);
 }
 
 fn retryName(comptime kind: protocol.CommandKind) []const u8 {
-    comptime {
-        var name = @tagName(kind)[0..@tagName(kind).len].*;
-        std.mem.replaceScalar(u8, &name, '_', '-');
-        const final = name;
-        return &final;
+    inline for (comptime std.enums.values(cli_value.RecoveryKind)) |value| {
+        if (cli_value.commandKind(value) == kind) return @tagName(value);
     }
+    unreachable;
 }
 
 test "recover accepts only the hyphenated spelling of each command kind" {
@@ -3485,7 +3415,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,start_agent,web_search|none] [--permission-mode ask|bypass] [--reasoning-effort none|low|medium|high|xhigh|max|default] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,start_agent,web_search|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:
@@ -3574,4 +3504,69 @@ fn testPipe() ![2]std.posix.fd_t {
 
 fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
+}
+
+test "existing explicit captures bypass fresh option choices while new captures refuse" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const record = try std.fmt.bufPrint(&record_buffer, "{s}/saved.json", .{directory});
+    var refusal: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.session_configure.definition().parseSyntax(&.{ "--record", record, "--key", "k", "--permission-mode", "historical-mode" }, std.testing.allocator, &refusal);
+    try std.testing.expectError(error.InvalidOptionValue, validateFreshInvocation(io, &parsed, &refusal));
+    try std.testing.expectEqual(.choice_unsupported, refusal.code);
+    const file = try tmp.dir.createFile(io, "saved.json", .{});
+    defer file.close(io);
+    // The shell does not interpret the capture: opening, matching intent and
+    // replay remain with Capture. Even a corrupt existing record goes there.
+    try file.writeStreamingAll(io, "capture-owner-validates-this");
+    try validateFreshInvocation(io, &parsed, &refusal);
+    try std.testing.expectEqualStrings("historical-mode", parsed.get("permission-mode").?);
+}
+
+test "fresh instruction validation renders both source and stdin conflict refusals" {
+    const Case = struct { args: []const []const u8, code: caller_error.Code, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .args = &.{ "--instructions", "file" }, .code = .instructions_source, .expected = "rui session configure: --instructions file: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]\n" },
+        .{ .args = &.{ "--instructions", "-", "--output-schema", "-" }, .code = .stdin_sources_conflict, .expected = "rui session configure: --instructions with --output-schema: Instructions and the output schema cannot both read stdin. Accepted: --instructions - with --output-schema FILE, or --output-schema - without --instructions. Next: Read the schema from a file or supply instructions in a separate command. Nothing was captured or sent. [stdin_sources_conflict]\n" },
+    };
+    for (cases) |case| {
+        var refusal: cli_args.Refusal = undefined;
+        const parsed = try cli_args.Command.session_configure.definition().parseSyntax(case.args, std.testing.allocator, &refusal);
+        if (validateFreshInvocation(std.Io.Threaded.global_single_threaded.io(), &parsed, &refusal)) |_| return error.ExpectedRefusal else |_| {}
+        try std.testing.expectEqual(case.code, refusal.code);
+        var storage: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        try caller_error.writeLine(&out, refusal.code, refusal.held("session", "configure"));
+        try std.testing.expectEqualStrings(case.expected, out.buffered());
+    }
+}
+
+test "parser diagnostic hands off its complete line without a smaller format buffer" {
+    const descriptors = try testPipe();
+    defer closeDescriptor(descriptors[0]);
+    {
+        defer closeDescriptor(descriptors[1]);
+        const saved = std.c.dup(2);
+        if (saved < 0) return error.TestRedirectFailed;
+        defer closeDescriptor(saved);
+        if (std.c.dup2(descriptors[1], 2) != 2) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved, 2) == 2);
+        // The catalog owns this bound; the stderr wrapper must neither
+        // truncate it through its 1024-byte printf buffer nor add a line.
+        const grammar: [1200]u8 = @splat('a');
+        reportParseProblem(.{ .code = .count_malformed, .token = "active-capacity", .value = "bad", .accepted = .{ .grammar = &grammar } }, "host", "start", null);
+    }
+    var bytes: [2048]u8 = undefined;
+    const count = std.c.read(descriptors[0], &bytes, bytes.len);
+    if (count < 0) return error.TestReadFailed;
+    const line = bytes[0..@intCast(count)];
+    try std.testing.expect(line.len > 1200);
+    try std.testing.expect(std.mem.startsWith(u8, line, "rui host start: --active-capacity bad: "));
+    try std.testing.expect(std.mem.endsWith(u8, line, "Nothing was captured or sent. [count_malformed]\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+    try std.testing.expect(stderr.hasDiagnostic());
 }

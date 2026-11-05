@@ -634,8 +634,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_session_reference };
     }
     if (configuration.permission_mode.state == .value and
-        !configuration.permission_mode.value.eql("ask") and
-        !configuration.permission_mode.value.eql("bypass"))
+        std.meta.stringToEnum(protocol.PermissionMode, configuration.permission_mode.value.slice()) == null)
     {
         return .{ .rejected = .unsupported_permission_mode };
     }
