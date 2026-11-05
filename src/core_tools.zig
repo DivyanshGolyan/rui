@@ -333,11 +333,9 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
     if (tokens == 0) return refused("spec.compactAt must be a positive number of tokens");
     configuration.compaction_trigger.state = .value;
     configuration.compaction_trigger.value.set(std.fmt.allocPrint(arena, "{d}", .{tokens}) catch return error.OutOfMemory) catch unreachable;
-    var unknown: []const u8 = "";
-    toolsField(arena, spec.get("tools") orelse return refused("spec.tools is required"), &unknown, &configuration.tools) catch |err| switch (err) {
+    toolsField(arena, spec.get("tools") orelse return refused("spec.tools is required"), &configuration.tools) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Refused => return refused("spec.tools must be a list of distinct tool names"),
-        error.UnknownTool => return refusedField(arena, unknown, "is not a Rui tool (spec.tools)"),
     };
     var selected_tools = configuration.tools.iterator();
     while (selected_tools.next()) |name| {
@@ -426,9 +424,9 @@ fn stringField(object: std.json.ObjectMap, comptime name: []const u8, field: any
     return true;
 }
 
-/// The tool list `value` names, sorted; `unknown` is set to a name no
-/// built-in tool has.
-fn toolsField(arena: std.mem.Allocator, value: std.json.Value, unknown: *[]const u8, tools: *protocol.ToolsField) error{ OutOfMemory, Refused, UnknownTool }!void {
+/// The tool list `value` names, sorted and checked with configure's name
+/// grammar. Availability is checked by the Store against its tool catalog.
+fn toolsField(arena: std.mem.Allocator, value: std.json.Value, tools: *protocol.ToolsField) error{ OutOfMemory, Refused }!void {
     const items = switch (value) {
         .array => |array| array.items,
         else => return error.Refused,
@@ -439,10 +437,6 @@ fn toolsField(arena: std.mem.Allocator, value: std.json.Value, unknown: *[]const
             .string => |text| text,
             else => return error.Refused,
         };
-        if (protocol.builtInTool(name.*) == null) {
-            unknown.* = name.*;
-            return error.UnknownTool;
-        }
     }
     std.sort.insertion([]const u8, names, {}, struct {
         fn less(_: void, a: []const u8, b: []const u8) bool {
@@ -711,7 +705,7 @@ test "a start_agent call's arguments carry a task and a whole spec without a pro
         .{ .arguments = "{\"attached\":true," ++ spec ++ "}", .refusal = "task is required" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":1," ++ spec ++ "}", .refusal = "attached must be true or false" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true}", .refusal = "spec is required" },
-        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"edit\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "edit is not a Rui tool (spec.tools)" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"edit.file\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"bash\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":0,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.compactAt must be a positive number of tokens" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"never\",\"label\":null}}", .refusal = "spec.permissionMode must be ask or bypass" },

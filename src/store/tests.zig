@@ -10655,6 +10655,80 @@ test "core_tools presets retain caller narrowing after overrides resolve" {
     }.run);
 }
 
+test "launch presets resolve MCP tools through the same catalog as configure" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const launch_frame = @import("../launch_frame.zig");
+            const core_tools = @import("../core_tools.zig");
+            var frame: launch_frame.Frame = .{};
+            defer frame.deinit();
+            var refusal: launch_frame.Refusal = undefined;
+            try launch_frame.parse(std.testing.allocator,
+                \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
+            , &frame, &refusal);
+            var records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.find_tools_record,
+                tool_catalog.message_agent_record,
+                tool_catalog.read_transcript_record,
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const offered: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            var routes = protocol.routesAll(.unserved);
+            routes.openai = .endpoint;
+            for ([_]bool{ false, true }) |available| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{
+                    .served = routes,
+                    .catalog = if (available) &offered else &tool_catalog.built_in,
+                });
+                defer storage.close() catch unreachable;
+
+                var direct: protocol.ConfigureCommand = .{};
+                try direct.key.set("mcp-direct");
+                direct.configuration.model.state = .value;
+                try direct.configuration.model.value.set("model-a");
+                direct.configuration.reasoning_effort.state = .explicit_null;
+                direct.configuration.compaction_trigger.state = .value;
+                try direct.configuration.compaction_trigger.value.set("1000");
+                direct.configuration.tools = try .of(&.{"fetch_page"});
+                direct.configuration.permission_mode.state = .value;
+                try direct.configuration.permission_mode.value.set("ask");
+                const ordinary = storage.configure(&direct, .{});
+
+                var request: protocol.ConfigureCommand = .{ .preset = .{} };
+                try request.key.set("mcp-preset");
+                try request.preset.?.set("reader");
+                var resolved: protocol.ConfigureCommand = .{ .key = request.key };
+                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer memory.deinit();
+                try std.testing.expect(try core_tools.parseAgentSpec(memory.allocator(), frame.presets[0].spec, &resolved.configuration) == .accepted);
+                const preset = storage.configureWithPreset(&resolved, .{ .request_digest = request.presetRequestDigest() }, .{});
+                if (available) {
+                    try std.testing.expect(ordinary == .accepted);
+                    try std.testing.expect(preset == .accepted);
+                    for ([_]@TypeOf(ordinary.accepted.session){ ordinary.accepted.session, preset.accepted.session }) |session| {
+                        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
+                            "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{session.slice()}));
+                    }
+                } else {
+                    try std.testing.expect(ordinary == .rejected);
+                    try std.testing.expect(preset == .rejected);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, ordinary.rejected.code);
+                    try std.testing.expectEqual(ordinary.rejected.code, preset.rejected.code);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                }
+            }
+        }
+    }.run);
+}
+
 test "preset unknown rejection survives reopen and later resolution" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

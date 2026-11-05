@@ -451,6 +451,18 @@ test "presets in a launch frame are owned until frame deinit" {
     try std.testing.expect(frame.presets_memory == null);
 }
 
+test "presets in a launch frame accept catalog-backed tool names" {
+    var frame: Frame = .{};
+    defer frame.deinit();
+    var refusal: Refusal = undefined;
+    try parse(std.testing.allocator, preset_head ++
+        \\{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["find_tools","fetch_page"],"permissionMode":"ask"}}}
+    , &frame, &refusal);
+    try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
+    const tools = frame.presets[0].spec.get("tools").?.array.items;
+    try std.testing.expectEqualStrings("fetch_page", tools[1].string);
+}
+
 test "presets in a launch frame refuse bad names and incomplete specs with their fields" {
     for ([_]struct { json: []const u8, name: []const u8, field: []const u8 }{
         .{ .json = preset_head ++ "{\"\":" ++ creating_spec ++ "}}", .name = "", .field = "name" },
@@ -464,6 +476,8 @@ test "presets in a launch frame refuse bad names and incomplete specs with their
         .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"permissionMode\":\"ask\"}}}", .name = "review", .field = "tools" },
         .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[]}}}", .name = "review", .field = "permissionMode" },
         .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "workspace" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"fetch.page\"],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "tools" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"fetch_page\",\"fetch_page\"],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "tools" },
         .{ .json = preset_head ++ "{\"review\":null}}", .name = "review", .field = "spec" },
         .{ .json = preset_head ++ "null}", .name = "presets", .field = "object" },
         .{ .json = preset_head ++ "[]}", .name = "presets", .field = "object" },
